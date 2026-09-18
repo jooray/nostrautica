@@ -22,6 +22,38 @@ export const PROTOCOL_VERSION_TAG = String(PROTOCOL_VERSION);
 const version = z.literal(PROTOCOL_VERSION);
 
 /**
+ * The `v` a PAGINATED 31604 roster declares (PROTOCOL-NIP.md §6.2).
+ *
+ * This is the one payload field in the protocol allowed to exceed
+ * {@link PROTOCOL_VERSION}, and the exception is deliberate — do not "fix" it by
+ * bumping PROTOCOL_VERSION.
+ *
+ * The roster is the only kind with a wire problem: it is a single NIP-44 payload
+ * and that layer caps plaintext at 65,535 bytes, which caps a roster at a few
+ * hundred members while MAX_ROSTER advertises 2,000. Paginating it needs old
+ * clients to STOP rather than render page 0 as if it were the whole event — zod
+ * objects strip unknown keys, so a `pages` field alone is silently ignored by
+ * every build already installed. Declaring a newer `v` makes them fail through
+ * the existing `NewerProtocolVersionError` path ("Update required") instead.
+ *
+ * Bumping PROTOCOL_VERSION to 3 would do that too — and would also invalidate
+ * every 31600 config, every join request, every directory entry, every match
+ * list and every 21xxx rumor on the network, i.e. a full wire-v3 flag day across
+ * every kind, to solve a problem in exactly one of them. So the bump is scoped
+ * to the payload that has the problem: a roster that FITS keeps `v: 2` and stays
+ * byte-identical, and only one that genuinely cannot be represented in a single
+ * payload declares v3 and asks those clients to update.
+ */
+export const ROSTER_PAGED_VERSION = 3;
+
+/**
+ * 31604's `v`: wire v2 for a roster that fits in one payload, or
+ * {@link ROSTER_PAGED_VERSION} for a paginated one. Every other payload uses the
+ * strict {@link version} above.
+ */
+const rosterVersion = z.union([z.literal(PROTOCOL_VERSION), z.literal(ROSTER_PAGED_VERSION)]);
+
+/**
  * Thrown when a payload/event declares an integer protocol version strictly
  * NEWER than this client understands (`v > PROTOCOL_VERSION`). Distinct from a
  * generic malformed-payload error so callers can tell "from the future" (prompt
@@ -284,7 +316,27 @@ export const MAX_MATCHES = 100; // 31605 matches array items
 // directional reasoning, not a restatement of it.
 export const MAX_ICEBREAKERS = 3;
 export const MAX_ICEBREAKER = 280;
-export const MAX_ROSTER = 2000; // 31604 attendees array items
+/**
+ * Approved members a 31604 roster can carry IN TOTAL, across all its pages
+ * (PROTOCOL-NIP.md §6.2). Also the bound on the per-event settings id arrays,
+ * which are "a subset of the roster" by construction.
+ */
+export const MAX_ROSTER = 2000;
+/**
+ * Attendee entries in ONE 31604 page. Not the operative limit and not meant to
+ * be: the 65,535-byte NIP-44 plaintext ceiling always binds first (the smallest
+ * possible entry is ~100 bytes, so ~640 entries is all that can physically fit).
+ * This is the parse-time bound that keeps a hostile payload from allocating an
+ * unbounded array before the byte check gets a chance to run.
+ */
+export const MAX_ROSTER_PAGE = 700;
+/**
+ * Pages one roster may span. 2,000 members at the worst realistic entry size
+ * (five attested chat devices with full-length labels) is about 37 pages; a
+ * reader asks for pages 1..N-1 in a single REQ, so this also keeps that filter
+ * inside what relays accept without truncating it.
+ */
+export const MAX_ROSTER_PAGES = 40;
 export const MAX_RELAYS = 30; // relay URL array items
 export const MAX_MEDIA = 20; // media descriptors per 31602 self-copy / reuse library
 // v2 (NIP §8): a 21601 profile submission carries at most 4 processed media
@@ -729,6 +781,14 @@ export const myProfileContentSchema = z.object({
   // (survives a device change, unlike a device-local counter). Absent on the
   // reuse-library entry and on pre-rev self-copies (treated as "no submission yet").
   rev: z.number().int().nonnegative().optional(),
+  // The same thing for 21608 ai_profile CORRECTIONS, which carry their own §3.3
+  // `rev` and are ordered against the stored one by the coordinator. It was kept
+  // only in device-local storage, so a second device started again from 0 and every
+  // edit it made lost to the first device's stored rev — discarded server-side while
+  // the UI said "saved" (audit A-5). Same reasoning as `rev` above: this entry is
+  // the client's own durable per-event store, and it is self-encrypted, so nothing
+  // else on the wire reads it.
+  correction_rev: z.number().int().nonnegative().optional(),
 });
 export type MyProfileContent = z.infer<typeof myProfileContentSchema>;
 
@@ -866,22 +926,38 @@ export const rosterChatKeySchema = z.object({
 });
 export type RosterChatKey = z.infer<typeof rosterChatKeySchema>;
 
-export const rosterContentSchema = z.object({
-  v: version,
-  eck_current: z.number().int().positive(),
-  nostr_group_id: hex32.optional(), // Marmot MLS routing id of this event's group (§10.4)
-  attendees: z
-    .array(
-      z.object({
-        pubkey: hex32,
-        d: z.string().max(MAX_D), // entry's blinded d
-        role: z.enum(["attendee", "organizer"]),
-        // Per-device chat keys attested to this account (NIP §6.2), ≤ 5 per attendee.
-        chat_keys: z.array(rosterChatKeySchema).max(MAX_CHAT_KEYS_PER_ACCOUNT).optional(),
-      }),
-    )
-    .max(MAX_ROSTER),
-});
+export const rosterContentSchema = z
+  .object({
+    v: rosterVersion,
+    eck_current: z.number().int().positive(),
+    nostr_group_id: hex32.optional(), // Marmot MLS routing id of this event's group (§10.4)
+    // Page count, on page 0 of a PAGINATED roster only (§6.2). Absent means the
+    // roster is the whole thing — the shape every roster below the ceiling keeps.
+    pages: z.number().int().min(2).max(MAX_ROSTER_PAGES).optional(),
+    attendees: z
+      .array(
+        z.object({
+          pubkey: hex32,
+          d: z.string().max(MAX_D), // entry's blinded d
+          role: z.enum(["attendee", "organizer"]),
+          // Per-device chat keys attested to this account (NIP §6.2), ≤ 5 per attendee.
+          chat_keys: z.array(rosterChatKeySchema).max(MAX_CHAT_KEYS_PER_ACCOUNT).optional(),
+        }),
+      )
+      .max(MAX_ROSTER_PAGE),
+  })
+  .superRefine((val, ctx) => {
+    // `pages` beside `v: 2` is the one wire shape that must never exist: it is
+    // exactly what a pre-pagination client strips and then renders as a complete
+    // member list. A roster that paginates says so in its version.
+    if (val.pages !== undefined && val.v !== ROSTER_PAGED_VERSION) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pages"],
+        message: `a paginated roster must declare v:${ROSTER_PAGED_VERSION}, not v:${val.v}`,
+      });
+    }
+  });
 export type RosterContent = z.infer<typeof rosterContentSchema>;
 
 // ── 31605 Match List content (nip44 → recipient) ─────────────────────────────

@@ -17,10 +17,23 @@
   import type { Snippet } from "svelte";
   import type { Match } from "@nostrautica/protocol";
   import ConfidenceBadge from "./ConfidenceBadge.svelte";
+  import type { ConfidenceBand } from "$lib/events/confidence.js";
   import Icon from "./icons/Icon.svelte";
   import { t, i18n } from "$lib/i18n/i18n.svelte.js";
 
-  let { match, actions }: { match: Match; actions?: Snippet } = $props();
+  // `band` comes from the caller because it is a property of the whole match
+  // list, not of this row (confidence.ts): "strong" means top-few FOR THIS
+  // ATTENDEE, so a component holding one Match cannot work it out.
+  // `showReasoning` exists for the desktop two-pane People layout, where the
+  // list entry beside this pane is already showing the same paragraph: the same
+  // prose twice on one screen reads as a bug, and the list is the copy that has
+  // to stay (it is the one that is there for every person, not just this one).
+  let {
+    match,
+    band,
+    actions,
+    showReasoning = true,
+  }: { match: Match; band: ConfidenceBand; actions?: Snippet; showReasoning?: boolean } = $props();
 
   /**
    * Scores are 0–1 on the wire and stay that way everywhere else — this is a
@@ -39,10 +52,12 @@
   }
 </script>
 
-<ConfidenceBadge score={match.score} />
+<ConfidenceBadge {band} />
 
 <!-- Reasoning is the product — full body size, no longer under a %. -->
-<p class="reason">{match.reasoning}</p>
+{#if showReasoning}
+  <p class="reason">{match.reasoning}</p>
+{/if}
 
 <!-- Icebreakers (§7.3 kind 31605): concrete conversation starters, if any. -->
 {#if match.icebreakers && match.icebreakers.length > 0}

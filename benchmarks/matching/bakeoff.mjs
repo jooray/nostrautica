@@ -41,7 +41,8 @@ import { costUsd, priceOf } from "./lib.mjs";
 import { modelProfile, snapshotSpec } from "./model-profiles.mjs";
 import { promptFingerprint } from "./suite-prompts.mjs";
 import { latencyProbe } from "./latency-probe.mjs";
-import { detectLanguage } from "./language-adherence.mjs";
+import { detectLanguage, languageFloorCheck, IN_LANGUAGE_FLOOR_PCT } from "./language-adherence.mjs";
+import { summarizeReasoning } from "./icebreaker-grade.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -49,12 +50,19 @@ const here = dirname(fileURLToPath(import.meta.url));
 // Changing anything here makes new cards incomparable with old ones. If it must
 // change, bump SUITE_VERSION and re-run every model — the report refuses to mix
 // versions rather than printing a table that quietly compares two experiments.
-export const SUITE_VERSION = 1;
+// v2 (2026-09-10): arm D moved from R3 to R6. R3 stopped being the deployed
+// prompt on 2026-08-26, when the output-language reminder shipped, so every card
+// between then and now measured attribution and output language on a prompt
+// production no longer sends. R6 IS `reverseSystemPrompt()`, so the arm now
+// follows production rather than a snapshot of it — and when that function next
+// changes, the per-card prompt hash is what makes two R6 cards comparable or
+// not. Every v1 card was re-run; the originals are kept in results/bakeoff/v1-R3.
+export const SUITE_VERSION = 2;
 export const SUITE = {
   prompt: "BP3",
   k: 10,
   seeds: [1, 2],
-  icebreakerVariant: "R3",
+  icebreakerVariant: "R6",
   icebreakerBucket: "reverse-dense",
   icebreakerLangs: ["sk", "en"],
   icebreakerReps: 6,
@@ -264,6 +272,18 @@ function strictJsonOf(runs) {
   return { ok, known, pct: known ? Math.round((ok / known) * 1000) / 10 : null };
 }
 
+/**
+ * The number that actually decides adoptability: does the raw body survive
+ * `parseModelJson`, which is what providers/venice.ts calls. `strictJsonOf`
+ * above answers a question production stopped asking on 2026-09-04. Null on
+ * cards recorded before this was measured — which must not read as 0%.
+ */
+function veniceJsonOf(runs) {
+  const ok = runs.reduce((a, r) => a + (r.stats.veniceOkCalls ?? 0), 0);
+  const known = runs.reduce((a, r) => a + (r.stats.veniceKnownCalls ?? 0), 0);
+  return { ok, known, pct: known ? Math.round((ok / known) * 1000) / 10 : null };
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 const subsetRuns = [];
 for (const seed of SUITE.seeds) subsetRuns.push(await scoringArm(seed, true));
@@ -273,6 +293,25 @@ const ice = SKIP_IB ? null : await icebreakerArm();
 // arms' latency is the retry schedule rather than the model.
 console.log(`\n── latency: 6 serial K=10 calls ──`);
 const lat = await latencyProbe(MODEL, 6);
+
+// The suite is frozen on SUITE.icebreakerVariant, and the LIVE prompt is free to
+// move away from it — it did on 2026-08-26, when the output-language reminder
+// shipped and the deployed prompt became R6 while this suite kept running R3.
+// That is a legitimate choice (changing the arm breaks comparability with every
+// existing card, which is what SUITE_VERSION is for), but it must never be a
+// silent one: an attribution or language number measured on a superseded prompt
+// does not describe what an attendee would receive.
+{
+  const fp = await promptFingerprint(LANGS, SUITE.icebreakerVariant);
+  const stale = LANGS.filter((l) => fp[`icebreaker.system.${SUITE.icebreakerVariant}.${l}`] !== fp[`icebreaker.system.LIVE.${l}`]);
+  if (stale.length) {
+    console.log(`\n  ⚠ arm D runs ${SUITE.icebreakerVariant}, which is NOT the prompt production sends` +
+      ` (differs in: ${stale.join(", ")}).\n` +
+      `    Its language and attribution numbers describe a superseded prompt.\n` +
+      `    To measure the shipped one, point SUITE.icebreakerVariant at the live variant\n` +
+      `    and bump SUITE_VERSION — every existing card must then be re-run.\n`);
+  }
+}
 
 const scoringRuns = [...subsetRuns, fullRun];
 const totalScoringCost = scoringRuns.reduce((a, r) => a + r.stats.costUsd, 0);
@@ -293,13 +332,14 @@ const card = {
   // Hashes of the exact bytes sent. Two cards with different fingerprints were
   // measured under different prompts — most often a stale coordinator dist, which
   // silently benchmarks the previous release. Full text: record-prompts.mjs.
-  promptFingerprint: await promptFingerprint(LANGS),
+  promptFingerprint: await promptFingerprint(LANGS, SUITE.icebreakerVariant),
 
   scoring: {
     perSeedSubset: subsetRuns.map((r) => evalRun(r)),
     pooledSubset: pooledScoring(subsetRuns),
     full190: evalRun(fullRun),
     strictJson: strictJsonOf(scoringRuns),
+    veniceJson: veniceJsonOf(scoringRuns),
     reasoningTokens: scoringRuns.reduce((a, r) => a + (r.stats.usage.reasoningTokens ?? 0), 0),
   },
 
@@ -352,6 +392,33 @@ const card = {
             return [r.lang, { n, ...c, wrong, inLanguagePct: n ? Math.round(((n - wrong - c.undecided) / n) * 1000) / 10 : 0 }];
           }),
         ),
+        // reasoning_for_target, pooled and per language (2026-09-10). Carried on
+        // the card because a model can be clean on icebreaker attribution and
+        // still invert the reasoning — qwen-3-8-flash is 2% on the first and
+        // 6.3% (sk) on the second. Older cards have no `reasonRows` and get null
+        // rather than a zero, which would read as a clean score it never earned.
+        reasoning: (() => {
+          const has = ice.runs.some((r) => Array.isArray(r.reasonRows));
+          if (!has) return null;
+          const rows = ice.runs.flatMap((r) => r.reasonRows ?? []);
+          const c = (code) => rows.filter((r) => r.violations.includes(code)).length;
+          const pct = (n) => (rows.length ? Math.round((n / rows.length) * 1000) / 10 : 0);
+          const inverted = c("INVERTED"), misattributed = c("MISATTRIBUTED");
+          return {
+            pooled: {
+              total: rows.length,
+              inverted, invertedPct: pct(inverted),
+              misattributed, misattributedPct: pct(misattributed),
+              errors: inverted + misattributed, errorPct: pct(inverted + misattributed),
+              clean: rows.filter((r) => r.violations.length === 0).length,
+              cleanPct: pct(rows.filter((r) => r.violations.length === 0).length),
+            },
+            perLang: Object.fromEntries(
+              ice.runs.map((r) => [r.lang, summarizeReasoning(r.reasonRows ?? [])]),
+            ),
+            clusters: ice.runs.flatMap((r) => clustersOf(r.reasonRows ?? [])),
+          };
+        })(),
         // Per CALL, not per opener — the unit the permutation test shuffles.
         // Keyed on the `callId` the run stamps on every row: deriving it from
         // (target, candidate, rep) is wrong for the reverse shape, where one
@@ -403,14 +470,24 @@ console.log(`\n${"=".repeat(72)}\n${MODEL} — suite v${SUITE_VERSION}\n${"=".re
 console.log(`request profile   disable_thinking=${card.requestProfile.disableThinking}` +
   (card.requestProfile.reason ? `  (${card.requestProfile.reason})` : ""));
 console.log(`strict JSON       ${card.scoring.strictJson.ok}/${card.scoring.strictJson.known} calls` +
-  ` (${card.scoring.strictJson.pct}%) parse with JSON.parse — production's parser`);
+  ` (${card.scoring.strictJson.pct}%) parse with a bare JSON.parse`);
+if (card.scoring.veniceJson?.known) {
+  console.log(`venice parser     ${card.scoring.veniceJson.ok}/${card.scoring.veniceJson.known} calls` +
+    ` (${card.scoring.veniceJson.pct}%) parse with parseModelJson — production's parser`);
+}
 console.log(`scoring subset    r@1 ${s.recall1.toFixed(2)}  r@3 ${s.recall3.toFixed(2)}  sep ${s.sepStrongWeak.toFixed(2)}  posBias ${s.posBias.toFixed(2)}  fails ${s.formatFails}`);
 console.log(`scoring full-190  r@1 ${f.recall1.toFixed(2)}  r@3 ${f.recall3.toFixed(2)}  sep ${f.sepStrongWeak.toFixed(2)}  posBias ${f.posBias.toFixed(2)}  fails ${f.formatFails}  miss ${f.missingCandidates}`);
 if (card.icebreakers) {
   const p = card.icebreakers.pooled;
   console.log(`icebreakers       n=${p.total}  attribution-errors ${p.attributionErrors} (${p.attributionErrorPct}%)  briefing ${p.briefingPct}%  clean ${p.cleanPct}%`);
+  if (card.icebreakers.reasoning) {
+    const rp = card.icebreakers.reasoning.pooled;
+    console.log(`reasoning         n=${rp.total}  inverted ${rp.inverted} (${rp.invertedPct}%)  misattributed ${rp.misattributed}  clean ${rp.cleanPct}%`);
+  }
   for (const [lang, l] of Object.entries(card.icebreakers.language ?? {})) {
-    const bad = l.inLanguagePct < 98 ? "  ⚠ WROTE THE WRONG LANGUAGE" : "";
+    // Same floor the report gates on. This line used to have its own, stricter
+    // number and shouted at results the table then cleared.
+    const bad = languageFloorCheck(lang, l).ok ? "" : `  ⚠ BELOW THE ${IN_LANGUAGE_FLOOR_PCT}% FLOOR`;
     console.log(`  lang ${lang}          ${l.inLanguagePct}% in-language (n=${l.n})` +
       (lang === "sk" ? `  english ${l.english}  czech ${l.czech}` : "") + bad);
   }

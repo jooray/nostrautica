@@ -4,6 +4,12 @@
   // row markup — the translation-aware bio is computed at the call site and
   // passed in as `line`, so this component stays presentational.
   //
+  // `trailing` sits on the SECOND line, beside the bio, not beside the name
+  // (2026-09-13). On the name's line a 55px badge plus three controls left a
+  // 390px row about 76px of name — "Peter Bezpečnostný" rendered as "Peter…".
+  // The badge is an annotation on the person, not part of their name, and the
+  // bio's line has room the name's line does not.
+  //
   // `actions` renders OUTSIDE the open-button (quick actions like Message /
   // Want to meet, UX feedback 2026-07-16) — nested buttons are invalid HTML.
   import type { Snippet } from "svelte";
@@ -18,6 +24,7 @@
     trailing,
     actions,
     last = false,
+    selected = false,
   }: {
     pubkey: string;
     name: string;
@@ -30,17 +37,23 @@
      *  roster the DOM's last child isn't necessarily the list's last item, so
      *  `:last-child` can no longer decide this — the caller knows). */
     last?: boolean;
+    /** Open in the detail pane beside this list (desktop master/detail). */
+    selected?: boolean;
   } = $props();
 </script>
 
-<div class="person" class:last>
-  <button class="open" onclick={onOpen}>
+<div class="person" class:last class:selected>
+  <button class="open" onclick={onOpen} aria-current={selected ? "true" : undefined}>
     <Avatar {pubkey} {name} {picture} size={40} />
     <span class="meta">
       <span class="name">{name}</span>
-      {#if line}<span class="line">{line}</span>{/if}
+      {#if line || trailing}
+        <span class="sub">
+          {#if trailing}<span class="trailing">{@render trailing()}</span>{/if}
+          {#if line}<span class="line">{line}</span>{/if}
+        </span>
+      {/if}
     </span>
-    {#if trailing}<span class="trailing">{@render trailing()}</span>{/if}
   </button>
   {#if actions}<span class="actions">{@render actions()}</span>{/if}
 </div>
@@ -72,6 +85,24 @@
   .open:hover .name {
     color: var(--accent);
   }
+  /* Which row the detail pane is showing. `aria-current` carries it for anyone
+     not looking at the tint, and the leading bar keeps it legible in forced
+     colours, where the background is discarded. */
+  .person.selected {
+    background: var(--accent-soft);
+    border-radius: var(--radius-sm);
+  }
+  .person.selected .name {
+    color: var(--accent);
+  }
+  .person.selected::before {
+    content: "";
+    align-self: stretch;
+    width: 3px;
+    flex: none;
+    border-radius: 0 2px 2px 0;
+    background: var(--accent);
+  }
   .meta {
     flex: 1;
     min-width: 0;
@@ -86,6 +117,12 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .sub {
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
+    min-width: 0;
   }
   .line {
     color: var(--text-dim);

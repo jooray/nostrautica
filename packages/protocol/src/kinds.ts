@@ -55,6 +55,24 @@ export const KIND_TALK = 31610; // Talk (ECK) — a prerecorded talk, blinded d 
 // self-description for discovery, so organizers can pick a coordinator instead of
 // pasting an npub (docs/COORDINATOR-DISCOVERY-PLAN.md). d = "nostrautica:coordinator".
 export const KIND_COORDINATOR_ANNOUNCE = 31611;
+/**
+ * Community (public, replaceable, signed by E_id) — the standing-group twin of
+ * the NIP-52 31923 an event publishes.
+ *
+ * A community has no start, no end and no venue, and 31923 is a NIP-52
+ * TIME-BASED calendar event whose `start` is mandatory. Publishing one with a
+ * made-up start would put every community into other clients' calendars and
+ * date filters as a zero-length event at the moment it was created — spamming
+ * software that never asked for it, to satisfy a field that carries no meaning
+ * here. So a community is its own kind, in Nostrautica's own range, and calendar
+ * clients simply never see it.
+ *
+ * Tags are 31923's minus time and place: `d`, `title`, optional `summary`,
+ * `image`, `t`. Everything downstream — the 31600 config, the ECK, the roster,
+ * the directory, matching — is addressed by coordinate and does not care which
+ * of the two kinds it is.
+ */
+export const KIND_COMMUNITY = 31612;
 export const COORDINATOR_ANNOUNCE_D = "nostrautica:coordinator";
 
 // ── Custom gift-wrap rumor kinds (21600–21604) ──────────────────────────────

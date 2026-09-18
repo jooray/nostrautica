@@ -1,0 +1,47 @@
+{
+  "model": "deepseek-v4-1-flash",
+  "calls": 5,
+  "ok": 5,
+  "failed": 0,
+  "kinds": {},
+  "entryYield": 100,
+  "latencyMsP50": 12279,
+  "at": "2026-09-13T19:30:48.007Z",
+  "rows": [
+    {
+      "ok": true,
+      "ms": 10012,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    },
+    {
+      "ok": true,
+      "ms": 12279,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    },
+    {
+      "ok": true,
+      "ms": 11119,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    },
+    {
+      "ok": true,
+      "ms": 15378,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    },
+    {
+      "ok": true,
+      "ms": 44384,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    }
+  ]
+}

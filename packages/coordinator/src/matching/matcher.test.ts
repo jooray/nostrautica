@@ -71,6 +71,46 @@ describe("incremental matching (spec §9.3)", () => {
     expect(list.matches[0]!.score).toBe(0.9);
     expect(list.matches[1]!.score).toBe(0.6);
   });
+
+  it("breaks a score tie on complementarity, then similarity", () => {
+    // Real scores quantize to 0.05, so ties at the top are the normal case, not
+    // the edge one — 19 of 39 attendees at the Plan B event had a tied #1 and got
+    // whichever row SQLite handed back first.
+    const store = new Store();
+    const me = "a".repeat(64);
+    const rows = [
+      { pk: "b", comp: 0.5, sim: 0.9 },
+      { pk: "c", comp: 0.9, sim: 0.1 },
+      { pk: "d", comp: 0.5, sim: 0.95 },
+    ];
+    for (const r of rows) {
+      store.putPair({
+        coordinate: coord, a: me, b: r.pk.repeat(64), inputsHash: "x",
+        score: 0.85, similarity: r.sim, complementarity: r.comp,
+        reasoningForA: `meet ${r.pk}`, reasoningForB: `meet ${r.pk}`, now: 1,
+      });
+    }
+    const list = buildMatchList(store, coord, me, 3, 1000);
+    expect(list.matches.map((m) => m.pubkey)).toEqual([
+      "c".repeat(64), // highest complementarity — the prompt's "most important signal"
+      "d".repeat(64), // tied on complementarity, higher similarity
+      "b".repeat(64),
+    ]);
+  });
+
+  it("lets the tie-break decide who survives the top-K cut", () => {
+    const store = new Store();
+    const me = "a".repeat(64);
+    for (const [pk, comp] of [["b", 0.2], ["c", 0.8]] as const) {
+      store.putPair({
+        coordinate: coord, a: me, b: pk.repeat(64), inputsHash: "x",
+        score: 0.7, similarity: 0.7, complementarity: comp,
+        reasoningForA: `meet ${pk}`, reasoningForB: `meet ${pk}`, now: 1,
+      });
+    }
+    const list = buildMatchList(store, coord, me, 1, 1000);
+    expect(list.matches.map((m) => m.pubkey)).toEqual(["c".repeat(64)]);
+  });
 });
 
 describe("batched grouping (spec §16.2, K=10)", () => {

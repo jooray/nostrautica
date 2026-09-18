@@ -26,6 +26,177 @@ describe("JobRunner (spec §9.2)", () => {
     expect(store.pendingJobCount()).toBe(0);
   });
 
+  it("runs a newcomer's own matching ahead of reverse work already queued", async () => {
+    // The Plan B shape (2026-09-11): someone's forward batch finishes and enqueues
+    // the publish that shows THEM their list — but that row is created after the
+    // reverse batches, so in pure id order the 30ms publish waited out three LLM
+    // calls. And a second arrival's whole pipeline waited behind the first
+    // person's reverse work, which nobody is looking at.
+    const store = new Store();
+    const runner = new JobRunner(store, { now: fixedClock().now });
+    const order: string[] = [];
+    for (const type of ["score_batch", "score_reverse_batch", "publish_matches", "process_attendee"]) {
+      runner.register(type, async (p: { who: string }) => {
+        order.push(`${type}:${p.who}`);
+      });
+    }
+    // Newcomer A's recompute: forward first, then reverse (what match_recompute does).
+    runner.enqueue("score_batch", "a-fwd", { who: "A" });
+    runner.enqueue("score_reverse_batch", "a-rev-1", { who: "A" });
+    runner.enqueue("score_reverse_batch", "a-rev-2", { who: "A" });
+    // A's forward batch would enqueue this only once it finished — it is queued
+    // last, and before this change it ran last.
+    runner.enqueue("publish_matches", "a-pub", { who: "A" });
+    // B walks in while A's reverse work is still queued.
+    runner.enqueue("process_attendee", "b-proc", { who: "B" });
+    await runner.drain();
+
+    expect(order).toEqual([
+      // A's list is published the moment there is something to publish …
+      "publish_matches:A",
+      "score_batch:A",
+      // … B's pipeline starts while A's cross-updates are still queued …
+      "process_attendee:B",
+      // … and the work nobody is watching for runs last.
+      "score_reverse_batch:A",
+      "score_reverse_batch:A",
+    ]);
+  });
+
+  describe("scoring runs two-wide; everything else stays one at a time", () => {
+    /** A handler that reports its own overlap window, so a lane breach is visible. */
+    function tracker() {
+      const live = new Map<string, number>();
+      const peak = new Map<string, number>();
+      let peakTotal = 0;
+      return {
+        peak,
+        peakTotal: () => peakTotal,
+        async run(type: string, ticks = 2) {
+          live.set(type, (live.get(type) ?? 0) + 1);
+          const total = [...live.values()].reduce((a, b) => a + b, 0);
+          peak.set(type, Math.max(peak.get(type) ?? 0, live.get(type)!));
+          peakTotal = Math.max(peakTotal, total);
+          for (let i = 0; i < ticks; i++) await Promise.resolve();
+          await new Promise((r) => setTimeout(r, 1));
+          live.set(type, live.get(type)! - 1);
+        },
+      };
+    }
+
+    it("runs two score batches at once", async () => {
+      const store = new Store();
+      const runner = new JobRunner(store, { now: fixedClock().now, scoreConcurrency: 2 });
+      const t = tracker();
+      runner.register("score_batch", () => t.run("score_batch"));
+      for (let i = 0; i < 6; i++) runner.enqueue("score_batch", `s${i}`, {});
+      await runner.drain();
+      expect(t.peak.get("score_batch")).toBe(2);
+      expect(store.pendingJobCount()).toBe(0);
+    });
+
+    it("never runs two jobs of any other type at once", async () => {
+      // The lane that matters: process_attendee downloads media against a byte
+      // budget and fills content-addressed caches across awaits, chat jobs mutate
+      // MLS group state. None of that was written for two handlers, and the pool
+      // must not be what discovers it.
+      const store = new Store();
+      const runner = new JobRunner(store, { now: fixedClock().now, scoreConcurrency: 2 });
+      const t = tracker();
+      for (const type of ["process_attendee", "chat_sync_member", "publish_matches"]) {
+        runner.register(type, () => t.run(type));
+      }
+      for (let i = 0; i < 4; i++) {
+        runner.enqueue("process_attendee", `p${i}`, {});
+        runner.enqueue("chat_sync_member", `c${i}`, {});
+        runner.enqueue("publish_matches", `m${i}`, {});
+      }
+      await runner.drain();
+      expect(t.peak.get("process_attendee")).toBe(1);
+      expect(t.peak.get("chat_sync_member")).toBe(1);
+      expect(t.peak.get("publish_matches")).toBe(1);
+      // And the serial lane is ONE lane: two different serial types never overlap
+      // either, so a chat job can't run beside an attendee job.
+      expect(t.peakTotal()).toBe(1);
+      expect(store.pendingJobCount()).toBe(0);
+    });
+
+    it("a serial job and a score batch can share the wall clock", async () => {
+      const store = new Store();
+      const runner = new JobRunner(store, { now: fixedClock().now, scoreConcurrency: 2 });
+      const t = tracker();
+      runner.register("process_attendee", () => t.run("process_attendee", 6));
+      runner.register("score_batch", () => t.run("score_batch", 6));
+      runner.enqueue("process_attendee", "p", {});
+      runner.enqueue("score_batch", "s", {});
+      await runner.drain();
+      expect(t.peakTotal()).toBe(2);
+    });
+
+    it("a worker whose lane is busy waits for it instead of ending the drain", async () => {
+      // Without the wait, the second worker returns the instant the serial lane is
+      // taken — and `drain` would then run one-wide for as long as that job lasts,
+      // which for a scoring call is over two minutes.
+      const store = new Store();
+      const runner = new JobRunner(store, { now: fixedClock().now, scoreConcurrency: 2 });
+      const order: string[] = [];
+      let release!: () => void;
+      const held = new Promise<void>((r) => (release = r));
+      runner.register("process_attendee", async () => {
+        order.push("serial-start");
+        await held;
+        order.push("serial-end");
+      });
+      runner.register("score_batch", async () => {
+        order.push("score");
+      });
+      runner.enqueue("process_attendee", "p", {});
+      const drain = runner.drain();
+      await new Promise((r) => setTimeout(r, 5));
+      // Queued only AFTER the drain started and the serial lane was already held.
+      runner.enqueue("score_batch", "s", {});
+      await new Promise((r) => setTimeout(r, 60));
+      release();
+      await drain;
+      // The score job ran while the serial job was still blocked.
+      expect(order).toEqual(["serial-start", "score", "serial-end"]);
+    });
+
+    it("awaits every worker and rethrows, so a store failure cannot orphan one", async () => {
+      // An un-awaited worker rejection reaches unhandledRejection, which this
+      // daemon turns into exit(1) — with the other worker still writing.
+      const store = new Store();
+      const runner = new JobRunner(store, { now: fixedClock().now, scoreConcurrency: 2 });
+      let finished = false;
+      runner.register("score_batch", async (p: { boom?: boolean }) => {
+        if (p.boom) {
+          // Not a handler error (those are caught and retried) — a claim-path
+          // failure, which is what propagates out of runOne.
+          store.close();
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 20));
+        finished = true;
+      });
+      runner.enqueue("score_batch", "slow", {});
+      runner.enqueue("score_batch", "boom", { boom: true });
+      await expect(runner.drain()).rejects.toThrow();
+      expect(finished).toBe(true); // the sibling was awaited, not abandoned
+    });
+  });
+
+  it("keeps id order inside a scheduling class", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store, { now: fixedClock().now });
+    const order: number[] = [];
+    runner.register("score_reverse_batch", async (p: { n: number }) => {
+      order.push(p.n);
+    });
+    for (const n of [1, 2, 3]) runner.enqueue("score_reverse_batch", `r${n}`, { n });
+    await runner.drain();
+    expect(order).toEqual([1, 2, 3]);
+  });
+
   it("stopClaiming halts new claims but the drain returns cleanly (graceful shutdown)", async () => {
     const store = new Store();
     const runner = new JobRunner(store, { now: fixedClock().now });

@@ -1,5 +1,5 @@
 {
- "fetchedAt": "2026-08-26T18:27:08.121Z",
+ "fetchedAt": "2026-09-10T04:59:50.503Z",
  "data": [
   {
    "context_length": 1000000,
@@ -68,6 +68,54 @@
       "diem": 4.6875
      }
     },
+    "availableContextTokens": 1000000,
+    "maxCompletionTokens": 65536,
+    "capabilities": {
+     "optimizedForCode": false,
+     "quantization": "not-available",
+     "supportsAudioInput": true,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": false,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": false,
+     "supportsResponseSchema": true,
+     "supportsTeeAttestation": false,
+     "supportsE2EE": false,
+     "supportsVideoInput": true,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "Gemini 3.7 Flash is Google's most capable Flash model, built for complex coding, agentic workflows, and reliable multi-step execution, with 1M context and tunable thinking.",
+    "name": "Gemini 3.7 Flash",
+    "offline": false,
+    "privacy": "anonymized",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
+   "context_length": 1000000,
+   "created": 1788307200,
+   "id": "gemini-3-8-flash",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 0.9375,
+      "diem": 0.9375
+     },
+     "cache_input": {
+      "usd": 0.09375,
+      "diem": 0.09375
+     },
+     "output": {
+      "usd": 4.6875,
+      "diem": 4.6875
+     }
+    },
     "model_sets": [
      "venice_recommendations"
     ],
@@ -90,8 +138,8 @@
      "supportsWebSearch": true,
      "supportsXSearch": false
     },
-    "description": "Gemini 3.7 Flash is Google's most capable Flash model, built for complex coding, agentic workflows, and reliable multi-step execution, with 1M context and tunable thinking.",
-    "name": "Gemini 3.7 Flash",
+    "description": "Gemini 3.8 Flash is Google's most capable Flash model, built for complex coding, agentic workflows, and reliable multi-step execution, with 1M context and tunable thinking.",
+    "name": "Gemini 3.8 Flash",
     "offline": false,
     "privacy": "anonymized",
     "traits": []
@@ -167,9 +215,6 @@
       "diem": 5.5
      }
     },
-    "model_sets": [
-     "venice_recommendations"
-    ],
     "availableContextTokens": 1000000,
     "maxCompletionTokens": 131072,
     "capabilities": {
@@ -180,13 +225,7 @@
      "supportsLogProbs": false,
      "supportsMultipleImages": false,
      "supportsReasoning": true,
-     "supportsReasoningEffort": true,
-     "reasoningEffortOptions": [
-      "low",
-      "high",
-      "max"
-     ],
-     "defaultReasoningEffort": "max",
+     "supportsReasoningEffort": false,
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -197,9 +236,9 @@
     },
     "description": "GLM-5.3 is a large-scale reasoning model from Z.ai, built for complex software engineering and long-horizon agent tasks. It supports text input and output with a 1M-token context window, and improves on GLM-5.2 in coding and in the balance between performance and token efficiency.",
     "name": "GLM 5.3",
-    "modelSource": "https://openrouter.ai/z-ai/glm-5.3",
+    "modelSource": "https://huggingface.co/zai-org/GLM-5.3",
     "offline": false,
-    "privacy": "anonymized",
+    "privacy": "private",
     "traits": []
    },
    "object": "model",
@@ -213,18 +252,21 @@
    "model_spec": {
     "pricing": {
      "input": {
-      "usd": 0.09375,
-      "diem": 0.09375
+      "usd": 0.15,
+      "diem": 0.15
      },
      "cache_input": {
-      "usd": 0.01875,
-      "diem": 0.01875
+      "usd": 0.03,
+      "diem": 0.03
      },
      "output": {
-      "usd": 0.3125,
-      "diem": 0.3125
+      "usd": 0.5,
+      "diem": 0.5
      }
     },
+    "model_sets": [
+     "venice_recommendations"
+    ],
     "availableContextTokens": 1048576,
     "maxCompletionTokens": 131072,
     "capabilities": {
@@ -254,9 +296,9 @@
     },
     "description": "GLM-5.3 Flash is a reasoning model designed for coding, sustained agentic work, and production workloads. It is suited for long-horizon software engineering, complex reasoning, and workflows that combine text with visual context.",
     "name": "GLM 5.3 Flash",
-    "modelSource": "https://openrouter.ai/z-ai/glm-5.3-flash",
+    "modelSource": "https://huggingface.co/zai-org/GLM-5.3-Flash",
     "offline": false,
-    "privacy": "anonymized",
+    "privacy": "private",
     "traits": []
    },
    "object": "model",
@@ -1033,6 +1075,56 @@
   },
   {
    "context_length": 1000000,
+   "created": 1788998400,
+   "id": "qwen-3-8-flash",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 0.14,
+      "diem": 0.14
+     },
+     "cache_input": {
+      "usd": 0.014,
+      "diem": 0.014
+     },
+     "output": {
+      "usd": 0.49,
+      "diem": 0.49
+     }
+    },
+    "availableContextTokens": 1000000,
+    "maxCompletionTokens": 131072,
+    "capabilities": {
+     "optimizedForCode": true,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": true,
+     "maxImages": 10,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": false,
+     "supportsResponseSchema": true,
+     "supportsTeeAttestation": false,
+     "supportsE2EE": false,
+     "supportsVideoInput": true,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "Qwen 3.8 Flash is the latest multimodal model in the Qwen family, pairing strong reasoning and generation with remarkable speed. It natively supports a 1M-token context window, so it can process long documents, entire codebases, and complex conversations in a single pass. It excels at coding assistance, agentic workflows, and visual understanding, accepting text, image, and video input, and its thinking mode can be turned on or off per request.",
+    "name": "Qwen 3.8 Flash",
+    "modelSource": "https://www.alibabacloud.com/help/en/model-studio/models",
+    "offline": false,
+    "privacy": "anonymized",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
+   "context_length": 1000000,
    "created": 1779408000,
    "id": "qwen-3-7-max",
    "model_spec": {
@@ -1303,7 +1395,7 @@
     },
     "description": "The Qwen 3.6 27B native vision-language dense model builds upon the 3.5-27B version, with key improvements in agentic coding capabilities and enhanced STEM reasoning and inference skills. In the vision modality, it demonstrates significant advances in spatial intelligence, object localization, and detection, while video understanding, document OCR, and visual agent capabilities continue to improve steadily.",
     "name": "Qwen 3.6 27B",
-    "modelSource": "https://qwen.ai/blog?id=qwen3.6-27b",
+    "modelSource": "https://huggingface.co/Qwen/Qwen3.6-27B-FP8",
     "offline": false,
     "privacy": "private",
     "traits": []
@@ -2096,9 +2188,6 @@
       }
      }
     },
-    "model_sets": [
-     "venice_recommendations"
-    ],
     "availableContextTokens": 500000,
     "maxCompletionTokens": 32000,
     "capabilities": {
@@ -2170,6 +2259,9 @@
       }
      }
     },
+    "model_sets": [
+     "venice_recommendations"
+    ],
     "availableContextTokens": 500000,
     "maxCompletionTokens": 200000,
     "capabilities": {
@@ -2765,6 +2857,68 @@
       "diem": 60
      }
     },
+    "availableContextTokens": 1000000,
+    "maxCompletionTokens": 128000,
+    "capabilities": {
+     "optimizedForCode": true,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": true,
+     "maxImages": 10,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "high",
+     "supportsResponseSchema": true,
+     "supportsTeeAttestation": false,
+     "supportsE2EE": false,
+     "supportsVideoInput": false,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "Claude Fable 5 is Anthropic's most capable widely released model, designed for demanding reasoning and long-horizon agentic work. It features a 1M token context window, 128K max output tokens, always-on adaptive thinking, and strong multimodal capabilities.",
+    "name": "Claude Fable 5",
+    "modelSource": "",
+    "offline": false,
+    "privacy": "anonymized",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
+   "context_length": 1000000,
+   "created": 1787961600,
+   "id": "claude-fable-5-1",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 12,
+      "diem": 12
+     },
+     "cache_input": {
+      "usd": 0.3,
+      "diem": 0.3
+     },
+     "cache_write": {
+      "usd": 15,
+      "diem": 15
+     },
+     "output": {
+      "usd": 60,
+      "diem": 60
+     }
+    },
     "model_sets": [
      "venice_recommendations"
     ],
@@ -2796,8 +2950,8 @@
      "supportsWebSearch": true,
      "supportsXSearch": false
     },
-    "description": "Claude Fable 5 is Anthropic's most capable widely released model, designed for demanding reasoning and long-horizon agentic work. It features a 1M token context window, 128K max output tokens, always-on adaptive thinking, and strong multimodal capabilities.",
-    "name": "Claude Fable 5",
+    "description": "Claude Fable 5.1 improves on Claude Fable 5 across the board, with the biggest gains in agentic coding, long-running agentic workflows, and knowledge work such as long code refactors, front-end development, and finance and analysis tasks. It features a 1M token context window, 128K max output tokens, always-on adaptive thinking, and strong multimodal capabilities, and tends to be more concise in its plans and summaries.",
+    "name": "Claude Fable 5.1",
     "modelSource": "",
     "offline": false,
     "privacy": "anonymized",
@@ -2844,7 +2998,15 @@
      "supportsMultipleImages": true,
      "maxImages": 10,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "medium",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -2898,7 +3060,15 @@
      "supportsMultipleImages": true,
      "maxImages": 10,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "medium",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -2952,7 +3122,15 @@
      "supportsMultipleImages": true,
      "maxImages": 10,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "medium",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -3006,7 +3184,15 @@
      "supportsMultipleImages": true,
      "maxImages": 10,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "medium",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -3060,7 +3246,15 @@
      "supportsMultipleImages": true,
      "maxImages": 10,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "medium",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -3114,7 +3308,14 @@
      "supportsMultipleImages": true,
      "maxImages": 10,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "max"
+     ],
+     "defaultReasoningEffort": "medium",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -3195,20 +3396,20 @@
    "model_spec": {
     "pricing": {
      "input": {
-      "usd": 2,
-      "diem": 2
+      "usd": 3,
+      "diem": 3
      },
      "cache_input": {
-      "usd": 0.2,
-      "diem": 0.2
+      "usd": 0.3,
+      "diem": 0.3
      },
      "cache_write": {
-      "usd": 2.5000000000000004,
-      "diem": 2.5000000000000004
+      "usd": 3.75,
+      "diem": 3.75
      },
      "output": {
-      "usd": 10.000000000000002,
-      "diem": 10.000000000000002
+      "usd": 15,
+      "diem": 15
      }
     },
     "availableContextTokens": 1000000,
@@ -3222,7 +3423,15 @@
      "supportsMultipleImages": true,
      "maxImages": 10,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "medium",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -3279,7 +3488,14 @@
      "supportsMultipleImages": true,
      "maxImages": 10,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "max"
+     ],
+     "defaultReasoningEffort": "high",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -3559,7 +3775,7 @@
     },
     "description": "Kimi K2.5 is Moonshot AIs most advanced open reasoning model, featuring trillion-parameter Mixture-of-Experts architecture with 32B active parameters and 256K context windows.",
     "name": "Kimi K2.5",
-    "modelSource": "https://github.com/MoonshotAI/Kimi-K2.5",
+    "modelSource": "https://huggingface.co/moonshotai/Kimi-K2.5",
     "offline": false,
     "privacy": "private",
     "traits": []
@@ -3822,7 +4038,14 @@
      "supportsLogProbs": false,
      "supportsMultipleImages": false,
      "supportsReasoning": true,
-     "supportsReasoningEffort": false,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "none",
+      "low",
+      "medium",
+      "high"
+     ],
+     "defaultReasoningEffort": "low",
      "supportsResponseSchema": true,
      "supportsTeeAttestation": false,
      "supportsE2EE": false,
@@ -3835,7 +4058,7 @@
     "name": "DeepSeek V4 Flash 0423",
     "modelSource": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash",
     "offline": false,
-    "privacy": "anonymized",
+    "privacy": "private",
     "traits": []
    },
    "object": "model",
@@ -4048,7 +4271,7 @@
     },
     "description": "DeepSeek V4 Pro is a 1.6T-parameter Mixture-of-Experts model with 49B active parameters and a 1M-token context window. Built for advanced reasoning, coding, and long-horizon agentic workflows with a hybrid attention system for efficient long-context processing.",
     "name": "DeepSeek V4 Pro 0813",
-    "modelSource": "https://app.baseten.co/model-apis/deepseek-ai/DeepSeek-V4-Pro-0813",
+    "modelSource": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro-0813",
     "offline": false,
     "privacy": "private",
     "traits": [
@@ -4404,10 +4627,10 @@
      "supportsReasoningEffort": true,
      "reasoningEffortOptions": [
       "none",
-      "minimal",
       "low",
       "medium",
-      "high"
+      "high",
+      "xhigh"
      ],
      "defaultReasoningEffort": "high",
      "supportsResponseSchema": true,
@@ -4476,6 +4699,11 @@
      "supportsWebSearch": true,
      "supportsXSearch": false
     },
+    "deprecation": {
+     "autoRemap": false,
+     "date": "2026-09-16T05:35:00.000Z",
+     "removesAt": "2026-09-16T05:35:00.000Z"
+    },
     "description": "GPT-5.2 Codex is OpenAI specialized coding model built on GPT-5.2, optimized for advanced software development, code generation, and technical problem-solving.",
     "name": "GPT-5.2 Codex",
     "modelSource": "https://developers.openai.com/api/docs/models/gpt-5.2-codex",
@@ -4520,10 +4748,10 @@
      "supportsReasoningEffort": true,
      "reasoningEffortOptions": [
       "none",
-      "minimal",
       "low",
       "medium",
-      "high"
+      "high",
+      "xhigh"
      ],
      "defaultReasoningEffort": "high",
      "supportsResponseSchema": true,
@@ -4578,10 +4806,10 @@
      "supportsReasoningEffort": true,
      "reasoningEffortOptions": [
       "none",
-      "minimal",
       "low",
       "medium",
-      "high"
+      "high",
+      "xhigh"
      ],
      "defaultReasoningEffort": "high",
      "supportsResponseSchema": true,
@@ -4643,10 +4871,9 @@
      "supportsReasoningEffort": true,
      "reasoningEffortOptions": [
       "none",
-      "minimal",
-      "low",
       "medium",
-      "high"
+      "high",
+      "xhigh"
      ],
      "defaultReasoningEffort": "medium",
      "supportsResponseSchema": true,
@@ -4701,10 +4928,10 @@
      "supportsReasoningEffort": true,
      "reasoningEffortOptions": [
       "none",
-      "minimal",
       "low",
       "medium",
-      "high"
+      "high",
+      "xhigh"
      ],
      "defaultReasoningEffort": "high",
      "supportsResponseSchema": true,
@@ -4858,20 +5085,39 @@
    "model_spec": {
     "pricing": {
      "input": {
-      "usd": 0.26666667,
-      "diem": 0.26666667
+      "usd": 0.25,
+      "diem": 0.25
      },
      "cache_input": {
-      "usd": 0.02666667,
-      "diem": 0.02666667
+      "usd": 0.025,
+      "diem": 0.025
      },
      "cache_write": {
-      "usd": 0.33333334,
-      "diem": 0.33333334
+      "usd": 0.3125,
+      "diem": 0.3125
      },
      "output": {
-      "usd": 1.6,
-      "diem": 1.6
+      "usd": 1.5,
+      "diem": 1.5
+     },
+     "extended": {
+      "context_token_threshold": 272000,
+      "input": {
+       "usd": 0.5,
+       "diem": 0.5
+      },
+      "output": {
+       "usd": 2.25,
+       "diem": 2.25
+      },
+      "cache_input": {
+       "usd": 0.05,
+       "diem": 0.05
+      },
+      "cache_write": {
+       "usd": 0.625,
+       "diem": 0.625
+      }
      }
     },
     "availableContextTokens": 1000000,
@@ -4905,7 +5151,7 @@
     },
     "description": "GPT-5.6 Luna is a fast, cost-efficient model in OpenAI's GPT-5.6 series. It is suited for high-volume, latency-sensitive tasks such as chat, classification, and lightweight agentic workflows, providing capable reasoning for its price tier.",
     "name": "GPT-5.6 Luna",
-    "modelSource": "https://openrouter.ai/openai/gpt-5.6-luna",
+    "modelSource": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
     "offline": false,
     "privacy": "anonymized",
     "traits": []
@@ -4921,38 +5167,38 @@
    "model_spec": {
     "pricing": {
      "input": {
-      "usd": 1.25,
-      "diem": 1.25
+      "usd": 0.25,
+      "diem": 0.25
      },
      "cache_input": {
-      "usd": 0.125,
-      "diem": 0.125
+      "usd": 0.025,
+      "diem": 0.025
      },
      "cache_write": {
-      "usd": 1.5625,
-      "diem": 1.5625
+      "usd": 0.3125,
+      "diem": 0.3125
      },
      "output": {
-      "usd": 7.5,
-      "diem": 7.5
+      "usd": 1.5,
+      "diem": 1.5
      },
      "extended": {
       "context_token_threshold": 272000,
       "input": {
-       "usd": 2.5,
-       "diem": 2.5
+       "usd": 0.5,
+       "diem": 0.5
       },
       "output": {
-       "usd": 11.25,
-       "diem": 11.25
+       "usd": 2.25,
+       "diem": 2.25
       },
       "cache_input": {
-       "usd": 0.25,
-       "diem": 0.25
+       "usd": 0.05,
+       "diem": 0.05
       },
       "cache_write": {
-       "usd": 3.125,
-       "diem": 3.125
+       "usd": 0.625,
+       "diem": 0.625
       }
      }
     },
@@ -4969,7 +5215,6 @@
      "supportsReasoning": true,
      "supportsReasoningEffort": true,
      "reasoningEffortOptions": [
-      "none",
       "low",
       "medium",
       "high",
@@ -4987,7 +5232,7 @@
     },
     "description": "GPT-5.6 Luna Pro is the same underlying model as GPT-5.6 Luna, served with reasoning.mode set to pro for higher-quality responses on complex tasks.",
     "name": "GPT-5.6 Luna Pro",
-    "modelSource": "https://openrouter.ai/openai/gpt-5.6-luna-pro",
+    "modelSource": "https://developers.openai.com/api/docs/models/gpt-5.6-luna",
     "offline": false,
     "privacy": "anonymized",
     "traits": []
@@ -5003,20 +5248,39 @@
    "model_spec": {
     "pricing": {
      "input": {
+      "usd": 2.5,
+      "diem": 2.5
+     },
+     "cache_input": {
+      "usd": 0.25,
+      "diem": 0.25
+     },
+     "cache_write": {
       "usd": 3.125,
       "diem": 3.125
      },
-     "cache_input": {
-      "usd": 0.3125,
-      "diem": 0.3125
-     },
-     "cache_write": {
-      "usd": 3.90625,
-      "diem": 3.90625
-     },
      "output": {
-      "usd": 18.75,
-      "diem": 18.75
+      "usd": 15,
+      "diem": 15
+     },
+     "extended": {
+      "context_token_threshold": 272000,
+      "input": {
+       "usd": 5,
+       "diem": 5
+      },
+      "output": {
+       "usd": 22.5,
+       "diem": 22.5
+      },
+      "cache_input": {
+       "usd": 0.5,
+       "diem": 0.5
+      },
+      "cache_write": {
+       "usd": 6.25,
+       "diem": 6.25
+      }
      }
     },
     "availableContextTokens": 1000000,
@@ -5050,7 +5314,7 @@
     },
     "description": "GPT-5.6 Terra is a balanced model in OpenAI's GPT-5.6 series, positioned between the flagship Sol tier and the cost-efficient Luna tier. It is suited for everyday coding, reasoning, and agentic tasks where capability and cost need to be balanced.",
     "name": "GPT-5.6 Terra",
-    "modelSource": "https://openrouter.ai/openai/gpt-5.6-terra",
+    "modelSource": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
     "offline": false,
     "privacy": "anonymized",
     "traits": []
@@ -5066,38 +5330,38 @@
    "model_spec": {
     "pricing": {
      "input": {
+      "usd": 2.5,
+      "diem": 2.5
+     },
+     "cache_input": {
+      "usd": 0.25,
+      "diem": 0.25
+     },
+     "cache_write": {
       "usd": 3.125,
       "diem": 3.125
      },
-     "cache_input": {
-      "usd": 0.3125,
-      "diem": 0.3125
-     },
-     "cache_write": {
-      "usd": 3.90625,
-      "diem": 3.90625
-     },
      "output": {
-      "usd": 18.75,
-      "diem": 18.75
+      "usd": 15,
+      "diem": 15
      },
      "extended": {
       "context_token_threshold": 272000,
       "input": {
-       "usd": 6.25,
-       "diem": 6.25
+       "usd": 5,
+       "diem": 5
       },
       "output": {
-       "usd": 28.125,
-       "diem": 28.125
+       "usd": 22.5,
+       "diem": 22.5
       },
       "cache_input": {
-       "usd": 0.625,
-       "diem": 0.625
+       "usd": 0.5,
+       "diem": 0.5
       },
       "cache_write": {
-       "usd": 7.8125,
-       "diem": 7.8125
+       "usd": 6.25,
+       "diem": 6.25
       }
      }
     },
@@ -5114,7 +5378,6 @@
      "supportsReasoning": true,
      "supportsReasoningEffort": true,
      "reasoningEffortOptions": [
-      "none",
       "low",
       "medium",
       "high",
@@ -5132,7 +5395,7 @@
     },
     "description": "GPT-5.6 Terra Pro is the same underlying model as GPT-5.6 Terra, served with reasoning.mode set to pro for higher-quality responses on complex tasks.",
     "name": "GPT-5.6 Terra Pro",
-    "modelSource": "https://openrouter.ai/openai/gpt-5.6-terra-pro",
+    "modelSource": "https://developers.openai.com/api/docs/models/gpt-5.6-terra",
     "offline": false,
     "privacy": "anonymized",
     "traits": []
@@ -5148,25 +5411,41 @@
    "model_spec": {
     "pricing": {
      "input": {
-      "usd": 6.25,
-      "diem": 6.25
+      "usd": 2.5,
+      "diem": 2.5
      },
      "cache_input": {
-      "usd": 0.625,
-      "diem": 0.625
+      "usd": 0.25,
+      "diem": 0.25
      },
      "cache_write": {
-      "usd": 7.8125,
-      "diem": 7.8125
+      "usd": 3.125,
+      "diem": 3.125
      },
      "output": {
-      "usd": 37.5,
-      "diem": 37.5
+      "usd": 12.5,
+      "diem": 12.5
+     },
+     "extended": {
+      "context_token_threshold": 272000,
+      "input": {
+       "usd": 5,
+       "diem": 5
+      },
+      "output": {
+       "usd": 18.75,
+       "diem": 18.75
+      },
+      "cache_input": {
+       "usd": 0.5,
+       "diem": 0.5
+      },
+      "cache_write": {
+       "usd": 6.25,
+       "diem": 6.25
+      }
      }
     },
-    "model_sets": [
-     "venice_recommendations"
-    ],
     "availableContextTokens": 1000000,
     "maxCompletionTokens": 128000,
     "capabilities": {
@@ -5214,38 +5493,38 @@
    "model_spec": {
     "pricing": {
      "input": {
-      "usd": 6.25,
-      "diem": 6.25
+      "usd": 2.5,
+      "diem": 2.5
      },
      "cache_input": {
-      "usd": 0.625,
-      "diem": 0.625
+      "usd": 0.25,
+      "diem": 0.25
      },
      "cache_write": {
-      "usd": 7.8125,
-      "diem": 7.8125
+      "usd": 3.125,
+      "diem": 3.125
      },
      "output": {
-      "usd": 37.5,
-      "diem": 37.5
+      "usd": 12.5,
+      "diem": 12.5
      },
      "extended": {
       "context_token_threshold": 272000,
       "input": {
-       "usd": 12.5,
-       "diem": 12.5
+       "usd": 5,
+       "diem": 5
       },
       "output": {
-       "usd": 56.25,
-       "diem": 56.25
+       "usd": 18.75,
+       "diem": 18.75
       },
       "cache_input": {
-       "usd": 1.25,
-       "diem": 1.25
+       "usd": 0.5,
+       "diem": 0.5
       },
       "cache_write": {
-       "usd": 15.625,
-       "diem": 15.625
+       "usd": 6.25,
+       "diem": 6.25
       }
      }
     },
@@ -5281,6 +5560,168 @@
     "description": "GPT-5.6 Sol Pro is the same underlying model as GPT-5.6 Sol, served with reasoning.mode set to pro for higher-quality responses on complex tasks.",
     "name": "GPT-5.6 Sol Pro",
     "modelSource": "https://openrouter.ai/openai/gpt-5.6-sol-pro",
+    "offline": false,
+    "privacy": "anonymized",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
+   "context_length": 1050000,
+   "created": 1788566400,
+   "id": "openai-gpt-6-astra",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 10,
+      "diem": 10
+     },
+     "cache_input": {
+      "usd": 1,
+      "diem": 1
+     },
+     "cache_write": {
+      "usd": 12.5,
+      "diem": 12.5
+     },
+     "output": {
+      "usd": 50,
+      "diem": 50
+     },
+     "extended": {
+      "context_token_threshold": 272000,
+      "input": {
+       "usd": 20,
+       "diem": 20
+      },
+      "output": {
+       "usd": 75,
+       "diem": 75
+      },
+      "cache_input": {
+       "usd": 2,
+       "diem": 2
+      },
+      "cache_write": {
+       "usd": 25,
+       "diem": 25
+      }
+     }
+    },
+    "availableContextTokens": 1050000,
+    "maxCompletionTokens": 128000,
+    "capabilities": {
+     "optimizedForCode": false,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": true,
+     "maxImages": 10,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "high",
+     "supportsResponseSchema": true,
+     "supportsTeeAttestation": false,
+     "supportsE2EE": false,
+     "supportsVideoInput": false,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "GPT-6 Astra is OpenAI's most capable model, built for the hardest end-to-end work. It is suited for complex reasoning, coding, computer use, research, and document creation, with a 1.05M token context window (922K input, 128K output) and support for text and image inputs.",
+    "name": "GPT-6 Astra",
+    "modelSource": "https://developers.openai.com/api/docs/models/gpt-6-astra",
+    "offline": false,
+    "privacy": "anonymized",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
+   "context_length": 1050000,
+   "created": 1788566400,
+   "id": "openai-gpt-6-astra-pro",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 12.5,
+      "diem": 12.5
+     },
+     "cache_input": {
+      "usd": 1.25,
+      "diem": 1.25
+     },
+     "cache_write": {
+      "usd": 15.625,
+      "diem": 15.625
+     },
+     "output": {
+      "usd": 62.5,
+      "diem": 62.5
+     },
+     "extended": {
+      "context_token_threshold": 272000,
+      "input": {
+       "usd": 25,
+       "diem": 25
+      },
+      "output": {
+       "usd": 93.75,
+       "diem": 93.75
+      },
+      "cache_input": {
+       "usd": 2.5,
+       "diem": 2.5
+      },
+      "cache_write": {
+       "usd": 31.25,
+       "diem": 31.25
+      }
+     }
+    },
+    "availableContextTokens": 1050000,
+    "maxCompletionTokens": 128000,
+    "capabilities": {
+     "optimizedForCode": false,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": true,
+     "maxImages": 10,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max"
+     ],
+     "defaultReasoningEffort": "high",
+     "supportsResponseSchema": true,
+     "supportsTeeAttestation": false,
+     "supportsE2EE": false,
+     "supportsVideoInput": false,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "GPT-6 Astra with pro reasoning mode for difficult tasks that benefit from more model work. Supports text and image inputs with a 1.05M token context window. Pro mode can use more tokens and take longer than standard Astra.",
+    "name": "GPT-6 Astra Pro",
+    "modelSource": "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "offline": false,
     "privacy": "anonymized",
     "traits": []
@@ -5601,6 +6042,62 @@
    "type": "text"
   },
   {
+   "context_length": 260000,
+   "created": 1788825600,
+   "id": "mercury-2-5",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 0.25,
+      "diem": 0.25
+     },
+     "cache_input": {
+      "usd": 0.025,
+      "diem": 0.025
+     },
+     "output": {
+      "usd": 0.9375,
+      "diem": 0.9375
+     }
+    },
+    "availableContextTokens": 260000,
+    "maxCompletionTokens": 65536,
+    "capabilities": {
+     "optimizedForCode": false,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": false,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "none",
+      "low",
+      "medium",
+      "high"
+     ],
+     "defaultReasoningEffort": "high",
+     "supportsResponseSchema": true,
+     "supportsTeeAttestation": false,
+     "supportsE2EE": false,
+     "supportsVideoInput": false,
+     "supportsVision": false,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "Mercury 2.5 is a diffusion-based reasoning model from Inception with fast parallel token generation, tunable reasoning, tool calling, and structured output support.",
+    "name": "Mercury 2.5",
+    "modelSource": "https://www.inceptionlabs.ai/models",
+    "offline": false,
+    "privacy": "anonymized",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
    "context_length": 128000,
    "created": 1769472000,
    "id": "nvidia-nemotron-3-nano-30b-a3b",
@@ -5702,51 +6199,6 @@
    "type": "text"
   },
   {
-   "context_length": 40000,
-   "created": 1773792000,
-   "id": "e2ee-gemma-3-27b-p",
-   "model_spec": {
-    "pricing": {
-     "input": {
-      "usd": 0.14,
-      "diem": 0.14
-     },
-     "output": {
-      "usd": 0.5,
-      "diem": 0.5
-     }
-    },
-    "availableContextTokens": 40000,
-    "maxCompletionTokens": 4096,
-    "capabilities": {
-     "optimizedForCode": false,
-     "quantization": "not-available",
-     "supportsAudioInput": false,
-     "supportsFunctionCalling": false,
-     "supportsLogProbs": false,
-     "supportsMultipleImages": false,
-     "supportsReasoning": false,
-     "supportsReasoningEffort": false,
-     "supportsResponseSchema": false,
-     "supportsTeeAttestation": true,
-     "supportsE2EE": true,
-     "supportsVideoInput": false,
-     "supportsVision": false,
-     "supportsWebSearch": true,
-     "supportsXSearch": false
-    },
-    "description": "Gemma 3 27B running in a Trusted Execution Environment (TEE). Google's multimodal model supporting vision-language input with 140+ language understanding, with hardware attestation evidence available for independent verification.",
-    "name": "Gemma 3 27B",
-    "modelSource": "https://huggingface.co/google/gemma-3-27b-it",
-    "offline": false,
-    "privacy": "private",
-    "traits": []
-   },
-   "object": "model",
-   "owned_by": "venice.ai",
-   "type": "text"
-  },
-  {
    "context_length": 64000,
    "created": 1779580800,
    "id": "e2ee-gemma-4-26b-a4b-uncensored-p",
@@ -5802,6 +6254,10 @@
       "usd": 1.75,
       "diem": 1.75
      },
+     "cache_input": {
+      "usd": 0.3,
+      "diem": 0.3
+     },
      "output": {
       "usd": 5.75,
       "diem": 5.75
@@ -5845,27 +6301,31 @@
    "type": "text"
   },
   {
-   "context_length": 128000,
-   "created": 1773792000,
-   "id": "e2ee-gpt-oss-20b-p",
+   "context_length": 1000000,
+   "created": 1788652800,
+   "id": "e2ee-glm-5-3-p",
    "model_spec": {
     "pricing": {
      "input": {
-      "usd": 0.05,
-      "diem": 0.05
+      "usd": 1.75,
+      "diem": 1.75
+     },
+     "cache_input": {
+      "usd": 0.325,
+      "diem": 0.325
      },
      "output": {
-      "usd": 0.19,
-      "diem": 0.19
+      "usd": 5.5,
+      "diem": 5.5
      }
     },
-    "availableContextTokens": 128000,
+    "availableContextTokens": 1000000,
     "maxCompletionTokens": 32768,
     "capabilities": {
-     "optimizedForCode": false,
+     "optimizedForCode": true,
      "quantization": "not-available",
      "supportsAudioInput": false,
-     "supportsFunctionCalling": false,
+     "supportsFunctionCalling": true,
      "supportsLogProbs": false,
      "supportsMultipleImages": false,
      "supportsReasoning": true,
@@ -5885,9 +6345,9 @@
      "supportsWebSearch": true,
      "supportsXSearch": false
     },
-    "description": "GPT OSS 20B running in a Trusted Execution Environment (TEE). OpenAI's compact open-weight 21B MoE model with 3.6B active parameters, optimized for lower-latency inference, with hardware attestation evidence available for independent verification.",
-    "name": "GPT OSS 20B",
-    "modelSource": "https://huggingface.co/openai/gpt-oss-20b",
+    "description": "GLM 5.3 running in a Trusted Execution Environment (TEE). Z.ai's flagship model with 1M context. Hardware attestation evidence is available for independent verification of enclave identity and configuration.",
+    "name": "GLM 5.3",
+    "modelSource": "https://huggingface.co/zai-org/GLM-5.3",
     "offline": false,
     "privacy": "private",
     "traits": []
@@ -5948,6 +6408,61 @@
    "type": "text"
   },
   {
+   "context_length": 1000000,
+   "created": 1788825600,
+   "id": "e2ee-kimi-k3-p",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 3.75,
+      "diem": 3.75
+     },
+     "cache_input": {
+      "usd": 0.375,
+      "diem": 0.375
+     },
+     "output": {
+      "usd": 18.75,
+      "diem": 18.75
+     }
+    },
+    "availableContextTokens": 1000000,
+    "maxCompletionTokens": 131072,
+    "capabilities": {
+     "optimizedForCode": true,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": true,
+     "maxImages": 10,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": true,
+     "reasoningEffortOptions": [
+      "none",
+      "max"
+     ],
+     "defaultReasoningEffort": "max",
+     "supportsResponseSchema": true,
+     "supportsTeeAttestation": true,
+     "supportsE2EE": true,
+     "supportsVideoInput": false,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "Kimi K3 is a 2.8T parameter open-weight multimodal reasoning model from Moonshot AI. It is suited for complex coding, knowledge work, and long-horizon agentic workflows.",
+    "name": "Kimi K3",
+    "modelSource": "https://huggingface.co/moonshotai/Kimi-K3",
+    "offline": false,
+    "privacy": "private",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
    "context_length": 32000,
    "created": 1773792000,
    "id": "e2ee-qwen-2-5-7b-p",
@@ -5994,57 +6509,6 @@
   },
   {
    "context_length": 128000,
-   "created": 1779580800,
-   "id": "e2ee-qwen3-6-35b-a3b-uncensored-p",
-   "model_spec": {
-    "pricing": {
-     "input": {
-      "usd": 0.38,
-      "diem": 0.38
-     },
-     "output": {
-      "usd": 1.88,
-      "diem": 1.88
-     }
-    },
-    "availableContextTokens": 128000,
-    "maxCompletionTokens": 4096,
-    "capabilities": {
-     "optimizedForCode": false,
-     "quantization": "fp8",
-     "supportsAudioInput": false,
-     "supportsFunctionCalling": false,
-     "supportsLogProbs": false,
-     "supportsMultipleImages": false,
-     "supportsReasoning": false,
-     "supportsReasoningEffort": false,
-     "supportsResponseSchema": false,
-     "supportsTeeAttestation": true,
-     "supportsE2EE": true,
-     "supportsVideoInput": false,
-     "supportsVision": false,
-     "supportsWebSearch": true,
-     "supportsXSearch": false
-    },
-    "deprecation": {
-     "autoRemap": false,
-     "date": "2026-09-09T09:00:00.000Z",
-     "removesAt": "2026-09-09T09:00:00.000Z"
-    },
-    "description": "Qwen3.6 35B A3B Uncensored running in a Trusted Execution Environment (TEE). An uncensored variant of Alibaba's Qwen3.6 MoE model with 35B total parameters and ~3B active, supporting 262K context and multimodal input across text, images, and video, with hardware attestation evidence available for independent verification.",
-    "name": "Qwen3.6 35B A3B Uncensored",
-    "modelSource": "https://www.redpill.ai/models/phala/qwen3.6-35b-a3b-uncensored",
-    "offline": false,
-    "privacy": "private",
-    "traits": [],
-    "uncensored": true
-   },
-   "object": "model",
-   "owned_by": "venice.ai",
-   "type": "text"
-  },
-  {
-   "context_length": 128000,
    "created": 1773792000,
    "id": "e2ee-qwen3-vl-30b-a3b-p",
    "model_spec": {
@@ -6080,54 +6544,6 @@
     "description": "Qwen3 VL 30B A3B running in a Trusted Execution Environment (TEE). A multimodal model unifying text generation with visual understanding for images and videos, with hardware attestation evidence available for independent verification.",
     "name": "Qwen3 VL 30B A3B",
     "modelSource": "https://huggingface.co/Qwen/Qwen3-VL-30B-A3B-Instruct",
-    "offline": false,
-    "privacy": "private",
-    "traits": []
-   },
-   "object": "model",
-   "owned_by": "venice.ai",
-   "type": "text"
-  },
-  {
-   "context_length": 200000,
-   "created": 1776988800,
-   "id": "e2ee-glm-5-1",
-   "model_spec": {
-    "pricing": {
-     "input": {
-      "usd": 1.1,
-      "diem": 1.1
-     },
-     "output": {
-      "usd": 4.15,
-      "diem": 4.15
-     }
-    },
-    "model_sets": [
-     "venice_recommendations"
-    ],
-    "availableContextTokens": 200000,
-    "maxCompletionTokens": 32768,
-    "capabilities": {
-     "optimizedForCode": false,
-     "quantization": "fp8",
-     "supportsAudioInput": false,
-     "supportsFunctionCalling": false,
-     "supportsLogProbs": false,
-     "supportsMultipleImages": false,
-     "supportsReasoning": true,
-     "supportsReasoningEffort": false,
-     "supportsResponseSchema": false,
-     "supportsTeeAttestation": true,
-     "supportsE2EE": true,
-     "supportsVideoInput": false,
-     "supportsVision": false,
-     "supportsWebSearch": true,
-     "supportsXSearch": false
-    },
-    "description": "GLM 5.1 running in a Trusted Execution Environment (TEE). Hardware attestation evidence is available for independent verification of enclave identity and configuration.",
-    "name": "GLM 5.1",
-    "modelSource": "https://huggingface.co/zai-org/GLM-5.1",
     "offline": false,
     "privacy": "private",
     "traits": []
@@ -6186,114 +6602,6 @@
    "type": "text"
   },
   {
-   "context_length": 256000,
-   "created": 1783382400,
-   "id": "e2ee-qwen3-6-27b",
-   "model_spec": {
-    "pricing": {
-     "input": {
-      "usd": 0.346,
-      "diem": 0.346
-     },
-     "cache_input": {
-      "usd": 0.171,
-      "diem": 0.171
-     },
-     "output": {
-      "usd": 3.46,
-      "diem": 3.46
-     }
-    },
-    "availableContextTokens": 256000,
-    "maxCompletionTokens": 32768,
-    "capabilities": {
-     "optimizedForCode": true,
-     "quantization": "fp8",
-     "supportsAudioInput": false,
-     "supportsFunctionCalling": true,
-     "supportsLogProbs": false,
-     "supportsMultipleImages": false,
-     "supportsReasoning": true,
-     "supportsReasoningEffort": false,
-     "supportsResponseSchema": false,
-     "supportsTeeAttestation": true,
-     "supportsE2EE": true,
-     "supportsVideoInput": false,
-     "supportsVision": false,
-     "supportsWebSearch": true,
-     "supportsXSearch": false
-    },
-    "deprecation": {
-     "autoRemap": false,
-     "date": "2026-08-27T13:00:00.000Z",
-     "removesAt": "2026-08-27T13:00:00.000Z"
-    },
-    "description": "Qwen 3.6 27B FP8 running in a Trusted Execution Environment (TEE). Hardware attestation evidence is available for independent verification of enclave identity and configuration.",
-    "name": "Qwen 3.6 27B FP8",
-    "modelSource": "https://huggingface.co/Qwen/Qwen3.6-27B-FP8",
-    "offline": false,
-    "privacy": "private",
-    "traits": []
-   },
-   "object": "model",
-   "owned_by": "venice.ai",
-   "type": "text"
-  },
-  {
-   "context_length": 32000,
-   "created": 1779235200,
-   "id": "e2ee-gemma-4-31b",
-   "model_spec": {
-    "pricing": {
-     "input": {
-      "usd": 0.139,
-      "diem": 0.139
-     },
-     "cache_input": {
-      "usd": 0.028,
-      "diem": 0.028
-     },
-     "output": {
-      "usd": 0.43,
-      "diem": 0.43
-     }
-    },
-    "availableContextTokens": 32000,
-    "maxCompletionTokens": 4096,
-    "capabilities": {
-     "optimizedForCode": false,
-     "quantization": "not-available",
-     "supportsAudioInput": false,
-     "supportsFunctionCalling": false,
-     "supportsLogProbs": false,
-     "supportsMultipleImages": false,
-     "supportsReasoning": true,
-     "supportsReasoningEffort": false,
-     "supportsResponseSchema": false,
-     "supportsTeeAttestation": true,
-     "supportsE2EE": true,
-     "supportsVideoInput": false,
-     "supportsVision": false,
-     "supportsWebSearch": true,
-     "supportsXSearch": false
-    },
-    "deprecation": {
-     "autoRemap": false,
-     "date": "2026-08-27T13:00:00.000Z",
-     "removesAt": "2026-08-27T13:00:00.000Z"
-    },
-    "description": "Gemma 4 31B Instruct running in a Trusted Execution Environment (TEE). Hardware attestation evidence is available for independent verification of enclave identity and configuration.",
-    "name": "Gemma 4 31B Instruct",
-    "modelSource": "https://huggingface.co/google/gemma-4-31B-it",
-    "offline": false,
-    "privacy": "private",
-    "traits": []
-   },
-   "object": "model",
-   "owned_by": "venice.ai",
-   "type": "text"
-  },
-  {
    "context_length": 1000000,
    "created": 1783382400,
    "id": "e2ee-deepseek-v4-flash",
@@ -6334,6 +6642,153 @@
     "description": "DeepSeek V4 Flash running in a Trusted Execution Environment (TEE). Hardware attestation evidence is available for independent verification of enclave identity and configuration.",
     "name": "DeepSeek V4 Flash",
     "modelSource": "https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash",
+    "offline": false,
+    "privacy": "private",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
+   "context_length": 1000000,
+   "created": 1788652800,
+   "id": "e2ee-glm-5-3-flash",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 0.16,
+      "diem": 0.16
+     },
+     "cache_input": {
+      "usd": 0.038,
+      "diem": 0.038
+     },
+     "output": {
+      "usd": 0.54,
+      "diem": 0.54
+     }
+    },
+    "availableContextTokens": 1000000,
+    "maxCompletionTokens": 32768,
+    "capabilities": {
+     "optimizedForCode": true,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": false,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": false,
+     "supportsResponseSchema": false,
+     "supportsTeeAttestation": true,
+     "supportsE2EE": true,
+     "supportsVideoInput": false,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "GLM 5.3 Flash running in a Trusted Execution Environment (TEE). A fast, low-cost multimodal model with 1M context. Hardware attestation evidence is available for independent verification of enclave identity and configuration.",
+    "name": "GLM 5.3 Flash",
+    "modelSource": "https://huggingface.co/zai-org/GLM-5.3-Flash",
+    "offline": false,
+    "privacy": "private",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
+   "context_length": 262144,
+   "created": 1788652800,
+   "id": "e2ee-qwen3-8-27b",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 0.47,
+      "diem": 0.47
+     },
+     "cache_input": {
+      "usd": 0.047,
+      "diem": 0.047
+     },
+     "output": {
+      "usd": 3.53,
+      "diem": 3.53
+     }
+    },
+    "availableContextTokens": 262144,
+    "maxCompletionTokens": 8192,
+    "capabilities": {
+     "optimizedForCode": true,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": false,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": false,
+     "supportsResponseSchema": false,
+     "supportsTeeAttestation": true,
+     "supportsE2EE": true,
+     "supportsVideoInput": false,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "Qwen 3.8 27B running in a Trusted Execution Environment (TEE). A multimodal model with 262K context supporting text and image input. Hardware attestation evidence is available for independent verification of enclave identity and configuration.",
+    "name": "Qwen 3.8 27B",
+    "modelSource": "https://huggingface.co/Qwen/Qwen3.8-27B",
+    "offline": false,
+    "privacy": "private",
+    "traits": []
+   },
+   "object": "model",
+   "owned_by": "venice.ai",
+   "type": "text"
+  },
+  {
+   "context_length": 262144,
+   "created": 1788652800,
+   "id": "e2ee-kimi-k2-6",
+   "model_spec": {
+    "pricing": {
+     "input": {
+      "usd": 0.87,
+      "diem": 0.87
+     },
+     "cache_input": {
+      "usd": 0.44,
+      "diem": 0.44
+     },
+     "output": {
+      "usd": 4.12,
+      "diem": 4.12
+     }
+    },
+    "availableContextTokens": 262144,
+    "maxCompletionTokens": 8192,
+    "capabilities": {
+     "optimizedForCode": true,
+     "quantization": "not-available",
+     "supportsAudioInput": false,
+     "supportsFunctionCalling": true,
+     "supportsLogProbs": false,
+     "supportsMultipleImages": false,
+     "supportsReasoning": true,
+     "supportsReasoningEffort": false,
+     "supportsResponseSchema": false,
+     "supportsTeeAttestation": true,
+     "supportsE2EE": true,
+     "supportsVideoInput": false,
+     "supportsVision": true,
+     "supportsWebSearch": true,
+     "supportsXSearch": false
+    },
+    "description": "Kimi K2.6 running in a Trusted Execution Environment (TEE). MoonshotAI's multimodal model with 262K context. Hardware attestation evidence is available for independent verification of enclave identity and configuration.",
+    "name": "Kimi K2.6",
+    "modelSource": "https://huggingface.co/moonshotai/Kimi-K2.6",
     "offline": false,
     "privacy": "private",
     "traits": []

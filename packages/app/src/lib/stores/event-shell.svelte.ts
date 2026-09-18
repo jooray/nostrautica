@@ -8,6 +8,7 @@
  * navigation never clobbers the current event. Reads from cache first so tab
  * gating almost never flashes.
  */
+import { isCommunityCoordinate } from "@nostrautica/protocol";
 import { isMarmotChatEnabled, naddrToCoordinate } from "@nostrautica/protocol";
 import {
   loadEventContext,
@@ -62,6 +63,20 @@ class EventShell {
   }
   get showPeople(): boolean {
     return this.isMember;
+  }
+  /**
+   * A standing community rather than a dated event (config `mode`).
+   *
+   * Read from the coordinate's KIND (31612 against 31923), which is the single
+   * source of truth — there is no `mode` tag on the config, precisely so the two
+   * have nowhere to disagree (PROTOCOL-NIP.md §1.1).
+   *
+   * Reads false while the context is still loading, which is the right way
+   * round: an event is what every record written before communities existed is,
+   * so the fallback is the common case rather than a flash of the rarer one.
+   */
+  get isCommunity(): boolean {
+    return !!this.ctx && isCommunityCoordinate(this.ctx.coordinate);
   }
   get showMatches(): boolean {
     return (

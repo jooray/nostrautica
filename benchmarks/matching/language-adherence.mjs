@@ -25,6 +25,54 @@ import { dirname, join } from "node:path";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * The in-language rate an arm-D result must clear, as a percentage.
+ *
+ * ONE number, exported, because there were two: bakeoff.mjs shouted "WROTE THE
+ * WRONG LANGUAGE" below 98 while bakeoff-report.mjs gated deployability below
+ * 95, so a run could print an alarm about a model the table then cleared. That
+ * happened the first time arm D measured the shipped prompt: the DEPLOYED model
+ * came in at 97.7% and got the alarm.
+ *
+ * Calibration, from arm D on R6 (the prompt production sends) as of 2026-09-10:
+ *
+ *   deepseek-v4-flash-0731 (deployed)   sk 97.7%   en 99.8%
+ *   qwen-3-8-flash                      sk 34.5%   en 99.1%
+ *
+ * and, on R3 (the pre-fix prompt), the regression this gate exists to catch:
+ * the same deployed model between 70.7% and 93.3% across four draws. 95 sits
+ * below every healthy measurement and above every draw of that regression,
+ * which is the whole job. It is deliberately not 98: the deployed model's own
+ * 97.7% is 29 English and 1 Czech opener in 1420, and a gate that fails the
+ * thing we ship is a gate nobody reads.
+ *
+ * What this number CANNOT do is separate 95% from 97% on one arm. Arm D is 48
+ * calls and the failure is whole-call, so the honest interval is over calls, not
+ * openers — an opener-level interval on clustered data is the error this project
+ * already made once and corrected (see stats.mjs). Until the card records
+ * per-call language counts, read a near-floor result as "measure it again",
+ * not as a verdict.
+ */
+export const IN_LANGUAGE_FLOOR_PCT = 95;
+
+/**
+ * Whether one language's arm-D result clears the floor, and the sentence to
+ * print about it. Both callers use this so the run summary and the cross-model
+ * table cannot disagree about the same number again.
+ *
+ * @param {string} lang event language the arm ran in
+ * @param {{n:number,english:number,czech:number,inLanguagePct:number}} l
+ * @returns {{ok:boolean, detail:string}}
+ */
+export function languageFloorCheck(lang, l) {
+  return {
+    ok: l.inLanguagePct >= IN_LANGUAGE_FLOOR_PCT,
+    detail:
+      `only ${l.inLanguagePct}% of ${lang} openers were actually in ${lang} ` +
+      `(${l.english} English, ${l.czech} Czech, n=${l.n})`,
+  };
+}
+
 // Letters that exist in exactly one of the two languages.
 const CZECH_ONLY_CHARS = /[řěů]/i;
 const SLOVAK_ONLY_CHARS = /[ľĺŕôä]/i;

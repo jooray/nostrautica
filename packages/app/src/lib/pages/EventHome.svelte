@@ -1,3 +1,13 @@
+<script lang="ts" module>
+  /**
+   * `identity:coordinate` pairs that have already spent their one forced,
+   * full-history grant sweep this session (see `sweepForPendingGrant`). Module
+   * scope on purpose — an instance-level guard resets every time this page
+   * mounts, so bouncing between two events would re-run the sweep on each visit.
+   */
+  const forcedPendingSweep = new Set<string>();
+</script>
+
 <script lang="ts">
   import { onMount, onDestroy, untrack } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
@@ -180,7 +190,7 @@
    * directory read is strictly cheaper than the thing they were already doing.
    */
   let refreshingReadiness = false;
-  async function refreshReadiness() {
+  async function refreshReadiness(force = false) {
     const c = ctx;
     const signer = session.signer;
     if (!c || !signer || refreshingReadiness) return;
@@ -188,7 +198,16 @@
     try {
       // The 21606 "your pipeline failed / recovered" notices arrive as gift wraps,
       // so without this the journey would re-derive from the same stale statuses.
-      await receiveGrants(signer).catch(() => {});
+      //
+      // `force` on the BUTTON, never on the visibility path. Pressing "check
+      // again" is the user saying the card is wrong, and until 2026-09-17 it
+      // went through every latch the ordinary scan does — the backfill marker
+      // included — so for the one person it exists for (waiting on a grant this
+      // device cannot see) it was a guaranteed no-op that still spun and still
+      // reported nothing. Home's Retry button learned this lesson already; this
+      // one had not. Coming back to the tab is not the same statement, and a
+      // full-history sweep every 60s of tab-flipping is not what that costs.
+      await receiveGrants(signer, { force }).catch(() => {});
       await readinessStore.load(c, signer);
     } finally {
       refreshingReadiness = false;
@@ -269,6 +288,21 @@
   }
 
   /**
+   * One forced, full-history grant sweep for an event this device is waiting on.
+   * Returns whether the approval landed. No-op (returns false) after the first
+   * call for this identity+event in this session — see `forcedPendingSweep`.
+   */
+  async function sweepForPendingGrant(c: EventContext, signer: AppSigner): Promise<boolean> {
+    const pubkey = session.pubkey;
+    if (!pubkey) return false;
+    const key = `${pubkey}:${c.coordinate}`;
+    if (forcedPendingSweep.has(key)) return false;
+    forcedPendingSweep.add(key);
+    await receiveGrants(signer, { force: true }).catch(() => {});
+    return await isApproved(c.coordinate).catch(() => false);
+  }
+
+  /**
    * The owner-scoped pass: grant scan → custody → role → "My events" → readiness
    * → warmers. Extracted from onMount because it must be able to run a SECOND
    * time — a NIP-46/Amber signer can land after this page mounted (see the
@@ -287,10 +321,29 @@
       clearJoinSent(c.coordinate);
       checkApprovalBanner(c.coordinate);
     }
-    else {
-      requestPending = joinSentAt(c.coordinate) !== undefined;
-      // Keep watching for the approval while the page stays open (UX-9).
-      if (requestPending) startGrantPolling();
+    else if ((requestPending = joinSentAt(c.coordinate) !== undefined)) {
+      // We know exactly what we are waiting for, so ask the relays a question
+      // wide enough to contain it — once per identity+event per session.
+      //
+      // Every other scan on this page trusts the backfill marker and reads only
+      // `grantScanSince()`. That is the right default for a background sweep and
+      // the wrong one here: "I sent a join request and have no key" is the state
+      // in which a grant older than the window is not a remote possibility, it is
+      // the single most likely explanation. The 2026-09-17 report was exactly
+      // this — the grant sat on the relays two days below that device's floor
+      // while the page said "waiting for organizer approval" indefinitely.
+      //
+      // Once, not per poll: `force` re-reads the whole 1059 history, and the 20s
+      // poller running that would be a full paginated sweep three times a minute.
+      if (signer && (await sweepForPendingGrant(c, signer))) {
+        approved = true;
+        requestPending = false;
+        clearJoinSent(c.coordinate);
+        checkApprovalBanner(c.coordinate);
+      } else {
+        // Keep watching for the approval while the page stays open (UX-9).
+        startGrantPolling();
+      }
     }
     const keys = await loadEventKeys(c.coordinate);
     organizer = keys?.role === "organizer";
@@ -426,6 +479,18 @@
       // if not (fresh device), the public-content pass below can't decrypt
       // members-only additions and is re-run once the grant scan lands them.
       const hadEck = identityPending ? false : await primeFromLocalCustody(ctx, session.signer);
+      // Warm People HERE, not in `syncIdentity`. Holding an ECK is the whole
+      // precondition for decrypting the directory, and `primeFromLocalCustody`
+      // has just proved it from the local keystore — whereas `syncIdentity`
+      // first awaits the grant scan, a full gift-wrap sweep over the inbox
+      // relays with its own paging. Gating the warm on that meant the most
+      // common flow in the app ("open an event, look at the people") only
+      // started fetching the roster seconds after the event page was already on
+      // screen and tappable, so a user who tapped Ľudia straight away beat the
+      // warm-up to it every time and paid for the roster read themselves.
+      // Deliberately after the `cache-paint` mark above: the header is already
+      // painted, so this competes with the body's fetches, not with first paint.
+      if (hadEck) prefetchAttendeesTab(ctx, session.signer);
       // Public content (custom layout 31608 + official feed) needs no keys and
       // no grant scan — start immediately so the page fills while grants resolve.
       const publicLoad = (async () => {
@@ -903,7 +968,7 @@
       readiness={readinessStore.readiness}
       {naddr}
       lastCheckedAt={readinessStore.lastCheckedAt}
-      onRefresh={session.signer ? refreshReadiness : undefined}
+      onRefresh={session.signer ? () => void refreshReadiness(true) : undefined}
       refreshing={readinessStore.loading}
     />
   {/if}

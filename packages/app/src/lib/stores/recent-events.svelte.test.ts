@@ -130,3 +130,79 @@ describe("recentEvents identity", () => {
     expect(recentEvents.list[0]).toMatchObject({ role: "visitor", at: 42 });
   });
 });
+
+/**
+ * "The network says you joined this, and this device has no key for it" (audit
+ * E9). A state, not a role — and one that must disappear the instant it stops
+ * being true, or the card lies in the other direction.
+ */
+describe("recentEvents pending-key state", () => {
+  it("keeps the flag on an entry the key store cannot place", () => {
+    recentEvents.reconcile({
+      coordinate: COORD,
+      naddr: NADDR,
+      title: "Event",
+      role: "visitor",
+      pendingKey: true,
+      at: 1,
+    });
+    expect(recentEvents.list[0]).toMatchObject({ role: "visitor", pendingKey: true });
+    // Survives a reload — Home paints from localStorage before any scan runs.
+    recentEvents.init();
+    expect(recentEvents.list[0]?.pendingKey).toBe(true);
+  });
+
+  it("drops the flag the moment the entry gets a real role", () => {
+    // The grant finally lands and receiveGrants writes the ECK: the card must
+    // stop saying "waiting for its key" without waiting for anything else.
+    recentEvents.reconcile({
+      coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor", pendingKey: true, at: 1,
+    });
+    recentEvents.reconcile({
+      coordinate: COORD, naddr: NADDR, title: "Event", role: "attendee", at: 1,
+    });
+    expect(recentEvents.list[0]).toMatchObject({ role: "attendee", pendingKey: false });
+  });
+
+  it("lets an authoritative pass clear the flag explicitly", () => {
+    // Home writes `pendingKey` on every authoritative reconciliation, `false`
+    // included — that is the read that retires the badge.
+    recentEvents.reconcile({
+      coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor", pendingKey: true, at: 1,
+    });
+    recentEvents.reconcile({
+      coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor", pendingKey: false, at: 1,
+    });
+    expect(recentEvents.list[0]?.pendingKey).toBe(false);
+  });
+
+  it("ordinary navigation, which knows nothing about it, leaves it alone", () => {
+    recentEvents.reconcile({
+      coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor", pendingKey: true, at: 1,
+    });
+    // EventHome recording a visit: no opinion on custody, so it must not clear
+    // a flag a scan established.
+    recentEvents.record({ coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor" });
+    expect(recentEvents.list[0]?.pendingKey).toBe(true);
+  });
+
+  it("never loads a flag that contradicts a stored role", () => {
+    // Whatever an older build or a half-written record left behind, the
+    // invariant has to hold before anything renders.
+    seed([
+      { coordinate: COORD, naddr: NADDR, title: "Event", role: "organizer", pendingKey: true, at: 1 },
+    ]);
+    recentEvents.init();
+    expect(recentEvents.list[0]).toMatchObject({ role: "organizer", pendingKey: false });
+  });
+
+  it("does not lose the flag when two records for one event are merged", () => {
+    seed([
+      { coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor", pendingKey: true, at: 1 },
+      { coordinate: COORD, naddr: NADDR, title: "Event", role: "visitor", at: 9 },
+    ]);
+    recentEvents.init();
+    expect(recentEvents.list).toHaveLength(1);
+    expect(recentEvents.list[0]?.pendingKey).toBe(true);
+  });
+});

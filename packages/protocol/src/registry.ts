@@ -30,6 +30,7 @@ import {
   KIND_EVENT_THEME,
   KIND_TALK,
   KIND_COORDINATOR_ANNOUNCE,
+  KIND_COMMUNITY,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
   KIND_KEY_GRANT,
@@ -125,9 +126,9 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "rosterContentSchema",
     sealing: "eck",
     author: "Coordinator, or `E_id` without one",
-    protection: "ECK-encrypted; `d` = event `d`",
+    protection: "ECK-encrypted; `d` = event `d` (page N at `<event-d>:N`)",
     notes:
-      "Approved-attendee index, current ECK version, per-device `chat_keys`, and the active Marmot `nostr_group_id` when chat is on. Latest valid roster wins; `nostr_group_id` is the authoritative event→group binding.",
+      "Approved-attendee index, current ECK version, per-device `chat_keys`, and the active Marmot `nostr_group_id` when chat is on. Latest valid roster wins; `nostr_group_id` is the authoritative event→group binding. A roster too large for one NIP-44 payload is paginated across `<event-d>:1`… with a `pages` count on page 0 and `v:3` (§6.2.1); one that fits keeps `v:2` and its single address.",
   },
   {
     constant: "KIND_MATCH_LIST",
@@ -212,6 +213,18 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     protection: "Public; `d = nostrautica:coordinator`",
     notes:
       "Discovery name, capabilities, resolved-route privacy disclosure, relays, optional pricing. Latest announcement per coordinator wins.",
+  },
+  {
+    constant: "KIND_COMMUNITY",
+    kind: KIND_COMMUNITY,
+    name: "Community",
+    klass: "addressable",
+    schemaExport: null,
+    sealing: "public",
+    author: "`E_id`",
+    protection: "Public; `d` = the space's `d`",
+    notes:
+      "The standing-group twin of the NIP-52 31923 a dated event publishes: `d`, `title`, optional `summary`/`image`/`t`, and deliberately no `start`, `end`, `location` or day-index tags. A community is not a calendar event, and publishing one as 31923 would put it into other clients' calendars as a zero-length event at its creation moment.",
   },
   // ── gift-wrapped rumors (21600–21610) ──────────────────────────────────────
   {
@@ -329,7 +342,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
 ] as const;
 
 /** The exact addressable and rumor kind ranges (inclusive). */
-export const CUSTOM_ADDRESSABLE_RANGE = { min: 31600, max: 31611 } as const;
+export const CUSTOM_ADDRESSABLE_RANGE = { min: 31600, max: 31612 } as const;
 export const CUSTOM_RUMOR_RANGE = { min: 21600, max: 21610 } as const;
 
 /**
@@ -368,7 +381,10 @@ is the primary ordering key; the sender-chosen timestamp is only a tie-break (§
 
 The custom kind ranges are \`${CUSTOM_ADDRESSABLE_RANGE.min}\`–\`${CUSTOM_ADDRESSABLE_RANGE.max}\` (addressable) and \`${CUSTOM_RUMOR_RANGE.min}\`–\`${CUSTOM_RUMOR_RANGE.max}\`
 (gift-wrapped rumors). All custom payloads carry \`v: 2\`; readers reject any payload or
-public event whose \`v\` is not exactly \`2\` (§2).
+public event whose \`v\` is not exactly \`2\` (§2). The single exception is a PAGINATED
+\`31604\` roster payload, which declares \`v: 3\` so that a client predating pagination
+fails loudly rather than rendering page 0 as the whole membership (§6.2.1); a roster that
+fits in one payload still carries \`v: 2\`.
 
 ## Addressable Events
 

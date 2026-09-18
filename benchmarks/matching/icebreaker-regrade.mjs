@@ -5,7 +5,13 @@
  */
 import { readFileSync, writeFileSync } from "node:fs";
 import { PERSONA_BY_ID } from "./icebreaker-fixture.mjs";
-import { gradeIcebreaker, mentionsEntity, summarize } from "./icebreaker-grade.mjs";
+import {
+  gradeIcebreaker,
+  gradeReasoning,
+  mentionsEntity,
+  summarize,
+  summarizeReasoning,
+} from "./icebreaker-grade.mjs";
 
 const path = process.argv[2];
 const data = JSON.parse(readFileSync(path, "utf8"));
@@ -23,6 +29,26 @@ for (const r of runs) {
     row.mentionsTarget = mentionsEntity(row.text, target.signature.entity);
     row.mentionsCandidate = mentionsEntity(row.text, cand.signature.entity);
     row.violations = gradeIcebreaker(row.text, target, cand);
+  }
+  // reasoning_for_target, re-graded on the same free-of-charge terms (2026-09-10).
+  // Runs saved before the reasoning grader existed have no reasonRows and are
+  // skipped rather than failing — they can only be refilled by replaying the run.
+  for (const row of r.reasonRows ?? []) {
+    const target = PERSONA_BY_ID.get(row.target);
+    const cand = PERSONA_BY_ID.get(row.candidate);
+    if (!target || !cand) throw new Error(`unknown persona in reasoning row: ${row.target} / ${row.candidate}`);
+    row.mentionsTarget = mentionsEntity(row.text, target.signature.entity);
+    row.mentionsCandidate = mentionsEntity(row.text, cand.signature.entity);
+    row.violations = gradeReasoning(row.text, target, cand);
+  }
+  if (r.reasonRows) {
+    r.reasonSummary = summarizeReasoning(r.reasonRows);
+    const rs = r.reasonSummary;
+    console.log(
+      `${(r.label + (r.lang ? "/" + r.lang : "")).padEnd(18)} ${"reason".padEnd(7)} n=${String(rs.total).padStart(3)}  ` +
+        `errors ${String(rs.errors).padStart(2)} (${rs.errorPct}%)  ` +
+        `[inverted ${rs.inverted} / misattributed ${rs.misattributed}]  clean ${rs.cleanPct}%`,
+    );
   }
   const show = (s, tag) =>
     console.log(

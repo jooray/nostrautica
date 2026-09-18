@@ -505,6 +505,33 @@ describe("schema migrations (audit O3)", () => {
     store.close();
   });
 
+  it("classifies the jobs already queued when the priority column appears", async () => {
+    const path = tmpDb();
+    // A database from before the scheduling class existed: the jobs table has no
+    // `priority` column, and it already holds a reverse batch queued AHEAD of a
+    // publish. This is the state a running coordinator is in at the moment the
+    // deploy lands, and the backlog is precisely what the next arrival waits on.
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(
+      `CREATE TABLE jobs (id INTEGER PRIMARY KEY AUTOINCREMENT, type TEXT NOT NULL,
+         dedupe_key TEXT NOT NULL UNIQUE, payload TEXT NOT NULL,
+         state TEXT NOT NULL DEFAULT 'pending', attempts INTEGER NOT NULL DEFAULT 0,
+         next_run_at INTEGER NOT NULL DEFAULT 0, last_error TEXT, claimed_at INTEGER,
+         lease_until INTEGER, worker_token TEXT)`,
+    );
+    const ins = raw.prepare("INSERT INTO jobs (type, dedupe_key, payload) VALUES (?, ?, '{}')");
+    ins.run("score_reverse_batch", "old-reverse");
+    ins.run("publish_matches", "old-publish");
+    raw.close();
+
+    const store = new Store(path);
+    // The publish is claimed first despite being the younger row.
+    expect(store.claimNextJob(1000, "w", 60_000)?.dedupe_key).toBe("old-publish");
+    expect(store.claimNextJob(1000, "w", 60_000)?.dedupe_key).toBe("old-reverse");
+    store.close();
+  });
+
   it("re-keys invite_usage per redeemer, keeping the codes already spent (v5)", async () => {
     const path = tmpDb();
     // A pre-v5 database: one row per CODE, so it cannot represent two redeemers.
@@ -1426,7 +1453,17 @@ describe("inspectPipelineReadOnly (doctor)", () => {
  * the one time it is needed.
  */
 describe("pre-migration backup (audit OPS-2)", () => {
-  const tmp = () => join(mkdtempSync(join(tmpdir(), "nostrautica-migrate-")), "coordinator.sqlite");
+  const dirs: string[] = [];
+  afterEach(() => {
+    for (const d of dirs.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+  const tmp = () => {
+    // Tracked for cleanup: these are real dirs in the SHARED system tmpdir, and
+    // audio.test.ts's sweep test looks at every `nostrautica-*` in there.
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-migrate-"));
+    dirs.push(dir);
+    return join(dir, "coordinator.sqlite");
+  };
   const backupsIn = (dbPath: string) =>
     readdirSync(dirname(dbPath)).filter((f) => f.endsWith(".bak"));
 

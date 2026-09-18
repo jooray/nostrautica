@@ -1,7 +1,8 @@
 <script lang="ts">
-  // Event-scoped bottom nav (redesign §6.2): Overview · People · Matches ·
-  // Updates · More. People/Matches are gated by role + config so a tab never
-  // dead-ends at "join first". Replicates BottomNav's shipped a11y pattern
+  // Event-scoped bottom nav (redesign §6.2): Overview · People · Updates · More.
+  // People is gated by role + config so a tab never dead-ends at "join first".
+  // Matches merged INTO People (2026-09-13) — one list, matched people first —
+  // so the new-matches badge now rides the People tab. Replicates BottomNav's shipped a11y pattern
   // verbatim: aria-current="page", aria-hidden icons, a non-colour ::before
   // marker (forced-colors safe), 48px targets, safe-area padding.
   import { router } from "$lib/router/router.svelte.js";
@@ -11,6 +12,7 @@
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
+  import EventSwitcher from "$lib/components/EventSwitcher.svelte";
   import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -24,10 +26,11 @@
   function active(...names: string[]): boolean {
     return names.includes(route.name);
   }
-  // The bar holds Overview · People · Matches · Chat · Updates · More. When both
-  // Matches AND Chat are visible the bar is full, so Updates collapses into the
-  // More menu (MARMOT-GROUP-CHAT §7) to keep tap targets comfortable.
-  const collapseUpdates = $derived(eventShell.showMatches && eventShell.showChat);
+  // The bar holds Overview · People · Chat · Updates · More — five at most, one
+  // fewer than before the People/Matches merge. That is what let Updates come
+  // back out of the More menu: it used to collapse there whenever Matches AND
+  // Chat were both visible (MARMOT-GROUP-CHAT §7) because six tabs squeezed the
+  // labels to the point of truncating ("Overvi…"). Five fit.
 </script>
 
 {#snippet talksTab()}
@@ -41,6 +44,14 @@
 {/snippet}
 
 <nav class="event-nav" aria-label={t("nav.eventPrimary")}>
+  <!-- Which event you are in, said once and permanently, and the way out to
+       another one. On the phone this lives in the strip above the content and
+       the bar has no room for it; in the rail it is the one thing that should
+       never scroll away, so the strip stands down (see .compact-event-strip in
+       app.css). -->
+  {#if eventShell.ctx}
+    <EventSwitcher ctx={eventShell.ctx} {naddr} />
+  {/if}
   <button
     aria-current={active("event", "join") ? "page" : undefined}
     class:active={active("event", "join")}
@@ -58,30 +69,20 @@
       class:active={active("attendees", "attendee")}
       onclick={() => router.go({ name: "attendees", naddr })}
     >
-      <span class="ico"><Icon name="people" size={24} /></span><span class="lbl">{t("nav.people")}</span>
-    </button>
-  {/if}
-
-  {#if eventShell.showTalks && !eventShell.talksFirst}{@render talksTab()}{/if}
-
-  {#if eventShell.showMatches}
-    <button
-      aria-current={active("matches") ? "page" : undefined}
-      class:active={active("matches")}
-      onclick={() => router.go({ name: "matches", naddr })}
-    >
       <span class="ico">
-        <Icon name="constellation" size={24} />
-        {#if newMatches > 0 && !active("matches")}
+        <Icon name="people" size={24} />
+        {#if newMatches > 0 && !active("attendees", "attendee")}
           <span class="badge-count" aria-hidden="true">{newMatches > 9 ? "9+" : newMatches}</span>
         {/if}
       </span><span class="lbl"
-        >{t("nav.matches")}{#if newMatches > 0 && !active("matches")}<span class="visually-hidden"
+        >{t("nav.people")}{#if newMatches > 0 && !active("attendees", "attendee")}<span class="visually-hidden"
             >{tp("nav.matches.new", newMatches)}</span
           >{/if}</span
       >
     </button>
   {/if}
+
+  {#if eventShell.showTalks && !eventShell.talksFirst}{@render talksTab()}{/if}
 
   {#if eventShell.showChat}
     <!-- Active on the event group chat AND the global chat list / DM threads
@@ -103,15 +104,13 @@
     </button>
   {/if}
 
-  {#if !collapseUpdates}
-    <button
-      aria-current={active("posts", "post") ? "page" : undefined}
-      class:active={active("posts", "post")}
-      onclick={() => router.go({ name: "posts", naddr })}
-    >
-      <span class="ico"><Icon name="horn" size={24} /></span><span class="lbl">{t("nav.updates")}</span>
-    </button>
-  {/if}
+  <button
+    aria-current={active("posts", "post") ? "page" : undefined}
+    class:active={active("posts", "post")}
+    onclick={() => router.go({ name: "posts", naddr })}
+  >
+    <span class="ico"><Icon name="horn" size={24} /></span><span class="lbl">{t("nav.updates")}</span>
+  </button>
 
   <button
     aria-current={active("eventMore") ? "page" : undefined}
@@ -220,6 +219,73 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+
+  /* ── Desktop: the bar becomes a left rail ──────────────────────────────
+     A bottom bar is where a thumb already is, which is why it is right on a
+     phone and wrong on a monitor: it puts the navigation as far from the
+     cursor as the window allows, and stretches five items across a width twice
+     that of the content they lead to. Same markup, same order, same badges —
+     the axis changes and the labels stop competing for room, which is also what
+     retires the 6-tab ellipsis rule above. */
+  @media (min-width: 1000px) {
+    .event-nav {
+      top: 0;
+      right: auto;
+      width: var(--rail);
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: stretch;
+      gap: 0.1rem;
+      padding: 1rem 0.7rem 1.2rem;
+      border-top: none;
+      border-right: 1px solid var(--border);
+      box-shadow: none;
+      /* Solid, not translucent. Blur behind a bar floating over scrolling
+         content is a real effect; behind a full-height rail beside the content
+         it is decoration — and it would create a containing block that traps
+         the switcher's fixed menu inside the rail's own scroll. */
+      background: var(--bg-elev);
+      backdrop-filter: none;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .event-nav button {
+      flex: 0 0 auto;
+      max-width: none;
+      min-height: 40px;
+      flex-direction: row;
+      justify-content: flex-start;
+      gap: 0.7rem;
+      padding: 0.5rem 0.65rem 0.5rem 0.85rem;
+      border-radius: var(--radius-sm);
+    }
+    .event-nav button:hover {
+      background: var(--bg-elev2);
+      color: var(--text);
+    }
+    .event-nav button.active {
+      background: var(--accent-soft);
+    }
+    /* The selected marker turns with the axis: a bar down the leading edge
+       rather than across the top. Still currentColor and still not carried by
+       colour alone, so forced-colors keeps it (A6). */
+    /* Inside the button, not outside it: the rail scrolls, and a scroll
+       container clips both axes, so a marker hung in the rail's padding was
+       sliced off at the window edge. */
+    .event-nav button.active::before {
+      top: 50%;
+      left: 0;
+      width: 3px;
+      height: 1.25rem;
+      transform: translateY(-50%);
+      border-radius: 0 2px 2px 0;
+    }
+    .lbl {
+      font-size: 0.92rem;
+      font-weight: 600;
+    }
+  }
+
   /* Very narrow / high-zoom: shrink labels a touch so a long translated label
      ("Nastavenia", "Aktualizace") never forces horizontal overflow. */
   @media (max-width: 360px) {
@@ -229,5 +295,15 @@
     button {
       padding: 0.25rem 0.1rem;
     }
+  }
+  /* Six tabs is the fullest the bar gets (Overview · Talks · People · Chat ·
+     Updates · More). At that count the widest label runs past the ellipsis at
+     390px, which is the common phone width AND the one the docs screenshots are
+     taken at, so "Overview" shipped as "Overvi…". The rule above never caught it
+     because it triggers on a width below 360px, and the cause is not width: five
+     tabs fit at 390px perfectly well. Count the tabs instead of guessing at the
+     viewport. */
+  .event-nav:has(> button:nth-child(6)) .lbl {
+    font-size: 0.68rem;
   }
 </style>

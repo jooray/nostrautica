@@ -39,7 +39,14 @@ import { t } from "$lib/i18n/i18n.svelte.js";
 // The self-copy (31602) and reuse library are decrypted private data, cached
 // owner-scoped and wiped on logout (CACHING-PLAN §2.7): the Record composer and
 // readiness paint the last intro/library instantly instead of re-decrypting.
-type SelfCopy = { profile?: AttendeeProfile; media: MediaDescriptor[]; introText?: string; rev?: number };
+type SelfCopy = {
+  profile?: AttendeeProfile;
+  media: MediaDescriptor[];
+  introText?: string;
+  rev?: number;
+  /** The last 21608 correction `rev` sent for this event (audit A-5). */
+  correctionRev?: number;
+};
 
 // Parameterized replaceable events created in the same wall-clock second must
 // not rely on the event-id tie-break to decide which edit survives. Keep each
@@ -73,8 +80,14 @@ function selfCopyKey(coordinate: string): string {
 function selfRevKey(coordinate: string): string {
   return `selfrev:${coordinate}`;
 }
+/** The same, for 21608 ai_profile corrections (audit A-5). */
+function correctionRevKey(coordinate: string): string {
+  return `corrrev:${coordinate}`;
+}
 const MEDIALIB_KEY = "medialib";
 const TEXTLIB_KEY = "textlib";
+/** Per-clip "added at" sidecar for the reuse gallery (see ReuseLibrary.at). */
+const MEDIALIB_AT_KEY = "medialib-at";
 
 /**
  * The next submission `rev` for this event — strictly greater than both the
@@ -118,7 +131,24 @@ function nextRevFloor(coordinate: string, rev: number): void {
 
 /** The cross-event reuse library: recorded intros (`media`) + authored text intros
  *  (`texts`). Both live in the SINGLE per-user `a:null` 31602 entry (§6.2). */
-export type ReuseLibrary = { media: MediaDescriptor[]; texts: string[] };
+/**
+ * `at` maps a clip's ciphertext hash to when it was added, in unix seconds.
+ *
+ * It is a sidecar rather than a field on MediaDescriptor for two reasons: the
+ * descriptor is a WIRE object that gets republished into events, and its schema
+ * strips unknown keys, so a timestamp added there would silently vanish on the
+ * next validation round-trip. This library record is self-encrypted and private
+ * — nobody else parses it — so an extra top-level key costs nothing and older
+ * clients ignore it.
+ *
+ * Entries written before this existed have no stamp. That is why the gallery
+ * also falls back to array order, which has always been chronological.
+ */
+export type ReuseLibrary = {
+  media: MediaDescriptor[];
+  texts: string[];
+  at: Record<string, number>;
+};
 
 /**
  * The authored profile of someone who has genuinely never written one. A
@@ -163,8 +193,83 @@ export function cachedSelfCopy(coordinate: string): SelfCopy | undefined {
 export function cacheSelfCopy(coordinate: string, self: SelfCopy, at: number): void {
   cacheSet(selfCopyKey(coordinate), self, at);
   if (typeof self.rev === "number") nextRevFloor(coordinate, self.rev);
+  if (typeof self.correctionRev === "number") {
+    // Same high-water discipline as `rev`: raise, never lower (audit A-5).
+    const floor = Math.max(cacheGet<number>(correctionRevKey(coordinate))?.data ?? -1, self.correctionRev);
+    cacheSet(correctionRevKey(coordinate), floor, Math.floor(Date.now() / 1000));
+  }
 }
+/** This device's persisted high-water mark for 21608 correction revs, or undefined. */
+export function cachedCorrectionRev(coordinate: string): number | undefined {
+  const stored = cacheGet<number>(correctionRevKey(coordinate))?.data;
+  return typeof stored === "number" ? stored : undefined;
+}
+
+/**
+ * Claim the next 21608 correction `rev` for this event, monotonic ACROSS DEVICES
+ * (audit A-5).
+ *
+ * The correction counter used to live only in this device's `localStorage`, so a
+ * second device (or a cleared profile) started again from 0 while the coordinator
+ * still held rev 3 from the first — and it orders corrections by
+ * `(rev, created_at, id)`, so every edit the new device made was discarded
+ * server-side while the UI reported "saved". Delivery had genuinely succeeded;
+ * application had not, and nothing told the user.
+ *
+ * The floor is therefore taken from BOTH the relay-backed 31602 self-copy (which
+ * survives a device change) and the local high-water mark, exactly as
+ * {@link nextRev} does for submissions: a failed or empty relay read can only fail
+ * to ADVANCE the counter, never roll it back. The returned `record` publishes the
+ * new value into the self-copy so the NEXT device sees it; the local mark is
+ * written before either, so a failed publish still can't reissue this rev.
+ */
+export async function claimCorrectionRev(
+  signer: AppSigner,
+  ctx: EventContext,
+  blindingKey: Uint8Array,
+): Promise<{ rev: number; record: () => Promise<void> }> {
+  const self = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
+  const floor = Math.max(cachedCorrectionRev(ctx.coordinate) ?? -1, self?.correctionRev ?? -1);
+  const rev = floor + 1;
+  // Wall clock as the cache timestamp, NOT `rev` — a revision counter read as a
+  // timestamp is 1970, and the 30-day prune then deletes the high-water mark on the
+  // next boot (the trap `nextRev` documents).
+  cacheSet(correctionRevKey(ctx.coordinate), rev, Math.floor(Date.now() / 1000));
+  return {
+    rev,
+    record: async () => {
+      const attendeePubkey = await signer.getPublicKey();
+      const selfD = blindedD(blindingKey, ctx.coordinate, attendeePubkey);
+      const key = selfCopyKey(ctx.coordinate);
+      const merged: SelfCopy = { ...(self ?? { media: [] }), correctionRev: rev };
+      const content = {
+        v: 2,
+        a: ctx.coordinate,
+        profile: merged.profile,
+        media: merged.media,
+        ...(merged.introText ? { intro_text: merged.introText } : {}),
+        ...(merged.rev !== undefined ? { rev: merged.rev } : {}),
+        correction_rev: rev,
+      };
+      const cipher = await signer.nip44Encrypt(attendeePubkey, JSON.stringify(content));
+      const event = await signer.signEvent({
+        kind: KIND_MY_PROFILE,
+        created_at: nextReplaceableTimestamp(selfD, cacheGet<SelfCopy>(key)?.at),
+        tags: [["d", selfD]],
+        content: cipher,
+      });
+      await publishOrQueue(event);
+      cacheSelfCopy(ctx.coordinate, merged, event.created_at);
+    },
+  };
+}
+
 /** Cached reuse-library media (no network), or undefined. */
+/** Cached per-clip "added at" map; `{}` when this device has never seen one. */
+export function cachedLibraryAt(): Record<string, number> {
+  return cacheGet<Record<string, number>>(MEDIALIB_AT_KEY)?.data ?? {};
+}
+
 export function cachedLibrary(): MediaDescriptor[] | undefined {
   return cacheGet<MediaDescriptor[]>(MEDIALIB_KEY)?.data;
 }
@@ -341,6 +446,10 @@ export async function submitProfileAndMedia(
   // 31602 self-copy (blinded d over the self-conversation key). Keeps the
   // attendee's own device holding their authored text intro too, and the `rev`
   // just sent so the next edit bumps from it.
+  // Carry the correction rev forward (audit A-5). Every submission REPLACES this
+  // 31602, and Zod strips what the schema doesn't name, so a submission that didn't
+  // re-emit it would erase the only cross-device record of the correction counter.
+  const carriedCorrectionRev = prevSelf?.correctionRev ?? cachedCorrectionRev(ctx.coordinate);
   const selfContent = {
     v: 2,
     a: ctx.coordinate,
@@ -348,6 +457,7 @@ export async function submitProfileAndMedia(
     profile,
     media: args.media,
     ...(introText ? { intro_text: introText } : {}),
+    ...(carriedCorrectionRev !== undefined ? { correction_rev: carriedCorrectionRev } : {}),
   };
   const selfKey = selfCopyKey(ctx.coordinate);
   const selfD = blindedD(args.blindingKey, ctx.coordinate, attendeePubkey);
@@ -364,7 +474,7 @@ export async function submitProfileAndMedia(
     // persisted it. Write through before navigation can re-read stale intro state.
     cacheSelfCopy(
       ctx.coordinate,
-      { profile, media: args.media, introText, rev } satisfies SelfCopy,
+      { profile, media: args.media, introText, rev, correctionRev: carriedCorrectionRev } satisfies SelfCopy,
       selfEvent.created_at,
     );
     return published;
@@ -416,6 +526,12 @@ export async function addToLibrary(
   const byHash = new Map<string, MediaDescriptor>();
   for (const d of [...existing.media, ...media]) byHash.set(d.x, d);
   const mergedMedia = [...byHash.values()];
+  // Stamp only what is genuinely new. Re-adding a clip that is already in the
+  // library must not move it to the top of the gallery: the question the date
+  // answers is when it was MADE, not when it was last touched.
+  const nowSec = Math.floor(Date.now() / 1000);
+  const mergedAt: Record<string, number> = { ...existing.at };
+  for (const d of mergedMedia) if (mergedAt[d.x] === undefined) mergedAt[d.x] = nowSec;
 
   const mergedTexts = [...existing.texts];
   for (const txt of texts) {
@@ -429,6 +545,7 @@ export async function addToLibrary(
     v: 2,
     a: null,
     media: mergedMedia,
+    media_at: mergedAt,
     ...(cappedTexts.length ? { intro_texts: cappedTexts } : {}),
   };
   const cipher = await signer.nip44Encrypt(pubkey, JSON.stringify(content));
@@ -441,6 +558,7 @@ export async function addToLibrary(
   const published = await publishOrQueue(event);
   cacheSet(MEDIALIB_KEY, mergedMedia, event.created_at);
   cacheSet(TEXTLIB_KEY, cappedTexts, event.created_at);
+  cacheSet(MEDIALIB_AT_KEY, mergedAt, event.created_at);
   return toOutcome(published);
 }
 
@@ -514,12 +632,14 @@ export async function loadSelfCopy(
         media?: MediaDescriptor[];
         intro_text?: string;
         rev?: number;
+        correction_rev?: number;
       };
       const self: SelfCopy = {
         profile: parsed.profile,
         media: parsed.media ?? [],
         introText: parsed.intro_text,
         rev: typeof parsed.rev === "number" ? parsed.rev : undefined,
+        correctionRev: typeof parsed.correction_rev === "number" ? parsed.correction_rev : undefined,
       };
       cacheSet(selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
       return self;
@@ -587,19 +707,25 @@ export async function loadLibraryFull(
     "#d": [libD],
   });
   const latest = pickLatest(events);
-  if (!latest) return { media: [], texts: [] };
+  if (!latest) return { media: [], texts: [], at: {} };
   try {
     const json = await signer.nip44Decrypt(pubkey, latest.content);
-    const parsed = JSON.parse(json) as { media?: MediaDescriptor[]; intro_texts?: string[] };
+    const parsed = JSON.parse(json) as {
+      media?: MediaDescriptor[];
+      intro_texts?: string[];
+      media_at?: Record<string, number>;
+    };
     const media = parsed.media ?? [];
+    const at = parsed.media_at ?? {};
     // Older library entries (written before text reuse) carry no intro_texts —
     // treated as an empty text library, so they still load cleanly.
     const texts = (parsed.intro_texts ?? []).filter((s) => typeof s === "string");
     cacheSet(MEDIALIB_KEY, media, latest.created_at ?? 0);
     cacheSet(TEXTLIB_KEY, texts, latest.created_at ?? 0);
-    return { media, texts };
+    cacheSet(MEDIALIB_AT_KEY, at, latest.created_at ?? 0);
+    return { media, texts, at };
   } catch {
-    return { media: [], texts: [] };
+    return { media: [], texts: [], at: {} };
   }
 }
 

@@ -26,7 +26,6 @@ import {
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
   KIND_EVENT_CONFIG,
-  KIND_CALENDAR_EVENT,
   KIND_DELETION,
   KIND_NOTE,
   KIND_REPOST,
@@ -57,6 +56,14 @@ import {
   directoryEntryContentSchema,
   chatKeyAttestationContentSchema,
   MAX_CHAT_KEYS_PER_ACCOUNT,
+  MAX_ROSTER,
+  MAX_ROSTER_PAGES,
+  splitRoster,
+  mergeRosterPages,
+  rosterPageCount,
+  rosterPageD,
+  rosterPageDs,
+  rosterContinuationDs,
   KIND_CHAT_KEY_ATTESTATION,
   isMarmotChatEnabled,
   CHAT_INTEROP_RELAYS,
@@ -94,11 +101,11 @@ import {
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor, RumorKind } from "@nostrautica/protocol";
 
-import { Store, DAEMON_PARK_REASON, type BillingStateRow } from "./store/db.js";
+import { Store, DAEMON_PARK_REASON, EVENT_NOT_LIVE_PARK_REASON, type BillingStateRow, type EnqueueOutcome } from "./store/db.js";
 import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
 import { InviteChecker, evaluateEntitlement } from "./pipeline/entitlement.js";
 import { processAttendee } from "./pipeline/process.js";
-import type { NostrPost } from "./pipeline/profile.js";
+import { extractProfileBio, type NostrPost } from "./pipeline/profile.js";
 import {
   profileHash,
   hasProfileContent,
@@ -195,12 +202,62 @@ const MAX_ATTENDEES_PER_EVENT = 2000;
 /** Durable inbox rate accounting (audit C3): fixed 60s window. */
 const INBOX_RATE_WINDOW_MS = 60_000;
 /**
- * How often every live inbox is re-read from the relays (P1 #14). Ten minutes is
- * chosen against what is actually waiting on it: a join request that the live
- * subscription missed is somebody standing at a door, and the pre-existing
- * recovery for that was "wait for the next deploy".
+ * How often every live inbox is re-read from the relays (P1 #14). Chosen against
+ * what is actually waiting on it: a join request that the live subscription
+ * missed is somebody standing at a door, and the pre-existing recovery for that
+ * was "wait for the next deploy".
+ *
+ * Ten minutes until 2026-09-13, and the Plan B logs show exactly what that cost.
+ * Of 18 auto-approvals on the event's first day, most landed in clusters on the
+ * sweep tick — four people at 09:17:43, more at :27:42, :37:42, :47:42 — while
+ * the ones the live subscription did deliver arrived at ordinary times like
+ * 09:05:58. Each cluster is people who had already submitted, waiting out the
+ * rest of the interval at a registration desk. A sweep reads a 3-day window of
+ * wraps (~50 for the coordinator inbox, ~100 per event) and skips the seen ones,
+ * and took about 2 seconds in production, so running it five times as often is
+ * cheap next to what it saves. The overlap guard at the call site means a slow
+ * sweep still cannot stack.
+ *
+ * This is a mitigation, not the fix: a live subscription that reliably delivered
+ * would make the sweep a backstop again. Why it drops events (relay handover,
+ * conference wifi, a socket the relay closed quietly) is unresolved.
  */
-const INBOX_RESCAN_INTERVAL_MS = 600_000;
+const INBOX_RESCAN_INTERVAL_MS = 120_000;
+/**
+ * How often {@link Coordinator.profileRefreshSweep} re-reads attendees' public
+ * kind-0 profiles to notice a bio edited OUTSIDE Nostrautica.
+ *
+ * Deliberately an hour, not the two minutes above. That interval exists because a
+ * missed join request is somebody standing at a registration desk; nobody is
+ * standing anywhere while their bio propagates, and the cost profile is the
+ * opposite — this sweep issues one relay query per event per tick against
+ * PUBLIC relays the daemon does not own, so a short interval would spend other
+ * people's relay budget to shave minutes off something nobody is waiting on.
+ */
+const PROFILE_REFRESH_INTERVAL_MS = 3_600_000;
+/**
+ * How long after an event ends the sweep keeps watching its attendees' profiles.
+ *
+ * Matches are consumed during the event and the days around it. A bio edited two
+ * months later should not quietly re-rank an event nobody is attending any more —
+ * it would spend the organizer's provider budget to rewrite match lists that no
+ * client will open. Events with no known end (`eventEndSec = 0`, no 31923 `end`
+ * or `start` tag) are swept indefinitely: those are the undated/rolling community
+ * events, where "two months after" has no meaning to bound against.
+ */
+const PROFILE_REFRESH_MAX_AGE_SEC = 14 * 86_400;
+/**
+ * Attendees whose profile may be re-enqueued per event per tick.
+ *
+ * The backstop against a whole event drifting at once and approaching the cost of
+ * a full organizer `recompute`. Each re-enqueued attendee re-scores every
+ * prefiltered pair they belong to in BOTH directions and republishes their
+ * directory entry, so an unbounded sweep over a 200-person event could dispatch a
+ * recompute-sized burst from a timer nobody pressed. Whatever exceeds the cap is
+ * simply picked up by the next tick an hour later — the work is not lost, it is
+ * spread.
+ */
+const PROFILE_REFRESH_MAX_PER_EVENT = 25;
 /** Max inbound rumors accepted from ONE sender per window (abuse ceiling). */
 const MAX_RUMORS_PER_SENDER_WINDOW = 30;
 /**
@@ -241,6 +298,22 @@ const ENROLLMENT_WAIT_MAX_AGE_SEC = 5 * 60;
  */
 const MAX_ENROLLMENT_WAITS = Math.floor(INBOX_MAX_CONCURRENCY / 2);
 const INBOX_MAX_QUEUE = 2000;
+/**
+ * How old a 21600 join has to be before it counts as a LATE DELIVERY rather than a
+ * live request, for the one decision that cares (audit B-2): whether it may
+ * re-enroll an identity a completed revoke/withdrawal deliberately removed. See
+ * {@link Coordinator.handleJoinLocked} for why staleness, and not the ordering
+ * comparison alone, is what that guard turns on.
+ */
+const JOIN_STALE_AFTER_SEC = 5 * 60;
+/**
+ * Warn the organizer once the 31604 roster crosses this fraction of MAX_ROSTER
+ * (audit B-8). "The event is full" must never be the first anyone hears about a
+ * limit they can still plan around. The fraction used to be measured against the
+ * NIP-44 byte ceiling, which pagination (PROTOCOL-NIP.md §6.2) is no longer the
+ * binding constraint — the member cap is.
+ */
+const ROSTER_WARN_FRACTION = 0.9;
 
 /** Resolve the per-descriptor duration cap: 0/negative (UNLIMITED) ⇒ the built-in default. */
 function effectiveMaxMediaSec(configured: number): number {
@@ -252,6 +325,9 @@ function effectiveMaxMediaSec(configured: number): number {
  * retention window (NIP §6.2) counts from. Prefers the `end` tag; falls back to
  * `start` (an instant event with no distinct end). 0 when neither is a valid int —
  * the retention sweep then skips the event (it cannot know when the window opened).
+ * A 31612 community has neither tag BY DESIGN (it is a standing group, not a dated
+ * event), so it reads 0 and is never retention-swept, which is the correct
+ * behaviour and not an omission to "fix" with a synthesised end date.
  */
 function parseEventEndSec(evt: NostrEvent | undefined): number {
   if (!evt) return 0;
@@ -345,6 +421,110 @@ function relayKey(relays: string[]): string {
 }
 
 /**
+ * How many stored events restore at once at boot (see {@link Coordinator.start}).
+ *
+ * Four, not "all of them". Each restoring event has at most a handful of relay
+ * reads in flight at a time (its config, its E_inbox history, its chat roster's
+ * key packages), and those all multiplex over the SAME websockets — a daemon with
+ * forty installed events restoring unbounded would put ~120 concurrent REQs on
+ * each relay socket, which is where relays start dropping subscriptions and where
+ * a burst of NIP-44 decrypts starts starving the event loop that has to service
+ * them. Four is enough to hide a slow or dead relay behind three other events'
+ * work, which is the whole point, while keeping the fan-out per relay in the range
+ * a single ordinary client produces.
+ *
+ * It bounds CONCURRENCY, not correctness: everything genuinely shared underneath
+ * is already serialized (node:sqlite is synchronous, so a store write cannot
+ * interleave; `MarmotClientMls.serialize` chains MLS commits per group; the chat
+ * roster walk takes `withMemberLock` per member). Two events never share a group
+ * or an inbox, so there is nothing left for them to race over.
+ */
+const RESTORE_CONCURRENCY = 4;
+
+/**
+ * Delays, in order, of the bounded chat-enrolment re-check that follows an
+ * approval (see the `chat_sync_member` handler).
+ *
+ * `chat_sync_member` is enqueued the moment an attendee is approved, and on a
+ * chat event it then completes in 0–1 ms having done nothing at all: the account
+ * has no attested device yet, because the client publishes its key package and
+ * its 21607 later, when it prewarms chat. The job's success was therefore
+ * meaningless — nothing was waiting to notice when the device DID show up except
+ * the passive 30443 watcher, and the person watched a spinner in the meantime.
+ *
+ * Four re-checks at +5 s, +25 s, +85 s, +265 s (each scheduled from the previous
+ * run, so ~4.5 minutes end to end), and the chain stops the moment the member
+ * holds a leaf. Bounded on purpose: past that window the live watcher and the
+ * attestation path are the right mechanisms, and a chain that never ends is a
+ * per-approval timer on every event this daemon serves.
+ */
+const CHAT_ENROLMENT_RECHECK_DELAYS_MS = [5_000, 20_000, 60_000, 180_000];
+
+/**
+ * Run `fn` over `items` with at most `limit` in flight, preserving nothing about
+ * order (callers here only care that every item ran). A rejection from `fn`
+ * propagates — every call site in this file catches per item.
+ */
+async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) => Promise<void>): Promise<void> {
+  if (items.length === 0) return;
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      const i = next++;
+      if (i >= items.length) return;
+      await fn(items[i]!);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
+
+/**
+ * Wall-clock accounting for the boot path, so "startup is slow" can be answered
+ * with a measurement instead of a hypothesis.
+ *
+ * This exists because docs/DEPLOYMENT.md's startup-time section has twice blamed
+ * the wrong phase — first the coordinator's own inbox backfill (which FELL while
+ * startup ROSE), then a per-event cost stated as one undifferentiated 9–12 s lump.
+ * Neither could be checked without an SSH session and a stopwatch, so both
+ * survived as folklore. The daemon now prints its own breakdown on every boot,
+ * which means the next person to ask "where does the time go" reads it off the
+ * deploy output.
+ *
+ * Deliberately `performance.now()`, not the injectable `this.now()`: tests drive a
+ * fake clock and would otherwise report every phase as 0 ms.
+ */
+class BootPhases {
+  private readonly totals = new Map<string, { ms: number; n: number }>();
+  private readonly t0 = performance.now();
+
+  /** Time `fn` under `phase`. Nested phases are fine — each is reported on its own
+   *  line, so an enclosing phase's total legitimately exceeds the sum of its parts. */
+  async time<T>(phase: string, fn: () => Promise<T>): Promise<T> {
+    const started = performance.now();
+    try {
+      return await fn();
+    } finally {
+      const prev = this.totals.get(phase) ?? { ms: 0, n: 0 };
+      prev.ms += performance.now() - started;
+      prev.n += 1;
+      this.totals.set(phase, prev);
+    }
+  }
+
+  /** Wall-clock ms since this accounting began. */
+  elapsedMs(): number {
+    return performance.now() - this.t0;
+  }
+
+  /** One line per phase, slowest first: `phase 12.3s ×4`. */
+  report(): string[] {
+    return [...this.totals]
+      .sort((a, b) => b[1].ms - a[1].ms)
+      .map(([phase, { ms, n }]) => `${phase} ${(ms / 1000).toFixed(1)}s${n > 1 ? ` ×${n}` : ""}`);
+  }
+}
+
+/**
  * Stable dedupe fragment for a batch job: a hash of the sorted candidate
  * `b:inputsHash` pairs. Two enqueues covering the same target+candidate set (same
  * inputs) collapse to one job, so a restart mid-recompute never double-bills.
@@ -382,6 +562,12 @@ export interface CoordinatorDeps {
   /** @deprecated pass `roles`. */
   translateModel?: ModelRef;
   defaultRelays: string[];
+  /**
+   * How many LLM scoring jobs may run at once ({@link SCORE_LANE}); default 1.
+   * `main.ts` raises it for the daemon and is where the one configuration that
+   * must not be raised is spelled out.
+   */
+  scoreConcurrency?: number;
   prefilter?: PrefilterConfig;
   topK?: number;
   /** Candidates per batched match-scoring call (spec §16.2). Default 10. */
@@ -460,6 +646,17 @@ export interface CoordinatorDeps {
 
 interface EventState {
   coordinate: string;
+  /**
+   * The kind half of {@link coordinate} — 31923 for a dated NIP-52 event, 31612
+   * for a standing community (PROTOCOL-NIP.md §1.1). Everything that reads the
+   * space's own metadata record (title/summary/`t`, and the `end` anchor a dated
+   * event has) must filter on THIS and not on a literal 31923: a community's
+   * metadata is published under its own kind and would otherwise never be read.
+   * It is also not merely "either space kind" — an E_id may hold a 31923 and a
+   * 31612 sharing one `d`, and they are two different spaces, so a community's
+   * title must never be applied to the event's state or vice versa.
+   */
+  spaceKind: number;
   identifier: string;
   eidPubkey: string;
   inboxSk: Uint8Array;
@@ -495,11 +692,13 @@ interface EventState {
    *  `eventEndSec + retentionDays·86400`. */
   retentionDays?: number;
   /** The event's end time (unix seconds) from its 31923 `end` tag (falls back to
-   *  `start`), the anchor the retention window counts from. 0 when unknown. */
+   *  `start`), the anchor the retention window counts from. 0 when unknown — and
+   *  always 0 for a 31612 community, which has no end (see parseEventEndSec). */
   eventEndSec: number;
-  /** Newest applied 31923 metadata event id + timestamp (audit P9 replaceable
-   *  ordering). A live 31923 edit is applied only when it SUPERSEDES this, so a
-   *  shuffled relay re-read can never regress title/eventEndSec to a stale revision. */
+  /** Newest applied space-metadata event id + timestamp (audit P9 replaceable
+   *  ordering). A live edit of the {@link spaceKind} record is applied only when it
+   *  SUPERSEDES this, so a shuffled relay re-read can never regress
+   *  title/eventEndSec to a stale revision. */
   metaEventId?: string;
   metaCreatedAt: number;
   /** True once the retention sweep has expired this event: paid processing is parked
@@ -613,6 +812,15 @@ export class Coordinator {
   /** Coordinates whose retention expiry is currently running (audit R3): guards the
    *  boot + hourly sweeps against double-executing the same event's expiry. */
   private readonly retentionInProgress = new Set<string>();
+  /** Guards the hourly profile-refresh sweep against stacking on a slow tick (it
+   *  awaits one relay fetch per installed event). Same shape as `rescanRunning`. */
+  private profileRefreshRunning = false;
+  /** Events already warned about the roster ceiling (audit B-8) — once per process,
+   *  so a burst of approvals near the limit produces one notice, not one per person. */
+  private readonly rosterWarned = new Set<string>();
+  /** Per-phase boot accounting, live only for the duration of {@link start} — the
+   *  same code paths run for a live install, where the numbers would be noise. */
+  private boot?: BootPhases;
 
   constructor(private readonly deps: CoordinatorDeps) {
     this.now = deps.now ?? (() => Date.now());
@@ -685,6 +893,7 @@ export class Coordinator {
     }
     this.jobs = new JobRunner(deps.store, {
       now: this.now,
+      scoreConcurrency: deps.scoreConcurrency,
       // A poisoned job is surfaced to the organizer (audit Q12): persist a status
       // row and gift-wrap a 21606 status to E_id so it's visible without server logs.
       onPoison: (info) => void this.surfacePoison(info).catch(() => {}),
@@ -903,9 +1112,20 @@ export class Coordinator {
       await this.runEventJob(p.coordinate, signal, async () => {
         // `reenrolling` is absent on the approval path and on rows enqueued before
         // it was carried; both are plain adds, which is correct for them.
-        await this.marmot!.syncMember(p.coordinate, p.pubkey, {
+        const synced = await this.marmot!.syncMember(p.coordinate, p.pubkey, {
           ...(typeof p.reenrolling === "string" ? { reenrolling: p.reenrolling } : {}),
         });
+        // THROW on an incomplete sync (audit B-5), so this job is what its comment
+        // says it is: a durable retry. `syncMember` deliberately does not throw for
+        // one failed Add — one undecodable key package must not abort a whole
+        // backfill — so before it returned a verdict, the job completed
+        // successfully having added nobody, and the member stayed in "Setting up…"
+        // until a human intervened. The retry tail ends in poison → 21606, which is
+        // how the organizer finds out if it never resolves.
+        if (!synced) {
+          throw new Error(`chat sync for ${short(p.pubkey)} did not complete (a device was left out of the group)`);
+        }
+        await this.scheduleEnrolmentRecheck(p.coordinate, p.pubkey, p.recheck, p.chain);
       });
     });
     // Durable retry for a config edit whose outward effects (31606 matrix publish,
@@ -920,9 +1140,66 @@ export class Coordinator {
     this.jobs.register("chat_revoke_member", async (p, { signal }) => {
       if (!this.marmot) return;
       await this.runEventJob(p.coordinate, signal, async () => {
-        await this.marmot!.handleRevoke(p.coordinate, p.pubkey);
+        // `chatPubkeys` is the device list captured at revoke time (audit B-9), for
+        // the case where the attendee's bindings have since been purged by a
+        // delete_data withdrawal. Absent on rows enqueued before this field
+        // existed, and on paths that don't purge — handleRevoke unions it with
+        // whatever is still stored, so both shapes behave.
+        await this.marmot!.handleRevoke(p.coordinate, p.pubkey, {
+          chatPubkeys: Array.isArray(p.chatPubkeys) ? (p.chatPubkeys as string[]) : undefined,
+        });
       });
     });
+  }
+
+  /**
+   * Keep looking for an approved member's chat device for a bounded window after
+   * their grant (see {@link CHAT_ENROLMENT_RECHECK_DELAYS_MS}).
+   *
+   * Chosen over the other option on the table — publishing an explicit "chat
+   * enrolment pending/complete" signal the client reads — because that is a WIRE
+   * change: a new field or `error_category` on the 21606/31604 that the app has to
+   * learn to render, which means a protocol revision and a coordinated app release
+   * to deliver any benefit at all. This is coordinator-only, ships on its own, and
+   * addresses the concrete cost (the first-open wait): the re-check is what
+   * actually notices the key package the moment it lands instead of leaving it to
+   * the passive watcher.
+   *
+   * `chain` scopes a chain's dedupe keys to ONE approval, so a later re-approval
+   * of the same member starts a fresh chain instead of colliding with the previous
+   * chain's terminal `done` rows (which would be discarded with a warning and
+   * silently never run).
+   */
+  private async scheduleEnrolmentRecheck(
+    coordinate: string,
+    pubkey: string,
+    recheck: unknown,
+    chain: unknown,
+  ): Promise<void> {
+    // Absent on every enqueue that is not an approval-seeded chain (the attestation
+    // path's durable retry, rows written before this existed): those are one-shot.
+    if (typeof recheck !== "number" || recheck >= CHAT_ENROLMENT_RECHECK_DELAYS_MS.length) return;
+    if (!this.marmot) return;
+    // A member who left, was revoked, or whose event turned chat off has nothing to
+    // wait for — don't keep a chain alive for them.
+    if (!this.events.get(coordinate)?.chat) return;
+    if (this.deps.store.getAttendee(coordinate, pubkey)?.status !== "approved") return;
+    if (await this.marmot.isEnrolled(coordinate, pubkey)) return;
+    const delay = CHAT_ENROLMENT_RECHECK_DELAYS_MS[recheck]!;
+    this.jobs.enqueue(
+      "chat_sync_member",
+      `chat-recheck:${coordinate}:${pubkey}:${String(chain)}:${recheck}`,
+      { coordinate, pubkey, recheck: recheck + 1, chain },
+      this.now() + delay,
+    );
+  }
+
+  /** Account `fn` against a boot phase while {@link start} is running; a plain
+   *  pass-through at every other time (a live install must not be charged to a
+   *  boot report, and paying for a `performance.now()` pair per relay fetch for
+   *  the life of the process buys nothing). */
+  private phase<T>(name: string, fn: () => Promise<T>): Promise<T> {
+    return this.boot ? this.boot.time(name, fn) : fn();
   }
 
   // ── install (21603) ────────────────────────────────────────────────────────
@@ -954,7 +1231,7 @@ export class Coordinator {
      */
     source?: "grant" | "restore";
   }): Promise<void> {
-    const { pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
+    const { kind: spaceKind, pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
     // wss-only, no credentials/fragments, public host, allowlist, deduped, capped
     // (audit COORD-16 + C4).
@@ -962,21 +1239,30 @@ export class Coordinator {
     const relays = grantRelays.length ? grantRelays : this.deps.defaultRelays;
 
     // Load public config + event details for scoring context.
-    const cfgEvents = await this.deps.transport.fetch(
-      { kinds: [31600, 31923], authors: [eidPubkey], "#d": [identifier] },
-      relays,
+    const cfgEvents = await this.phase("install:config-fetch", () =>
+      this.deps.transport.fetch(
+        // The space record's kind comes from the coordinate: 31923 for a dated
+        // NIP-52 event, 31612 for a standing community (PROTOCOL-NIP.md §1.1).
+        { kinds: [KIND_EVENT_CONFIG, spaceKind], authors: [eidPubkey], "#d": [identifier] },
+        relays,
+      ),
     );
     // Newest config wins (audit COORD-14): relays return replaceable events in
     // arbitrary order. Pick with the shared §3.1 comparator — higher created_at,
     // then LOWEST id on a tie (NIP-01). v1 picked the highest id here, which
     // disagreed with the convention and with every other reader.
-    const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31600));
-    // Newest 31923 wins too (audit P9): relays return replaceable events in arbitrary
-    // order and this event controls the title and, critically, `eventEndSec` — the
-    // anchor the retention sweep deletes member records from. v1 took the FIRST
-    // returned 31923, so a shuffled relay order (or a restart) could select a stale
-    // revision with an earlier end date and expire member records prematurely.
-    const evtEvent = pickLatest(cfgEvents.filter((e) => e.kind === 31923));
+    const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === KIND_EVENT_CONFIG));
+    // Newest space record wins too (audit P9): relays return replaceable events in
+    // arbitrary order and this event controls the title and, critically,
+    // `eventEndSec` — the anchor the retention sweep deletes member records from. v1
+    // took the FIRST returned one, so a shuffled relay order (or a restart) could
+    // select a stale revision with an earlier end date and expire member records
+    // prematurely. The kind is the coordinate's, not a literal 31923: matching on
+    // 31923 alone found nothing for a community, so every 31612 installed with an
+    // EMPTY scoring context — the matcher prompt said "EVENT: the event" with no
+    // ABOUT and no TOPICS for the whole life of the install, and no live title edit
+    // could ever repair it.
+    const evtEvent = pickLatest(cfgEvents.filter((e) => e.kind === spaceKind));
     // A 31600 that is present but UNPARSEABLE — a pre-v2 wire config carrying
     // ["v","1"], a config whose `v` is newer than we speak, or any other malformed
     // tag parseEventConfig rejects — is treated EXACTLY like an unfetchable config:
@@ -1147,6 +1433,7 @@ export class Coordinator {
 
     const state: EventState = {
       coordinate: grant.coordinate,
+      spaceKind,
       identifier,
       eidPubkey,
       inboxSk: hexToBytes(grant.inboxSkHex),
@@ -1196,6 +1483,11 @@ export class Coordinator {
     // nothing (the gate that actually enforces billing is `assertSpendAllowed`, at
     // job execution, not this call), and means a billing failure leaves an event
     // that can at least hear its attendees.
+    // The event is serving again: release work parked because it wasn't (audit
+    // B-10). Reason-scoped, so a billing block or a per-event budget park — which an
+    // install says nothing about — survives untouched.
+    const revived = this.deps.store.resumeEventNotLiveJobs(grant.coordinate);
+    if (revived > 0) log(`[install] resumed ${revived} job(s) parked while ${grant.coordinate} was not live`);
     const since = grant.backfill === "full" ? 0 : giftwrapSince(Math.floor(this.now() / 1000));
     this.subscribeEventInbox(state, since);
     // Explicitly BACKFILL the E_inbox history from before this subscription's epoch
@@ -1209,15 +1501,15 @@ export class Coordinator {
     // an enrollment row exists before any same-identity submission is evaluated)
     // closes both; the seen_rumors ledger dedupes it against the live stream, and
     // transport.fetch is capped (C3) so the backfill stays bounded.
-    await this.backfillEventInbox(state, since);
+    await this.phase("install:inbox-backfill", () => this.backfillEventInbox(state, since));
     // React to live 31600 config edits (relays, matching, visibility, lang…) — audit H5.
     this.subscribeEventConfig(state);
     // Persist the typed billing principal + evaluate the state machine at install
     // (spec §9, D5). Emits a 21606 if the event installs already over its tier.
-    await this.reevaluateBilling(grant.coordinate);
+    await this.phase("install:billing", () => this.reevaluateBilling(grant.coordinate));
     // Marmot group chat (§4): only chat-enabled events with a coordinator do any
     // work here — a chat-off event stays completely inert (no group, no watcher).
-    if (state.chat) await this.ensureChat(state);
+    if (state.chat) await this.phase("install:chat", () => this.ensureChat(state));
     // Handover bootstrap (NIP §3.7): a FRESH grant install may be a replacement
     // coordinator taking over an event that already has a published record set under
     // the previous coordinator's key. Reconstruct the approved set from the prior
@@ -1547,6 +1839,29 @@ export class Coordinator {
     jobSignal: AbortSignal,
     fn: (signal: AbortSignal) => Promise<void>,
   ): Promise<void> {
+    // The event has to BE here for event-scoped work to mean anything (audit B-10).
+    // Every handler already returned early when `events.get()` came back undefined —
+    // and the runner read that as success, so the job was marked `done`. For a
+    // SUSPENDED event (startup revalidation could not fetch its newest 31600, NIP
+    // §3.5 — a relay outage at boot is enough) that is a silent loss: the event
+    // comes back minutes later and the work never runs again, because its dedupe key
+    // now belongs to a terminal row. Park it instead, under a reason scoped enough
+    // to release when the event returns and narrow enough to leave billing/budget
+    // parks alone.
+    //
+    // A DETACHED or uninstalled event is the opposite case and still completes: its
+    // custody is gone, the tombstone bars re-install, and there is nothing left for
+    // the work to act on — parking it forever would just be litter.
+    if (!this.events.has(coordinate)) {
+      const installed = !!this.deps.store.getEvent(coordinate);
+      if (!installed || this.deps.store.isInstallTombstoned(coordinate)) {
+        log(`[job] ${coordinate} is no longer installed — nothing to do`);
+        return;
+      }
+      throw new ParkJobError(
+        `${EVENT_NOT_LIVE_PARK_REASON}: ${coordinate} is installed but not serving (suspended or not yet restored)`,
+      );
+    }
     const eventSig = this.eventSignal(coordinate);
     const combined = AbortSignal.any([jobSignal, eventSig]);
     const set = this.activeEventHandlers.get(coordinate) ?? new Set<Promise<void>>();
@@ -1843,7 +2158,10 @@ export class Coordinator {
       if (rumor.kind === KIND_JOIN_REQUEST) {
         const content = joinRequestContentSchema.parse(JSON.parse(rumor.content));
         log(`[join] request from ${short(rumor.pubkey)} ("${content.name}")`);
-        await this.handleJoin(state, rumor.pubkey, rumor.tags, content.name);
+        await this.handleJoin(state, rumor.pubkey, rumor.tags, content.name, {
+          createdAt: effectiveCreatedAt, // §3.4 membership ordering → the clamped value
+          rumorId: rumor.id,
+        });
       } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
         const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
         log(`[submission] from ${short(rumor.pubkey)} — rev ${content.rev}, ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
@@ -2133,19 +2451,96 @@ export class Coordinator {
     await this.publishDirectory(state, pubkey);
   }
 
+  /**
+   * A join request (21600). Runs under the `member:<pubkey>` mutex every other
+   * membership transition takes (approve / revoke / withdrawal / chat attestation),
+   * because this handler AWAITS a relay round-trip (`fetchInviteHashes`) in the
+   * middle of deciding a status: an organizer approval landing in that window used
+   * to be overwritten back to `pending` by the upsert below, leaving the attendee
+   * holding a valid ECK while the DB, the roster view and the matching set all said
+   * "pending" (audit B-1).
+   *
+   * `order` is the join's clamped (created_at, rumor id). It is used as an ORDERING
+   * GUARD but deliberately does NOT claim the subject the way an admin command does
+   * (audit B-2). The guard: a join that does not supersede an already-COMPLETED
+   * membership command must not resurrect a row that command deliberately revoked
+   * or deleted — a distinct old join sitting on a slow relay would otherwise land
+   * after a revoke and quietly put the person back in the organizer's pending
+   * queue (and recreate a row a `delete_data` withdrawal had erased).
+   *
+   * Not claiming the subject is the deliberate half. Joins are attendee-authored and
+   * approvals are organizer-authored, so their `created_at`s come from two different
+   * clocks: if a join took the watermark, an organizer approving ten seconds later
+   * from a device whose clock is thirty seconds behind the attendee's would produce
+   * an approve that "does not supersede" the join — and it would be dropped, for
+   * every attendee whose phone runs fast. That is the venue-scale approve-all path,
+   * so the join stays outside the watermark and only reads it.
+   */
   private async handleJoin(
     state: EventState,
     attendeePubkey: string,
     tags: string[][],
     name: string,
+    order?: { createdAt: number; rumorId: string },
+  ): Promise<void> {
+    await this.withSubjectLock(state.coordinate, `member:${attendeePubkey}`, () =>
+      this.handleJoinLocked(state, attendeePubkey, tags, name, order),
+    );
+  }
+
+  private async handleJoinLocked(
+    state: EventState,
+    attendeePubkey: string,
+    tags: string[][],
+    name: string,
+    order?: { createdAt: number; rumorId: string },
   ): Promise<void> {
     // Already approved: this is a re-delivery after a mid-grant failure (the
     // rumor was left unseen, COORD-2) — grantAndPublish is idempotent
     // (replaceable events + deduped grants), so re-running repairs a lost grant.
+    // Ahead of the ordering guard below on purpose: it writes no status, so a
+    // stale join can only ever REPAIR an approval here, never regress one.
     const existing = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
     if (existing?.status === "approved") {
       await this.grantAndPublish(state, attendeePubkey);
       return;
+    }
+
+    // Ordering guard (audit B-2): a LATE-DELIVERED join older than the last
+    // fully-applied membership command for this subject must not undo it. Narrow on
+    // purpose — three conditions, all of them required:
+    //
+    //  - the row is revoked, or gone because a `delete_data` withdrawal erased it,
+    //    so a first-time join (no watermark at all) is untouched;
+    //  - the join is strictly OLDER than a COMPLETED membership command, so a
+    //    genuine re-join after a revoke is newer and wins honestly;
+    //  - and the join is not a live request: it was written more than
+    //    JOIN_STALE_AFTER_SEC ago, which is what makes it a re-delivery (a slow
+    //    relay, a backfill rescan) rather than someone pressing Join right now.
+    //
+    // The third condition is what keeps a clock disagreement from locking anyone
+    // out. Joins are attendee-authored and revokes usually organizer-authored, so
+    // their timestamps come from different clocks: without it, a member re-joining
+    // minutes after a revoke from a device whose clock happens to run behind the
+    // organizer's would look "older" and be silently dropped. With it, that only
+    // happens to a rumor that ALSO claims to be minutes old, which a live join is
+    // not. The log line says what happened, since a dropped join is otherwise
+    // indistinguishable from one that never arrived.
+    if (order && (existing?.status === "revoked" || !existing)) {
+      const op = this.deps.store.getCommandWatermark(state.coordinate, `member:${attendeePubkey}`);
+      const ageSec = Math.floor(this.now() / 1000) - order.createdAt;
+      if (
+        op &&
+        op.state === "complete" &&
+        op.rumor_id !== order.rumorId &&
+        order.createdAt < op.created_at &&
+        ageSec > JOIN_STALE_AFTER_SEC
+      ) {
+        log(
+          `[join] ignored stale join from ${short(attendeePubkey)}: written ${ageSec}s ago, before the applied membership command for this subject (${op.created_at}) — not resurrecting a revoked/withdrawn member. A fresh join request from them enrolls normally.`,
+        );
+        return;
+      }
     }
 
     // Population cap (audit C3): a NEW attendee beyond the 2,000 roster protocol cap
@@ -2217,10 +2612,32 @@ export class Coordinator {
       }
     }
 
+    // The roster ceiling applies to an auto-approval exactly as it does to an
+    // organizer's (audit B-8): an invite code cannot conjure space that the 31604
+    // payload does not have. Refused entrants stay pending, which is the same place
+    // a manual-approval event would have put them.
+    if (decision.grant && !(await this.admitToRoster(state, attendeePubkey))) {
+      decision = { grant: false, reason: "event roster is full" };
+    }
+
+    // Never REGRESS a status decided while the fetch above was in flight (audit
+    // B-1). Entitlement can only ever promote to `approved`; when it says no, the
+    // row keeps whatever it says now. The mutex makes the organizer's approve wait
+    // its turn, so in practice this re-read agrees with the pre-fetch row — it is
+    // here because the failure it prevents (an attendee holding a granted ECK while
+    // every server-side view calls them pending) is silent, and because any future
+    // path that writes this row without the mutex would reintroduce it.
+    const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+    const status = decision.grant ? "approved" : (current?.status ?? "pending");
+    if (!decision.grant && current && current.status !== "pending") {
+      log(
+        `[join] ${short(attendeePubkey)}: status changed to '${current.status}' while entitlement was being resolved — keeping it (not overwriting with pending)`,
+      );
+    }
     this.deps.store.upsertAttendee({
       coordinate: state.coordinate,
       pubkey: attendeePubkey,
-      status: decision.grant ? "approved" : "pending",
+      status,
       // B1: keep the display name — match reasoning addresses people by name.
       displayName: name.trim() || null,
       now: this.now(),
@@ -2327,11 +2744,45 @@ export class Coordinator {
    * (audit H4): no transcript/summary/profile/embedding/scoring work — and thus
    * no provider billing — for an event that disabled AI matching.
    */
-  private enqueueProcess(coordinate: string, pubkey: string): void {
-    if (this.events.get(coordinate)?.matching === "off") return;
+  private enqueueProcess(coordinate: string, pubkey: string, kind0Bio?: string): EnqueueOutcome | "skipped" {
+    const state = this.events.get(coordinate);
+    if (state?.matching === "off") return "skipped";
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
+    // UNCHANGED on purpose: the `version` component stays exactly
+    // `sha256(profile_json)`, because `supersedePendingJobs` below matches on the
+    // `proc:<coordinate>:<pubkey>:` prefix and every enqueue path has to produce
+    // keys from the same family. A sweep that hashed the profile differently would
+    // stop superseding the submission path's pending jobs, and the coordinator
+    // would pay twice to derive the same attendee.
     const version = sha256Hex(utf8ToBytes(attendee?.profile_json ?? "")).slice(0, 16);
-    const key = `proc:${coordinate}:${pubkey}:${version}`;
+    // The key names every input the run derives from, not just the profile (audit
+    // B-11). The event's language and nostr-context depth are inputs too — the
+    // pipeline's own caches are keyed on them — so a config edit that changes either
+    // asks for a genuinely different result from the same profile. Keyed on the
+    // profile hash alone, `applyConfigUpdate`'s per-attendee re-enqueue collided with
+    // the already-`done` row and was discarded: an organizer flipping the event to
+    // Slovak got a log line saying the enqueue was dropped and not one re-summarized
+    // profile. Every attendee costs one reprocess per flip now, which is exactly
+    // what the flip means.
+    // `k0` is the attendee's CURRENT public kind-0 bio, hashed — the input that
+    // used to be invisible to this key. The bug it fixes was reported by a real
+    // user: they had used Nostr for years, joined with that identity, then updated
+    // their profile OUTSIDE Nostrautica. Their ai_profile and everyone's matches
+    // stayed computed from the bio they had at join, forever, because every input
+    // named in this key was unchanged — the bio is fetched INSIDE the run
+    // (`fetchNostrContext`), so the key could not see that it had moved.
+    //
+    // Empty for every caller that does not have the bio in hand (submission,
+    // approval, config edit, handover, admin reprocess). Those paths re-read kind 0
+    // inside the run anyway, so they are already current; only the sweep needs to
+    // express "the bio moved since the last run" as a distinct key. The cost of
+    // that asymmetry is one extra run per attendee per submission revision, the
+    // first time the sweep sees them — and that run is LLM-free (every pipeline
+    // stage hits its content-addressed artifact cache) and re-ranks nothing (an
+    // unchanged ai_profile leaves `profile_hash` alone, so no pair inputs_hash
+    // moves). Paying that once beats carrying a watermark table for it.
+    const k0 = kind0Bio === undefined ? "" : sha256Hex(utf8ToBytes(kind0Bio)).slice(0, 16);
+    const key = `proc:${coordinate}:${pubkey}:${version}:l=${state?.lang ?? "?"}:n=${state?.nostrContextN ?? 0}:k0=${k0}`;
     // Coalesce superseded revisions (audit H-2): a new submission cancels this
     // attendee's still-pending/parked process_attendee jobs for OLDER revisions, so
     // the coordinator never pays to download+STT+profile a recording the attendee
@@ -2343,7 +2794,13 @@ export class Coordinator {
     // conditional commit is gated on the revision it actually READS at execution
     // (the authoritative "what this run derived from"); this payload copy records
     // the revision that was current at enqueue for traceability/debugging.
-    this.jobs.enqueue("process_attendee", key, {
+    // The outcome is RETURNED (it used to be discarded) so the profile-refresh
+    // sweep can tell "no-op because nothing changed" from "no-op because this key
+    // is already `poison`". Reading the second as the first is how two attendees
+    // sat without profiles for two weeks (see the `reprocess` handler): a poisoned
+    // row makes its key permanently un-runnable, and a sweep that logs nothing
+    // would hide that state indefinitely instead of surfacing it.
+    return this.jobs.enqueue("process_attendee", key, {
       coordinate,
       pubkey,
       sourceRevision: attendee?.source_revision ?? null,
@@ -2352,6 +2809,27 @@ export class Coordinator {
 
   /** Account-addressed gift wraps must reach both event-local and reader-default relays. */
   private accountRelays(state: EventState): string[] {
+    return [...new Set([...state.configRelays, ...this.deps.defaultRelays])];
+  }
+
+  /**
+   * Relays to read an attendee's OWN public events (kind 0 / notes) from.
+   *
+   * The event's `configRelays` alone are the wrong set, and this was a real defect:
+   * a person who has used Nostr for years publishes their kind 0 to THEIR relays,
+   * and nothing obliges an event's relay list to carry it. Reading only
+   * `configRelays` meant the daemon fetched nothing, concluded the bio was
+   * unchanged, and left them matched on whatever their profile said the day they
+   * joined — while every deploy marker printed OK, because nothing had failed.
+   *
+   * `defaultRelays` is the same reader-default set `accountRelays` unions in for
+   * the same reason (a gift wrap has to REACH a person who is not on the event's
+   * relays; this has to FIND them there). Kept as its own method rather than
+   * reusing `accountRelays` because the two are only incidentally equal today:
+   * one is a write/delivery set, this is a read/discovery set, and a future
+   * NIP-65 outbox lookup belongs here and not there.
+   */
+  private publicReadRelays(state: EventState): string[] {
     return [...new Set([...state.configRelays, ...this.deps.defaultRelays])];
   }
 
@@ -2383,10 +2861,15 @@ export class Coordinator {
     // path rather than leaving the member out of the group forever.
     if (state.chat && this.marmot) {
       this.marmot.invalidateEligibility(state.coordinate);
+      const chain = this.now();
       this.jobs.enqueue(
         "chat_sync_member",
-        `chat-sync:${state.coordinate}:${attendeePubkey}:${this.now()}`,
-        { coordinate: state.coordinate, pubkey: attendeePubkey },
+        `chat-sync:${state.coordinate}:${attendeePubkey}:${chain}`,
+        // Seed the bounded enrolment re-check (see {@link scheduleEnrolmentRecheck}).
+        // This job runs at approval time, when the client has not yet published the
+        // key package or the attestation — so on its own it completes in a
+        // millisecond having added nobody, and nothing looks again.
+        { coordinate: state.coordinate, pubkey: attendeePubkey, recheck: 0, chain },
       );
     }
   }
@@ -2419,6 +2902,57 @@ export class Coordinator {
    * a fetch failure leaves the E_inbox backfill (invite auto-approvals) as the
    * floor, and a later organizer recompute converges the rest.
    */
+  /**
+   * Fetch roster pages 1..`pages`-1 for a paginated 31604 (PROTOCOL-NIP.md
+   * §6.2), in ONE REQ, from the same author whose page 0 we accepted.
+   *
+   * Returns them in page order, or `undefined` if ANY page is missing, authored
+   * by someone else, addressed to a different coordinate, or will not decrypt.
+   * Partial is not an acceptable answer for a membership list: a caller that
+   * accepted "most of the roster" would treat the absent members as not
+   * approved. Page addresses are `<d>:N`, which could in principle be another
+   * space's own `d` under this coordinator, so the `a` tag is checked as well as
+   * the author.
+   */
+  private async fetchRosterPages(
+    state: EventState,
+    author: string,
+    pages: number,
+  ): Promise<RosterContent[] | undefined> {
+    const { identifier } = parseCoordinate(state.coordinate);
+    const ds = rosterContinuationDs(identifier, pages);
+    const events = await this.deps.transport.fetch(
+      { kinds: [KIND_ROSTER], authors: [author], "#d": ds },
+      state.configRelays,
+    );
+    const out: RosterContent[] = [];
+    for (let page = 1; page < pages; page++) {
+      const d = rosterPageD(identifier, page);
+      const candidates = events
+        .filter(
+          (e) =>
+            e.pubkey === author &&
+            e.tags.some((t) => t[0] === "d" && t[1] === d) &&
+            e.tags.some((t) => t[0] === "a" && t[1] === state.coordinate),
+        )
+        .sort(compareLatest);
+      let parsed: RosterContent | undefined;
+      for (const ev of candidates) {
+        const json = this.tryEckDecrypt(state, ev.content);
+        if (!json) continue;
+        try {
+          parsed = rosterContentSchema.parse(JSON.parse(json));
+          break;
+        } catch {
+          /* malformed — try an older revision of this page */
+        }
+      }
+      if (!parsed) return undefined;
+      out.push(parsed);
+    }
+    return out;
+  }
+
   private async bootstrapHandover(state: EventState): Promise<void> {
     const { identifier } = parseCoordinate(state.coordinate);
     let rosterEvents: NostrEvent[];
@@ -2478,6 +3012,21 @@ export class Coordinator {
       }
     }
     if (!roster || !rosterAuthor || roster.attendees.length === 0) return;
+    // A paginated roster (PROTOCOL-NIP.md §6.2) has the rest of its membership on
+    // `<d>:1`…`<d>:N-1`. Bootstrapping from page 0 alone would silently adopt a
+    // fraction of the event and — because everyone missing is never re-granted —
+    // lock the remainder out of the directory. So: all pages, from the SAME
+    // author, or nothing.
+    if ((roster.pages ?? 1) > 1) {
+      const rest = await this.fetchRosterPages(state, rosterAuthor, roster.pages!).catch(() => undefined);
+      if (!rest) {
+        log(
+          `[handover] ${state.coordinate}: ABORTING — the roster from ${short(rosterAuthor)} is paginated (${roster.pages} pages) and not every page was readable`,
+        );
+        return;
+      }
+      roster = mergeRosterPages([roster, ...rest]);
+    }
     log(
       `[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from a roster authored by ${short(rosterAuthor)}` +
         (rosterAuthor === state.eidPubkey ? " (E_id)" : " (prior coordinator)"),
@@ -2673,7 +3222,13 @@ export class Coordinator {
     return run;
   }
 
-  private async publishRoster(state: EventState): Promise<void> {
+  /**
+   * The 31604 roster content for this event's approved set, optionally including
+   * one attendee who is not approved YET — the capacity probe below asks "would
+   * this person still fit". Split out of {@link publishRoster} so the probe
+   * measures the real payload rather than an estimate of it.
+   */
+  private buildRosterContent(state: EventState, alsoInclude?: string): RosterContent {
     const approved = this.deps.store.approvedAttendees(state.coordinate);
     const { bytes } = this.currentEck(state);
     // Advertise this event's MLS routing id (audit APPK-3) so members bind to the
@@ -2711,8 +3266,156 @@ export class Coordinator {
         };
       }),
     };
-    const event = buildRoster(this.publishKeys(state), state.coordinate, roster, this.nextCreatedAt);
-    await this.publish(event, state.configRelays);
+    if (alsoInclude && !approved.some((a) => a.pubkey === alsoInclude)) {
+      roster.attendees.push({
+        pubkey: alsoInclude,
+        d: blindedDFor(bytes, state.coordinate, alsoInclude),
+        role: "attendee",
+        ...(() => {
+          const keys = this.deps.store
+            .chatKeysForAccount(state.coordinate, alsoInclude)
+            .filter((k) => k.status === "active")
+            .slice(0, MAX_CHAT_KEYS_PER_ACCOUNT)
+            .map((k) => ({
+              pubkey: k.chat_pubkey,
+              ...(k.label ? { label: k.label } : {}),
+              added_at: Math.floor(k.updated_at / 1000),
+            }));
+          return keys.length > 0 ? { chat_keys: keys } : {};
+        })(),
+      });
+    }
+    return roster;
+  }
+
+  /**
+   * Would this event's roster still PUBLISH with one more member in it?
+   *
+   * A 31604 page is a single NIP-44 payload and NIP-44 v2 caps plaintext at
+   * 65,535 bytes. That used to be the whole answer, and it put the real ceiling
+   * somewhere between roughly 240 and 480 approved members while the schema
+   * advertised 2,000: past it, `buildRoster` threw from inside the approve path
+   * with the ECK grant already published, so the ceiling was moved HERE, before
+   * the grant, and reported to the organizer in terms they can act on (audit
+   * B-8).
+   *
+   * Pagination (PROTOCOL-NIP.md §6.2) removed the byte ceiling as the binding
+   * constraint — a roster that outgrows one payload is now split across pages —
+   * but it did not remove the gate, only what "fits" means. What binds now is
+   * `MAX_ROSTER` (2,000 members in total, the number the schema and the join gate
+   * have always advertised) and `MAX_ROSTER_PAGES`, which a pathological entry
+   * size could reach first. The ordering is unchanged and is the point: refuse
+   * before granting, never mid-publish.
+   */
+  private rosterCapacity(
+    state: EventState,
+    adding?: string,
+  ): { bytes: number; fits: boolean; count: number; pages: number } {
+    const roster = this.buildRosterContent(state, adding);
+    const bytes = utf8ToBytes(JSON.stringify(roster)).length;
+    const count = roster.attendees.length;
+    const pages = rosterPageCount(roster);
+    return { bytes, count, pages, fits: count <= MAX_ROSTER && pages <= MAX_ROSTER_PAGES };
+  }
+
+  /**
+   * Gate an approval on the roster ceiling (audit B-8). Returns false when this
+   * member cannot be admitted, having told the organizer why. Also warns ONCE per
+   * event as the roster crosses {@link ROSTER_WARN_FRACTION} of capacity, so
+   * "this event is full" is never the first anyone hears of it.
+   */
+  private async admitToRoster(state: EventState, pubkey: string): Promise<boolean> {
+    const { bytes, fits, count, pages } = this.rosterCapacity(state, pubkey);
+    if (!fits) {
+      log(
+        `[roster] REFUSED approval of ${short(pubkey)} for ${state.coordinate}: the 31604 roster would be ${count} members over ${pages} pages (${bytes} bytes), past the ${MAX_ROSTER}-member / ${MAX_ROSTER_PAGES}-page cap`,
+      );
+      await this.emitRosterFullStatus(state, count).catch(() => {});
+      return false;
+    }
+    if (count >= MAX_ROSTER * ROSTER_WARN_FRACTION && !this.rosterWarned.has(state.coordinate)) {
+      this.rosterWarned.add(state.coordinate);
+      log(
+        `[roster] ${state.coordinate} is near the roster ceiling: ${count}/${MAX_ROSTER} members over ${pages} page(s), ${bytes} bytes`,
+      );
+      await this.emitRosterNearFullStatus(state, count).catch(() => {});
+    }
+    return true;
+  }
+
+  /** Tell the organizer the roster is full — the approval did NOT happen. */
+  private async emitRosterFullStatus(state: EventState, count: number): Promise<void> {
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 2,
+      a: state.coordinate,
+      stage: "roster",
+      state: "poison",
+      attempts: 0,
+      error_category: "roster_full",
+      // Not retryable: nothing clears by waiting. Revoking or removing a member
+      // frees space; nothing else does.
+      retryable: false,
+      at: Math.floor(this.now() / 1000),
+    });
+    await this.deps.transport.publish(status, this.accountRelays(state));
+    log(`[roster] published 21606 roster_full for ${state.coordinate} (${count} members)`);
+  }
+
+  /** Warn the organizer once, while they can still do something about it. */
+  private async emitRosterNearFullStatus(state: EventState, count: number): Promise<void> {
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 2,
+      a: state.coordinate,
+      stage: "roster",
+      state: "poison",
+      attempts: 0,
+      error_category: "roster_nearly_full",
+      retryable: false,
+      at: Math.floor(this.now() / 1000),
+    });
+    await this.deps.transport.publish(status, this.accountRelays(state));
+    log(`[roster] published 21606 roster_nearly_full for ${state.coordinate} (${count} members)`);
+  }
+
+  /**
+   * Publish the roster, as one 31604 or as the pages it needs (PROTOCOL-NIP.md
+   * §6.2) — and publish ONLY the pages whose contents actually changed.
+   *
+   * That last part is the whole reason this bothers to remember anything. An
+   * approval appends one entry, and front-to-back packing means that lands on
+   * the last page; republishing all N instead would turn one approval into N
+   * relay publishes for the length of an event, against relays already carrying
+   * the join traffic that caused it. Opening a NEW page costs two (the new page,
+   * plus page 0 whose `pages` count moved) — never N.
+   *
+   * The record is in memory, so the first publish after a restart republishes
+   * every page once. That is a correctness-preserving over-publish, and the
+   * alternative — a durable per-page hash — buys one redundant publish per
+   * process lifetime.
+   */
+  private async publishRoster(state: EventState): Promise<void> {
+    const roster = this.buildRosterContent(state);
+    const pages = splitRoster(roster);
+    const key = state.coordinate;
+    const published = [...(this.rosterPagesPublished.get(key) ?? [])];
+    const wire = pages.map((p) => JSON.stringify(p));
+    for (const [i, page] of pages.entries()) {
+      if (published[i] === wire[i]) continue;
+      const event = buildRoster(this.publishKeys(state), key, page, this.nextCreatedAt, i);
+      await this.publish(event, state.configRelays);
+      // Record per page, not once at the end: a publish that throws halfway must
+      // leave the pages it did NOT reach marked unpublished, so the next run
+      // retries exactly those.
+      published[i] = wire[i]!;
+      this.rosterPagesPublished.set(key, published.slice(0, pages.length));
+    }
+    // A roster that shrank (a revoke) leaves stale higher pages on relays. They
+    // are unreachable — readers take the page count from page 0 — but the record
+    // must forget them, or a later regrowth would think they were still current.
+    this.rosterPagesPublished.set(key, published.slice(0, pages.length));
+    if (pages.length > 1) {
+      log(`[roster] ${key}: ${roster.attendees.length} members across ${pages.length} pages`);
+    }
   }
 
   // ── pipeline jobs ──────────────────────────────────────────────────────────
@@ -3545,6 +4248,10 @@ export class Coordinator {
       if (order && !this.stillOwnsSubject(coordinate, subject, order.rumorId)) return;
       const attendee = pubkey ? this.deps.store.getAttendee(coordinate, pubkey) : undefined;
       if (attendee) {
+        // The roster has a real ceiling well below the 2,000-member intake cap
+        // (audit B-8) — refuse BEFORE the grant rather than throwing mid-publish
+        // with the ECK already in the attendee's hands.
+        if (attendee.status !== "approved" && !(await this.admitToRoster(state, pubkey))) return;
         if (attendee.status !== "approved") {
           this.deps.store.upsertAttendee({ coordinate, pubkey, status: "approved", now: this.now() });
           log(`[approve] organizer approved ${short(pubkey)}`);
@@ -3602,8 +4309,32 @@ export class Coordinator {
           coordinate,
           pubkey,
         });
+        // Re-enqueue the speaker's untranscribed talks too (audit B-4).
+        // `clearAttendeeJobMemo` deliberately covers `process_talk` — a poisoned talk
+        // row is otherwise unrecoverable, because its dedupe key is content-addressed
+        // on the media hash and re-submitting the identical recording reproduces it
+        // exactly. But deleting that row was only half the repair: nothing re-created
+        // the job, so reprocess left the talk permanently transcript-less and the
+        // speaker's only remedy was to re-record. The talks are re-enqueued under the
+        // same key shape the submission path uses, which the delete above has just
+        // freed.
+        let talksQueued = 0;
+        for (const talk of this.deps.store.untranscribedTalksBySpeaker(coordinate, pubkey)) {
+          const x = parseStoredJson<MediaDescriptor>(talk.media_json, `${short(pubkey)} talk ${talk.talk_d} media`)?.x;
+          if (!x) continue; // no blob to fetch (defensive; the query already excludes external talks)
+          if (
+            this.jobs.enqueue("process_talk", `talk:${coordinate}:${pubkey}:${talk.talk_d}:${x}`, {
+              coordinate,
+              pubkey,
+              talkD: talk.talk_d,
+            }) === "enqueued"
+          ) {
+            talksQueued++;
+          }
+        }
         log(
-          `[admin] reprocess ${coordinate} ${short(pubkey)}: cleared ${forgotten} finished job row(s), enqueue ${outcome}`,
+          `[admin] reprocess ${coordinate} ${short(pubkey)}: cleared ${forgotten} finished job row(s), enqueue ${outcome}` +
+            (talksQueued > 0 ? `, re-queued ${talksQueued} untranscribed talk(s)` : ""),
         );
       }
     } else if (cmd === "revoke") {
@@ -3789,10 +4520,26 @@ export class Coordinator {
     //    poison/21606 path rather than leaving the member in the group forever.
     if (state.chat && this.marmot) {
       this.marmot.invalidateEligibility(state.coordinate);
+      // Carry the DEVICE keys in the payload, captured now (audit B-9). The job runs
+      // asynchronously and `handleRevoke` reads the account's `marmot_chat_keys`
+      // rows to build the MLS remove list — but a withdrawal with `delete_data`
+      // (the DEFAULT, and the common "leave this event" path) purges exactly those
+      // rows inside the same lock, moments later and long before the job is
+      // claimed. The job then found no bindings and removed only the ACCOUNT leaf,
+      // leaving the leaver's device in the group, able to read new chat traffic
+      // until some other member's add/remove churned the epoch. Removing a leaf is
+      // the one part of a revoke that is real post-compromise security, so it must
+      // not depend on state the same operation is about to delete.
       this.jobs.enqueue(
         "chat_revoke_member",
         `chat-revoke:${state.coordinate}:${removedPubkey}:${this.now()}`,
-        { coordinate: state.coordinate, pubkey: removedPubkey },
+        {
+          coordinate: state.coordinate,
+          pubkey: removedPubkey,
+          chatPubkeys: this.deps.store
+            .chatKeysForAccount(state.coordinate, removedPubkey)
+            .map((k) => k.chat_pubkey),
+        },
       );
     }
     // Attendee-count change (spec §9): a revocation can bring the event back under
@@ -3908,6 +4655,157 @@ export class Coordinator {
   }
 
   /**
+   * Periodic profile-refresh sweep: notice when an attendee has edited their
+   * public kind-0 profile OUTSIDE Nostrautica, and re-derive what depends on it.
+   *
+   * THE BUG THIS EXISTS FOR. A user who had been on Nostr for years joined an
+   * event with that identity, then noticed their profile was out of date and
+   * updated it in their usual client — new display name, new bio. Nostrautica went
+   * on describing them, and matching them to other people, using the bio they had
+   * on the day they joined. Nothing was broken in a way anything could report: the
+   * bio IS an input to `ai_profile` (`fetchNostrContext` fetches kind 0 and
+   * `summarizeNostr` labels it "Profile bio:"), but it is fetched INSIDE a
+   * pipeline run, and the only things that started a run were coordinator-side
+   * events — a new submission, an approval, a config edit, an organizer command.
+   * A kind 0 changing out on the network was not one of them, so the run that
+   * would have picked it up never happened.
+   *
+   * HOW IT DETECTS A CHANGE, without storing a watermark. It hashes the current
+   * bio into the `process_attendee` dedupe key (see {@link enqueueProcess}). That
+   * key is UNIQUE in the jobs table, so an unchanged bio produces a byte-identical
+   * key and the enqueue is a no-op that costs nothing — no provider call, no row,
+   * no spend. A changed bio produces a new key, the job runs, and every derived
+   * artifact downstream re-derives itself off its own content hash: new posts+bio
+   * ⇒ new nostr summary ⇒ new ai_profile ⇒ new `profile_hash` ⇒ every pair
+   * `inputs_hash` involving them moves ⇒ `match_recompute` rescores them against
+   * the roster, forward and reverse. None of that chain needed changing; it was
+   * always correct, and was simply never started.
+   *
+   * WHAT IT DELIBERATELY DOES NOT WATCH: new notes. `fetchNostrContext` also feeds
+   * the last N posts to the model, and polling those would re-enrich somebody
+   * every time they posted — a cost that scales with how chatty an attendee is
+   * rather than with whether anything about them changed. A bio edit is a
+   * deliberate "this is who I am now"; a note is not. The run a bio edit triggers
+   * re-reads the posts anyway, so posts still reach matching — just on the
+   * person's own edit, not on their every toot.
+   */
+  async profileRefreshSweep(): Promise<void> {
+    const nowSec = Math.floor(this.now() / 1000);
+    for (const state of [...this.events.values()]) {
+      // Same live/terminal guards the rest of the daemon uses. A detached,
+      // tombstoned or retention-expired event must not have work started for it,
+      // and `retentionExpired` in particular is a TERMINAL park — re-enqueuing
+      // there would resurrect paid processing for an event whose member records
+      // have already been deleted.
+      if (!this.eventStillLive(state.coordinate)) continue;
+      if (this.deps.store.isRetentionExpired(state.coordinate)) continue;
+      // Matching off ⇒ no AI stages run for this event at all (audit H4), so there
+      // is nothing for a refreshed bio to change. Checked here as well as inside
+      // `enqueueProcess` so the relay fetch below is skipped too, not just the
+      // enqueue it would have fed.
+      if (state.matching === "off") continue;
+      // nostr_context = 0 ⇒ the pipeline never reads kind 0 (`fetchNostrContext`
+      // returns [] on n <= 0), so the bio is not a model input and re-running would
+      // rebuild a byte-identical ai_profile off the artifact cache. Skipping is not
+      // an optimization here, it is the difference between a no-op and a lie.
+      if (state.nostrContextN <= 0) continue;
+      // Past the window where matches are still being read (see
+      // PROFILE_REFRESH_MAX_AGE_SEC). `eventEndSec = 0` means "no known end", which
+      // is swept indefinitely rather than treated as epoch and skipped forever.
+      if (state.eventEndSec > 0 && nowSec > state.eventEndSec + PROFILE_REFRESH_MAX_AGE_SEC) continue;
+      try {
+        await this.refreshEventProfiles(state);
+      } catch (e) {
+        log(
+          `[profile-refresh] sweep failed for ${state.coordinate}: ${e instanceof Error ? e.message : e} — will retry next sweep`,
+        );
+      }
+    }
+  }
+
+  /**
+   * One event's half of {@link profileRefreshSweep}: fetch every approved
+   * attendee's kind 0 in ONE query and re-enqueue the ones whose bio moved.
+   */
+  private async refreshEventProfiles(state: EventState): Promise<void> {
+    // Organizers are excluded for the same reason `applyConfigUpdate`'s re-enqueue
+    // excludes them: they are not matched, so nothing downstream reads their
+    // ai_profile and a run for them would be pure spend.
+    const attendees = this.deps.store
+      .approvedAttendees(state.coordinate)
+      .filter((a) => a.role !== "organizer" && this.deps.store.getAttendee(state.coordinate, a.pubkey)?.profile_json);
+    if (attendees.length === 0) return;
+
+    // ONE batched query for the whole event, not one per attendee. Kind 0 is
+    // replaceable and the filter is author-scoped, so a single `authors: [...]`
+    // fetch returns at most one current event per person — asking per attendee
+    // would multiply a single round trip by the size of the roster for nothing.
+    const events = await this.deps.transport.fetch(
+      { kinds: [KIND_PROFILE], authors: attendees.map((a) => a.pubkey) },
+      this.publicReadRelays(state),
+    );
+    // Relays may each return their own copy; keep the newest per author using the
+    // §3.1 replaceable rule, exactly as `fetchNostrContext` does, so the sweep and
+    // the run it triggers agree on WHICH kind 0 is current. Disagreeing here would
+    // make the sweep enqueue off one revision and the run derive from another.
+    const latest = new Map<string, NostrEvent>();
+    for (const e of events) {
+      if (e.kind !== KIND_PROFILE) continue;
+      const prev = latest.get(e.pubkey);
+      if (!prev || compareLatest(e, prev) < 0) latest.set(e.pubkey, e);
+    }
+
+    let refreshed = 0;
+    let unchanged = 0;
+    let stuck = 0;
+    for (const a of attendees) {
+      if (refreshed >= PROFILE_REFRESH_MAX_PER_EVENT) {
+        log(
+          `[profile-refresh] ${state.coordinate}: hit the ${PROFILE_REFRESH_MAX_PER_EVENT}-attendee per-tick cap — the rest resume next sweep`,
+        );
+        break;
+      }
+      const kind0 = latest.get(a.pubkey);
+      // No kind 0 found is NOT "their bio is empty". It is "no relay we asked had
+      // one", which a dead relay produces just as readily as a profileless user.
+      // Treating it as an empty bio would hash to a value that differs from
+      // whatever was used before and enqueue a pointless run for everybody on the
+      // event every time a relay had a bad minute.
+      if (!kind0) continue;
+      const bio = extractProfileBio(kind0.content) ?? "";
+      const outcome = this.enqueueProcess(state.coordinate, a.pubkey, bio);
+      if (outcome === "enqueued") {
+        refreshed++;
+        log(`[profile-refresh] ${short(a.pubkey)}: kind-0 bio changed since the last run — re-enriching + re-matching`);
+      } else if (outcome === "poison") {
+        // NOT the same as "already done", and the distinction is the whole reason
+        // the outcome is inspected. A poisoned row makes its dedupe key
+        // permanently un-runnable, so this attendee is frozen at this bio until
+        // somebody intervenes — exactly the state two attendees sat in for two
+        // weeks after a translation bug that had already been fixed. The sweep
+        // cannot safely clear it on its own (that would re-run a job that has
+        // already failed its retries, on a timer, forever), so it says so loudly
+        // and leaves the repair to an organizer `reprocess`.
+        stuck++;
+        log(
+          `[profile-refresh] ${short(a.pubkey)}: kind-0 bio changed but their process job is POISON — NOT re-enriched; an organizer 'reprocess' is needed to clear it`,
+        );
+      } else {
+        unchanged++;
+      }
+    }
+    // Only speak when something happened. An hourly sweep over a quiet event would
+    // otherwise write a line per event per hour saying nothing changed, which is
+    // how a log stops being read.
+    if (refreshed > 0 || stuck > 0) {
+      log(
+        `[profile-refresh] ${state.coordinate}: ${refreshed} profile(s) refreshed, ${unchanged} unchanged` +
+          (stuck > 0 ? `, ${stuck} BLOCKED by a poisoned job` : ""),
+      );
+    }
+  }
+
+  /**
    * Expire one event's retention (NIP §6.2): NIP-09-delete every member record,
    * park paid processing terminally, and notify organizers via 21606. The public
    * effect is best-effort (relays may not honor NIP-09) — the wording never
@@ -3947,8 +4845,16 @@ export class Coordinator {
         pushAddr(`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST));
       }
     }
-    // 31604 roster + 31606 matrix keyed on the event `d` (not blinded).
-    pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${state.identifier}`, String(KIND_ROSTER));
+    // 31604 roster + 31606 matrix keyed on the event `d` (not blinded). The
+    // roster may have paginated (PROTOCOL-NIP.md §6.2), and a roster that later
+    // SHRANK leaves stale higher pages on relays that nothing reads but that
+    // still hold member pubkeys. Nothing durably records how many pages this
+    // event ever had, so retention deletes every address pagination could have
+    // used: deleting one that was never published costs a tag pair and is a
+    // no-op at the relay, whereas missing one leaves member data behind.
+    for (const d of rosterPageDs(state.identifier, MAX_ROSTER_PAGES)) {
+      pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${d}`, String(KIND_ROSTER));
+    }
     pushAddr(`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX));
     // Published 31610 talks: delete under every historical ECK version (audit C5),
     // not only the one recorded on the row, so a rotated-away talk address is cleaned.
@@ -4045,11 +4951,19 @@ export class Coordinator {
    */
   async fetchNostrContext(state: EventState, pubkey: string, n: number): Promise<NostrPost[]> {
     if (n <= 0) return [];
+    // Read the attendee's own relays too, not just the event's (see
+    // {@link publicReadRelays}). This has to match the relay set the
+    // profile-refresh sweep detects changes on, or the two disagree in the worst
+    // possible way: the sweep sees a new bio on a default relay, enqueues a
+    // re-enrichment, and the run then re-reads only `configRelays`, finds the OLD
+    // kind 0, and rebuilds a byte-identical ai_profile. The job would be spent,
+    // the log would say it ran, and the person's matches would never move.
+    const readRelays = this.publicReadRelays(state);
     const [profileEvents, postEvents] = await Promise.all([
-      this.deps.transport.fetch({ kinds: [KIND_PROFILE], authors: [pubkey], limit: 1 }, state.configRelays),
+      this.deps.transport.fetch({ kinds: [KIND_PROFILE], authors: [pubkey], limit: 1 }, readRelays),
       this.deps.transport.fetch(
         { kinds: [KIND_NOTE, KIND_REPOST, KIND_LONGFORM], authors: [pubkey], limit: n },
-        state.configRelays,
+        readRelays,
       ),
     ]);
     // Kind 0 is replaceable — pick it with the §3.1 rule, not an ad-hoc sort, so a
@@ -4091,12 +5005,14 @@ export class Coordinator {
    */
   private async ensureChat(state: EventState): Promise<void> {
     if (!this.marmot) return;
-    await this.marmot.ensureGroup({
-      coordinate: state.coordinate,
-      name: state.scoringCtx.title,
-      description: state.scoringCtx.summary,
-      relays: state.configRelays,
-    });
+    await this.phase("chat:ensure-group", () =>
+      this.marmot!.ensureGroup({
+        coordinate: state.coordinate,
+        name: state.scoringCtx.title,
+        description: state.scoringCtx.summary,
+        relays: state.configRelays,
+      }),
+    );
     // Self-heal: additively fold the Whitenoise relays into the group's own
     // routing state, even for a group that already existed before this was
     // added — a no-op once they're present, so safe to run on every install.
@@ -4109,8 +5025,8 @@ export class Coordinator {
     // published where it could not see them, and once the removed relay went away
     // the room split silently. `ensureRelays` is additive and idempotent — it was
     // simply being handed the wrong list.
-    await this.marmot.ensureRelays(state.coordinate, chatRelaysFor(state));
-    await this.marmot.backfillApproved(state.coordinate);
+    await this.phase("chat:ensure-relays", () => this.marmot!.ensureRelays(state.coordinate, chatRelaysFor(state)));
+    await this.phase("chat:roster-scan", () => this.marmot!.backfillApproved(state.coordinate));
     this.subscribeChat(state);
   }
 
@@ -4153,6 +5069,19 @@ export class Coordinator {
   // ── event loop ──────────────────────────────────────────────────────────────
   /** Subscribe to the coordinator inbox and all installed events; run jobs. */
   async start(): Promise<void> {
+    this.boot = new BootPhases();
+    try {
+      await this.startInner();
+    } finally {
+      // Always, even when a boot step threw: `this.phase` is a no-op once this is
+      // cleared, and leaving a dead BootPhases behind would charge every later live
+      // install to a report nobody will ever print.
+      this.boot = undefined;
+    }
+  }
+
+  private async startInner(): Promise<void> {
+    const boot = this.boot!;
     // Recover any job stranded `running` by a previous crash (audit H1): its lease
     // is expired, so reset it to claimable before the loop begins.
     const reclaimed = this.jobs.recoverStrandedJobs();
@@ -4163,61 +5092,108 @@ export class Coordinator {
     // coordinator+gen detaches it; an unfetchable config leaves it SUSPENDED (retried
     // by retrySuspendedEvents) rather than resumed leniently. Already-known events use
     // the 3-day live-overlap window (backfill "recent").
-    for (const row of this.deps.store.allEvents()) {
-      // Defense in depth: one event's restore must never abort start() or block the
-      // OTHER stored events from restoring. installEvent already routes a bad/pre-v2
-      // config to the SUSPENDED path rather than throwing, but any unexpected
-      // per-event failure is caught here so the daemon still boots and serves the
-      // rest (prod incident: a single pre-v2 config threw out of start() → crash-loop).
-      try {
-        await this.installEvent({
-          coordinate: row.coordinate,
-          inboxSkHex: row.inbox_nsec,
-          eck: this.eckFromStore(row.coordinate),
-          configRelays: JSON.parse(row.config_relays),
-          gen: row.gen,
-          backfill: "recent",
-          source: "restore",
-        });
-      } catch (e) {
-        log(`[boot] restore of ${row.coordinate} failed: ${e instanceof Error ? e.message : e} — skipping, other events continue`);
-      }
-    }
+    //
+    // CONCURRENTLY, bounded — see {@link RESTORE_CONCURRENCY}. Restoring events one
+    // at a time made boot O(events) in relay round trips: measured at ~9–12 s per
+    // installed event, three events were most of a 47–66 s budget against a hard
+    // 240 s deploy limit, and nothing brought it back down. The work is almost
+    // entirely independent relay I/O against DIFFERENT inboxes and DIFFERENT MLS
+    // groups, and everything genuinely shared is already serialized a layer down
+    // (node:sqlite is synchronous; `MarmotClientMls` serializes per group;
+    // `withSubjectLock` serializes per member).
+    const rows = this.deps.store.allEvents();
+    await boot.time("boot:restore-events", () =>
+      mapWithConcurrency(rows, RESTORE_CONCURRENCY, async (row) => {
+        // Defense in depth: one event's restore must never abort start() or block the
+        // OTHER stored events from restoring. installEvent already routes a bad/pre-v2
+        // config to the SUSPENDED path rather than throwing, but any unexpected
+        // per-event failure is caught here so the daemon still boots and serves the
+        // rest (prod incident: a single pre-v2 config threw out of start() → crash-loop).
+        try {
+          await this.installEvent({
+            coordinate: row.coordinate,
+            inboxSkHex: row.inbox_nsec,
+            eck: this.eckFromStore(row.coordinate),
+            configRelays: JSON.parse(row.config_relays),
+            gen: row.gen,
+            backfill: "recent",
+            source: "restore",
+          });
+        } catch (e) {
+          log(`[boot] restore of ${row.coordinate} failed: ${e instanceof Error ? e.message : e} — skipping, other events continue`);
+        }
+      }),
+    );
 
     // One-shot FULL-history fetch of the coordinator's own inbox (audit COORD-11):
     // the live subscription below only covers the 3-day gift-wrap window, so
     // install grants/admin commands sent during a longer outage would be missed.
     // Already-handled rumors dedupe via the seen ledger.
-    try {
-      // Paginated so a >5000-wrap flood on the public coordinator inbox can't crowd a
-      // legitimate older install grant / admin command out of recovery (audit R4).
-      const wraps = await this.fetchFullHistory(
-        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: 0 },
-        this.deps.defaultRelays,
-      );
-      if (wraps.length) log(`[boot] coordinator-inbox backfill: ${wraps.length} historical wrap(s)`);
-      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
-    } catch (e) {
-      log(`[boot] coordinator-inbox backfill failed: ${e instanceof Error ? e.message : e}`);
-    }
+    await boot.time("boot:coordinator-inbox", async () => {
+      try {
+        // Paginated so a >5000-wrap flood on the public coordinator inbox can't crowd a
+        // legitimate older install grant / admin command out of recovery (audit R4).
+        const wraps = await this.fetchFullHistory(
+          { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since: 0 },
+          this.deps.defaultRelays,
+        );
+        if (wraps.length) log(`[boot] coordinator-inbox backfill: ${wraps.length} historical wrap(s)`);
+        for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
+      } catch (e) {
+        log(`[boot] coordinator-inbox backfill failed: ${e instanceof Error ? e.message : e}`);
+      }
+    });
 
     const coordCloser = this.subscribeCoordInbox();
     this.closers.push(coordCloser);
     // Periodically revalidate suspended events (NIP §3.5, P0-5): one whose config was
     // unfetchable at startup resumes once it's fetchable, or detaches if it now names
-    // another coordinator/gen. Only scheduled when there's something to retry.
-    if (this.suspended.size > 0) {
-      const timer = setInterval(() => void this.retrySuspendedEvents().catch(() => {}), 60_000);
-      if (typeof (timer as any).unref === "function") (timer as any).unref();
-      this.closers.push(() => clearInterval(timer));
-    }
+    // another coordinator/gen.
+    //
+    // UNCONDITIONAL. This used to be `if (this.suspended.size > 0)`, i.e. scheduled
+    // only when something was already suspended at boot — but `suspendEvent` is
+    // reachable for the whole life of the process: a running daemon whose config
+    // watcher re-installs an event, or whose relay set goes away, suspends it, and
+    // on a daemon that booted clean there was then NOTHING to ever retry it. The
+    // event went quiet until the next deploy, with the log saying only "SUSPENDED …
+    // retry in 5000ms" — a retry that had no timer behind it. The saving was one
+    // unref'd 60 s interval that iterates an empty Map.
+    const suspendTimer = setInterval(() => void this.retrySuspendedEvents().catch(() => {}), 60_000);
+    if (typeof (suspendTimer as any).unref === "function") (suspendTimer as any).unref();
+    this.closers.push(() => clearInterval(suspendTimer));
     // Retention sweep (NIP §6.2): run once at boot (catches events whose window
     // elapsed while the daemon was down) and then hourly. Cheap — it only touches
     // events that carry a retention policy and are past their deadline.
-    await this.retentionSweep().catch((e) => log(`[retention] boot sweep failed: ${e instanceof Error ? e.message : e}`));
+    await boot.time("boot:retention-sweep", () =>
+      this.retentionSweep().catch((e) => log(`[retention] boot sweep failed: ${e instanceof Error ? e.message : e}`)),
+    );
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
     this.closers.push(() => clearInterval(retentionTimer));
+    // Profile-refresh sweep: pick up kind-0 bios edited outside Nostrautica (see
+    // {@link profileRefreshSweep} for the user report this fixes).
+    //
+    // No boot run, unlike the retention sweep above. Retention runs at boot because
+    // a window that elapsed while the daemon was down is a deletion that is already
+    // overdue; a bio that changed during a restart is not overdue by any standard,
+    // and the first tick catches it an hour later. Startup is the wrong moment to
+    // add a relay round trip per installed event: the daemon is not "ready" until
+    // it reaches its watch loop, that readiness is measured and alarmed on, and it
+    // already drifts upward with the number of installed events.
+    //
+    // Overlap-guarded like the inbox rescan: the sweep awaits a relay fetch per
+    // event, so on a many-event daemon a slow tick must not stack on the next one.
+    const profileTimer = setInterval(() => {
+      if (this.profileRefreshRunning) return;
+      this.profileRefreshRunning = true;
+      void this.profileRefreshSweep()
+        .catch((e) => log(`[profile-refresh] sweep failed: ${e instanceof Error ? e.message : e}`))
+        .finally(() => {
+          this.profileRefreshRunning = false;
+        });
+    }, PROFILE_REFRESH_INTERVAL_MS);
+    if (typeof (profileTimer as any).unref === "function") (profileTimer as any).unref();
+    this.closers.push(() => clearInterval(profileTimer));
     // Daemon-wide ceiling release (audit SEC-7): work parked because the whole
     // daemon was over its rolling budget has no other way back — the per-event
     // resume paths are driven by billing and by organizer action, and neither
@@ -4241,7 +5217,9 @@ export class Coordinator {
     // Resume any relay handover left pending by a transient outage or a restart
     // (audit C9): probe the stored candidate and promote it once reachable. Run once
     // at boot, then periodically.
-    await this.retryRelayHandovers().catch((e) => log(`[relay] boot handover retry failed: ${e instanceof Error ? e.message : e}`));
+    await boot.time("boot:relay-handovers", () =>
+      this.retryRelayHandovers().catch((e) => log(`[relay] boot handover retry failed: ${e instanceof Error ? e.message : e}`)),
+    );
     const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
     if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
     this.closers.push(() => clearInterval(relayTimer));
@@ -4263,6 +5241,13 @@ export class Coordinator {
     this.closers.push(() => clearInterval(rescanTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
+
+    // Print where the boot actually went, BEFORE start() returns — main.ts prints
+    // the readiness line the deploy script measures right after this resolves, so
+    // this report is inside the measured window and cannot flatter it. DEPLOYMENT.md
+    // points at these lines; keep the phase names stable if you edit them.
+    log(`[boot] ready in ${(boot.elapsedMs() / 1000).toFixed(1)}s — ${rows.length} event(s); phases:`);
+    for (const line of boot.report()) log(`[boot]   ${line}`);
   }
 
   // Live subscriptions keyed by (inbox pubkey + sorted relay set) — audit COORD-8:
@@ -4279,6 +5264,13 @@ export class Coordinator {
   private rosterDirty = new Set<string>();
   /** The in-flight roster publisher per coordinate, awaited by later callers. */
   private rosterRunners = new Map<string, Promise<void>>();
+  /**
+   * The serialized contents of each roster PAGE as last published, per
+   * coordinate — how {@link Coordinator.publishRoster} knows an approval touched
+   * only the last page and the other N-1 need no relay traffic. In memory on
+   * purpose; see that method.
+   */
+  private rosterPagesPublished = new Map<string, string[]>();
 
   /**
    * NIP §3.2 monotonic `created_at` for a (kind, `d`) address:
@@ -4668,23 +5660,28 @@ export class Coordinator {
    * Subscribe to the event's live 31600 config (audit H5), so relay/matching/
    * visibility/language changes take effect without a restart or reinstall.
    * Also watches 31601 invite lists (audit COORD-29): a new invite list
-   * invalidates the per-event invite-hash cache.
+   * invalidates the per-event invite-hash cache, and the space's own metadata
+   * record — 31923 for a dated event, 31612 for a community — for live
+   * title/summary/`end` edits (audit P9).
    */
   private subscribeEventConfig(state: EventState): void {
     const key = `${state.eidPubkey}:${state.identifier}|${relayKey(state.configRelays)}`;
     this.replaceSubscription(this.configSubs, state.coordinate, key, () =>
       (this.deps.transport as any).subscribe?.(
-        { kinds: [KIND_EVENT_CONFIG, KIND_INVITE_LIST, KIND_CALENDAR_EVENT], authors: [state.eidPubkey], "#d": [state.identifier] },
+        // The space kind is the coordinate's (31923 or 31612), not a literal
+        // calendar kind: a community publishes its title/summary edits under
+        // 31612, which a 31923-only filter never delivers.
+        { kinds: [KIND_EVENT_CONFIG, KIND_INVITE_LIST, state.spaceKind], authors: [state.eidPubkey], "#d": [state.identifier] },
         (e: NostrEvent) => {
           if (e.kind === KIND_INVITE_LIST) {
             this.inviteHashCache.delete(state.coordinate);
             log(`[join] invite list updated for "${state.scoringCtx.title}" — invite cache invalidated`);
             return;
           }
-          // Live 31923 metadata edit (audit P9): the title/summary and — critically —
+          // Live space-metadata edit (audit P9): the title/summary and — critically —
           // the retention anchor `eventEndSec` are editable after install, so watch
-          // for a superseding revision instead of only reading the 31923 once.
-          if (e.kind === KIND_CALENDAR_EVENT) {
+          // for a superseding revision instead of only reading the record once.
+          if (e.kind === state.spaceKind) {
             this.handleMetaUpdate(state.coordinate, e);
             return;
           }
@@ -4700,9 +5697,10 @@ export class Coordinator {
   }
 
   /**
-   * Apply a live 31923 metadata edit (audit P9). Accepted only from this event's
-   * E_id, matching its `d`, and only when it SUPERSEDES the applied metadata under
-   * the global §3.1 comparator (strictly newer, or same created_at with a lower id).
+   * Apply a live space-metadata edit (audit P9) — the coordinate's own 31923 or
+   * 31612 record. Accepted only from this event's E_id, matching its `d`, under its
+   * own kind, and only when it SUPERSEDES the applied metadata under the global
+   * §3.1 comparator (strictly newer, or same created_at with a lower id).
    * Updates the scoring context (title/summary/hashtags) and, decisively, the
    * retention anchor `eventEndSec` — so a moved end date re-times the retention
    * sweep instead of leaving it pinned to the install-time value.
@@ -4710,7 +5708,10 @@ export class Coordinator {
   private handleMetaUpdate(coordinate: string, event: NostrEvent): void {
     const state = this.events.get(coordinate);
     if (!state) return;
-    if (event.kind !== KIND_CALENDAR_EVENT) return;
+    // This space's OWN kind. Not "either space kind": one E_id can publish a
+    // 31923 and a 31612 under the same `d`, and those are two distinct spaces
+    // whose titles must never cross.
+    if (event.kind !== state.spaceKind) return;
     if (event.pubkey !== state.eidPubkey) return; // must be signed by E_id
     const d = event.tags.find((t) => t[0] === "d")?.[1];
     if (d !== state.identifier) return; // wrong event
@@ -4730,7 +5731,7 @@ export class Coordinator {
     };
     state.metaEventId = event.id;
     state.metaCreatedAt = event.created_at;
-    log(`[config] applied live 31923 metadata update for "${state.scoringCtx.title}" — event_end=${state.eventEndSec}`);
+    log(`[config] applied live kind-${event.kind} metadata update for "${state.scoringCtx.title}" — event_end=${state.eventEndSec}`);
   }
 
   /**
@@ -5035,12 +6036,22 @@ export class Coordinator {
     const changed = (prev?.state ?? "evaluating") !== next;
     if (changed) {
       log(`[billing] ${coordinate}: ${prev?.state ?? "evaluating"} → ${next}${reason ? ` — ${reason}` : ""}`);
-      await this.emitBillingStatus(state, next, verdict, graceUntil);
       // Unblocked (→ ok/grace): re-enqueue paid work parked while blocked (H-2).
+      //
+      // BEFORE the 21606 publish, not after (audit B-3). The publish is a relay
+      // write and can throw; when it did, this function threw having already
+      // persisted `ok` but never having resumed — and the next evaluation saw
+      // prev=ok, next=ok, `changed=false`, so it never resumed either. The event
+      // was billing-fine and its paid work sat `waiting` forever, with the only
+      // remedy an organizer recompute nobody knew to run. Resuming first makes the
+      // durable state and the queue agree even when the announcement fails; the
+      // announcement is then retried by whatever drove this call (the throw is
+      // deliberately still propagated).
       if (next !== "blocked" && prev?.state === "blocked") {
         const resumed = this.deps.store.resumeWaitingJobs(coordinate);
         if (resumed > 0) log(`[billing] ${coordinate}: resumed ${resumed} parked job(s)`);
       }
+      await this.emitBillingStatus(state, next, verdict, graceUntil);
     }
     return next;
   }
@@ -5337,6 +6348,14 @@ export class Coordinator {
    *  by the newest 31923 metadata revision. */
   eventEndSecOf(coordinate: string): number | undefined {
     return this.events.get(coordinate)?.eventEndSec;
+  }
+
+  /** Test accessor: the scoring context the matcher prompt is built from — the
+   *  title/summary/hashtags read off the space's own metadata record (31923 or
+   *  31612). Empty here means every match prompt for this space says
+   *  "EVENT: the event" with no ABOUT and no TOPICS. */
+  scoringContextOf(coordinate: string): EventContextForScoring | undefined {
+    return this.events.get(coordinate)?.scoringCtx;
   }
 
   /** Grant a fresh key backup shape for a coordinator-issued grant. */

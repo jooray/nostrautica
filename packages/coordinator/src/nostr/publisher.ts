@@ -22,6 +22,7 @@ import {
   nip44Encrypt,
   wrapRumor,
   parseCoordinate,
+  rosterPageD,
   type EckVersion,
   type DirectoryEntryContent,
   type RosterContent,
@@ -76,20 +77,36 @@ export function buildDirectoryEntry(
   );
 }
 
-/** kind 31604 roster (ECK, d = event-d). */
+/**
+ * kind 31604 roster page (ECK, `d` = event-d for page 0, `<event-d>:N` after).
+ *
+ * `page` defaults to 0, which is the address every roster has always used and
+ * the only one an unpaginated roster occupies. Callers pass the pages that
+ * {@link splitRoster} produced, in order — never a hand-built `d`, so the page
+ * addressing has exactly one definition (PROTOCOL-NIP.md §6.2).
+ *
+ * The `["v","2"]` tag stays 2 on every page even when the PAYLOAD declares v3.
+ * The event envelope really is unchanged — same kind, same tags, same ECK
+ * sealing — and, more to the point, an old client must still FETCH page 0 in
+ * order to fail loudly on its payload version. A client that dropped the event
+ * on the tag instead would render an empty roster and no error at all, which is
+ * the silent failure this whole design exists to avoid.
+ */
 export function buildRoster(
   keys: PublishKeys,
   coordinate: string,
   roster: RosterContent,
   createdAt: CreatedAtFor = wallClockCreatedAt,
+  page = 0,
 ): NostrEvent {
   const { identifier } = parseCoordinate(coordinate);
+  const d = rosterPageD(identifier, page);
   return finalizeEvent(
     {
       kind: KIND_ROSTER,
-      created_at: createdAt(KIND_ROSTER, identifier),
+      created_at: createdAt(KIND_ROSTER, d),
       tags: [
-        ["d", identifier],
+        ["d", d],
         ["a", coordinate],
         ["eck", String(keys.eckId)],
         ["v", "2"],

@@ -22,6 +22,13 @@ export const ICONS = {
     '<rect x="3" y="5" width="18" height="12" rx="2"/><path d="M10 8.5l4.5 2.5L10 13.5z" fill="currentColor" fill-opacity="0.25"/><path d="M8 20h8"/>',
   // Global nav + brand
   star: '<path d="M12 3C12.4 9 15 11.6 21 12C15 12.4 12.4 15 12 21C11.6 15 9 12.4 3 12C9 11.6 11.6 9 12 3Z" fill="currentColor" fill-opacity="0.25"/>',
+  // "Saved for me": want-to-meet and a favourited talk. Deliberately NOT the
+  // star — that one is the Events glyph in the bottom nav, and one mark cannot
+  // mean "all events", "I want to meet them" and "keep this talk" at once.
+  bookmark: '<path d="M7 4h10a1 1 0 0 1 1 1v15.2a.5.5 0 0 1-.77.42L12 17.4l-5.23 3.22A.5.5 0 0 1 6 20.2V5a1 1 0 0 1 1-1z"/>',
+  // Follow / following, as an icon pair for dense rows.
+  personPlus: '<circle cx="10" cy="8" r="3.2"/><path d="M3.6 20a6.4 6.4 0 0 1 12.8 0"/><path d="M19 8v6"/><path d="M16 11h6"/>',
+  personCheck: '<circle cx="10" cy="8" r="3.2"/><path d="M3.6 20a6.4 6.4 0 0 1 12.8 0"/><path d="M16.4 11.6 18.6 14l3.4-4"/>',
   plus: '<path d="M12 5v14"/><path d="M5 12h14"/>',
   chat: '<path d="M4 6a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H9l-3.5 3v-3H6a2 2 0 0 1-2-2z"/>',
   person: '<circle cx="12" cy="8" r="3.2"/><path d="M5.5 20a6.5 6.5 0 0 1 13 0"/>',
@@ -48,6 +55,9 @@ export const ICONS = {
   warning:
     '<path d="M12 4.5L21 19a1 1 0 0 1-.9 1.5H3.9A1 1 0 0 1 3 19z"/><path d="M12 10v4"/><path d="M12 17v.5"/>',
   send: '<path d="M21 4L3 11l7 3 3 7z"/><path d="M21 4l-11 10"/>',
+  // Two shackles of a chain — the "paste a link" affordance on Home. Not a
+  // calendar or a clock, so the imagery ban above is intact.
+  link: '<path d="M10.4 13.6a3.9 3.9 0 0 0 5.5 0l2.9-2.9a3.9 3.9 0 0 0-5.5-5.5l-1.5 1.5"/><path d="M13.6 10.4a3.9 3.9 0 0 0-5.5 0l-2.9 2.9a3.9 3.9 0 0 0 5.5 5.5l1.5-1.5"/>',
 } as const;
 
 export type IconName = keyof typeof ICONS;

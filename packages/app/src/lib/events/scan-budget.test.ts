@@ -12,6 +12,7 @@ import {
   ScanIncompleteError,
   SCAN_BUDGET_MS,
   MAX_SIGNER_CALLS,
+  LOW_PRIORITY_RESERVE,
 } from "./scan-budget.js";
 
 describe("startScanBudget", () => {
@@ -46,25 +47,71 @@ describe("startScanBudget", () => {
     expect(SCAN_BUDGET_MS).toBeLessThan(12_000);
     expect(MAX_SIGNER_CALLS).toBeGreaterThan(0);
   });
+
+  it("holds a reserve back from work that cannot recover a key", () => {
+    // The membership sweep (31602 self-copies) proves you joined something; it
+    // can never hand this device an ECK. Left to race for the same pool, an
+    // account with many joins would spend the whole allowance on it and the
+    // grant scan would run out before reaching the wrap that actually holds the
+    // key the user is missing.
+    const budget = startScanBudget({ maxCalls: 5, reserve: 3, now: () => 0 });
+    expect([budget.take("low"), budget.take("low"), budget.take("low")]).toEqual([
+      true,
+      true,
+      false, // only 5 − 3 claims are ever available to low-priority work
+    ]);
+    // …and the three it was refused are still there for the scans that count.
+    expect([budget.take(), budget.take(), budget.take(), budget.take()]).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+  });
+
+  it("lets normal work spend the whole pool, reserve included", () => {
+    const budget = startScanBudget({ maxCalls: 2, reserve: 2, now: () => 0 });
+    expect(budget.take("low")).toBe(false); // nothing at all is spare
+    expect([budget.take(), budget.take(), budget.take()]).toEqual([true, true, false]);
+  });
+
+  it("defaults leave real room for both (the reserve is a floor, not the cap)", () => {
+    expect(LOW_PRIORITY_RESERVE).toBeGreaterThan(0);
+    expect(LOW_PRIORITY_RESERVE).toBeLessThan(MAX_SIGNER_CALLS);
+  });
+
+  it("a reserve wider than the cap disables low-priority work rather than wrapping", () => {
+    const budget = startScanBudget({ maxCalls: 2, reserve: 99, now: () => 0 });
+    expect(budget.take("low")).toBe(false);
+    expect(budget.take()).toBe(true);
+  });
+
+  it("still stops low-priority work when the wall clock is spent", () => {
+    let clock = 0;
+    const budget = startScanBudget({ budgetMs: 100, maxCalls: 50, reserve: 0, now: () => clock });
+    expect(budget.take("low")).toBe(true);
+    clock += 100;
+    expect(budget.take("low")).toBe(false);
+  });
 });
 
 describe("scanIncomplete", () => {
   it("is false for a pass that read everything it attempted", () => {
-    expect(scanIncomplete({ attempted: 4, succeeded: 4, truncated: false })).toBe(false);
+    expect(scanIncomplete({ attempted: 4, succeeded: 4, truncated: false, unreachableEvents: 0 })).toBe(false);
   });
 
   it("is false when SOME unwraps failed but the signer demonstrably answered", () => {
     // The steady state of any gift-wrap inbox: foreign/corrupt wraps addressed
     // to us that will never decrypt. Not an outage — must not raise an alarm.
-    expect(scanIncomplete({ attempted: 10, succeeded: 1, truncated: false })).toBe(false);
+    expect(scanIncomplete({ attempted: 10, succeeded: 1, truncated: false, unreachableEvents: 0 })).toBe(false);
   });
 
   it("is true when every signer round trip failed (an outage, not an empty account)", () => {
-    expect(scanIncomplete({ attempted: 6, succeeded: 0, truncated: false })).toBe(true);
+    expect(scanIncomplete({ attempted: 6, succeeded: 0, truncated: false, unreachableEvents: 0 })).toBe(true);
   });
 
   it("is true when the pass ran out of budget", () => {
-    expect(scanIncomplete({ attempted: 50, succeeded: 50, truncated: true })).toBe(true);
+    expect(scanIncomplete({ attempted: 50, succeeded: 50, truncated: true, unreachableEvents: 0 })).toBe(true);
   });
 
   it("is false for a pass with nothing to do", () => {
@@ -85,7 +132,7 @@ describe("scanFailure", () => {
   it("returns null when both scans came back complete", () => {
     expect(
       scanFailure([ok(), ok()], [
-        { attempted: 2, succeeded: 2, truncated: false },
+        { attempted: 2, succeeded: 2, truncated: false, unreachableEvents: 0 },
         emptyOutcome(),
       ]),
     ).toBeNull();
@@ -93,7 +140,7 @@ describe("scanFailure", () => {
 
   it("prefers a real rejection over a synthetic incomplete", () => {
     const boom = new Error("relay pool is offline");
-    expect(scanFailure([bad(boom), ok()], [{ attempted: 3, succeeded: 0, truncated: false }])).toBe(
+    expect(scanFailure([bad(boom), ok()], [{ attempted: 3, succeeded: 0, truncated: false, unreachableEvents: 0 }])).toBe(
       boom,
     );
   });
@@ -103,7 +150,7 @@ describe("scanFailure", () => {
     // and Home concluded the account was empty.
     const failure = scanFailure([ok(), ok()], [
       emptyOutcome(),
-      { attempted: 12, succeeded: 0, truncated: false },
+      { attempted: 12, succeeded: 0, truncated: false, unreachableEvents: 0 },
     ]);
     expect(failure).toBeInstanceOf(ScanIncompleteError);
   });

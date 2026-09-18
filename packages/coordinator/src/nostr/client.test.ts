@@ -74,6 +74,59 @@ describe("NostrClient.fetchAll pagination (audit R4)", () => {
     expect(client.fetchCalls).toBe(1); // short first page → done
   });
 
+  /**
+   * Audit B-6. The walk stopped as soon as a page added nothing new, calling that
+   * "no forward progress" and returning what it had. A page of >pageSize events
+   * sharing ONE `created_at` produces exactly that: the next window is
+   * `oldest + overlapSec`, which re-serves the same cluster, so everything OLDER
+   * than the cluster was silently never fetched — the very silent-truncation
+   * failure this pagination was written to close, and reachable without an
+   * attacker by one busy second of a live event's inbox.
+   */
+  it("walks PAST a dense same-second cluster to reach older history", async () => {
+    const cluster = Array.from({ length: 6 }, (_, i) => ({
+      id: `dense-${i}`,
+      pubkey: "a".repeat(64),
+      kind: 1059,
+      created_at: 1_000_000, // all in the same second, more than one page of them
+      tags: [],
+      content: "",
+      sig: "sig",
+    })) as unknown as NostrEvent[];
+    const older = {
+      id: "buried-install-grant",
+      pubkey: "a".repeat(64),
+      kind: 1059,
+      created_at: 999_000, // an hour earlier, and the whole point of the walk
+      tags: [],
+      content: "",
+      sig: "sig",
+    } as unknown as NostrEvent;
+    const client = new StubClient([...cluster, older]);
+
+    const all = await client.fetchAll({ kinds: [1059] }, undefined, { pageSize: 2 });
+
+    expect(all.some((e) => e.id === older.id)).toBe(true);
+    // The cluster events sharing `oldest` exactly are the acknowledged cost of
+    // stepping below it; what must never happen again is losing everything older.
+    expect(all.length).toBeGreaterThan(2);
+  });
+
+  it("gives up after a bounded number of no-progress pages", async () => {
+    // A relay that answers every window with the same full page must not turn the
+    // walk into an unbounded crawl.
+    class StuckClient extends StubClient {
+      override fetch(): Promise<NostrEvent[]> {
+        this.fetchCalls++;
+        return Promise.resolve(makeEvents(2, 1_000_000)); // identical page, forever
+      }
+    }
+    const client = new StuckClient([]);
+    const all = await client.fetchAll({ kinds: [1059] }, undefined, { pageSize: 2 });
+    expect(all).toHaveLength(2);
+    expect(client.fetchCalls).toBeLessThanOrEqual(102); // the bound, not forever
+  });
+
   it("honors maxTotal as a hard safety bound", async () => {
     const events = makeEvents(500, 1_000_000);
     const client = new StubClient(events);

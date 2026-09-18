@@ -1,6 +1,6 @@
 {
   "_rubric": "1-5. reasoning: grounded in BOTH profiles, concrete hook, second person, no analytics. icebreaker: sendable verbatim, concrete, correct ownership (my=sender, your=recipient), natural in its language.",
-  "_gradedBy": "claude-opus-5 (Claude Code session), 2026-08-26 — blind: judging/key.json not read before grading. Round 2 added qwen-3-8-27b and qwen3-6-35b-a3b.",
+  "_gradedBy": "claude-opus-5 (Claude Code session), 2026-08-26 — blind: judging/key.json not read before grading. Round 2 added qwen-3-8-27b and qwen3-6-35b-a3b. Round 4 (2026-09-10) added qwen-3-8-flash and deepseek-v4-flash, same judge, same rubric, blind (key.json not read before grading). Suite v2 (2026-09-10): arm D moved to the live R6 prompt, so all 120 icebreakers were new text and were graded fresh, same judge, same rubric, blind.",
   "_note": "Small-model grades. Re-run with `node judge-pack.mjs --regrade-all` when a stronger judge is available; item ids are content hashes so the whole dataset can be regraded at once.",
   "e35dbb83b8041053": {
     "score": 4,
@@ -680,5 +680,1369 @@
     "score": 5,
     "flags": [],
     "note": "Petrichor Fund correctly his, and offers something concrete rather than asking"
+  },
+  "94c5b3ef60b630c2": {
+    "score": 4,
+    "flags": [],
+    "note": "grounded in both, second person, but restates the profiles instead of naming something to do together"
+  },
+  "8e1ce069ce3d2c60": {
+    "score": 5,
+    "flags": [],
+    "note": "both needs named, concrete ask about integrating her code into his secure elements"
+  },
+  "6e67d1d9db5036dd": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "sendable, correct ownership, but 'your hardware projects seem like exactly that' names nothing"
+  },
+  "a9a398129bc8647e": {
+    "score": 5,
+    "flags": [],
+    "note": "concrete collaboration plus a real question to open with"
+  },
+  "5ec9a5c0d09d6914": {
+    "score": 5,
+    "flags": [],
+    "note": "'bring her a page of your protocol docs' is an action, not a description"
+  },
+  "7d01f2e0bf7c50e0": {
+    "score": 5,
+    "flags": [],
+    "note": "grounded both ways, asks about her first step with the ZK library"
+  },
+  "5909d37874946322": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "third person throughout, 'exactly the kind of partner you want to mentor' is a rating, not a hook"
+  },
+  "ea70039cc43570a5": {
+    "score": 4,
+    "flags": [],
+    "note": "accurate and direct but ends on 'exactly what you need' with nothing to ask"
+  },
+  "f8c9825aad6c547b": {
+    "score": 5,
+    "flags": [],
+    "note": "specific to both, and the ask is a joint exercise"
+  },
+  "81665248cbdc89dc": {
+    "score": 5,
+    "flags": [],
+    "note": "host voice, concrete opening question"
+  },
+  "0cdeca094a558acb": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correctly declines a weak pair, but analytical and gives the reader nothing to do"
+  },
+  "189d3904dc091efe": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "Czech, not Slovak, on a Slovak event: 'Dobrý den', 'Tvé dovednosti', 'Chceš se bavit'"
+  },
+  "209b41c67a37625f": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; ownership of Pelagic Standard and its branding is right"
+  },
+  "42d4ba85520587cb": {
+    "score": 4,
+    "flags": [],
+    "note": "natural Slovak, real ask, though it leans on his network rather than on him"
+  },
+  "1152ba11d78e25f9": {
+    "score": 5,
+    "flags": [],
+    "note": "correct both ways (her podcast, his branding) and a specific question"
+  },
+  "a79db97235bc4e40": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "honest about a weak pair, no hook offered"
+  },
+  "1d2376fc72451e8b": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; content itself is correct and specific"
+  },
+  "875b502ba79ffff9": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; the funder question is a good ask otherwise"
+  },
+  "19d27eab36ee2787": {
+    "score": 5,
+    "flags": [],
+    "note": "her app, his branding, and a question only he can answer"
+  },
+  "b7f1f9d9e2950b60": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "good Slovak and correct ownership, but 'Rád by som' for a female sender and 'Pozdrav' as a greeting"
+  },
+  "95fade66cbb6e931": {
+    "score": 4,
+    "flags": [],
+    "note": "grounded both ways; 'You offer exactly what he needs' edges toward explaining the rating"
+  },
+  "ce057e1f13f80a5f": {
+    "score": 5,
+    "flags": [],
+    "note": "tight, second person, asks how he would redesign the interface"
+  },
+  "ceafea97f656cf16": {
+    "score": 4,
+    "flags": [],
+    "note": "natural and sendable; treats him as a router to teams rather than engaging his own work"
+  },
+  "c375f94d588cb6ac": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; ownership of Sundial Custody and its branding is right"
+  },
+  "b26c6183117e7545": {
+    "score": 5,
+    "flags": [],
+    "note": "her app, his branding, natural and short"
+  },
+  "b2a06315af0f0146": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "specific and correct; 'stavím' should be 'staviam'"
+  },
+  "ddd2cb826ef209c2": {
+    "score": 5,
+    "flags": [],
+    "note": "turns a lukewarm pair into a real question a beginner can ask"
+  },
+  "b43f6f1a2de45105": {
+    "score": 4,
+    "flags": [],
+    "note": "opens third-person and explains the fit before getting to the ask about his prototypes"
+  },
+  "9e6a716b5cc5c6ee": {
+    "score": 4,
+    "flags": [],
+    "note": "concrete pilot-workshop ask, but 'how we can structure' puts the host inside the pair"
+  },
+  "efb22933c77d9c5d": {
+    "score": 5,
+    "flags": [],
+    "note": "his design system, his correspondent's branding, correct and idiomatic Slovak"
+  },
+  "ba3b321bc5e8ea0e": {
+    "score": 1,
+    "flags": [
+      "ownership"
+    ],
+    "note": "claims Copperwake — that is Sunny's hardware wallet; the sender built Sundial Custody"
+  },
+  "6aaa356d64510217": {
+    "score": 3,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "content right, but 'inžinierka' then 'Videl som'/'rád by som pomohol', plus untranslated 'tight'"
+  },
+  "9512ab467fd16386": {
+    "score": 4,
+    "flags": [],
+    "note": "sendable and on-target, though it offers a list rather than a specific project"
+  },
+  "1b04d259dc5bb418": {
+    "score": 4,
+    "flags": [],
+    "note": "ownership handled correctly, but asks her for referrals instead of engaging her"
+  },
+  "57c377f2f02f274d": {
+    "score": 5,
+    "flags": [],
+    "note": "both directions named, and 'let him stress-test how you handle the material' is a real action"
+  },
+  "a4b584377d3b137d": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; otherwise one of the more specific openers here"
+  },
+  "a5a1be2a8b8b1e4a": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "accurate hedge on a medium pair, but analytical and with no opening line"
+  },
+  "1fffdabf52146a66": {
+    "score": 4,
+    "flags": [],
+    "note": "honest that the fit is indirect and still supplies a question"
+  },
+  "855af68a69504da0": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct rejection, one flat sentence, nothing to act on"
+  },
+  "ae6eb7f5ed6e0712": {
+    "score": 5,
+    "flags": [],
+    "note": "her podcast, his artwork, and 'tell me how you'd tell its story' fits both of them"
+  },
+  "d6e9d539e5fdfdbe": {
+    "score": 1,
+    "flags": [
+      "ownership"
+    ],
+    "note": "addressed to the sender himself, and claims the branding of his own design system"
+  },
+  "075330f3425f7d2e": {
+    "score": 5,
+    "flags": [],
+    "note": "tells the reader what to pitch and why she is the right person to hear it"
+  },
+  "a8adc97abf98515f": {
+    "score": 5,
+    "flags": [],
+    "note": "correct ownership of Copperwake and a question that joins both their goals"
+  },
+  "bbfa9203ddeec5b2": {
+    "score": 4,
+    "flags": [],
+    "note": "correct that he branded Salt & Signal; the follow-up question is broad"
+  },
+  "876b2c0baf70703f": {
+    "score": 5,
+    "flags": [],
+    "note": "names the exact gap and gives her a first move"
+  },
+  "4bf1df9869642831": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "no name, no reference to him, and he is not a hardware builder"
+  },
+  "cf08c2982c1e68e8": {
+    "score": 5,
+    "flags": [],
+    "note": "his paper, the recipient's branding, and a concrete legal ask"
+  },
+  "217a837a5fb4807e": {
+    "score": 5,
+    "flags": [],
+    "note": "his crate, the recipient's branding, and a direct question about the open role"
+  },
+  "e90b4bbd376c618f": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "accurate but reads as an assessment memo, not something to say to someone"
+  },
+  "fcf1f855edc09537": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "three analytical sentences advising the reader about sequencing rather than about meeting him"
+  },
+  "d0ea1da4b9304680": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct rejection, single flat sentence"
+  },
+  "6465400fed90cc67": {
+    "score": 5,
+    "flags": [],
+    "note": "both needs named and a natural opening question"
+  },
+  "661dd05d72b44b21": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "accurate on the mismatch, phrased as analysis"
+  },
+  "d9c290d2e23312d5": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct ownership both ways; masculine 'počul som'/'navrhol' for a female sender"
+  },
+  "e6dc4d676c43861a": {
+    "score": 4,
+    "flags": [],
+    "note": "honest about a weak pair and still offers a reason to say hello"
+  },
+  "334779a912474bbb": {
+    "score": 4,
+    "flags": [],
+    "note": "good Slovak, correct ownership; the co-founder pitch does not quite fit an educator"
+  },
+  "ece232c3fd11ee69": {
+    "score": 4,
+    "flags": [],
+    "note": "honest about the mismatch and supplies a usable question"
+  },
+  "2c2488c6136bf6af": {
+    "score": 4,
+    "flags": [],
+    "note": "grounded and concrete, though it opens in third person"
+  },
+  "b2f57254e80f84c4": {
+    "score": 4,
+    "flags": [],
+    "note": "specific about her communities; the closing condition is a nudge rather than a hook"
+  },
+  "ce9a3a06d4434b4e": {
+    "score": 5,
+    "flags": [],
+    "note": "his own devices, his correspondent's discipline, one sharp question"
+  },
+  "db4448d3fc69e7f0": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "conditional and analytical, nothing to open with"
+  },
+  "f552528922d3adbb": {
+    "score": 4,
+    "flags": [],
+    "note": "has a concrete ask but stretches to justify a thin pair"
+  },
+  "b343538d9ba0f756": {
+    "score": 5,
+    "flags": [],
+    "note": "host voice and a question that fits an investor conversation"
+  },
+  "4b9e1fbc3fcd1742": {
+    "score": 5,
+    "flags": [],
+    "note": "both sides named, ask is specific to his enclosures"
+  },
+  "2eaf4a068e1c76b3": {
+    "score": 4,
+    "flags": [],
+    "note": "says plainly that the fit is weak and still leaves a door open"
+  },
+  "e07fb1f0dae3e12b": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "accurate rejection with no opening offered"
+  },
+  "16498e33db55e6ee": {
+    "score": 5,
+    "flags": [],
+    "note": "names the shared problem and a joint first task"
+  },
+  "c44175eb1544b064": {
+    "score": 5,
+    "flags": [],
+    "note": "his documentary, her production credit, natural Slovak, real ask"
+  },
+  "c4ae5796c22680bd": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct that the fit is poor, but 'your role would be redundant' is a blunt assessment of the reader"
+  },
+  "b084fbae6679a1ee": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; ownership of the novel and its branding is right"
+  },
+  "fd4d44fcd9097924": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "sendable and polite but vague about what he actually wants to discuss"
+  },
+  "8dbb90e75ace7ac3": {
+    "score": 4,
+    "flags": [],
+    "note": "clear ask, though it treats him as a referral source"
+  },
+  "a3cbbe4766bdd538": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct content; 'zameraný' is masculine for a female sender and 'UX writer' stays untranslated"
+  },
+  "341a9f4293ab062b": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct rejection, nothing actionable"
+  },
+  "ce59e7cc6bc17426": {
+    "score": 4,
+    "flags": [],
+    "note": "grounded with a genuine question, but 'prime candidate' is rating language"
+  },
+  "53c3d5c33d46a4a1": {
+    "score": 5,
+    "flags": [],
+    "note": "his supper club, the recipient's branding, warm and short"
+  },
+  "77e50b5852a1e2f9": {
+    "score": 4,
+    "flags": [],
+    "note": "honest about the mismatch and names what they could still talk about"
+  },
+  "dff07222f307411f": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "fine Slovak, but 'tvoja práca na brandingu' names no project and asks nothing specific"
+  },
+  "1ca9968103b7b1ca": {
+    "score": 4,
+    "flags": [],
+    "note": "correct ownership and a real ask; opens without a greeting or name"
+  },
+  "94eb4ee688d0f1bc": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "accurate rejection written as an assessment"
+  },
+  "d611dd3e5d7034e1": {
+    "score": 1,
+    "flags": [
+      "awkward-lang",
+      "unsendable"
+    ],
+    "note": "Czech, and it tells the recipient her skills are wrong — nobody sends this"
+  },
+  "4410b406b138363b": {
+    "score": 5,
+    "flags": [],
+    "note": "his imprint, her branding, and an invitation to do something together"
+  },
+  "3ac9fc54fb549f8b": {
+    "score": 5,
+    "flags": [],
+    "note": "her co-op space, his visual identity, correct and warm"
+  },
+  "f8d213c79c5717d0": {
+    "score": 5,
+    "flags": [],
+    "note": "both directions named and a question tied to her next step"
+  },
+  "363f9c6e747b367d": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "accurate, but it advises her about a third attendee instead of about this meeting"
+  },
+  "df3c09f21b9d17aa": {
+    "score": 5,
+    "flags": [],
+    "note": "his paper, his own problem, and a question the designer can answer"
+  },
+  "ed66fa9be12f4330": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct and concrete; 'počul som' is masculine for a female sender"
+  },
+  "320c502600042e23": {
+    "score": 5,
+    "flags": [],
+    "note": "names his gap and tells her what to do about it"
+  },
+  "22ce2a779a2fcae8": {
+    "score": 4,
+    "flags": [],
+    "note": "correct ownership; the question asks a backend engineer about interface work"
+  },
+  "c27545ea69cecaec": {
+    "score": 5,
+    "flags": [],
+    "note": "his dataset, the recipient's stack, and a question aimed at a real problem"
+  },
+  "5b758530aa1c1253": {
+    "score": 5,
+    "flags": [],
+    "note": "leads with the ask and grounds it in both profiles"
+  },
+  "925c273386dc6b6c": {
+    "score": 4,
+    "flags": [],
+    "note": "sendable and on-target, but thin on specifics about his workshops"
+  },
+  "f6b2184585cb90fa": {
+    "score": 4,
+    "flags": [],
+    "note": "grounded both ways; ends on the fit rather than on something to ask"
+  },
+  "7d154f04d20a6818": {
+    "score": 5,
+    "flags": [],
+    "note": "his fund, the recipient's launch branding, and a natural second question"
+  },
+  "8094d044391916c2": {
+    "score": 4,
+    "flags": [],
+    "note": "accurate and conditional; no explicit opening line"
+  },
+  "52d53177afae950b": {
+    "score": 5,
+    "flags": [],
+    "note": "names her communities and gives the investor two things to ask"
+  },
+  "77c2eca926e830c4": {
+    "score": 5,
+    "flags": [],
+    "note": "his curriculum, her branding, and a firmware ask that fits her actual day job"
+  },
+  "820a93c90a65181b": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct ownership and lively, but 'vypichol' is the wrong verb here"
+  },
+  "fb72d8430cc3d0f9": {
+    "score": 5,
+    "flags": [],
+    "note": "specific about her stage and about what the reader can supply"
+  },
+  "e0f1b2f008abca1a": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; her wallet and his branding are correctly assigned"
+  },
+  "08b3ed683070d477": {
+    "score": 4,
+    "flags": [],
+    "note": "correct ownership, decent Slovak; asks him to scout rather than to talk"
+  },
+  "8cb04e2bb989bcad": {
+    "score": 4,
+    "flags": [],
+    "note": "good question about his real expertise; no greeting or name"
+  },
+  "bae0d2dd9920b17a": {
+    "score": 4,
+    "flags": [],
+    "note": "declines a weak pair with a joke that still lands as advice"
+  },
+  "11adbb7a68f23401": {
+    "score": 4,
+    "flags": [],
+    "note": "honest that there is no shared project and still names one thing to discuss"
+  },
+  "45d3cee80b641614": {
+    "score": 5,
+    "flags": [],
+    "note": "grounded both ways and asks where users get stuck"
+  },
+  "74c0c413e512f842": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; ownership correct and the closing question is sharp"
+  },
+  "24815ba7e79c28ea": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "accurate rejection, no opening offered"
+  },
+  "4c4f73269f966c01": {
+    "score": 5,
+    "flags": [],
+    "note": "both needs named and two concrete things to ask"
+  },
+  "f35c7eff5885e553": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event, and stiffer than the rest even so"
+  },
+  "828dd5fd4787be75": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "grounded but routes the reader to a third attendee instead of to this conversation"
+  },
+  "425f7df0143db496": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "analytical, and it concedes the mismatch without giving him anything to say"
+  },
+  "46dc4cdbbb28a836": {
+    "score": 4,
+    "flags": [],
+    "note": "sendable and confident; 'your secure gadgets' names no specific device"
+  },
+  "05c798cdc61bbe6f": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "no name, no reference to her own work, and it ignores that she came for a band"
+  },
+  "ff93aa72125eef0c": {
+    "score": 5,
+    "flags": [],
+    "note": "his documentary, the recipient's branding, and a question that fits both their frustrations"
+  },
+  "164185f2bae400a6": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "honest, but misses that a firmware engineer is closer to her need than 'chat about music'"
+  },
+  "d09e2ce3dd6f8b6c": {
+    "score": 5,
+    "flags": [],
+    "note": "names the exact early partnership both want and what to bring to it"
+  },
+  "19199d16c84a5c7c": {
+    "score": 4,
+    "flags": [],
+    "note": "natural Slovak and a real ask; never names the app it is about"
+  },
+  "98661ca0841330c9": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; her novel and his cover are correctly assigned"
+  },
+  "b062b3abad5365cc": {
+    "score": 4,
+    "flags": [],
+    "note": "correct ownership; 'I saw you listed it as a hot project' talks about the profile, not the person"
+  },
+  "981bd240d02af9f9": {
+    "score": 3,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "half-English ('Hi Kenji', 'hot projects', 'UX writing stratégie') and no concrete offer"
+  },
+  "edf0be796f8c860d": {
+    "score": 4,
+    "flags": [],
+    "note": "good Slovak, names her communities and his infrastructure work"
+  },
+  "a2aa21521d5c8e17": {
+    "score": 2,
+    "flags": [
+      "awkward-lang",
+      "generic"
+    ],
+    "note": "English on a Slovak event, and asks a generic question about his process"
+  },
+  "330e39c4b69ef4d4": {
+    "score": 5,
+    "flags": [],
+    "note": "her library, his branding, and a request only he can answer"
+  },
+  "501c814efd0c3f56": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct ownership; 'kryptografka' then masculine 'Videl som'"
+  },
+  "463bf093a15c3807": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "formal 'Dobrý deň' with informal 'si', and offers nothing specific"
+  },
+  "89c2f8d89b968292": {
+    "score": 3,
+    "flags": [
+      "invented",
+      "awkward-lang"
+    ],
+    "note": "Lightning is not in his profile, and 'by mi chýbali najviac' is not how this is said"
+  },
+  "6aa7239e20d97ed5": {
+    "score": 2,
+    "flags": [
+      "generic"
+    ],
+    "note": "template phrasing, and 'moje nástroje' points at the wrong person's tools"
+  },
+  "33f31f6848a95697": {
+    "score": 4,
+    "flags": [],
+    "note": "grounded, though a data scientist offering usability work is a stretch"
+  },
+  "45204ac7b43da086": {
+    "score": 1,
+    "flags": [
+      "ownership"
+    ],
+    "note": "attributes source protection, the sender's own expertise, to the recipient"
+  },
+  "37f0bf19b98d8046": {
+    "score": 5,
+    "flags": [],
+    "note": "her co-op, his branding, and a question that joins both their work"
+  },
+  "2aa96279e124788b": {
+    "score": 2,
+    "flags": [
+      "awkward-lang",
+      "invented"
+    ],
+    "note": "masculine 'Chcel by som' for a female sender, invented 'ko-fondovanie', and it hands him hardware he does not do"
+  },
+  "ea2b3b7ffa5ab8a1": {
+    "score": 5,
+    "flags": [],
+    "note": "his stack, the recipient's branding, and a specific thing to build together"
+  },
+  "338648f0f535a3a4": {
+    "score": 3,
+    "flags": [
+      "invented"
+    ],
+    "note": "'I play keys/guitar' appears nowhere in her profile"
+  },
+  "faf078418ed1a4a4": {
+    "score": 5,
+    "flags": [],
+    "note": "correct both ways, short, and asks something he can actually answer"
+  },
+  "bf756044256cb885": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "'tvoja práca na mnohých projektoch' names none of them"
+  },
+  "8f4dbae9cf6c0cfc": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "correct but says nothing a hundred other people could not have written"
+  },
+  "0dbce87c2401160a": {
+    "score": 4,
+    "flags": [],
+    "note": "her album, the recipient's branding; the closing question wanders"
+  },
+  "14093e676ac9685e": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; ownership of Copperwake is right"
+  },
+  "7077ebc06813e1d0": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and specific; offering unsolicited feedback is a little forward"
+  },
+  "2114084455f35984": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "his documentary, her branding; masculine 'navrhol' for a female recipient"
+  },
+  "e2e93ebc8c86f7b3": {
+    "score": 4,
+    "flags": [],
+    "note": "good Slovak and correct ownership of the imprint"
+  },
+  "52f0f3d0bd041e0a": {
+    "score": 5,
+    "flags": [],
+    "note": "names her app, her gap, and the one thing he is expert in"
+  },
+  "93f8e9aaaf3e29bb": {
+    "score": 5,
+    "flags": [],
+    "note": "correct gender throughout, and it lands his stated seek in one line"
+  },
+  "cf2443b58f55e314": {
+    "score": 4,
+    "flags": [],
+    "note": "his paper, a real legal ask; opens with no greeting"
+  },
+  "be0e0375fb906c75": {
+    "score": 5,
+    "flags": [],
+    "note": "names his own gap and asks the designer the right question"
+  },
+  "31915013145b962f": {
+    "score": 5,
+    "flags": [],
+    "note": "finds the genuine common ground, both left a commercial field"
+  },
+  "d6712806e8209506": {
+    "score": 4,
+    "flags": [],
+    "note": "correct ownership; no greeting and no question to answer"
+  },
+  "983877eb6e21c2d2": {
+    "score": 5,
+    "flags": [],
+    "note": "side-channel attacks is exactly the bridge between a filmmaker and a hardware hacker"
+  },
+  "2c644fe48600bde3": {
+    "score": 5,
+    "flags": [],
+    "note": "names the shared mission and offers something concrete in return"
+  },
+  "9519d5b1e3ded9f7": {
+    "score": 5,
+    "flags": [],
+    "note": "his dataset, the recipient's branding, and a clear proposal"
+  },
+  "d43b3c7b3f133710": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "friendly but misses that the recipient branded the sender's own supper club"
+  },
+  "7021f71a57d1b6fc": {
+    "score": 4,
+    "flags": [],
+    "note": "clear and correct, though it reads as a pitch rather than a question"
+  },
+  "b6f8482b30d53c0a": {
+    "score": 5,
+    "flags": [],
+    "note": "his war stories against her curiosity, in natural Slovak"
+  },
+  "65d7fe9755baf640": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "no name, and it ignores that the recipient branded the sender's own design system"
+  },
+  "f14cb11f627f6227": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "concrete offer; 'dátový dataset' is a redundancy no native writer produces"
+  },
+  "2aa429a520e3e829": {
+    "score": 5,
+    "flags": [],
+    "note": "idiomatic Slovak, states her real problem, and asks a designer's question"
+  },
+  "61787fb045f6b701": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and inviting; misses that he branded her own conference series"
+  },
+  "27e8bb6f60412447": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct ownership and a real question; opens 'Hi' at a Slovak event"
+  },
+  "c89f52490a359b1a": {
+    "score": 4,
+    "flags": [],
+    "note": "her mapping project, his branding, and a concrete offer to review docs"
+  },
+  "b94188b0b507b522": {
+    "score": 2,
+    "flags": [
+      "awkward-lang",
+      "generic"
+    ],
+    "note": "English on a Slovak event, and 'our online presence' names nothing"
+  },
+  "ed9a0e0c5b318a1d": {
+    "score": 4,
+    "flags": [],
+    "note": "correct; leaves her own podcast, which he branded, unmentioned"
+  },
+  "8643f13f2cbc5390": {
+    "score": 4,
+    "flags": [],
+    "note": "terse but exactly on point: his stack, her firmware"
+  },
+  "6abcdd1aa3512123": {
+    "score": 3,
+    "flags": [
+      "invented"
+    ],
+    "note": "calls him a content strategist; he does growth and go-to-market"
+  },
+  "d8f5cd3e6448582b": {
+    "score": 4,
+    "flags": [],
+    "note": "good Slovak and a real bridge, though the Bitcoin framing narrows his research"
+  },
+  "b8b21aadf099285b": {
+    "score": 2,
+    "flags": [
+      "invented",
+      "awkward-lang"
+    ],
+    "note": "the recipient does not build hardware wallets, and 'napísal' is masculine for a female sender"
+  },
+  "d00737e1cf070322": {
+    "score": 4,
+    "flags": [],
+    "note": "clear offer tied to his documentation; no name"
+  },
+  "b78dd9751e5c87fc": {
+    "score": 5,
+    "flags": [],
+    "note": "her co-op, the recipient's identity work, and a question only a wallet builder can answer"
+  },
+  "d350571a55287b44": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and direct, but names nothing either of them made"
+  },
+  "a28e4c668158644f": {
+    "score": 5,
+    "flags": [],
+    "note": "her album, the recipient's artwork, and an actual invitation to jam"
+  },
+  "91a357556c987437": {
+    "score": 4,
+    "flags": [],
+    "note": "his stack, the recipient's branding, correctly assigned"
+  },
+  "4685082f49dca2c8": {
+    "score": 1,
+    "flags": [
+      "ownership"
+    ],
+    "note": "compliments the recipient on Pelagic Standard, which is the sender's own design system"
+  },
+  "893e9b60a539cbef": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct ownership; masculine 'videl som' for a female sender"
+  },
+  "0890983d1fae6f85": {
+    "score": 5,
+    "flags": [],
+    "note": "her wallet, his branding, one clean question"
+  },
+  "7c6b73059da2ed84": {
+    "score": 5,
+    "flags": [],
+    "note": "both artifacts correctly assigned and a real proposal between them"
+  },
+  "9938b61bc8b9cf43": {
+    "score": 2,
+    "flags": [
+      "unsendable"
+    ],
+    "note": "hands a third attendee's details to someone who did not ask; that is not this pair's message"
+  },
+  "916be3312a100a17": {
+    "score": 4,
+    "flags": [],
+    "note": "her app and his expertise; misses that he branded it"
+  },
+  "08e58fc83246e94b": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "'otherwise I'll keep looking' closes the door it just opened"
+  },
+  "ba417a43e902237a": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct ownership; formal 'Dobrý deň' colliding with informal 'si', and no name"
+  },
+  "81014aa067a0d5e8": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; the question itself is fine"
+  },
+  "30ba1c4600390554": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; his documentary and the recipient's branding are right"
+  },
+  "765313f49317ae5c": {
+    "score": 4,
+    "flags": [],
+    "note": "his curriculum, the recipient's design work, and a usable question"
+  },
+  "60f2e9ffa46e4fc5": {
+    "score": 5,
+    "flags": [],
+    "note": "his stack, her firmware, asked as a direct offer"
+  },
+  "68d7142a69da197c": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and warm; no name, and 'the branding you've done' stays vague"
+  },
+  "99a225f877d6f8cb": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; the substance is a good match"
+  },
+  "c5dc629e03de9108": {
+    "score": 4,
+    "flags": [],
+    "note": "correct and clear, if a little corporate"
+  },
+  "1024d8daf4efa90f": {
+    "score": 5,
+    "flags": [],
+    "note": "short, names his own gap, and asks the storyteller the right thing"
+  },
+  "37f39dafe228d5a8": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "asks a marketer's question of a bassist and misses that she branded his dataset"
+  },
+  "d66cadef4436cf39": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "honest about a weak fit, but 'tvoj profil' talks about the listing, not the person"
+  },
+  "b48e7f5ce57a82b0": {
+    "score": 4,
+    "flags": [],
+    "note": "grounded in his stated gap; opens with no name"
+  },
+  "78ee88d9b34b697d": {
+    "score": 5,
+    "flags": [],
+    "note": "his stack, her branding, correct feminine forms, real question"
+  },
+  "ad51394b4a5cd905": {
+    "score": 5,
+    "flags": [],
+    "note": "his paper, his problem, and the exact expertise he needs from the recipient"
+  },
+  "786fab6e9d5be2cf": {
+    "score": 4,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "vivid and correct; 'remesel' should be 'remeslo'"
+  },
+  "aef02eb78af1ec26": {
+    "score": 4,
+    "flags": [],
+    "note": "correct ownership of the imprint; the question stays abstract"
+  },
+  "a63511a8515a40d9": {
+    "score": 5,
+    "flags": [],
+    "note": "her novel, his branding, natural Slovak, right question"
+  },
+  "69363783c7abd788": {
+    "score": 4,
+    "flags": [],
+    "note": "her conference, his branding; never connects to what she actually does"
+  },
+  "5d7f9b75cb6db5ae": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; his paper and her artwork are correctly assigned"
+  },
+  "c0826acd30e10551": {
+    "score": 4,
+    "flags": [],
+    "note": "correct feminine forms and a sensible ask for a weak pair"
+  },
+  "ecd83c15fdd29527": {
+    "score": 3,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "'Navrhla som' then masculine 'rád', no name, and it skips his branding of her wallet"
+  },
+  "ca93b009d52f7866": {
+    "score": 4,
+    "flags": [],
+    "note": "clear and polite; misses the paper she actually branded for him"
+  },
+  "d80c3690465347b0": {
+    "score": 4,
+    "flags": [],
+    "note": "honest and sendable for a pair with little in common"
+  },
+  "de7392ce8fcc2292": {
+    "score": 5,
+    "flags": [],
+    "note": "his imprint, the recipient's artwork, and something concrete to show"
+  },
+  "d36857fd10ac5d7a": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "no name, no specific device, and no reason it is him being asked"
+  },
+  "aaeb35d996237cca": {
+    "score": 3,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "the mentoring offer comes out inverted, and it skips the supper club the recipient branded"
+  },
+  "1e2243d591127fcc": {
+    "score": 3,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "correct ownership, but 'si si pristúpil' and calling a dataset a 'súbor'"
+  },
+  "79ca60405cde89aa": {
+    "score": 4,
+    "flags": [],
+    "note": "his dataset and a real offer; the recipient's branding of it goes unmentioned"
+  },
+  "c10133269b2aa210": {
+    "score": 5,
+    "flags": [],
+    "note": "her album, her correct feminine forms, and an invitation that fits what the recipient came for"
+  },
+  "95d169b3c8e22a61": {
+    "score": 1,
+    "flags": [
+      "invented"
+    ],
+    "note": "calls the recipient an investigative journalist; he is a Rust engineer"
+  },
+  "b5ccefac75190176": {
+    "score": 4,
+    "flags": [],
+    "note": "his curriculum, the recipient's identity work; too terse to lead anywhere"
+  },
+  "296879d492d26b00": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "no name, and it skips the library the recipient branded for her"
+  },
+  "4224714ccf746dca": {
+    "score": 5,
+    "flags": [],
+    "note": "turns his own need into the recipient's stated wish for a low-stakes side project"
+  },
+  "0cbdf52ed0c3b00a": {
+    "score": 5,
+    "flags": [],
+    "note": "his toolkit, the recipient's branding, and a question that is actually fun"
+  },
+  "09141cf52f42316a": {
+    "score": 3,
+    "flags": [
+      "generic"
+    ],
+    "note": "vague, and it misses that the recipient branded his own supper club"
+  },
+  "7a00fdea0f0581da": {
+    "score": 4,
+    "flags": [],
+    "note": "names her real problem and his two relevant skills"
+  },
+  "f8d64e217cde77ae": {
+    "score": 5,
+    "flags": [],
+    "note": "states his frustration and asks the recipient the one question he is qualified for"
+  },
+  "9c69f741078f84ef": {
+    "score": 5,
+    "flags": [],
+    "note": "admits the fit is sideways and still gives a genuine reason to sit down"
+  },
+  "68eb07794b26e9bb": {
+    "score": 5,
+    "flags": [],
+    "note": "finds real data in his mesh stack, which is exactly what she is short of"
+  },
+  "1fbaea9a18bcfd0e": {
+    "score": 3,
+    "flags": [],
+    "note": "the 'ale' sets them against each other, and it asks the designer about distribution"
+  },
+  "3dee01c53e45ad1a": {
+    "score": 4,
+    "flags": [],
+    "note": "no name, but the ZK question is squarely her problem"
+  },
+  "6bb9d4b0d5c460d3": {
+    "score": 5,
+    "flags": [],
+    "note": "his documentary, the recipient's graphics, and a question with a real answer"
+  },
+  "47610441f8aaf8a7": {
+    "score": 2,
+    "flags": [
+      "generic"
+    ],
+    "note": "the link from community work to finding bandmates does not hold up"
+  },
+  "207fdf0dcb8e8ff3": {
+    "score": 5,
+    "flags": [],
+    "note": "his toolkit, the recipient's branding, natural Slovak"
+  },
+  "929c6da61d08ae9e": {
+    "score": 4,
+    "flags": [],
+    "note": "sendable and characterful for a pair with no obvious overlap"
+  },
+  "1b100a32e8b5370c": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event, and the closing question reads as an interrogation"
+  },
+  "b8abd808642de028": {
+    "score": 4,
+    "flags": [],
+    "note": "honest ask for a weak pair, correctly framed"
+  },
+  "254e87db895dd19f": {
+    "score": 3,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "'dokumentaristka' then masculine 'rád by som'"
+  },
+  "bccc18707e25f51b": {
+    "score": 5,
+    "flags": [],
+    "note": "his crate, the recipient's branding, and a question specific to niche Rust"
+  },
+  "d82facd8cb8ef90e": {
+    "score": 5,
+    "flags": [],
+    "note": "her co-op, correct feminine forms, and a real question about adapting his wallet"
+  },
+  "2beb1f1e7680700e": {
+    "score": 4,
+    "flags": [],
+    "note": "correct ownership; 'candidates you'd back' casts him as an investor"
+  },
+  "4ac91b3e425b81a0": {
+    "score": 3,
+    "flags": [
+      "invented"
+    ],
+    "note": "Lightning Network scalability is nowhere in his profile"
+  },
+  "00642972fb7c32ce": {
+    "score": 2,
+    "flags": [
+      "awkward-lang"
+    ],
+    "note": "English on a Slovak event; her conference and his branding are right"
+  },
+  "f38507ace3241664": {
+    "score": 4,
+    "flags": [],
+    "note": "her project, his visual identity work, correctly assigned"
+  },
+  "b7b20137896acc2d": {
+    "score": 4,
+    "flags": [],
+    "note": "lands on his stated wish for casual collaboration"
+  },
+  "ae78bba94c41d36e": {
+    "score": 5,
+    "flags": [],
+    "note": "her novel, his launch branding, correct feminine forms"
+  },
+  "e607acc310a6b7e2": {
+    "score": 4,
+    "flags": [],
+    "note": "his dataset, her identity work; no name and the offer is open-ended"
+  },
+  "ebb80c705c693486": {
+    "score": 4,
+    "flags": [],
+    "note": "honest that the fields differ and still finds a question worth asking"
+  },
+  "730f2b8f9d0328e3": {
+    "score": 4,
+    "flags": [],
+    "note": "his paper and his real problem; 'storytelling skills' is a stretch for a bassist"
   }
 }

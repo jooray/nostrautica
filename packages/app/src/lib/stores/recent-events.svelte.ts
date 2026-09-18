@@ -12,6 +12,21 @@ export interface RecentEvent {
   role: "organizer" | "attendee" | "visitor";
   icon?: string;
   at: number; // last-opened unix ms
+  /**
+   * The network says this identity asked to join, and this device holds no key
+   * for it (audit E9, see events/membership.ts).
+   *
+   * A STATE, not a role — which is why it is a separate field rather than a
+   * fourth value in `role`. "visitor" already means something specific and
+   * useful ("you have looked at this"), every role comparison in the app is a
+   * rank over those three, and the thing being recorded here is orthogonal to
+   * all of it: it is the difference between an event that is absent from the
+   * list and one that is present but unopenable. It is only ever meaningful
+   * alongside "visitor" — anything the key store can place has a real role —
+   * and `merge`/`record` below drop it the moment a role outranks that, so an
+   * event whose key finally arrives cannot keep rendering "waiting for its key".
+   */
+  pendingKey?: boolean;
 }
 
 const KEY = "nostrautica:recent-events";
@@ -49,14 +64,27 @@ function naddrOf(e: RecentEvent): string | undefined {
 /** Merge two entries that turned out to be the same event: highest role,
  *  most-recent timestamp, prefer a real title/icon. */
 function merge(prior: RecentEvent, e: RecentEvent): RecentEvent {
+  const role = RANK[e.role] >= RANK[prior.role] ? e.role : prior.role;
+  const newer = e.at >= prior.at ? e : prior;
+  const older = e.at >= prior.at ? prior : e;
   return {
     coordinate: e.coordinate || prior.coordinate,
     naddr: e.at >= prior.at ? e.naddr : prior.naddr,
     title: (e.at >= prior.at ? e.title : prior.title) || prior.title || e.title,
-    role: RANK[e.role] >= RANK[prior.role] ? e.role : prior.role,
+    role,
     icon: e.icon ?? prior.icon,
     at: Math.max(e.at, prior.at),
+    // Newest-record-wins, like `naddr`/`title` above — and `??`, not `||`: an
+    // explicit `false` on the fresher record is a scan that has just looked and
+    // found the key, and must beat a stale `true`, while `undefined` is a record
+    // with no opinion (ordinary navigation) and inherits the other one's.
+    pendingKey: pendingFor(role, newer.pendingKey ?? older.pendingKey),
   };
+}
+
+/** A pending-key flag is only ever true of an entry the key store cannot place. */
+function pendingFor(role: RecentEvent["role"], pending: boolean | undefined): boolean {
+  return role === "visitor" && !!pending;
 }
 
 /** Collapse entries that refer to the same event (by coordinate, then by naddr). */
@@ -68,7 +96,13 @@ function dedupe(list: RecentEvent[]): RecentEvent[] {
     const naddr = naddrOf(raw);
     if (!naddr) continue;
     const coordinate = coordOf(raw);
-    const e = { ...raw, naddr, coordinate };
+    const e: RecentEvent = { ...raw, naddr, coordinate };
+    // Enforce "pendingKey implies visitor" on the way IN too — this is the load
+    // path for whatever an older build or a half-written record left behind, and
+    // the invariant has to hold for anything that reaches a render. CLEARING
+    // only, never setting: an absent flag must stay absent, because merge()
+    // below relies on telling "no opinion" apart from an explicit `false`.
+    if (e.pendingKey && e.role !== "visitor") e.pendingKey = false;
     const prior = byCoord.get(coordinate);
     byCoord.set(coordinate, prior ? merge(prior, e) : e);
   }
@@ -163,12 +197,13 @@ class RecentEvents {
     const title = evt.title || prior?.title || "Event";
     const icon = evt.icon ?? prior?.icon;
     const at = evt.at ?? Date.now();
+    const pendingKey = pendingFor(role, evt.pendingKey ?? prior?.pendingKey);
     // Through dedupe(), not a raw sort+slice: `existing` only drops entries that
     // match on the coordinate STRING, so an entry whose stored coordinate is
     // stale/empty/differently-cased survives alongside the incoming one and the
     // two collide on `naddr` — the render key. Every assignment to `list` must
     // leave it unique on both identity fields, or the next render throws.
-    const next = dedupe([{ ...evt, title, icon, role, at }, ...existing]);
+    const next = dedupe([{ ...evt, title, icon, role, at, pendingKey }, ...existing]);
     localStorage.setItem(storageKey(this.owner), JSON.stringify(next));
     this.list = next;
   }

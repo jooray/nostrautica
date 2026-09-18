@@ -9,8 +9,8 @@
  *
  * Pluralization: `tp("key", n, params)` picks a plural form by suffixing the key
  * with the locale's category (`.one` / `.few` / `.many`) and exposes the count as
- * `{n}`. Slovak and Czech have three forms (1 / 2–4 / 5+); English collapses to
- * one / many.
+ * `{n}`. Slovak and Czech have three forms (1 / 2-4 / 5+); English, German and
+ * Spanish collapse to one / many.
  */
 import { messages, LOCALES, type Locale, type MessageKey } from "./messages.js";
 
@@ -50,7 +50,7 @@ function asLocale(value: string | null | undefined): Locale | undefined {
  * is in hand before any network round-trip.
  *
  * The value is attacker-supplied (anyone can craft a link), which is survivable
- * because the only thing it can do is pick one of the three shipped catalogs and
+ * because the only thing it can do is pick one of the shipped catalogs and
  * it can never set `explicit` — a wrong guess is one Settings visit away from
  * being fixed, and can never overwrite a choice the user already made.
  *
@@ -65,7 +65,11 @@ export function langFromHash(hash: string): Locale | undefined {
 
 export type PluralCategory = "one" | "few" | "many";
 
-/** Plural category for a count, per locale (en: 1 / other; sk/cs: 1 / 2–4 / 5+). */
+/**
+ * Plural category for a count, per locale. Slovak and Czech split 1 / 2-4 / 5+;
+ * every other shipped locale (en, de, es) splits 1 / other, which is what the
+ * fallthrough below returns, so adding a two-form language needs no change here.
+ */
 export function pluralCategory(locale: Locale, n: number): PluralCategory {
   const abs = Math.abs(n);
   if (locale === "sk" || locale === "cs") {
@@ -170,6 +174,25 @@ class I18n {
     return messages[this.locale][key] ?? messages.en[key] ?? key;
   }
 
+  /**
+   * Does a string for this key exist at all?
+   *
+   * Checked against English, not the active locale: the community variants are
+   * added in all three languages together, and falling back to the EVENT
+   * wording of the active locale is far better than showing an English
+   * community string to a Slovak reader because one translation lagged.
+   */
+  has(key: MessageKey): boolean {
+    return messages.en[key] !== undefined;
+  }
+
+  /** The plural-family equivalent of `has`: is any form of `base` defined? */
+  hasPlural(base: string): boolean {
+    return (["one", "few", "many"] as const).some(
+      (c) => messages.en[`${base}.${c}` as MessageKey] !== undefined,
+    );
+  }
+
   t(key: MessageKey, params?: Record<string, string | number>): string {
     return interpolate(this.raw(key), params);
   }
@@ -193,5 +216,46 @@ export function t(key: MessageKey, params?: Record<string, string | number>): st
 
 /** Plural-aware translator: `tp("attendees.count", n)`. */
 export function tp(base: string, n: number, params?: Record<string, string | number>): string {
+  return i18n.tp(base, n, params);
+}
+
+/**
+ * Community-aware translator: `tc("attendees.count", isCommunity)`.
+ *
+ * A community is an event without an end, but it is not an event in any
+ * sentence a person reads: they are members of a community, not attendees of
+ * it, and nothing "takes place". Most of the app never notices — talks,
+ * approvals, the venue, the report are all switched off — so only the strings
+ * that actually say "event" or "attendee" out loud need a second version, and
+ * this falls back to the event wording for every string that does not have one.
+ *
+ * Deliberately NOT a placeholder ("{thing} has ended"). Slovak and Czech decline
+ * the noun and change the preposition with it: `na podujatí` against
+ * `v komunite`. German declines the article the same way (`beim Event` against
+ * `in der Community`), and Spanish changes the preposition (`en el evento`
+ * against `en la comunidad`). A slot that holds a nominative noun produces
+ * broken grammar in every shipped language except English, which is the one we
+ * are least likely to notice it in.
+ */
+export function tc(
+  key: MessageKey,
+  community: boolean,
+  params?: Record<string, string | number>,
+): string {
+  if (!community) return i18n.t(key, params);
+  const variant = `${key}.community` as MessageKey;
+  return i18n.has(variant) ? i18n.t(variant, params) : i18n.t(key, params);
+}
+
+/** Plural-aware community variant: `tcp("attendees.count", isCommunity, n)`. */
+export function tcp(
+  base: string,
+  community: boolean,
+  n: number,
+  params?: Record<string, string | number>,
+): string {
+  if (community && i18n.hasPlural(`${base}.community`)) {
+    return i18n.tp(`${base}.community`, n, params);
+  }
   return i18n.tp(base, n, params);
 }

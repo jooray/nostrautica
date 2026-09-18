@@ -23,7 +23,9 @@
     cachedTextLibrary,
     cachedSelfCopy,
     prepareReuse,
+    cachedLibraryAt,
   } from "$lib/media/submit.js";
+  import { orderForGallery } from "$lib/media/library-order.js";
   import type { PublishOutcome } from "$lib/nostr/publish-queue.js";
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import { classifyTalkUrl } from "$lib/media/external.js";
@@ -36,7 +38,7 @@
   import MediaPlayer from "$lib/components/MediaPlayer.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { perfMark } from "$lib/perf.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, i18n } from "$lib/i18n/i18n.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
@@ -125,8 +127,37 @@
   // the user made at ANY previous event, offered here so they needn't redo one.
   let library = $state<MediaDescriptor[]>(cachedLibrary() ?? []);
   let textLibrary = $state<string[]>(cachedTextLibrary() ?? []);
-  // Only intros are reusable AS an intro (a stored talk clip isn't an intro).
-  const introLibrary = $derived(library.filter((m) => m.kind === "intro"));
+  /** Per-clip "added at", for dating and ordering the gallery. */
+  let libraryAt = $state<Record<string, number>>(cachedLibraryAt());
+
+  /**
+   * Only intros are reusable AS an intro (a stored talk clip isn't an intro),
+   * and the newest comes first.
+   *
+   * The gallery used to render the library in stored order, which is oldest
+   * first, and said nothing about when anything was made — so four clips looked
+   * interchangeable and the only way to find the latest was to watch them
+   * (reported 2026-09-13). The stored order has always been chronological, so
+   * reversing it answers "which is the most recent" for clips recorded before
+   * there was a timestamp to show; `libraryAt` dates the ones recorded after.
+   */
+  const introLibrary = $derived(
+    orderForGallery(
+      library.filter((m) => m.kind === "intro"),
+      libraryAt,
+    ),
+  );
+
+  /** The clip's date, when this device knows it. Blank for older entries. */
+  function addedOn(x: string): string {
+    const at = libraryAt[x];
+    if (!at) return "";
+    return new Date(at * 1000).toLocaleDateString(i18n.locale, {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  }
   let textIntro = $state(
     cachedCtx ? (cachedSelfCopy(cachedCtx.coordinate)?.introText ?? "") : "",
   );
@@ -222,6 +253,7 @@
         const bk = await deriveBlindingKey(session.signer);
         const lib = await loadLibraryFull(session.signer, bk);
         library = lib.media;
+        libraryAt = lib.at;
         textLibrary = lib.texts;
         const self = await loadSelfCopy(session.signer, ctx, bk);
         if (self?.introText) textIntro = self.introText;
@@ -968,6 +1000,7 @@
             <span class="badge">
               {m.m.startsWith("audio/") ? t("record.reuse.audioLabel") : t("record.reuse.videoLabel")}{#if m.duration} · {m.duration}s{/if}
             </span>
+            {#if addedOn(m.x)}<span class="muted added">{addedOn(m.x)}</span>{/if}
             <!-- On-demand: MediaPlayer decrypts + plays only when clicked. -->
             <MediaPlayer descriptor={m} />
             <div class="row" style="flex-wrap:wrap">
@@ -1212,5 +1245,10 @@
     line-clamp: 4;
     -webkit-box-orient: vertical;
     overflow: hidden;
+  }
+  /* When the clip was made. Quiet: the question it answers is "which one is
+     the latest", and the order already answers it — this confirms. */
+  .added {
+    font-size: 0.75rem;
   }
 </style>

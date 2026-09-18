@@ -144,4 +144,62 @@
       font-size: 0.68rem;
     }
   }
+
+  /* ── Desktop: the bar becomes a left rail ──────────────────────────────
+     Mirrors EventNav's rail so the global and event shells are the same object
+     at the same breakpoint. Duplicated rather than shared because Svelte scopes
+     component styles, and the alternative is a global rule that has to outrank
+     the scoped one by specificity tricks. */
+  @media (min-width: 1000px) {
+    .bottom-nav {
+      top: 0;
+      right: auto;
+      width: var(--rail);
+      flex-direction: column;
+      justify-content: flex-start;
+      align-items: stretch;
+      gap: 0.1rem;
+      padding: 1rem 0.7rem 1.2rem;
+      border-top: none;
+      border-right: 1px solid var(--border);
+      box-shadow: none;
+      /* Solid, like the event rail: see the note there. */
+      background: var(--bg-elev);
+      backdrop-filter: none;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+    }
+    .bottom-nav button {
+      flex: 0 0 auto;
+      max-width: none;
+      min-height: 40px;
+      flex-direction: row;
+      justify-content: flex-start;
+      gap: 0.7rem;
+      padding: 0.5rem 0.65rem 0.5rem 0.85rem;
+      border-radius: var(--radius-sm);
+    }
+    .bottom-nav button:hover {
+      background: var(--bg-elev2);
+      color: var(--text);
+    }
+    .bottom-nav button.active {
+      background: var(--accent-soft);
+    }
+    /* Inside the button, not outside it: the rail scrolls, and a scroll
+       container clips both axes, so a marker hung in the rail's padding was
+       sliced off at the window edge. */
+    .bottom-nav button.active::before {
+      top: 50%;
+      left: 0;
+      width: 3px;
+      height: 1.25rem;
+      transform: translateY(-50%);
+      border-radius: 0 2px 2px 0;
+    }
+    .lbl {
+      font-size: 0.92rem;
+      font-weight: 600;
+    }
+  }
 </style>

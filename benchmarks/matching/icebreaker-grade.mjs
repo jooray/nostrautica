@@ -381,12 +381,50 @@ function governs(gap) {
  * comparison, which is the whole point: an earlier possessive that DOES govern
  * must still be able to win.
  */
-function lastGoverning(before, res) {
+/**
+ * Round eight, and the first one found by the reasoning grader (2026-09-10).
+ *
+ * `navrhla si vlastnú hardvérovú peňaženku Copperwake` was graded as a
+ * second-person claim, because `MADE_SLAVIC\s+(?:si|jsi)` cannot tell the
+ * second-person auxiliary ("navrhol si X" — YOU designed X) from the reflexive
+ * dative ("navrhla si vlastnú X" — she designed her OWN X). Both are the same
+ * two surface tokens.
+ *
+ * What settles it in the flagged row is the clause: "…embedded inžinierka,
+ * KTORÁ píše C a navrhla si vlastnú…". A NOMINATIVE relative pronoun makes the
+ * relativized noun the subject of its clause, so the verb is third person and
+ * `si` can only be reflexive.
+ *
+ * Only the unambiguously nominative forms are listed. The object cases leave the
+ * subject free, and there `si` really is second person — "kniha, ktorú si
+ * napísal" is "the book YOU wrote", a real claim that must stay flagged. Listing
+ * `ktorú`/`ktorého` here would have traded one false positive for a false
+ * negative on the exact failure this file exists to catch.
+ */
+const NOM_REL_RE = /(?<!\p{L})(?:ktor|kter)[ya](?!\p{L})/iu;
+const SI_RE = /(?<!\p{L})(?:si|jsi)(?!\p{L})/iu;
+
+function reflexiveNotSecondPerson(before, idx, matched) {
+  if (!SI_RE.test(matched)) return false;
+  const clause = deaccent(before.slice(0, idx));
+  const lastComma = clause.lastIndexOf(",");
+  return NOM_REL_RE.test(lastComma === -1 ? clause : clause.slice(lastComma));
+}
+
+/**
+ * Index of the LAST claim in `before` that actually reaches the artifact, or -1.
+ * `veto` drops a match that survives `governs()` but is grammatically not the
+ * person it looks like — see reflexiveNotSecondPerson.
+ */
+function lastGoverning(before, res, veto) {
   let best = -1;
   for (const re of res) {
     re.lastIndex = 0;
     for (const m of before.matchAll(re)) {
-      if (m.index > best && governs(before.slice(m.index + m[0].length))) best = m.index;
+      if (m.index <= best) continue;
+      if (!governs(before.slice(m.index + m[0].length))) continue;
+      if (veto && veto(before, m.index, m[0])) continue;
+      best = m.index;
     }
   }
   return best;
@@ -413,7 +451,11 @@ export function attributionOf(text, entity) {
   // be a verb claim, and those are read separately below.
   const nextWord = deaccent(after).trim().split(/[\s,.;:!?—–-]+/)[0] ?? "";
   const serviceHead = SERVICE_NOUN.test(nextWord);
-  const second = lastGoverning(before, serviceHead ? SECOND_MADE_RES : [SECOND_POSS_RE, ...SECOND_MADE_RES]);
+  const second = lastGoverning(
+    before,
+    serviceHead ? SECOND_MADE_RES : [SECOND_POSS_RE, ...SECOND_MADE_RES],
+    reflexiveNotSecondPerson,
+  );
   const first = lastGoverning(before, serviceHead ? FIRST_MADE_RES : [FIRST_POSS_RE, ...FIRST_MADE_RES]);
   if (second === -1 && first === -1) return "none";
   return second > first ? "second" : "first";
@@ -445,14 +487,33 @@ const THIRD_PERSON_VERBS =
   "je|bol|byl|má|robí|dělá|pracuje|vytvoril|vytvořil|napísal|napsal|píše|stavia|buduje|vedie|" +
   "vede|spravuje|hostí|navrhol|navrhl|nahral|nahrál|študuje|studuje|učí|tvorí|tvoří";
 
-export function isBriefing(text, candidateFirstName) {
-  if (THIRD_PARTY_RES.some((re) => re.test(text))) return true;
-  const name = candidateFirstName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * Is `firstName` written ABOUT — named as the subject of a third-person verb
+ * ("Pavel robí branding", "Sunny plays bass") — rather than written TO?
+ *
+ * Split out of isBriefing on 2026-09-10 so `gradeReasoning` can use this half
+ * alone. It must not inherit the other half: THIRD_PARTY_RES treats "ask him
+ * about X" as a briefing, which is right for an icebreaker (it cannot be sent)
+ * and exactly WRONG for reasoning_for_target, where "Ask him about Nightjar
+ * Ledger" is the house style the prompt asks for. Reusing isBriefing there would
+ * have flagged the intended output as the defect.
+ *
+ * A vocative is deliberately not a match: "Hi Sunny — …" and "Sunny, what would
+ * …" address the person, and requiring a VERB after the name is what separates
+ * those from "Sunny plays bass".
+ */
+export function namedInThirdPerson(text, firstName) {
+  const name = firstName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const thirdPerson = new RegExp(
     `(?<!\\p{L})${name}(?!\\p{L})\\s+(?:also\\s+|just\\s+|currently\\s+)?(?:${THIRD_PERSON_VERBS})(?!\\p{L})`,
     "iu",
   );
   return thirdPerson.test(text);
+}
+
+export function isBriefing(text, candidateFirstName) {
+  if (THIRD_PARTY_RES.some((re) => re.test(text))) return true;
+  return namedInThirdPerson(text, candidateFirstName);
 }
 
 /**
@@ -476,6 +537,81 @@ export function gradeIcebreaker(text, target, candidate) {
   if (attributionOf(text, candidate.signature.entity) === "first") bad.push("FALSE_CLAIM");
   if (isBriefing(text, candidate.firstName)) bad.push("BRIEFING");
   return bad;
+}
+
+/**
+ * Grade one `reasoning_for_target` for a (target, candidate) pair.
+ *
+ * Added 2026-09-10 after a production card showed the failure this file was
+ * built for, in the ONE field it never looked at. Everything above grades
+ * `icebreakers`; `reasoning_for_target` was saved by every run and checked by
+ * none — so an inverted reasoning scored a clean card, exactly the way the
+ * 2026-07-25 English-only grader scored a clean 0% while a Slovak event was
+ * inverting every opener.
+ *
+ * The card: reasoning read "Milane, Juraj je autor nástroja Nostrautica…" — the
+ * READER (Juraj) written about in the third person and the OTHER person
+ * addressed — while the icebreakers in the same entry were correctly written for
+ * Juraj to send. One entry, two fields, opposite addressees.
+ *
+ * The two fields have deliberately OPPOSITE conventions, which is why this needs
+ * its own grader rather than a flag on the one above:
+ *
+ *   icebreakers          target = "I"   candidate = "you"
+ *   reasoning_for_target target = "you" candidate = third person
+ *
+ * So the checks are mirrored, not reused:
+ *
+ *  - INVERTED — the TARGET named with a third-person verb ("Juraj je autor…").
+ *    The target is the reader and is always "you" here; describing them in the
+ *    third person means the sentence is addressed to somebody else. This is the
+ *    same machinery as BRIEFING above, pointed at the other person.
+ *  - MISATTRIBUTED — the CANDIDATE's signature artifact called "your". In this
+ *    field "your" can only ever mean the target's, so this hands the reader the
+ *    other person's work — the mirror of THEFT.
+ *
+ * Note the asymmetry with gradeIcebreaker: naming the CANDIDATE in the third
+ * person is correct here ("Ask him about Nightjar Ledger"), and "your" on the
+ * TARGET's own artifact is correct here too. Both are violations one field over.
+ * That is the whole reason an inverted reasoning slipped past a grader that was
+ * looking hard for exactly this.
+ */
+export function gradeReasoning(text, target, candidate) {
+  const bad = [];
+  if (namedInThirdPerson(text, target.firstName)) bad.push("INVERTED");
+  if (attributionOf(text, candidate.signature.entity) === "second") bad.push("MISATTRIBUTED");
+  return bad;
+}
+
+/**
+ * Aggregate per-reasoning grades. Deliberately its own function rather than a
+ * branch inside summarize(): the two fields have different violation codes and
+ * different denominators, and pooling them would let a clean icebreaker rate
+ * hide an inverted reasoning rate — which is precisely how this went unnoticed.
+ */
+export function summarizeReasoning(rows) {
+  const total = rows.length;
+  const count = (code) => rows.filter((r) => r.violations.includes(code)).length;
+  const grounded = rows.filter((r) => r.mentionsTarget || r.mentionsCandidate).length;
+  const inverted = count("INVERTED");
+  const misattributed = count("MISATTRIBUTED");
+  const clean = rows.filter((r) => r.violations.length === 0).length;
+  const pct = (n) => (total ? Math.round((n / total) * 1000) / 10 : 0);
+  return {
+    total,
+    grounded,
+    groundedPct: pct(grounded),
+    // INVERTED is the headline: it needs no artifact mention to fire, so unlike
+    // the icebreaker numbers it is not gated by groundedPct.
+    inverted,
+    invertedPct: pct(inverted),
+    misattributed,
+    misattributedPct: pct(misattributed),
+    errors: inverted + misattributed,
+    errorPct: pct(inverted + misattributed),
+    clean,
+    cleanPct: pct(clean),
+  };
 }
 
 /** Aggregate per-icebreaker grades into the numbers we compare between prompts. */

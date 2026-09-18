@@ -1,6 +1,9 @@
 # Nostrautica: Průvodce pro účastníky
 
-Někdo vás pozval na akci, která běží na Nostrautice. O co jde: nahrajete si krátké video, ve kterém se představíte, a ještě před začátkem akce vám aplikace řekne, **koho přesně se vyplatí potkat, a proč**. Žádné další doufání, že u kávovaru narazíte na tu pravou osobu.
+Někdo vás pozval na akci, která běží na Nostrautice. O co jde: nahrajete si
+krátké video, ve kterém se představíte, a ještě před začátkem akce vám aplikace
+řekne, **koho přesně se vyplatí potkat, a proč**. Žádné další doufání, že u
+kávovaru narazíte na tu pravou osobu.
 
 Pět minut nastavení, celé na telefonu.
 
@@ -8,9 +11,32 @@ Pět minut nastavení, celé na telefonu.
 
 ## 1. Otevřete si svůj pozvánkový odkaz
 
-Klepněte na odkaz, který jste dostali. Zobrazí se vám **Přehled** akce (co to je, kdy a kde) a tlačítko pro připojení. Pokud organizátor zveřejnil nějaká oznámení, i ta se objeví hned tady.
+Klepněte na odkaz, který jste dostali. Zobrazí se vám **Přehled** akce (co to
+je, kdy a kde) a tlačítko pro připojení. Pokud organizátor zveřejnil nějaká
+oznámení, i ta se objeví hned tady.
 
-Jakmile jste uvnitř akce, spodní lišta se celá týká *této* akce: **Přehled** (kde jste teď), **Lidé**, **Spojení**, **Novinky** a **Více** (váš účet, nastavení, ostatní akce). Další dvě karty se objeví jen tehdy, když organizátor tyto funkce zapne: **Přednášky** (§4.5) a **Chat** (§6.5). Pokud je nevidíte, tato akce je prostě nepoužívá. Malá hlavička nahoře vám vždycky říká, ve které akci jste a jestli jste návštěvník, čekáte, nebo jste uvnitř.
+Jakmile jste uvnitř akce, spodní lišta se celá týká *této* akce: **Přehled**
+(kde jste teď), **Lidé**, **Novinky** a **Více** (váš účet, nastavení, ostatní
+akce). Další dvě karty se objeví jen tehdy, když organizátor tyto funkce
+zapne: **Přednášky** (§4.5) a **Chat** (§5.5). Přednášky jsou hned za
+Přehledem tehdy, když je organizátor nastavil na sledování *před* akcí
+(„prerecord-first“), jinak jsou hned za Lidmi. Chat je za Lidmi, a pokud jsou
+zapnuté i Přednášky, tak až za nimi. Pokud je nevidíte, tato akce je prostě
+nepoužívá. Malá hlavička nahoře vám vždycky říká, ve které akci jste a
+jestli jste návštěvník, čekáte, nebo jste uvnitř.
+
+### Pokud máte Nostrauticu nainstalovanou na ploše
+
+Nainstalovaná aplikace je vlastní prohlížeč. Odkaz, na který klepnete v
+chatovací aplikaci, se otevře v Safari nebo Chrome, a ten o identitě, kterou
+jste si vytvořili v aplikaci, neví nic — jiné přihlášení, žádné akce — takže
+pozvánka dorazí na jediné místo, kde se nedá použít, a vypadá to, jako by
+organizátorův odkaz nefungoval.
+
+Odkaz si raději zkopírujte, otevřete Nostrauticu z plochy a vložte ho na
+obrazovce s akcemi do políčka **Přidat akci z odkazu**. Otevře se přesně tak,
+jako byste na něj klepli, i s pozvánkovým kódem. Funguje i samotná adresa
+`naddr1…` a stejně tak odkaz na stálou komunitu, nejen na akci s datem.
 
 ![Přehled akce](images/participant-cs/02-event-overview-light.png)
 
@@ -20,17 +46,34 @@ Klepněte na **Připojit se k akci** a vyplňte, jak by vás lidé měli znát:
 
 ![Formulář pro připojení](images/participant-cs/04-join-form-light.png)
 
-- **Fotka, jméno a „O vás“**: to je váš veřejný profil, jako v kterékoli sociální aplikaci. Formulář to i říká: jméno, fotka a bio jsou veřejné, všechno ostatní zůstává uvnitř akce.
-- **Dovednosti** a **Co hledáte?**: na tomhle běží párování. Buďte konkrétní: „rust vývojář, hledám spoluzakladatele“ je lepší než „technologický nadšenec“. Ta minutka navíc se vyplatí. Vynechte obojí, i bio, a přesto se můžete připojit. Formulář jen jemně upozorní, že zatím není co párovat.
-- Je tam i políčko na **zveřejnění veřejného RSVP**, pokud chcete, aby ostatní viděli, že se zúčastníte. Nechte ho nezaškrtnuté, pokud chcete mít účast jen uvnitř akce.
+- **Fotka, jméno a „O vás“**: to je váš veřejný profil, jako v kterékoli
+  sociální aplikaci. Formulář to i říká: jméno, fotka a bio jsou veřejné,
+  všechno ostatní zůstává uvnitř akce.
+- **Dovednosti** a **Co hledáte?**: na tomhle běží párování. Buďte konkrétní:
+  „rust vývojář, hledám spoluzakladatele“ je lepší než „technologický nadšenec“.
+  Ta minutka navíc se vyplatí. Vynechte obojí, i bio, a přesto se můžete
+  připojit. Formulář jen jemně upozorní, že zatím není co párovat.
+- Je tam i políčko na **zveřejnění veřejného RSVP**, pokud chcete, aby ostatní
+  viděli, že se zúčastníte. Nechte ho nezaškrtnuté, pokud chcete mít účast jen
+  uvnitř akce.
 
-Žádný e-mail, žádné heslo, žádná registrace. Když klepnete na **Vytvořit identitu a připojit se**, aplikace vám na místě vytvoří přenosnou identitu (víc o tom na konci: je to pěkný bonus).
+Žádný e-mail, žádné heslo, žádná registrace. Když klepnete na **Vytvořit
+identitu a připojit se**, aplikace vám na místě vytvoří přenosnou identitu (víc
+o tom na konci: je to pěkný bonus).
 
-> **Něco z toho už používáte?** Pokud klepnete na **Už jste na Nostru? Přihlaste se**, můžete se místo toho přihlásit svým existujícím klíčem, rozšířením prohlížeče nebo podepisovací aplikací v telefonu (například Amber nebo Clave). Váš existující profil se přenese a zobrazí se needitovatelně. Aplikace ho nikdy nemění.
+> **Něco z toho už používáte?** Pokud klepnete na **Už jste na Nostru? Přihlaste
+> se**, můžete se místo toho přihlásit svým existujícím klíčem, rozšířením
+> prohlížeče nebo podepisovací aplikací v telefonu (například Amber nebo Clave).
+> Váš existující profil se přenese a zobrazí se needitovatelně. Aplikace ho
+> nikdy nemění.
 >
 > ![Uvítací obrazovka: přihlášení nebo vytvoření identity](images/participant-cs/07-signin-options-light.png)
 
-Pokud váš Nostr profil už má bio, použije se tady tak, jak je. Pokud ho nemá, formulář pro připojení vám nabídne vlastní pole **„O vás“**: text jen pro tuto akci, který se nikdy nezapíše zpátky do vašeho Nostr profilu. Tak či onak jsou **Dovednosti** a **Co hledáte?** vždycky na vás vyplnit znovu, jsou specifické pro tuto akci.
+Pokud váš Nostr profil už má bio, použije se tady tak, jak je. Pokud ho nemá,
+formulář pro připojení vám nabídne vlastní pole **„O vás“**: text jen pro tuto
+akci, který se nikdy nezapíše zpátky do vašeho Nostr profilu. Tak či onak jsou
+**Dovednosti** a **Co hledáte?** vždycky na vás vyplnit znovu, jsou specifické
+pro tuto akci.
 
 ![Formulář pro připojení, přihlášený uživatel](images/participant-cs/04b-join-form-signedin-light.png)
 
@@ -42,27 +85,34 @@ předem, abyste věděli, s čím souhlasíte.
 
 Po odeslání se stane jedna ze dvou věcí, podle toho, jaký odkaz jste použili:
 
-- **Jste uvnitř hned** (pozvánkové odkazy, když běží organizátorova párovací služba): uvidíte obrazovku „Jste uvnitř“ s tlačítkem, kde uvidíte, kdo tu je:
+- **Jste uvnitř hned** (pozvánkové odkazy, když běží organizátorova párovací
+  služba): uvidíte obrazovku „Jste uvnitř“ s tlačítkem, kde uvidíte, kdo tu je:
 
   ![Jste uvnitř](images/participant-cs/06-approved-light.png)
 
-- **Organizátor vás brzy schválí**: uvidíte obrazovku „čeká se na schválení“. Aplikaci můžete zavřít; dostanete se dovnitř, jakmile vás schválí.
+- **Organizátor vás brzy schválí**: uvidíte obrazovku „čeká se na schválení“.
+  Aplikaci můžete zavřít; dostanete se dovnitř, jakmile vás schválí.
 
   ![Žádost odeslána](images/participant-cs/05-request-sent-light.png)
 
-Zpátky na **Přehledu** vás krátký kontrolní seznam **„Připravujeme vás“** sleduje přesně tam, kde jste (Připojeno → Záloha zajištěna → Představení odesláno → Zpracovává se → Spojení připravena), a jako první vám ukazuje *jednu* nejbližší věc, kterou je potřeba udělat. Nemusíte hádat, proč se spojení ještě neukázala: seznam vám to řekne.
+Zpátky na **Přehledu** vás krátký kontrolní seznam **„Připravujeme vás“**
+sleduje přesně tam, kde jste (Připojeno → Záloha zajištěna → Představení
+odesláno → Zpracovává se → Spojení připravena), a jako první vám ukazuje *jednu*
+nejbližší věc, kterou je potřeba udělat. Nemusíte hádat, proč se spojení ještě
+neukázala: seznam vám to řekne.
 
 ### Funguje i se špatnou Wi-Fi na místě konání
 
 Níž na téže stránce Přehled, jakmile jste schváleni, najdete kartu
 **Stáhnout pro offline použití**. Klepnutím na ni si aplikace předem stáhne
 lidi, spojení a přednášky *a zároveň načte i samotné obrazovky*, které je
-zobrazují (Lidé, Spojení, Přednášky, stránka přednášky, Nahrávání, Můj profil,
-Novinky), takže se všechno dá procházet i bez signálu, hodí se to v přeplněné
-místnosti, kde si všechny telefony soupeří o stejné slabé připojení. Starší verze
-sice stáhly data, ale některou obrazovku (třeba Přednášky) se offline stejně nemuselo
-podařit *otevřít*; teď se obrazovky stahují spolu s nimi. Samotné video a zvuk se
-předem stále nestahují (jen všechno ostatní, co potřebujete), a kdykoli můžete
+zobrazují (Lidé, Přednášky, stránka přednášky, Nahrávání, Můj profil,
+Novinky), takže se všechno dá procházet i bez signálu, hodí se to
+v přeplněné místnosti, kde si všechny telefony soupeří o stejné slabé
+připojení. Starší verze sice stáhly data, ale některou obrazovku (třeba
+Přednášky) se offline stejně nemuselo podařit *otevřít*; teď se obrazovky
+stahují spolu s nimi. Samotné video a zvuk se předem stále nestahují (jen
+všechno ostatní, co potřebujete), a kdykoli můžete
 klepnout na **Aktualizovat offline kopii**, abyste si ji obnovili. Pokud se něco
 nepodařilo stáhnout, karta to řekne, místo aby předstírala, že je kompletní.
 
@@ -70,25 +120,55 @@ nepodařilo stáhnout, karta to řekne, místo aby předstírala, že je komplet
 
 ### Uložte si klíč (30 vteřin, opravdu to udělejte)
 
-Po připojení vám aplikace ukáže **kartu se zálohou** s vaším tajným klíčem. Klepněte na **Kopírovat můj tajný klíč** a vložte ho do svého správce hesel. Je to jediná cesta zpátky do vašeho účtu, když ztratíte telefon. Žádný e-mail „zapomenuté heslo“ tu není, protože žádná firma váš účet nedrží. („Další způsoby zálohování“ vám mohou poslat obnovovací odkaz e-mailem nebo vytvořit soubor chráněný heslem.)
+Po připojení vám aplikace ukáže **kartu se zálohou** s vaším tajným klíčem.
+Klepněte na **Kopírovat můj tajný klíč** a vložte ho do svého správce hesel. Je
+to jediná cesta zpátky do vašeho účtu, když ztratíte telefon. Žádný e-mail
+„zapomenuté heslo“ tu není, protože žádná firma váš účet nedrží. („Další způsoby
+zálohování“ vám mohou poslat obnovovací odkaz e-mailem nebo vytvořit soubor
+chráněný heslem.)
 
 ![Karta se zálohou](images/participant-cs/03-backup-light.png)
 
 ## 3. Nahrání představení
 
-Právě tohle dělá párování dobrým. Je **nepovinné**: i bez představení vás párování zahrne, a to na základě vaší veřejné aktivity na Nostru a popisu v profilu, ale s představením má párování mnohem víc podkladů. Na stránce akce klepněte na **Nahrát / aktualizovat představení**. Máte tři způsoby, jak se představit. Vyberte si ten, který vám vyhovuje:
+Právě tohle dělá párování dobrým. Je **nepovinné**: i bez představení vás
+párování zahrne, a to na základě vaší veřejné aktivity na Nostru a popisu v
+profilu, ale s představením má párování mnohem víc podkladů. Na stránce akce
+klepněte na **Nahrát / aktualizovat představení**. Máte tři způsoby, jak se
+představit. Vyberte si ten, který vám vyhovuje:
 
-> **Proč se s tím vůbec obtěžovat?** Nahrání představení je nepovinné, ale doporučené. Dá párování víc na práci, takže dostanete lepší spojení. Ostatní účastníci si ho můžou pustit a získat pocit, jestli byste si opravdu sedli. Párování není jen o projektech a dovednostech, je to i pocit, který AI sama o sobě nedokáže zachytit. A pokud nahrajete video, lidé vás podle něj opravdu poznají, až vás zahlédnou v davu.
+> **Proč se s tím vůbec obtěžovat?** Nahrání představení je nepovinné, ale
+> doporučené. Dá párování víc na práci, takže dostanete lepší spojení. Ostatní
+> účastníci si ho můžou pustit a získat pocit, jestli byste si opravdu sedli.
+> Párování není jen o projektech a dovednostech, je to i pocit, který AI sama o
+> sobě nedokáže zachytit. A pokud nahrajete video, lidé vás podle něj opravdu
+> poznají, až vás zahlédnou v davu.
 
-- **Video** (výchozí): klepněte na **Povolit kameru**, pak na **● Nahrávat**. Mluvte až minutu: kdo jste, na čem pracujete, co hledáte. Stiskněte **■ Zastavit** (zastaví se i samo při časovém limitu), pusťte si to zpátky a klepněte na **Použít toto**, nebo **Nahrát znovu**, dokud nebudete spokojeni.
-- **Zvuk**: stejný princip, bez kamery. Klepněte na **Povolit mikrofon**, sledujte ukazatel úrovně, abyste se ujistili, že vás zachycuje, a pak **● Nahrát zvuk**.
-- **Text**: žádné nahrávání. Napište pár vět o tom, kdo jste a co hledáte; do spojení vstupuje přesně jako mluvené představení a (na rozdíl od videa/zvuku) nic se nepřepisuje: text, který jste napsali, je jediné, co opustí vaše zařízení.
+- **Video** (výchozí): klepněte na **Povolit kameru**, pak na **● Nahrávat**.
+  Mluvte až minutu: kdo jste, na čem pracujete, co hledáte. Stiskněte **■
+  Zastavit** (zastaví se i samo při časovém limitu), pusťte si to zpátky a
+  klepněte na **Použít toto**, nebo **Nahrát znovu**, dokud nebudete spokojeni.
+- **Zvuk**: stejný princip, bez kamery. Klepněte na **Povolit mikrofon**,
+  sledujte ukazatel úrovně, abyste se ujistili, že vás zachycuje, a pak **●
+  Nahrát zvuk**.
+- **Text**: žádné nahrávání. Napište pár vět o tom, kdo jste a co hledáte; do
+  spojení vstupuje přesně jako mluvené představení a (na rozdíl od videa/zvuku)
+  nic se nepřepisuje: text, který jste napsali, je jediné, co opustí vaše
+  zařízení.
 
-Než se cokoli nahraje, aplikace vám jasně řekne, kdo to zpracovává: účastníci akce, organizátorova párovací služba, pokud existuje, a kteří poskytovatelé AI vidí zvuk/přepis (nebo jen text, u textových představení). Musíte zaškrtnout políčko, že jste si to přečetli. Samotné představení nikdy neuvidí nikdo mimo účastníky této akce.
+Než se cokoli nahraje, aplikace vám jasně řekne, kdo to zpracovává: účastníci
+akce, organizátorova párovací služba, pokud existuje, a kteří poskytovatelé AI
+vidí zvuk/přepis (nebo jen text, u textových představení). Musíte zaškrtnout
+políčko, že jste si to přečetli. Samotné představení nikdy neuvidí nikdo mimo
+účastníky této akce.
 
 ![Nahrávání představení: video, zvuk a textový režim](images/participant-cs/09-record-light.png)
 
-Aplikace se na pozadí automaticky aktualizuje, ale nikdy ve chvíli, která by vás připravila o práci. Počká, až to odešlete nebo zahodíte, teprve pak se znovu načte, takže aktualizace nemůže přijít uprostřed nahrávání a připravit vás o záběr. (Pokud vás zajímá, proč aktualizace zrovna čeká, podívejte se do Řešení problémů.)
+Aplikace se na pozadí automaticky aktualizuje, ale nikdy ve chvíli, která by vás
+připravila o práci. Počká, až to odešlete nebo zahodíte, teprve pak se znovu
+načte, takže aktualizace nemůže přijít uprostřed nahrávání a připravit vás o
+záběr. (Pokud vás zajímá, proč aktualizace zrovna čeká, podívejte se do Řešení
+problémů.)
 
 **Už jste něco nahráli na jiné akci?** Pokud ano, na této obrazovce se nad
 nahráváním zobrazí **galerie pro opětovné použití**: každé video, zvuk nebo
@@ -96,13 +176,23 @@ text, které jste kdy vytvořili na kterékoli akci, s rychlým náhledem, abyst
 je od sebe poznali. Video nebo zvuk můžete použít tak, jak je, nebo přes
 **Nová kopie** ho pro tuto akci znovu zašifrovat bez nového natáčení; u textu
 vás **Použít tento text** rovnou přenese do editoru, odkud ho odešlete tak,
-jak je, nebo si ho ještě upravíte. Místní knihovna neukládá ani nezobrazuje původní akci, a pokud chcete, aby kopie pro tuto akci nešla propojit zpátky s tou předchozí, **Nová kopie** se o to postará (jak přesně to funguje, najdete v Řešení problémů).
+jak je, nebo si ho ještě upravíte. Místní knihovna neukládá ani nezobrazuje
+původní akci, a pokud chcete, aby kopie pro tuto akci nešla propojit zpátky s
+tou předchozí, **Nová kopie** se o to postará (jak přesně to funguje, najdete v
+Řešení problémů).
 
-Video a zvuková představení dostanou automatický přepis, jakmile je zpracuje organizátorova párovací služba. Na své nebo cizí stránce klepněte pod přehrávačem na **Zobrazit přepis**, abyste si to mohli číst při poslechu nebo v tom vyhledávat, případně když zrovna nemůžete poslouchat:
+Video a zvuková představení dostanou automatický přepis, jakmile je zpracuje
+organizátorova párovací služba. Na své nebo cizí stránce klepněte pod
+přehrávačem na **Zobrazit přepis**, abyste si to mohli číst při poslechu nebo v
+tom vyhledávat, případně když zrovna nemůžete poslouchat:
 
 ![Přepis, zobrazený pod přehrávačem médií](images/participant-cs/21-transcript-light.png)
 
-**Používejte jakýkoli jazyk chcete.** Představení nahrajte a profil napište v jazyce, ve kterém se cítíte nejpohodlněji. Nemusí se shodovat s jazykem akce. Aplikace píše vaše spojení a shrnutí v jazyce akce, a pokud je vaše bio v jiném jazyce, každému zobrazí překlad s původním textem na jedno klepnutí („zobrazit originál“). Takže buďte prostě sami sebou, vlastními slovy.
+**Používejte jakýkoli jazyk chcete.** Představení nahrajte a profil napište v
+jazyce, ve kterém se cítíte nejpohodlněji. Nemusí se shodovat s jazykem akce.
+Aplikace píše vaše spojení a shrnutí v jazyce akce, a pokud je vaše bio v jiném
+jazyce, každému zobrazí překlad s původním textem na jedno klepnutí („zobrazit
+originál“). Takže buďte prostě sami sebou, vlastními slovy.
 
 ### Váš vlastní profil na akci
 
@@ -111,7 +201,8 @@ profil na akci** a podívejte se přesně na to, co o vás vidí ostatní,
 rozdělené na dvě upřímné poloviny. **„Napsali jste“** obsahuje váš text o vás,
 dovednosti, co hledáte, odkazy a textové představení, pokud jste ho poslali,
 přímo upravitelné (nebo pořádně opravené novým nahráním představení).
-**„Vygenerováno z vašeho představení“** obsahuje AI shrnutí, dovednosti, zájmy, v
+**„Vygenerováno z vašeho představení“** obsahuje AI shrnutí, dovednosti, zájmy,
+v
 čem umíte pomoct a co hledáte, to všechno odvozené z toho, co jste nahráli.
 Něco je špatně ve vygenerované polovině? Kterékoli pole opravte, skryjte,
 nebo skryjte celou AI část a ukažte jen to, co jste napsali sami. Je tam i
@@ -123,30 +214,103 @@ okamžitě a jejich pohled na vás dostane malou značku **„Upraveno
 
 ## 4. Lidé
 
-Klepněte na **Lidé** ve spodní liště a procházejte, kdo tu je. Každý řádek zobrazuje avatar (fotku, nebo iniciály na barevné dlaždici), jméno a dovednosti. **Hledejte** podle jména nebo dovednosti a filtrujte jen na lidi, které jste si označili jako **chci potkat**, **potkáno**, nebo které na Nostru **sledujete**. Každý řádek má i rychlé akce: označit **chci potkat** nebo začít **zprávu** bez otevírání jeho stránky.
-Seznam se plní průběžně, jak odpovídají relaye: lidé se objevují, jak se dešifrují (jména a fotky se doplní o chvíli později), takže velký seznam na pomalém připojení nikdy nečeká na nejpomalejší relay.
+Klepněte na **Lidé** ve spodní liště. Je to jeden seznam pro celou akci: nahoře
+lidé, se kterými vás párování spojilo, s vysvětlením, proč byste se měli
+potkat, a pod nimi zbytek účastníků.
 
-Seznam účastníků je **zašifrovaný pro schválené účastníky**, takže dokud vás neschválí (nebo těsně poté, než se to ještě jen synchronizuje), obrazovka Lidé zůstává prázdná a řekne vám proč. To je model soukromí, který funguje přesně tak, jak má, ne chyba:
+Seznam účastníků je **zašifrovaný pro schválené účastníky**, takže dokud vás
+neschválí (nebo těsně poté, než se to ještě jen synchronizuje), obrazovka Lidé
+zůstává prázdná a řekne vám proč. To je model soukromí, který funguje přesně
+tak, jak má, ne chyba:
 
 ![Lidé: zašifrováno, dokud vás neschválí](images/participant-cs/08-attendees-light.png)
 
-Jakmile jste uvnitř, klepnutím na kohokoli otevřete jeho stránku: představovací video, co dělá, co hledá, AI shrnutí, jakmile už párování proběhlo, a jeho nedávné veřejné příspěvky.
+Jakmile jste uvnitř, obrazovka shora dolů:
 
-Na stránce někoho jiného ho můžete **Sledovat**, klepnutím na **Napsat zprávu** zahájit soukromý chat (viz §6) a, soukromě (tohle nikdo jiný nikdy neuvidí), označit **Chci potkat** nebo **Potkáno ✓** a nechat si soukromou poznámku („bubeník s mesh-network startupem“). Po znovunačtení všechno zůstane. Pokud vás někdo obtěžuje, **Ztlumení** ho skryje z vašeho seznamu Lidé, ze Spojení i ze zpráv (je to standardní Nostr ztlumení, takže se přenese i do jiných Nostr aplikací):
+- **Vyhledávací pole**: hledejte podle jména, popisu nebo dovedností.
+- Pokud máte shody, sekce **Silné shody** a **Dobré shody**: úroveň shody je
+  nadpis nad skupinou lidí, ne štítek opakovaný u každého člověka zvlášť. U
+  každé shody vidíte jméno, jeden řádek z jejich vlastního popisu a celé
+  odůvodnění, proč byste se měli potkat: vidíte ho vždy celé a hned, bez
+  nutnosti na cokoli klikat. Pod odůvodněním je sbalená sekce **Náměty na
+  rozhovor**, kterou si rozkliknete. Třetí úroveň se jmenuje **Stojí za
+  pozdrav**; jako vlastní sekci ji uvidíte, jen když nemáte žádnou silnou ani
+  dobrou shodu, jinak jsou tihle lidé dole v seznamu ostatních účastníků, jen
+  označení štítkem **Shoda**. Nemáte-li žádnou silnou shodu, nad seznamem uvidíte větu, že
+  zatím nikdo výrazný není, že tohle jsou nejbližší, a že se shody přepočítávají,
+  jak přibývají další lidé.
+- Nadpis **Ostatní účastníci** s počtem, filtry (**Chci potkat** / **Potkáno**
+  / **Sledovaní**) a celý zbytek seznamu, po jednom řádku. Pořadí určují
+  sekce: nejdřív shody podle úrovně, pak ostatní podle abecedy. Jakmile něco
+  hledáte nebo zapnete filtr, sekce zmizí a dostanete jeden plochý seznam
+  výsledků.
+
+![Lidé: shody vedou seznam, i s celým odůvodněním](images/participant-cs/11-people-matches-light.png)
+
+Na záložce **Lidé** se navíc objeví malý odznak s číslem, kdykoli přibudou nová
+spojení od vaší poslední návštěvy, takže nemusíte pořád kontrolovat seznam,
+který se nezměnil.
+
+> **Zatím žádné shody?** Objeví se, až koordinátor zpracuje představení pár
+> lidí, takže to jednoduše znamená, že se místnost teprve zaplňuje. Nejdřív
+> nahrajte vlastní představení (§3); právě to vás dostane do spojení
+> ostatních. Aplikace vám řekne, který z těch dvou důvodů to zrovna je, a
+> nabídne buď nahrávání, nebo tlačítko na nové ověření.
+
+Seznam se plní průběžně, jak odpovídají relaye: lidé se objevují, jak se
+dešifrují (jména a fotky se doplní o chvíli později), takže velký seznam na
+pomalém připojení nikdy nečeká na nejpomalejší relay.
+
+Klepnutím na jméno nebo na řádek kohokoli otevřete jeho stránku: představovací
+video, co dělá, co hledá, AI shrnutí, jakmile už párování proběhlo, jeho
+nedávné veřejné příspěvky a u shody totéž odůvodnění i s rozbalovacím
+„Podrobnosti skóre“ (podobnost / doplňkovost / celkově v procentech).
+
+Každý člověk na seznamu, ať je shoda nebo ne, má tři rychlé ovládací prvky
+přímo na řádku, bez otevírání jeho stránky: **Sledovat**, **Chci potkat** a
+**Napsat**. Napíšete-li shodě, editor zprávy se otevře už předvyplněný
+navrženou úvodní větou od koordinátora; před odesláním ji můžete upravit nebo
+smazat. (Samostatné tlačítko **Představit nás** se stejným účinkem zůstává na
+stránce dané osoby.)
+
+Na stránce někoho jiného ho můžete taky **Sledovat**, klepnutím na **Napsat
+zprávu** zahájit soukromý chat (viz §5) a, soukromě (tohle nikdo jiný nikdy
+neuvidí), označit **Chci potkat** nebo **Potkáno ✓** a nechat si soukromou
+poznámku („bubeník s mesh-network startupem“). Po znovunačtení všechno
+zůstane. Pokud vás někdo obtěžuje, tlačítko **Ztlumit** (dole, vedle
+kopírování npub/nprofile a odkazu na njump) ho skryje z vašeho seznamu Lidé i
+ze zpráv (je to standardní Nostr ztlumení, takže se přenese i do jiných Nostr
+aplikací):
 
 ![Stránka osoby s potvrzením ztlumení](images/participant-cs/18-mute-confirm-light.png)
 
+Na akci ten seznam využijte: najděte si své top shody, zmiňte, že vám to řekla
+aplikace. Lepší icebreaker neexistuje.
+
+> **Starý odkaz na záložku Spojení?** Adresa končící na `/matches` pořád
+> funguje: otevře se rovnou tenhle seznam Lidé.
+
 ## 4.5 Přednášky (pokud je organizátor zapnul)
 
-Některé akce umožňují účastníkům přidávat krátké přednatočené přednášky místo osobního setkání, případně ještě před ním. Pokud je to pro vaši akci zapnuté, ve spodní liště se objeví záložka **Přednášky**. Klepněte na **Přidat přednášku**, dejte jí titulek a krátký popis a pak zvolte, jak video poskytnete:
+Některé akce umožňují účastníkům přidávat krátké přednatočené přednášky místo
+osobního setkání, případně ještě před ním. Pokud je to pro vaši akci zapnuté, ve
+spodní liště se objeví záložka **Přednášky**. Klepněte na **Přidat přednášku**,
+dejte jí titulek a krátký popis a pak zvolte, jak video poskytnete:
 
 - **Nahrát** přímo v prohlížeči (jako své představení, §3),
 - **Nahrát soubor**, který už máte, nebo
-- **Vložit URL**: neveřejný **YouTube** odkaz nebo přímý **.mp4** odkaz. To je nejlepší volba pro přednášku, která je příliš velká na nahrání; video zůstává tam, kde ho hostujete, a šifrovaný je pro akci jen *odkaz*.
+- **Vložit URL**: neveřejný **YouTube** odkaz nebo přímý **.mp4** odkaz. To je
+  nejlepší volba pro přednášku, která je příliš velká na nahrání; video zůstává
+  tam, kde ho hostujete, a šifrovaný je pro akci jen *odkaz*.
 
 ![Odesílání přednášky: výběr zdroje videa a volitelné zapnutí párování](images/participant-cs/27-talks-submit-light.png)
 
-Je tu také políčko **„Zpracovat tuto přednášku pro párování?“**, ve výchozím stavu vypnuté: nechte ho vypnuté a přednáška se jednoduše zveřejní ke sledování; zapněte ho a koordinátor ji také přepíše a použije ke zlepšení vašich spojení. (Přednášky s vloženou URL se nikdy nezpracovávají: jsou jen ke sledování.) Tak či onak jde přednáška k organizátorovi ke zveřejnění, než je vidět pro kohokoli, takže nečekejte, že se to objeví hned.
+Je tu také políčko **„Zpracovat tuto přednášku pro párování?“**, ve výchozím
+stavu vypnuté: nechte ho vypnuté a přednáška se jednoduše zveřejní ke sledování;
+zapněte ho a koordinátor ji také přepíše a použije ke zlepšení vašich spojení.
+(Přednášky s vloženou URL se nikdy nezpracovávají: jsou jen ke sledování.) Tak
+či onak jde přednáška k organizátorovi ke zveřejnění, než je vidět pro kohokoli,
+takže nečekejte, že se to objeví hned.
 
 Po vložení odkazu appka hned potvrdí, že ho rozpoznala:
 
@@ -154,37 +318,39 @@ Po vložení odkazu appka hned potvrdí, že ho rozpoznala:
 
 ![Seznam přednášek](images/participant-cs/26-talks-empty-light.png)
 
-Sledování přednášky si pamatuje, kde jste skončili, takže můžete zavřít aplikaci a pokračovat později, a přehrávač má **ovládání rychlosti** (1×/1,5×/2×) pro rychlejší zvládnutí dlouhé přednášky. Přepis je dostupný, když řečník přednášku zapnul ke zpracování.
+Sledování přednášky si pamatuje, kde jste skončili, takže můžete zavřít aplikaci
+a pokračovat později, a přehrávač má **ovládání rychlosti** (1×/1,5×/2×) pro
+rychlejší zvládnutí dlouhé přednášky. Přepis je dostupný, když řečník přednášku
+zapnul ke zpracování.
 
-## 5. Vaše spojení
+## 5. Napište někomu
 
-Krátce po nahrání představení klepněte na **Spojení**: žebříček lidí, které se vyplatí potkat. Každé vede tím, jak silná je shoda: **Silná shoda** nebo **Dobrá shoda**, barevně odstupňované na jediné zelené škále, takže silnější odznak je viditelně jasnější a rozeznáte je od sebe ještě dřív, než přečtete jediné slovo. A co je nejdůležitější, hned nahoře je vysvětlení běžným jazykem, *proč byste se měli bavit*. Pokud chcete mechaniku (nakolik jste si podobní vs. nakolik se doplňujete), je na jedno klepnutí pod „podrobnosti skóre“, ale důvod je na prvním místě. Seznam se aktualizuje, jak se přidávají další lidé. Klepnutím na spojení otevřete jeho celou stránku.
-
-![Spojení](images/participant-cs/11-matches-light.png)
-
-Na záložce **Spojení** se objeví malý odznak, kdykoli přibudou nová spojení
-od vaší poslední návštěvy, takže nemusíte pořád kontrolovat seznam, který se
-nezměnil.
-
-Na akci ten seznam využijte: najděte si svá top spojení, zmiňte, že vám to řekla aplikace. Lepší icebreaker neexistuje.
-
-> Spojení se objeví, až jakmile organizátorův koordinátor zpracuje představení pár lidí, takže pokud seznam říká „zatím žádná spojení“, jednoduše to znamená, že se místnost teprve zaplňuje. Nejdřív nahrajte vlastní představení (§3); právě to vás dostane do spojení ostatních.
-
-## 6. Napište někomu
-
-Na stránce kohokoli je tlačítko **Napsat zprávu**. Klepnutím na něj otevřete soukromou, **koncově šifrovanou** konverzaci:
+Na stránce kohokoli je tlačítko **Napsat zprávu**. Klepnutím na něj otevřete
+soukromou, **koncově šifrovanou** konverzaci:
 
 ![Konverzace](images/participant-cs/15-dm-chat-light.png)
 
-Vaše zprávy najdete pod **Více → Zprávy**, kde jsou vypsané všechny konverzace, nejnovější nahoře:
+Vaše zprávy najdete pod **Více → Zprávy**, kde jsou vypsané všechny konverzace,
+nejnovější nahoře:
 
 ![Přehled zpráv](images/participant-cs/14-messages-light.png)
 
-Protože jde o standardní soukromé Nostr zprávy, **fungují i s jinými Nostr aplikacemi na zprávy**: druhá osoba může odpovědět z kterékoli Nostr aplikace, kterou používá, a vaše konverzace se objeví i tam. Není uzamčená jen na tuhle akci.
+Protože jde o standardní soukromé Nostr zprávy, **fungují i s jinými Nostr
+aplikacemi na zprávy**: druhá osoba může odpovědět z kterékoli Nostr aplikace,
+kterou používá, a vaše konverzace se objeví i tam. Není uzamčená jen na tuhle
+akci.
 
-## 6.5 Skupinový chat (experimentální)
+## 5.5 Skupinový chat (experimentální)
 
-Pokud organizátor zapnul **Skupinový chat**, hned po schválení se vám objeví záložka **Chat**: jedna zašifrovaná místnost pro celou akci, oddělená od soukromých zpráv. Funguje jako kterýkoli chat: zprávy se v místnosti objevují, jak je lidé posílají, oddělovače dní označují plynutí času a mezi zobrazením v bublinách a kompaktním IRC stylem můžete přepínat přepínačem nad zprávami. Je opravdu koncově šifrovaný (protokol s názvem Marmot/MLS), i když ho provozuje organizátorova párovací služba (přidává a odebírá lidi, jak jsou schváleni nebo odebráni) a dokáže ho číst. Aplikace vám to říká předem, pokaždé, když otevřete záložku.
+Pokud organizátor zapnul **Skupinový chat**, hned po schválení se vám objeví
+záložka **Chat**: jedna zašifrovaná místnost pro celou akci, oddělená od
+soukromých zpráv. Funguje jako kterýkoli chat: zprávy se v místnosti objevují,
+jak je lidé posílají, oddělovače dní označují plynutí času a mezi zobrazením v
+bublinách a kompaktním IRC stylem můžete přepínat přepínačem nad zprávami. Je
+opravdu koncově šifrovaný (protokol s názvem Marmot/MLS), i když ho provozuje
+organizátorova párovací služba (přidává a odebírá lidi, jak jsou schváleni nebo
+odebráni) a dokáže ho číst. Aplikace vám to říká předem, pokaždé, když otevřete
+záložku.
 
 **Funguje napříč všemi vašimi zařízeními, automaticky.** Otevřete záložku
 Chat na druhém telefonu nebo v jiném prohlížeči a připojí se do skupiny sám,
@@ -194,9 +360,13 @@ co se připojilo. Historii na nově přidané zařízení nelze synchronizovat.
 
 ![Skupinový chat se zprávou](images/participant/marmot-chat-roundtrip-light.png)
 
-Tahle funkce je záměrně označená jako **Experimentální**: je nová (spolupráce s jinými Marmot-kompatibilními aplikacemi je v plánu, ale zatím se na ni nespoléhejte) a připojení do skupiny může chvíli trvat, nebo občas potřebuje nový pokus, než se začnou objevovat zprávy. Pokud záložka zůstane zaseknutá na „nastavuje se“, dejte tomu pár minut a otevřete ji znovu.
+Tahle funkce je záměrně označená jako **Experimentální**: je nová (spolupráce s
+jinými Marmot-kompatibilními aplikacemi je v plánu, ale zatím se na ni
+nespoléhejte) a připojení do skupiny může chvíli trvat, nebo občas potřebuje
+nový pokus, než se začnou objevovat zprávy. Pokud záložka zůstane zaseknutá na
+„nastavuje se“, dejte tomu pár minut a otevřete ji znovu.
 
-## 7. Váš report z akce
+## 6. Váš report z akce
 
 Kdykoli před akcí, během ní i po ní otevřete **Report akce** z menu akce a
 podívejte se na přehledné shrnutí své akce, postavené výhradně na vašich
@@ -227,52 +397,116 @@ odkaz na zálohování klíče a jeho vyzkoušení v jiných Nostr aplikacích:
 stejný moment „přechodu na Nostr“, popsaný níže, právě ve chvíli, kdy je
 nejrelevantnější.
 
-## 8. Pak: váš profil si necháváte
+## 7. Pak: váš profil si necháváte
 
-Překvapení: účet, který jste právě použili, je **identita na Nostru**: přihlášení, které vlastníte vy, ne tahle aplikace ani žádná firma. Záložka **Více** začíná identifikační kartou s vaší fotkou, jménem a veřejnou adresou (vaším *npub*). Klepnutím na npub ho zkopírujete:
+Překvapení: účet, který jste právě použili, je **identita na Nostru**:
+přihlášení, které vlastníte vy, ne tahle aplikace ani žádná firma. Záložka
+**Více** začíná identifikační kartou s vaší fotkou, jménem a veřejnou adresou
+(vaším *npub*). Klepnutím na npub ho zkopírujete:
 
 ![Záložka Více: vaše identifikační karta](images/participant-cs/14-more-light.png)
 
-Klepnutím na kartu otevřete celý svůj profil, zkopírujete tajný klíč a přeskočíte do jiných Nostr aplikací.
+Klepnutím na kartu otevřete celý svůj profil, zkopírujete tajný klíč a
+přeskočíte do jiných Nostr aplikací.
 
-Lidé, které jste na akci sledovali, váš profil, to všechno funguje napříč celým ekosystémem sociálních aplikací (Primal, Damus, Amethyst, Yakihonne…). Zkopírujte si klíč, otevřete některou z nich, zvolte „přihlásit se klíčem“ a vložte ho. A jste tam.
+Lidé, které jste na akci sledovali, váš profil, to všechno funguje napříč celým
+ekosystémem sociálních aplikací (Primal, Damus, Amethyst, Yakihonne…).
+Zkopírujte si klíč, otevřete některou z nich, zvolte „přihlásit se klíčem“ a
+vložte ho. A jste tam.
 
-Ještě jedna věc: **Více → Nastavení** má tmavý režim a přepínač jazyka (angličtina / slovenština / čeština), a vaše volba zůstává zapamatovaná:
+Ještě jedna věc: **Více → Nastavení** má tmavý režim a přepínač jazyka
+(angličtina / slovenština / čeština / němčina / španělština), a vaše volba
+zůstává zapamatovaná:
 
 ![Nastavení](images/app-cs/settings-light.png)
 
-> **Příspěvky organizátora a poznámky jen pro členy.** Pod **Novinkami** najdete organizátorova oznámení. Některá mohou být **jen pro členy**, tedy zašifrovaná tak, aby si je mohli přečíst jen schválení účastníci (adresa afterparty, kód od dveří). Pokud někdy uvidíte příspěvek se zámkem a nápisem „připojte se k akci a přečtěte si to“, je to příspěvek jen pro členy, ke kterému ještě nemáte přístup.
+> **Příspěvky organizátora a poznámky jen pro členy.** Pod **Novinkami** najdete
+> organizátorova oznámení. Některá mohou být **jen pro členy**, tedy zašifrovaná
+> tak, aby si je mohli přečíst jen schválení účastníci (adresa afterparty, kód
+> od dveří). Pokud někdy uvidíte příspěvek se zámkem a nápisem „připojte se k
+> akci a přečtěte si to“, je to příspěvek jen pro členy, ke kterému ještě nemáte
+> přístup.
 
 ## Pokud potřebujete odejít
 
 Připojili jste se ke špatné akci, nebo jste si to prostě rozmysleli?
 Otevřete akci, sjeďte na konec stránky a klepněte na **Opustit akci**.
-Po potvrzení aplikace odešle žádost o odchod: váš záznam ze seznamu účastníků, spojení i představovací média se vyčistí na straně koordinátora (nebo organizátora) a jste venku. Později se můžete znovu připojit; bere se to jako úplně nová žádost o připojení, ne obnovení té staré.
+Po potvrzení aplikace odešle žádost o odchod: váš záznam ze seznamu účastníků,
+spojení i představovací média se vyčistí na straně koordinátora (nebo
+organizátora) a jste venku. Později se můžete znovu připojit; bere se to jako
+úplně nová žádost o připojení, ne obnovení té staré.
 
 ## Soukromí v jednom odstavci
 
-Vaše jméno, fotka a bio jsou veřejné (to je váš profil). Vaše představovací video, seznam účastníků a vaše spojení jsou **zašifrované tak, aby je viděli jen schválení účastníci téhle akce**, ne veřejnost a ne lidé, kteří nebyli vpuštěni dovnitř. Vaše značky chci potkat/potkáno a soukromé poznámky jsou zašifrované tak, aby je viděli **jen vy**. Vaše zprávy jsou koncově šifrované mezi vámi a druhou osobou. Párování běží na AI službě zvolené organizátorem, která čte představení a profily, aby napsala svá doporučení. Takhle vypadá seznam účastníků pro někoho, kdo není účastníkem. Nijak:
+Vaše jméno, fotka a bio jsou veřejné (to je váš profil). Vaše představovací
+video, seznam účastníků a vaše spojení jsou **zašifrované tak, aby je viděli jen
+schválení účastníci téhle akce**, ne veřejnost a ne lidé, kteří nebyli vpuštěni
+dovnitř. Vaše značky chci potkat/potkáno a soukromé poznámky jsou zašifrované
+tak, aby je viděli **jen vy**. Vaše zprávy jsou koncově šifrované mezi vámi a
+druhou osobou. Párování běží na AI službě zvolené organizátorem, která čte
+představení a profily, aby napsala svá doporučení. Takhle vypadá seznam
+účastníků pro někoho, kdo není účastníkem. Nijak:
 
 ![Co vidí cizí člověk](images/participant-cs/12-outsider-light.png)
 
 ## Řešení problémů
 
-- **Pořád mi to ukazuje „čeká se na schválení“.** Pokud jste nepoužili pozvánkový odkaz, organizátor schvaluje lidi ručně, takže dejte tomu pár minut, nebo ho najděte přímo na akci. Aplikaci můžete klidně zavřít; zkontrolujte to opětovným otevřením odkazu na akci.
+- **Pořád mi to ukazuje „čeká se na schválení“.** Pokud jste nepoužili
+  pozvánkový odkaz, organizátor schvaluje lidi ručně, takže dejte tomu pár
+  minut, nebo ho najděte přímo na akci. Aplikaci můžete klidně zavřít;
+  zkontrolujte to opětovným otevřením odkazu na akci.
 
-- **Kamera se mi nespouští.** Telefon nebo prohlížeč žádá o povolení ke kameře. Hledejte výzvu (často v adresním řádku) a povolte ji. Pokud se výzva neobjeví, zkuste jiný prohlížeč.
+- **Pozvánka se otevřela v prohlížeči, kde nemám účet.** Nainstalovaná
+  aplikace je jiný prohlížeč než ten, který otevírá odkazy. Zkopírujte odkaz,
+  otevřete Nostrauticu z plochy a vložte ho na obrazovce s akcemi do políčka
+  **Přidat akci z odkazu** (§1).
 
-- **Mám nový telefon, nebo jsem si vymazal(a) prohlížeč.** Otevřete aplikaci, klepněte na **Už jste na Nostru? Přihlaste se → Vložit klíč** a vložte tajný klíč, který jste si uložili při připojování. Stejný účet, stejné akce. (Přesně proto je uložení toho klíče důležité.) Pokud jste sami organizovali akci, vrátí se automaticky i váš plný organizátorský přístup (schvalování lidí, administrace, všechno) ze stejného klíče; samostatnou zálohu samotné akce nepotřebujete.
+- **Kamera se mi nespouští.** Telefon nebo prohlížeč žádá o povolení ke kameře.
+  Hledejte výzvu (často v adresním řádku) a povolte ji. Pokud se výzva neobjeví,
+  zkuste jiný prohlížeč.
 
-- **Zatím se mi nezobrazují žádná spojení.** Nahrání představení je to jediné, čím spojení zlepšíte nejvíc. Pak jim chvíli trvá, než se vypočítají, a potřebují, aby se připojilo a nahrálo i pár dalších lidí. Zkuste to brzy znovu.
+- **Mám nový telefon, nebo jsem si vymazal(a) prohlížeč.** Otevřete aplikaci,
+  klepněte na **Už jste na Nostru? Přihlaste se → Vložit klíč** a vložte tajný
+  klíč, který jste si uložili při připojování. Stejný účet, stejné akce. (Přesně
+  proto je uložení toho klíče důležité.) Pokud jste sami organizovali akci,
+  vrátí se automaticky i váš plný organizátorský přístup (schvalování lidí,
+  administrace, všechno) ze stejného klíče; samostatnou zálohu samotné akce
+  nepotřebujete.
 
-- **Nevidím seznam účastníků / videa.** Nejdřív musíte být schváleni. Pokud vás právě schválili, znovu otevřete akci a dejte tomu chvíli.
+- **Zatím se mi nezobrazují žádná spojení.** Nahrání představení je to jediné,
+  čím spojení zlepšíte nejvíc. Pak jim chvíli trvá, než se vypočítají, a
+  potřebují, aby se připojilo a nahrálo i pár dalších lidí. Zkuste to brzy
+  znovu.
 
-- **Klepl(a) jsem na Opustit akci, ale pořád to ukazuje „čeká se“.** Pokud jste byli při klepnutí offline, žádost se zařadí do fronty a aplikace vám jasně řekne, že jste ještě neodešli. Odešle se, jakmile se znovu připojíte.
+- **Nevidím seznam účastníků / videa.** Nejdřív musíte být schváleni. Pokud vás
+  právě schválili, znovu otevřete akci a dejte tomu chvíli.
 
-- **Proč to vypadá, že aplikace čeká s aktualizací?** Aktualizaci odkládá, dokud nahráváte, dokud máte hotový, ale neodeslaný záběr, neodeslaný soubor nebo odkaz na přednášku, nebo rozepsané představení, aby aktualizace nepřišla ve chvíli, která by vás připravila o práci. Zatímco čeká, nic se neukládá na disk, takže hotový záběr nenechávejte ležet celé dny; odešlete ho nebo zahoďte a aktualizace přijde hned potom.
+- **Klepl(a) jsem na Opustit akci, ale pořád to ukazuje „čeká se“.** Pokud jste
+  byli při klepnutí offline, žádost se zařadí do fronty a aplikace vám jasně
+  řekne, že jste ještě neodešli. Odešle se, jakmile se znovu připojíte.
 
-- **Propojí mě opětovné použití starého představení mezi akcemi?** Opětovné použití videa nebo zvuku beze změny ponechá stejný zašifrovaný blob, takže jeho veřejný hash ciphertextu může propojit vaši účast na dvou akcích. **Nová kopie** médium znovu zašifruje novým klíčem a IV, čímž vytvoří nový hash a zamezí tomuto konkrétnímu propojení, nedokáže ale vymazat jiná metadata ani kopie už zveřejněné jinde.
+- **Proč to vypadá, že aplikace čeká s aktualizací?** Aktualizaci odkládá, dokud
+  nahráváte, dokud máte hotový, ale neodeslaný záběr, neodeslaný soubor nebo
+  odkaz na přednášku, nebo rozepsané představení, aby aktualizace nepřišla ve
+  chvíli, která by vás připravila o práci. Zatímco čeká, nic se neukládá na
+  disk, takže hotový záběr nenechávejte ležet celé dny; odešlete ho nebo zahoďte
+  a aktualizace přijde hned potom.
 
-- **Chci spravovat svá zařízení chatu.** Otevřete **Chat → Zařízení chatu** a uvidíte každé zařízení napojené na váš účet pro tuto akci, můžete přejmenovat to, na kterém zrovna jste, nebo odstranit ta, která už nepoužíváte (starý telefon, prohlížeč, který jste smazali).
+- **Propojí mě opětovné použití starého představení mezi akcemi?** Opětovné
+  použití videa nebo zvuku beze změny ponechá stejný zašifrovaný blob, takže
+  jeho veřejný hash ciphertextu může propojit vaši účast na dvou akcích. **Nová
+  kopie** médium znovu zašifruje novým klíčem a IV, čímž vytvoří nový hash a
+  zamezí tomuto konkrétnímu propojení, nedokáže ale vymazat jiná metadata ani
+  kopie už zveřejněné jinde.
 
-- **Skupinový chat je zaseknutý, nebo se zprávy neodesílají a říká to, že jsem možná byl(a) odebrán(a).** Klepněte na **Znovu se připojit do chatu** (objeví se vedle chyby, nebo pod upozorněním „nastavuje se“). Požádá to organizátorovu službu, aby vaše zařízení přidala zpátky. Obvykle to trvá necelou minutu a zůstane vám zařízení, na kterém jste; stejně jako u každého nově přidaného zařízení váš pohled na konverzaci pokračuje od té chvíle dál.
+- **Chci spravovat svá zařízení chatu.** Otevřete **Chat → Zařízení chatu** a
+  uvidíte každé zařízení napojené na váš účet pro tuto akci, můžete přejmenovat
+  to, na kterém zrovna jste, nebo odstranit ta, která už nepoužíváte (starý
+  telefon, prohlížeč, který jste smazali).
+
+- **Skupinový chat je zaseknutý, nebo se zprávy neodesílají a říká to, že jsem
+  možná byl(a) odebrán(a).** Klepněte na **Znovu se připojit do chatu** (objeví
+  se vedle chyby, nebo pod upozorněním „nastavuje se“). Požádá to organizátorovu
+  službu, aby vaše zařízení přidala zpátky. Obvykle to trvá necelou minutu a
+  zůstane vám zařízení, na kterém jste; stejně jako u každého nově přidaného
+  zařízení váš pohled na konverzaci pokračuje od té chvíle dál.

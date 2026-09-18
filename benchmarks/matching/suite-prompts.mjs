@@ -9,6 +9,15 @@
  * these hashes; `bakeoff-report.mjs` has nothing to say about a table whose rows
  * were measured under different prompts, so the hashes are how you notice.
  *
+ * The fingerprint must hash THE BYTES THE ARM SENDS, which is the variant the
+ * suite runs — not whatever `reverseSystemPrompt()` happens to return. Hashing
+ * the live prompt instead was wrong in a way that took three weeks to surface:
+ * arm D runs `SUITE.icebreakerVariant` (R3), the language fix of 2026-08-26
+ * moved the live prompt to R6, and every card written afterwards carried an R6
+ * hash over an R3 measurement. The report then flagged "these rows were measured
+ * under different prompts" about six cards whose arms had all sent identical
+ * bytes. Both are recorded now, under names that say which is which.
+ *
  *   node record-prompts.mjs      # writes results/bakeoff/PROMPTS.md
  */
 import { createHash } from "node:crypto";
@@ -40,9 +49,10 @@ export function sampleScoringUser(target, batch) {
 
 /**
  * @param {string[]} langs languages the icebreaker arm ran in
+ * @param {string} variant the reverse variant the icebreaker arm runs (SUITE.icebreakerVariant)
  * @returns {Promise<Array<{name, text, sha, source}>>}
  */
-export async function suitePrompts(langs = ["sk", "en"]) {
+export async function suitePrompts(langs = ["sk", "en"], variant = "R3") {
   const target = PERSONAS[0];
   const batch = PERSONAS.slice(1, 11);
   const out = [
@@ -54,14 +64,26 @@ export async function suitePrompts(langs = ["sk", "en"]) {
   // reported, not thrown: a scoring-only bake-off is still a valid card.
   try {
     const dist = await import(join(here, "../../packages/coordinator/dist/matching/scoring.js"));
+    const { REVERSE_VARIANTS } = await import("./reverse-variants.mjs");
+    const v = REVERSE_VARIANTS[variant];
+    if (!v) throw new Error(`suitePrompts: unknown reverse variant ${variant}`);
     for (const lang of langs) {
       out.push({
-        name: `icebreaker.system.${lang}`,
+        // MEASURED: the bytes the icebreaker arm actually sends. The variant is
+        // in the name because a bare `icebreaker.system.sk` cannot be compared
+        // across cards that ran different variants.
+        name: `icebreaker.system.${variant}.${lang}`,
+        source: `reverse-variants.mjs ${v.label} (MEASURED — what arm D sends)`,
+        text: v.system(lang),
+      });
+      out.push({
+        // LIVE: what production sends today. Recorded alongside so a card shows,
+        // on its face, whether the arm measured the shipped prompt. Through the
+        // coordinator's own builder, not by re-concatenating its parts —
+        // reconstructing it here meant the fingerprint kept reporting the
+        // pre-2026-08-26 hash after the language reminder shipped.
+        name: `icebreaker.system.LIVE.${lang}`,
         source: "packages/coordinator/dist/matching/scoring.js reverseSystemPrompt() (LIVE)",
-        // Through the coordinator's own builder, not by re-concatenating its
-        // parts. Reconstructing it here meant the fingerprint kept reporting the
-        // pre-2026-08-26 hash after the language reminder shipped — a drift
-        // detector that cannot see the drift it exists for.
         text: dist.reverseSystemPrompt(lang),
       });
     }
@@ -83,6 +105,6 @@ export async function suitePrompts(langs = ["sk", "en"]) {
 }
 
 /** Just the hashes, for the card. */
-export async function promptFingerprint(langs) {
-  return Object.fromEntries((await suitePrompts(langs)).map((p) => [p.name, p.sha]));
+export async function promptFingerprint(langs, variant) {
+  return Object.fromEntries((await suitePrompts(langs, variant)).map((p) => [p.name, p.sha]));
 }

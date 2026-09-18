@@ -6,6 +6,13 @@
     <meta name="theme-color" content="#0e0e15" />
     <link rel="icon" href="%sveltekit.assets%/favicon.svg" type="image/svg+xml" />
     <!--
+      iOS ignores the manifest's icons for "Add to Home Screen" and looks only at
+      this link; with no apple-touch-icon it screenshots the page instead. 180x180
+      is the size current iPhones ask for, and it is opaque on purpose — iOS
+      applies its own corner rounding and composites transparency onto white.
+    -->
+    <link rel="apple-touch-icon" href="%sveltekit.assets%/apple-touch-icon.png" />
+    <!--
       PWA manifest link (audit U6). @vite-pwa generates manifest.webmanifest into
       the build output but does NOT inject this link, so Chromium never saw the
       app as installable — `beforeinstallprompt` never fired and the Android

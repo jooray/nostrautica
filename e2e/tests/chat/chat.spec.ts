@@ -7,6 +7,8 @@ import {
   openChatAwaitReady,
   sendChat,
   expectMessage,
+  expectSendClickable,
+  personChip,
   ownPubkeyHex,
 } from "./chat-helpers.js";
 
@@ -39,7 +41,8 @@ test.describe.serial(COORD_NPUB && RELAY_UP ? "marmot group chat" : "marmot grou
   let alice: Page;
   let bob: Page;
   let naddr: string;
-  let bobPk8: string;
+  /** The npub chip PersonId renders on Bob's admin card (see personChip). */
+  let bobChip: string;
 
   // Markers carried between serial scenarios (history-recovery assertions).
   let m1: string; // Alice → Bob
@@ -58,7 +61,7 @@ test.describe.serial(COORD_NPUB && RELAY_UP ? "marmot group chat" : "marmot grou
 
     alice = await newUser(aliceCtx, "Alice Attendee");
     bob = await newUser(bobCtx, "Bob Attendee");
-    bobPk8 = (await ownPubkeyHex(bob)).slice(0, 8);
+    bobChip = personChip(await ownPubkeyHex(bob));
 
     // Joins may be published before the coordinator's E_inbox subscription is live:
     // installEvent's backfillEventInbox now fetches inbox history (joins first) after
@@ -78,6 +81,20 @@ test.describe.serial(COORD_NPUB && RELAY_UP ? "marmot group chat" : "marmot grou
     test.setTimeout(180_000);
     await openChatAwaitReady(alice, naddr);
     await openChatAwaitReady(bob, naddr);
+
+    // Send must be REACHABLE before anything asserts what sending does (audit
+    // A-1). The composer is `position: sticky`, the bottom nav is `position:
+    // fixed`, and the composer used to stick to `bottom: 0` — the nav's own band
+    // — so at this project's 1280x720 viewport the nav covered Send and every
+    // click on it navigated to Updates instead. Both widths are checked because
+    // the bug existed ONLY at desktop widths: at 390x844 the pane sizing leaves
+    // the composer above the bar naturally, which is exactly why months of
+    // phone-shaped manual testing never hit it.
+    const desktop = alice.viewportSize()!;
+    await expectSendClickable(alice);
+    await alice.setViewportSize({ width: 390, height: 844 });
+    await expectSendClickable(alice);
+    await alice.setViewportSize(desktop);
 
     m1 = `hello-from-alice-${Date.now()}`;
     await sendChat(alice, m1);
@@ -136,7 +153,7 @@ test.describe.serial(COORD_NPUB && RELAY_UP ? "marmot group chat" : "marmot grou
     const marker = `handover-${Date.now()}`;
     await expect(async () => {
       await alice2.locator("form.compose textarea").fill(marker);
-      await alice2.locator("form.compose button.send").click({ force: true });
+      await alice2.locator("form.compose button.send").click();
       await expectMessage(bob, marker, 12_000);
     }).toPass({ timeout: 90_000 });
 
@@ -147,11 +164,14 @@ test.describe.serial(COORD_NPUB && RELAY_UP ? "marmot group chat" : "marmot grou
   test("4 — revocation locks out the removed member; group continues", async () => {
     test.setTimeout(200_000);
     // Revoke Bob from admin (routed through the coordinator → MLS Remove + ECK
-    // rotation). The card is found by Bob's short-pubkey badge. (The organizer is
-    // NOT brought into chat here: an extra MLS Add commit right before the Remove
-    // piles more epoch churn on Alice's client than the removal test needs.)
+    // rotation). The card is found by the npub chip PersonId renders — it was short
+    // hex until 2026-07-30, and this scenario had not run since (fourth in a serial
+    // suite whose first test was failing), so the stale selector never surfaced.
+    // The organizer is NOT brought into chat here: an extra MLS Add commit right
+    // before the Remove piles more epoch churn on Alice's client than the removal
+    // test needs.
     await organizer.goto(`/#/e/${naddr}/admin`);
-    const bobCard = organizer.locator(".card", { hasText: bobPk8 }).first();
+    const bobCard = organizer.locator(".card", { hasText: bobChip }).first();
     await expect(bobCard).toBeVisible({ timeout: 30_000 });
     await bobCard.getByRole("button", { name: /^revoke$/i }).click({ force: true }); // open confirm
     await bobCard.getByRole("button", { name: /^revoke$/i }).click({ force: true }); // confirm
@@ -167,7 +187,7 @@ test.describe.serial(COORD_NPUB && RELAY_UP ? "marmot group chat" : "marmot grou
     await expect(async () => {
       const marker = `post-revoke-${Date.now()}`;
       await alice.locator("form.compose textarea").fill(marker);
-      await alice.locator("form.compose button.send").click({ force: true });
+      await alice.locator("form.compose button.send").click();
       await expectMessage(alice, marker, 10_000); // group continues: Alice is usable
       await bob.goto(`/#/e/${naddr}/chat`); // Bob re-syncs to the latest group state
       await bob.waitForTimeout(4_000);

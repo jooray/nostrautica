@@ -146,6 +146,13 @@ send and exits, which is how to check a control reconstruction before it is bill
 - `stats.mjs` / `stats.test.mjs` — the exact statistics behind it, with no normal
   approximations (a Wald interval on 0 errors returns [0, 0], which reads as proof
   of perfection) and no dependencies. 10 tests.
+- `language-adherence.mjs` / `language-adherence.test.mjs` — did the model write in
+  the event's language? Exclusive markers only (Czech and Slovak share diacritics),
+  and anything with no marker either way is `undecided` rather than folded into the
+  pass rate. It also owns `IN_LANGUAGE_FLOOR_PCT`, the ONE threshold both
+  `bakeoff.mjs` and `bakeoff-report.mjs` gate on — there were two, 98 and 95, and
+  they first disagreed about the DEPLOYED model. The test pins the floor against
+  the real measurements that placed it. 5 tests.
 - `icebreaker-fixture.test.mjs` — the properties the dense bucket must have for its
   number to mean what it says: 100% trap density, the shared person keeps its own
   artifact so FALSE_CLAIM stays measurable, and every clone resolves through
@@ -648,3 +655,179 @@ than inferred. Rows without one make `bakeoff.mjs` say so.
 **And one reporting habit:** `bakeoff-report.mjs` prints per-language attribution
 rows unconditionally. Pooling hid this run's only significant result — the two
 models fail in opposite languages and cancelled to nothing.
+
+## The field nobody graded: `reasoning_for_target` (2026-09-10)
+
+A production card showed the failure this whole directory exists to catch, in
+the one field no arm had ever looked at. Reader is Juraj; the card read:
+
+> **Milane**, Juraj je autor nástroja Nostrautica a románu Krotitelia entropie…
+> Ty hľadáš informácie o bitcoine a pláne B – Juraj ti môže ponúknuť…
+
+The reader is written about in the third person and the OTHER person is
+addressed — while the icebreakers in the SAME entry were correctly written for
+the reader to send ("Ahoj Milane, som Juraj a…"). One entry, two fields,
+opposite addressees.
+
+Everything above grades `icebreakers`. `reasoning_for_target` was saved verbatim
+by every run since 2026-07-24 and checked by none — the same shape of blind spot
+as the 2026-07-25 English-only grader, which reported a clean 0% while a live
+Slovak event inverted every opener. Every prompt fix in this file's history
+(fc7bd25, d0b7164, 5e0d793) edited the ICEBREAKER block; none of them touched
+who the reasoning is addressed to, and nothing would have noticed if they had.
+
+`gradeReasoning` mirrors the existing checks rather than reusing them, because
+the two fields have deliberately OPPOSITE conventions:
+
+| | target | candidate |
+|---|---|---|
+| `icebreakers` | "I" | "you" |
+| `reasoning_for_target` | "you" | third person |
+
+- **INVERTED** — the TARGET named with a third-person verb. They are the reader
+  and are always "you" here, so being described means the sentence is addressed
+  to somebody else. Unlike the icebreaker checks this needs no artifact mention,
+  so it is not gated by `names-an-artifact`.
+- **MISATTRIBUTED** — the CANDIDATE's artifact called "your". In this field
+  "your" can only mean the target's.
+
+The split matters: `isBriefing` treats "ask him about X" as a defect, which is
+right for an icebreaker (it cannot be sent) and exactly WRONG here, where it is
+the house style the prompt asks for. `namedInThirdPerson` is that function's
+other half, extracted so this grader can use it alone; reusing `isBriefing`
+would have flagged the intended output as the failure.
+
+### Result — reverse-dense, K=10, ×6, both languages (all replayed from cache)
+
+| model | lang | n | inverted | rate |
+|---|---|---|---|---|
+| `deepseek-v4-flash-0731` (production) | sk | 480 | 0 | **0%** |
+| `deepseek-v4-flash-0731` | en | 480 | 0 | **0%** |
+| `qwen-3-8-flash` | sk | 480 | 30 | **6.3%** |
+| `qwen-3-8-flash` | en | 480 | 17 | **3.5%** |
+| `z-ai-glm-5-3-flash` | sk | 470 | 0 | **0%** |
+| `z-ai-glm-5-3-flash` | en | 480 | 0 | **0%** |
+
+The forward shape (IB1/IB2, trap buckets, sk) is also 0/72 per arm.
+
+Every Qwen row was read by hand and they are genuine — and they are one failure
+mode, not a scatter: it abandons the second person for an analytical briefing
+about both people, which is what the prompt forbids in as many words.
+
+> Theo je full-stack web developer, ktorý sa chce len učiť, zatiaľ čo Kenji
+> potrebuje špecialistu na embedded systémy… Ich zručnosti sa vôbec nedopĺňajú.
+
+> Lars is semi-retired and seeking conversation, while Casimir is actively
+> seeking partners… There is little professional overlap.
+
+So this metric separates models where the icebreaker metric does not: Qwen 3.8
+Flash ships this in 1 reasoning in 16 (sk) while sitting at 3% on icebreaker
+attribution. It is a reason not to switch to it beyond the wrong-language
+finding already recorded above. GLM 5.3 Flash and the production model are both
+clean on it.
+
+### Grader correction, round eight — and the first from this new arm
+
+GLM's single Slovak flag was a false positive, found the way the seven before it
+were: by reading the flagged row.
+
+> Sunny je … embedded inžinierka, **ktorá** píše C a **navrhla si** vlastnú
+> hardvérovú peňaženku Copperwake.
+
+`MADE_SLAVIC\s+(?:si|jsi)` cannot separate the second-person auxiliary
+("navrhol si X" — YOU designed X) from the reflexive dative ("navrhla si vlastnú
+X" — she designed her OWN X); they are the same two tokens. The clause settles
+it: a NOMINATIVE relative pronoun makes the relativized noun the subject, so the
+verb is third person and `si` can only be reflexive.
+
+Only the unambiguously nominative forms (`ktorý`/`ktorá`, `který`/`která`) are
+listed. Object cases leave the subject free and there `si` really is second
+person — *"kniha, ktorú si napísal"* is "the book YOU wrote" and must stay
+flagged. Both directions are pinned; adding `ktorú` would have traded a false
+positive for a miss on the exact failure this file exists to catch.
+
+Re-graded offline with `icebreaker-regrade.mjs` (now reasoning-aware, so a
+grader fix still costs nothing): the correction moved that one row and no other
+number in any run.
+
+### Why the production card is nonetheless NOT evidence against the live prompt
+
+The production model scores 0/960 here, so the card almost certainly predates
+the prompt that is running now. Until **2026-09-09** (`eabd83b`) `pairInputsHash`
+carried neither the prompt nor the model, so every prompt fix listed above
+invalidated nothing it had produced: the edit deployed and every lookup kept
+hitting the artifact the OLD prompt wrote. Even now invalidation is lazy by
+design — a stage re-runs only on a new submission or an explicit organizer
+recompute, so a quiet event keeps serving its fossils.
+
+At the time of writing, 408 of 452 live pair rows predate that fix, and 17
+predate the 2026-07-25 role-binding fix entirely. **A prompt improvement does
+not repair the cards already published.** `recompute` (which clears pairs AND
+the job memo) is what does.
+
+## Ask production's own code whether a model is deployable (2026-09-10)
+
+`bakeoff-report.mjs` had two standing blockers describing `providers/venice.ts`:
+that it sends `disable_thinking` unconditionally, and that it parses with a bare
+`JSON.parse`. **Both had stopped being true, and the report went on printing
+them** — for two weeks and one week respectively:
+
+- `disable_thinking` became per-model on 2026-08-26 (`cbc564d`): venice.ts
+  probes once, remembers the refusal for the process, and honours
+  `models.<role>.disable_thinking`.
+- the bare parse became `parseModelJson` on 2026-09-04 (`5f5468c`), which strips
+  a whole-output fence and falls back to the outermost JSON span.
+
+So the suite's quality-and-cost winner was being blocked on defects the
+coordinator had already fixed. This is the same failure as 2026-08-26 in the
+other direction: **the harness is a reimplementation of `venice.ts`, and every
+adoption mistake this benchmark has made came from the two drifting.**
+
+`provider-probe.mjs` stops re-deriving the answer. It imports `VeniceLlm` and
+`scoreReverseBatch` from `packages/coordinator/dist` and runs the real thing at
+K=10 against the dense fixture. If a call fails there, it fails in production.
+`bakeoff-report.mjs` reads `results/PROBE_<model>.json` and treats it as the
+last word — a model with no probe is flagged as unproven rather than assumed
+fine.
+
+### What it found, and why it matters more than the table
+
+**`z-ai-glm-5-3-flash` fails 5 of 5 production calls**, for a third reason
+nothing in the suite was measuring: its mandatory reasoning exhausts
+`batchMaxTokens(10)` = 12,000 tokens and the response returns
+`finish_reason=length`, which `venice.ts` rejects outright. The harness never
+noticed because it does not check `finish_reason` — it simply parsed whatever
+prefix came back, so a truncated answer counted as a clean one. Raising the
+budget was tried and did not rescue it.
+
+The table, meanwhile, has GLM at the top of nearly every column (separation
+0.64, prose 4.70, 98.8% Slovak, 0.2% attribution, zero reasoning inversions).
+**Every one of those numbers is real and none of them are reachable.** That gap
+is the whole argument for this arm existing.
+
+### The probe refuses to answer when it cannot ask
+
+Its own first run scored the DEPLOYED model 0/3 — it had been started somewhere
+without DNS, and "DNS resolution failed" was being filed as a deployability
+failure. A probe that cannot reach Venice has learned nothing about the model,
+so `unreachable`/`unauthorized` are classified apart from every model verdict
+and the run throws instead of writing a file. A caveat inside a field nobody
+renders is not a safeguard, and this report is read as authority.
+
+### A live bug the probe found on the way
+
+The first probe attempt failed 3/3 with `provider timeout: Venice
+chat/completions exceeded 120000ms` — against the DEPLOYED model. That was not
+a benchmark artefact. `PROVIDER_TIMEOUTS.completion` was a flat 120s while the
+measured p95 for production's own reverse batch is 130.6s (sk), and the
+coordinator log showed `score_batch` and `score_reverse_batch` failing at
+120,03Xms and retrying — six times on 2026-09-10 alone. A timed-out call still
+generated its tokens and is still billed, so each one cost 120s of the serial
+job loop and paid twice. The deadline now scales with the output budget
+(`completionTimeoutMs`), which is what the flat number should always have been:
+one limit was doing duty for a 500-token summary and a 12,000-token batch.
+
+The latency arm was understating this too — it sent `maxTokens: 4000` while
+calling itself "the same K=10 shape production uses", so it timed a shorter
+answer than the daemon ever receives (GLM: 16.1s there, 70.6s on the real
+shape). It now sends `batchMaxTokens(10)`.

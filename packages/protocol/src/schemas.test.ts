@@ -52,6 +52,7 @@ import {
   MAX_REASONING,
   MAX_MATCHES,
   MAX_ROSTER,
+  MAX_ROSTER_PAGE,
   MAX_RELAYS,
   MAX_MEDIA,
   MAX_SUBMISSION_MEDIA,
@@ -824,18 +825,21 @@ describe("boundary length caps (PROTO-4)", () => {
     expect(() => withdrawalContentSchema.parse({ v: 1, a: "x" })).toThrow();
   });
 
-  it("31604 roster: attendees ≤ MAX_ROSTER", () => {
+  it("31604 roster: attendees ≤ MAX_ROSTER_PAGE (the PER-PAGE bound, §6.2)", () => {
     const attendee = { pubkey: hex, d: "deadbeef", role: "attendee" };
+    // MAX_ROSTER (2000) is the total across a paginated roster's pages; one page
+    // is bounded by MAX_ROSTER_PAGE, which itself sits above what 65,535 bytes
+    // can physically hold so the byte ceiling is always what actually binds.
     roundTrips(rosterContentSchema, {
       v: 2,
       eck_current: 1,
-      attendees: Array(MAX_ROSTER).fill(attendee),
+      attendees: Array(MAX_ROSTER_PAGE).fill(attendee),
     });
     expect(() =>
       rosterContentSchema.parse({
         v: 2,
         eck_current: 1,
-        attendees: Array(MAX_ROSTER + 1).fill(attendee),
+        attendees: Array(MAX_ROSTER_PAGE + 1).fill(attendee),
       }),
     ).toThrow();
     // Inner blinded `d` is bounded too (P2).

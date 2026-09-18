@@ -24,6 +24,11 @@ docs-site-build/
 CLAUDE.md
 AGENTS.md
 benchmarks/matching/cache/
+# Per-machine Claude Code state (settings.local.json, local skills). Nothing in
+# here belongs to the project, and leaving it untracked-but-unignored meant it sat
+# in every `git status` and one `git add -A` from being committed, which is the
+# same trap the audit-notes rule below exists to close.
+.claude/
 
 # scratch design assets — kept local, never committed
 landing-mockups/
@@ -55,3 +60,11 @@ benchmarks/matching/.model-watch.json
 
 # Local verification output (e.g. a docs-site build rendered to eyeball links)
 tmp/
+
+# Prompt-tuning fixtures built from REAL attendees of a REAL event (see
+# benchmarks/matching/private/README.md). The public benchmark runs on invented
+# personas precisely so it can be published; this one cannot be, and the
+# working tree of `main` is what gets copied onto the public mirror by the sync
+# ritual in CLAUDE.md. Ignoring the whole directory is the enforcement — the
+# alternative is trusting that nobody ever runs `git add -A` in a hurry.
+benchmarks/matching/private/

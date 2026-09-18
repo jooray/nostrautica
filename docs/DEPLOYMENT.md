@@ -76,22 +76,93 @@ A limit set too *short* is the worse failure: the script does not kill anything,
 so the daemon starts normally while the deploy prints "coordinator is NOT
 running" and sends whoever pushed into an incident that is not happening.
 
-The soft threshold is the part worth watching. Startup resolves each provider
-route over the network and then backfills every event's `E_inbox` plus the
-coordinator's own inbox, and that last one grows with every wrap the daemon has
-ever been sent, 98 wraps on one boot, 153 two months later. It does not come
-back down on its own. The limit was 45 s until a 2026-09-04 deploy came in at
-44 s, which is not a margin.
+The soft threshold is the part worth watching. The limit was 45 s until a
+2026-09-04 deploy came in at 44 s, which is not a margin.
 
-If the warning starts firing, look at the boot log's `[boot] … backfill`
-lines before raising anything:
+**What actually drives it is per-event startup work, not inbox backfill.** That
+correction is worth stating plainly, because this section previously blamed the
+coordinator's own inbox backfill growing with the daemon's wrap history (98
+wraps on one boot, 153 two months later) and told you to go read the `[boot] …
+backfill` counts. A 2026-09-10 restart measured 52 s with the wrap count *down*
+to 45 — startup rose while the thing it was blamed on fell, so that story cannot
+be the explanation.
+
+**You no longer have to reconstruct this from timestamps.** The daemon now times
+its own boot and prints the breakdown immediately before the readiness line — so
+it is inside the window the deploy measures and cannot flatter it:
+
+```
+[boot] ready in 1.2s — 4 event(s); phases:
+[boot]   install:config-fetch 1.2s ×4
+[boot]   install:chat 1.2s ×4
+[boot]   chat:roster-scan 1.2s ×4
+[boot]   install:inbox-backfill 1.2s ×4
+[boot]   boot:restore-events 0.9s
+[boot]   boot:coordinator-inbox 0.3s
+```
+
+Phases nest (`install:chat` contains `chat:roster-scan`), so an enclosing phase
+legitimately exceeds the sum of the lines under it, and `×N` is the number of
+events that phase ran for. When the soft warning fires, read these lines.
+
+#### What the 9–12 s per event was
+
+Measured against a restart with four chat-enabled events of twelve members each,
+over a transport charging 300 ms per relay read. (The measurement harness was a
+throwaway; what ships is a regression test asserting the *structure* — one read
+per roster, several events in flight at once — because a wall-clock assertion in
+CI is a flake generator.)
+
+| | before | after |
+|---|---|---|
+| ready in | 17.2 s | 1.2 s |
+| relay reads | 57 | 13 |
+| `chat:roster-scan` | 14.5 s (84% of the boot) | 1.2 s |
+
+and at eight events of twenty-five members: **67.9 s → 2.2 s**, 225 relay reads
+→ 25. Two things were wrong. The first accounts for most of it (17.2 s → 4.0 s on
+its own); the second took the remainder (4.0 s → 1.2 s):
+
+- **The roster scan read key packages one member at a time.** `backfillApproved`
+  called `syncMember` per approved attendee and each opened its own kind-30443
+  fetch for a single author — so the cost was O(events × members) serialized
+  round trips, which is why it grew without ever coming back down. A relay filter
+  takes an author list, so the whole roster is now one read; `syncMember` still
+  filters the result to its own member's authorized identities, so nobody sees a
+  key package they did not see before.
+- **Events restored strictly one after another.** They are independent — a
+  different inbox, a different MLS group, a different config — so up to
+  `RESTORE_CONCURRENCY` (4, in `coordinator.ts`, with the reasoning next to it)
+  now restore at once. Four rather than unbounded because every restoring event's
+  reads multiplex over the same relay sockets, and a forty-event daemon fanning
+  out unbounded would put ~120 concurrent REQs on each one.
+
+Everything genuinely shared was already serialized a layer down and still is:
+`node:sqlite` is synchronous, `MarmotClientMls` chains MLS commits per group, and
+the roster walk takes the per-member subject lock. The per-member work *within*
+one event stays serial on purpose — what is left after the batched read is a
+local membership check and, for a member needing repair, an MLS Add, and Adds
+against one group serialize anyway (the concurrent-commit hazard), so concurrency
+there would buy queueing rather than speed.
+
+The other two costs from the 2026-09-10 measurement are untouched, and are now a
+much larger share of a much smaller total: the coordinator-inbox backfill (~5 s
+at 45 wraps) and the kind 31611 announce publish (up to ~4.4 s). The announce
+remains the cheap lever if one is ever needed: `main.ts` `await`s it between `coordinator.start()`
+and the readiness line, and `NostrClient.publish` resolves on the first relay ack
+— but when *no* relay acks (all five timed out on that boot) it pays nostr-tools'
+full publish timeout before the daemon reports ready. Nothing waits on that
+announcement.
+
+To read a real boot:
 
 ```sh
 ssh <coordinator-host> 'grep -a "\[boot\]" ~/log/nostrautica-coordinator.log | tail -20'
 ```
 
-Growing wrap counts there mean the fix is bounding the backfill window, not
-buying more seconds.
+If the slowest line is a per-event phase and there are simply more events than
+there used to be, the next lever is `RESTORE_CONCURRENCY` — not deferring work
+past the readiness line, which only makes the metric lie.
 
 ### Runtime
 

@@ -64,3 +64,51 @@ test("a join deep link with no reachable relay ends in a retryable error, not a 
   await expect(page.getByRole("alert")).toBeVisible({ timeout: 30_000 });
   await expect(page.getByRole("button", { name: /try again|retry/i })).toBeVisible();
 });
+
+/**
+ * Paste-a-link on Home.
+ *
+ * Installed as a PWA, Nostrautica is a separate browser from the one that opens
+ * links: an invite tapped in a chat app lands in the system browser, which holds
+ * none of this device's identity. The paste box on Home is the only way across
+ * that gap, so it has to accept the exact string an organizer hands out — code
+ * and all — and it has to refuse anything else out loud rather than navigating
+ * to a card that can never load.
+ *
+ * Lives in the relay-free smoke tier because none of this needs a relay: what is
+ * under test is the parse and the navigation, not what the event turns out to be.
+ */
+const SMOKE_NADDR =
+  "naddr1qvzqqqrukvpzqyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3zyg3qq9hxmt0ddjj6etkv4h8gyzs8z7";
+
+test("pasting an invite link on Home opens the join screen it names", async ({ page }) => {
+  await page.goto("/#/");
+  // The whole link, as copied out of a chat app: another origin, an invite code,
+  // and the organizer's `lang=`.
+  await page
+    .getByLabel(/event link/i)
+    .fill(
+      `https://nostrautica.cypherpunk.today/app/#/e/${SMOKE_NADDR}/join?code=nsec1pyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyysjzgfpyyszg5c4n&lang=sk`,
+    );
+  await page.getByRole("button", { name: /^open$/i }).click();
+  // Join consumes the code and strips it from the URL on arrival (spec §5.2),
+  // so the assertion is the screen, not the query string.
+  await expect(page).toHaveURL(new RegExp(`#/e/${SMOKE_NADDR}/join`));
+  await expect(page.getByText(/loading event/i)).toBeVisible();
+});
+
+test("pasting a bare address opens the event", async ({ page }) => {
+  await page.goto("/#/");
+  await page.getByLabel(/event link/i).fill(`nostr:${SMOKE_NADDR}`);
+  await page.getByRole("button", { name: /^open$/i }).click();
+  await expect(page).toHaveURL(new RegExp(`#/e/${SMOKE_NADDR}$`));
+});
+
+test("pasting something that isn't an event link says so and stays on Home", async ({ page }) => {
+  await page.goto("/#/");
+  await page.getByLabel(/event link/i).fill("https://example.org/not-an-event");
+  await page.getByRole("button", { name: /^open$/i }).click();
+  await expect(page.getByRole("alert")).toContainText(/no event link/i);
+  expect(new URL(page.url()).hash).toBe("#/");
+  await expect(page.getByText("Meet the right people")).toBeVisible();
+});

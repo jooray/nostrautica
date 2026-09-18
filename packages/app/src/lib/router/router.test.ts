@@ -32,18 +32,27 @@ function fakeWindow() {
 const HOME: Route = { name: "home" };
 const EVENT: Route = { name: "event", naddr: "naddr1xyz" };
 const POSTS: Route = { name: "posts", naddr: "naddr1xyz" };
-const MATCHES: Route = { name: "matches", naddr: "naddr1xyz" };
+const REPORT: Route = { name: "report", naddr: "naddr1xyz" };
 const ATTENDEES: Route = { name: "attendees", naddr: "naddr1xyz" };
 const ATTENDEE: Route = { name: "attendee", naddr: "naddr1xyz", npub: "npub1abc" };
 const POST: Route = { name: "post", naddr: "naddr1xyz", d: "d1" };
 const DM: Route = { name: "dm" };
 const DM_PEER: Route = { name: "dmPeer", npub: "npub1abc" };
+const DM_PEER2: Route = { name: "dmPeer", npub: "npub1def" };
 const SETTINGS: Route = { name: "settings" };
 
 let fw: ReturnType<typeof fakeWindow>;
 let router: Router;
 
 beforeEach(() => {
+  // The router persists `eventOrigin` and `dmReturn` in sessionStorage so both
+  // survive a reload, which is deliberate. It also means one test's state is the
+  // next test's starting condition unless it is cleared here.
+  try {
+    sessionStorage.clear();
+  } catch {
+    /* not every environment has one; the router tolerates that too */
+  }
   fw = fakeWindow();
   vi.stubGlobal("window", fw.win);
   router = new Router();
@@ -131,10 +140,10 @@ describe("router back-stack (UX-8)", () => {
 
 describe("router hierarchical up()", () => {
   it("rises to the contextual parent, not the chronological previous screen", () => {
-    // Arrive at matches via a non-hierarchical path: home → posts → matches.
+    // Arrive at the report via a non-hierarchical path: home → posts → the report.
     go(POSTS);
-    go(MATCHES);
-    router.up(); // hierarchy says matches' parent is the event home, NOT posts
+    go(REPORT);
+    router.up(); // hierarchy says the report' parent is the event home, NOT posts
     fw.navigate(buildHash(EVENT));
     expect(router.route).toEqual(EVENT);
   });
@@ -147,18 +156,18 @@ describe("router hierarchical up()", () => {
   });
 
   it("works on a cold deep-link with an empty stack", () => {
-    fw.navigate(buildHash(MATCHES)); // cold open, no in-app history
+    fw.navigate(buildHash(REPORT)); // cold open, no in-app history
     router.up();
     const target = router.route;
-    // parentOf(matches) is the event home; up() must reach it regardless of stack.
-    expect(target.name === "matches" || target.name === "event").toBe(true);
+    // parentOf(the report) is the event home; up() must reach it regardless of stack.
+    expect(target.name === "report" || target.name === "event").toBe(true);
   });
 
-  it("collapses a matching stack top so hardware Back stays coherent", () => {
-    // Linear drill: home → event → matches. up() from matches returns to event
+  it("collapses a duplicate stack top so hardware Back stays coherent", () => {
+    // Linear drill: home → event → the report. up() from the report returns to event
     // AND pops the duplicate event off the stack, so the next up() reaches home.
     go(EVENT);
-    go(MATCHES);
+    go(REPORT);
     router.up();
     fw.navigate(buildHash(EVENT));
     expect(router.route).toEqual(EVENT);
@@ -218,7 +227,7 @@ describe("upLabelKey names the destination", () => {
     expect(upLabelKey(EVENT)).toBe("more.allEvents");
   });
   it("labels event subtabs by their parent (event home = Overview)", () => {
-    expect(upLabelKey(MATCHES)).toBe("nav.overview");
+    expect(upLabelKey(REPORT)).toBe("nav.overview");
     expect(upLabelKey(ATTENDEES)).toBe("nav.overview");
   });
   it("labels a person detail 'People'", () => {
@@ -252,7 +261,7 @@ describe("a back that goes nowhere must not latch goingBack", () => {
    * Land on Home with an empty stack, then take the no-op back. Afterwards a
    * forward walk to Matches must still have Home on the stack, so back() from
    * Matches goes to HOME. With the flag latched the walk is not pushed, the
-   * stack is empty, and back() falls through to matches' contextual PARENT (the
+   * stack is empty, and back() falls through to the report' contextual PARENT (the
    * event home) instead — a different screen, which is the user-visible damage.
    */
   function homeThenMatches(noOpBack: () => void) {
@@ -260,7 +269,7 @@ describe("a back that goes nowhere must not latch goingBack", () => {
     fw.navigate(buildHash(HOME)); // system back onto the stack top → pops it
     expect(router.canGoBack).toBe(false); // stack is empty, we are on Home
     noOpBack();
-    go(MATCHES);
+    go(REPORT);
     router.back();
     // Whatever back() pointed the hash at, let the browser deliver it.
     fw.navigate(fw.win.location.hash);
@@ -274,5 +283,79 @@ describe("a back that goes nowhere must not latch goingBack", () => {
   it("back() with an empty stack on Home does not eat the next navigation", () => {
     homeThenMatches(() => router.back());
     expect(router.route).toEqual(HOME);
+  });
+});
+
+/**
+ * Up from a DM used to be the conversations list unconditionally, which is the
+ * right answer only for someone who picked the thread out of that list. The
+ * common path is browsing People, writing to somebody, and wanting to carry on
+ * down the roster — and that user was being dropped into a list of
+ * conversations they never asked for.
+ */
+describe("a DM thread remembers where it was opened from", () => {
+  /**
+   * These assert on the hash `up()` actually WROTE, rather than following it
+   * with `fw.navigate(buildHash(expected))` the way the suite above does. That
+   * idiom sets the hash to the expected value itself, so the assertion after it
+   * holds whatever the router decided — three of these tests passed against the
+   * unfixed router before this was changed.
+   */
+  const upTarget = (): string => {
+    router.up();
+    return fw.win.location.hash;
+  };
+
+  it("up() from a thread opened in People returns to People", () => {
+    go(EVENT);
+    go(ATTENDEES);
+    go(DM_PEER);
+    expect(upTarget()).toBe(buildHash(ATTENDEES));
+  });
+
+  it("names the destination People, so the button says where it goes", () => {
+    go(ATTENDEES);
+    go(DM_PEER);
+    expect(upLabelKey(router.route, router.eventOrigin, router.dmReturn)).toBe("nav.people");
+  });
+
+  it("a thread opened FROM the conversations list still rises to that list", () => {
+    go(DM);
+    go(DM_PEER);
+    expect(upTarget()).toBe(buildHash(DM));
+  });
+
+  it("writing to a second person in a row still returns to the roster", () => {
+    // Thread-to-thread keeps the ORIGINAL origin: the roster is still where the
+    // user was working, and re-pointing "up" at the previous thread would strand
+    // them one conversation deeper with every reply.
+    go(ATTENDEES);
+    go(DM_PEER);
+    go(DM_PEER2);
+    expect(upTarget()).toBe(buildHash(ATTENDEES));
+  });
+
+  it("forgets the origin once you leave chat, so a later thread isn't misrouted", () => {
+    go(ATTENDEES);
+    go(DM_PEER);
+    go(EVENT);
+    expect(router.dmReturn).toBeUndefined();
+    go(DM_PEER);
+    expect(upTarget()).toBe(buildHash(EVENT));
+  });
+
+  it("a cold deep link into a thread still has somewhere to go", () => {
+    // A real cold open: the hash is already the thread when the router boots,
+    // so there is no departed screen to remember. Built by hand rather than
+    // reusing the shared `router`, which has already booted on "#/".
+    const cold = fakeWindow();
+    cold.win.location.hash = buildHash(DM_PEER);
+    vi.stubGlobal("window", cold.win);
+    const r = new Router();
+    r.init();
+    expect(r.route).toEqual(DM_PEER);
+    expect(r.dmReturn).toBeUndefined();
+    r.up();
+    expect(cold.win.location.hash).toBe(buildHash(DM));
   });
 });

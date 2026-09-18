@@ -16,9 +16,12 @@ and streaming subscriptions alike. Sender-mutable rumors (profile submissions,
 corrections, talk submissions) additionally carry an explicit `rev`/`revision` field that
 is the primary ordering key; the sender-chosen timestamp is only a tie-break (§3.3).
 
-The custom kind ranges are `31600`–`31611` (addressable) and `21600`–`21610`
+The custom kind ranges are `31600`–`31612` (addressable) and `21600`–`21610`
 (gift-wrapped rumors). All custom payloads carry `v: 2`; readers reject any payload or
-public event whose `v` is not exactly `2` (§2).
+public event whose `v` is not exactly `2` (§2). The single exception is a PAGINATED
+`31604` roster payload, which declares `v: 3` so that a client predating pagination
+fails loudly rather than rendering page 0 as the whole membership (§6.2.1); a roster that
+fits in one payload still carries `v: 2`.
 
 ## Addressable Events
 
@@ -28,7 +31,7 @@ public event whose `v` is not exactly `2` (§2).
 | 31601 | Invite List | `E_id` | Public, hash-hidden; `d` = event `d` | JSON invite hash list, ≤10,000 entries. Only `E_id` may publish. Voiding = republishing without the hash. |
 | 31602 | Self-encrypted profile / reuse library | Attendee account | NIP-44 self-encrypted; blinded `d` | Per-event self-copy (`a` = coordinate) and cross-event reuse library (`a: null`), same content schema. |
 | 31603 | Directory Entry | Coordinator, or `E_id` without one | ECK-encrypted; ECK-blinded `d` | One approved attendee's profile/media/transcripts/derived profile. Replaced when profile or derived output changes; NIP-09-deleted on revocation or withdrawal. Readers accept only the coordinator currently named in the newest `31600`, or `E_id`. |
-| 31604 | Roster | Coordinator, or `E_id` without one | ECK-encrypted; `d` = event `d` | Approved-attendee index, current ECK version, per-device `chat_keys`, and the active Marmot `nostr_group_id` when chat is on. Latest valid roster wins; `nostr_group_id` is the authoritative event→group binding. |
+| 31604 | Roster | Coordinator, or `E_id` without one | ECK-encrypted; `d` = event `d` (page N at `<event-d>:N`) | Approved-attendee index, current ECK version, per-device `chat_keys`, and the active Marmot `nostr_group_id` when chat is on. Latest valid roster wins; `nostr_group_id` is the authoritative event→group binding. A roster too large for one NIP-44 payload is paginated across `<event-d>:1`… with a `pages` count on page 0 and `v:3` (§6.2.1); one that fits keeps `v:2` and its single address. |
 | 31605 | Match List | Coordinator | NIP-44 coordinator→recipient; ECK-blinded `d` | Directional match reasoning (+ optional icebreakers) for one recipient. Replaced after scoring or ECK rotation. |
 | 31606 | Match Matrix | Coordinator | ECK-encrypted; `d` = event `d` | Event-wide score-only matrix; published only when `match_visibility: event`. Deleted when visibility changes away from it. |
 | 31607 | Members-only Event Post | `E_id` | ECK-encrypted; random stable `d` | Official members-only post. Same `d` on edit; old ciphertext stays readable to whoever held the ECK version it was published under. |
@@ -36,6 +39,7 @@ public event whose `v` is not exactly `2` (§2).
 | 31609 | Event Theme | `E_id` | Public raw CSS; `d` = event `d` | Organizer-controlled presentation. Not a secret-safe rendering boundary: clients must not render it on routes carrying secrets. |
 | 31610 | Talk | Coordinator, or `E_id` without one | ECK-encrypted; talk/ECK-blinded `d` | Moderated prerecorded talk, transcript, language, revision, status. Republished under a new address on ECK rotation; old address NIP-09-deleted. |
 | 31611 | Coordinator Announcement | Coordinator | Public; `d = nostrautica:coordinator` | Discovery name, capabilities, resolved-route privacy disclosure, relays, optional pricing. Latest announcement per coordinator wins. |
+| 31612 | Community | `E_id` | Public; `d` = the space's `d` | The standing-group twin of the NIP-52 31923 a dated event publishes: `d`, `title`, optional `summary`/`image`/`t`, and deliberately no `start`, `end`, `location` or day-index tags. A community is not a calendar event, and publishing one as 31923 would put it into other clients' calendars as a zero-length event at its creation moment. |
 
 ## Gift-Wrapped Rumors
 
@@ -77,6 +81,6 @@ user-private (§4.1):
 theme, language, correction revisions, watch progress. Those are not relay records and are
 not listed here.)
 
-The currently used custom set is exactly `31600` through `31611` and `21600` through
+The currently used custom set is exactly `31600` through `31612` and `21600` through
 `21610`. Before a public release, re-check every custom kind against the Nostr NIPs
 registry.

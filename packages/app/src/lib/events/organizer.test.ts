@@ -36,6 +36,8 @@ import {
   eckDecrypt,
   KIND_INVITE_LIST,
   KIND_ROSTER,
+  splitRoster,
+  rosterPageD,
   type InviteListContent,
   type RosterContent,
   type ChatBackend,
@@ -68,6 +70,7 @@ import {
   approveAttendee,
   generateInvites,
   revokeAttendeeClient,
+  sharedInviteExp,
   updateEventConfig,
   type PendingRequest,
   fetchPending,} from "./organizer.js";
@@ -306,6 +309,53 @@ describe("generateInvites label numbering", () => {
 });
 
 /**
+ * The shared entry code's policy as it reaches the wire.
+ *
+ * `sharedInviteExp` (unit-tested at the bottom of this file) decides that 0
+ * hours means "no deadline"; this is the other half — that `generateInvites`
+ * actually OMITS `exp` rather than writing some falsy value into the published
+ * entry. `exp` is `positive()` in the schema, so an `exp: 0` would make the whole
+ * invite list unparseable to the coordinator and revoke every code on it, not
+ * just this one.
+ */
+describe("shared entry code policy", () => {
+  async function publishedEntry(opts: { uses?: number; exp?: number }) {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+    const [generated] = await generateInvites(
+      {} as AppSigner,
+      ctx,
+      1,
+      "https://app.example/",
+      "door",
+      opts,
+    );
+    const content: InviteListContent = JSON.parse(publishSigned.mock.calls[0][0].content);
+    return { generated, entry: content.invites[0] };
+  }
+
+  it("publishes an unlimited, never-expiring code with no exp key at all", async () => {
+    const { generated, entry } = await publishedEntry({ uses: 0, exp: undefined });
+
+    expect(entry.uses).toBe(0);
+    expect("exp" in entry).toBe(false);
+    // And the in-tab record the QR panel renders from agrees, so the panel can
+    // say "never expires" from `generated.exp === undefined` alone.
+    expect(generated.exp).toBeUndefined();
+    expect(generated.uses).toBe(0);
+  });
+
+  it("publishes the deadline when one was asked for", async () => {
+    const exp = 1_789_500_000 + 168 * 3600;
+    const { generated, entry } = await publishedEntry({ uses: 100, exp });
+
+    expect(entry.uses).toBe(100);
+    expect(entry.exp).toBe(exp);
+    expect(generated.exp).toBe(exp);
+  });
+});
+
+/**
  * Invite-list republish safety.
  *
  * `generateInvites` is a read-modify-write over a REPLACEABLE event: it publishes
@@ -491,6 +541,141 @@ describe("roster read-modify-write safety", () => {
     await approveAttendee({} as AppSigner, ctx, request(BOB));
 
     expect(publishedRoster().attendees.map((a) => a.pubkey)).toEqual([BOB]);
+  });
+
+  /**
+   * A roster too big for one NIP-44 payload lives on several 31604s
+   * (PROTOCOL-NIP.md §6.2). The organizer paths read and rewrite the whole index,
+   * so all of them have to follow the pages — and an approval still has to cost
+   * one publish, or the cheapest operation in the app becomes the most expensive.
+   */
+  describe("paginated roster", () => {
+    // Real curve points, generated once: the revoke path gift-wraps a re-grant to
+    // every remaining member, and a non-point pubkey fails inside nip44 rather
+    // than in the code under test.
+    const POOL: string[] = [];
+    function member(i: number): string {
+      while (POOL.length <= i) POOL.push(getPublicKey(generateSecretKey()));
+      return POOL[i]!;
+    }
+
+    /** A roster big enough to need more than one page. */
+    function bigRoster(n: number): RosterContent {
+      return {
+        v: 2,
+        eck_current: 1,
+        attendees: Array.from({ length: n }, (_, i) => ({
+          pubkey: member(i),
+          d: (i + 0x1000).toString(16).padStart(32, "a"),
+          role: "attendee" as const,
+        })),
+      };
+    }
+
+    /** The 31604 events a paginated roster is actually published as. */
+    function pageEvents(roster: RosterContent, createdAt = 5000) {
+      return splitRoster(roster).map((page, i) => ({
+        id: `roster-${i}-${createdAt}`,
+        kind: KIND_ROSTER,
+        pubkey: EID_PUBKEY,
+        created_at: createdAt,
+        tags: [["d", rosterPageD(IDENTIFIER, i)], ["a", COORD], ["eck", "1"], ["v", "2"]],
+        content: eckEncrypt(ECK_BYTES, JSON.stringify(page)),
+      }));
+    }
+
+    /** Serve each page only to the REQ that asked for its `d`, as a relay would. */
+    function serve(events: { tags: string[][] }[]): void {
+      fetchEventsRelayOnly.mockImplementation(async (filter: { "#d"?: string[] }) => {
+        const want = new Set(filter["#d"] ?? []);
+        return events.filter((e) => e.tags.some((t) => t[0] === "d" && want.has(t[1]!)));
+      });
+    }
+
+    function publishedRosterPages() {
+      return publishSigned.mock.calls
+        .map((c) => c[0] as { kind: number; content: string; tags: string[][] })
+        .filter((e) => e.kind === KIND_ROSTER);
+    }
+
+    it("reads every page and republishes only the one the approval changed", async () => {
+      const roster = bigRoster(600);
+      const pages = pageEvents(roster);
+      expect(pages.length).toBeGreaterThan(1);
+      serve(pages);
+
+      await approveAttendee({} as AppSigner, ctx, request(BOB));
+
+      // One publish, not one per page — an approval appends, and packing is
+      // front-to-back, so only the last page's bytes moved.
+      const published = publishedRosterPages();
+      expect(published).toHaveLength(1);
+      expect(published[0]!.tags.find((t) => t[0] === "d")?.[1]).toBe(
+        rosterPageD(IDENTIFIER, pages.length - 1),
+      );
+      // And it really carries the new member, on top of everyone already there.
+      const lastPage = JSON.parse(eckDecrypt(ECK_BYTES, published[0]!.content)) as RosterContent;
+      expect(lastPage.attendees.at(-1)!.pubkey).toBe(BOB);
+    });
+
+    it("republishes page 0 as well when the approval opens a new page", async () => {
+      // Grow to the point where one more entry needs another page: page 0's
+      // `pages` count moves, so it is republished too — two publishes, not N.
+      let n = 600;
+      // Bounded for the same reason as roster.test.ts's boundary search: without
+      // it, a splitRoster that stops paginating hangs the suite instead of
+      // failing it.
+      while (splitRoster(bigRoster(n + 1)).length === splitRoster(bigRoster(n)).length) {
+        n++;
+        if (n > 1000) throw new Error("never found a page boundary — splitRoster stopped paginating");
+      }
+      const pages = pageEvents(bigRoster(n));
+      serve(pages);
+
+      await approveAttendee({} as AppSigner, ctx, request(BOB));
+
+      const ds = publishedRosterPages().map((e) => e.tags.find((t) => t[0] === "d")?.[1]);
+      expect(new Set(ds)).toEqual(
+        new Set([rosterPageD(IDENTIFIER, 0), rosterPageD(IDENTIFIER, pages.length)]),
+      );
+    });
+
+    it("aborts rather than rewriting the index when a continuation page is missing", async () => {
+      // Page 0 says there are N pages and one of them did not come back. The
+      // membership is unknown, and republishing what we DID read would drop
+      // everyone on the missing page from the event.
+      const pages = pageEvents(bigRoster(600));
+      serve(pages.slice(0, -1));
+
+      await expect(approveAttendee({} as AppSigner, ctx, request(BOB))).rejects.toThrow(
+        /couldn't read/i,
+      );
+      expect(publishSigned).not.toHaveBeenCalled();
+    });
+
+    it("a revoke rewrites every page, because every blinded d changed", async () => {
+      const roster = bigRoster(600);
+      const victim = roster.attendees[5]!.pubkey;
+      const pages = pageEvents(roster);
+      serve(pages);
+      fetchEvents.mockResolvedValue([]);
+
+      await revokeAttendeeClient({} as AppSigner, ctx, victim);
+
+      const keys = await loadEventKeys(COORD);
+      const newEck = base64ToBytes(keys!.eck.find((v) => v.id === 2)!.key);
+      const published = publishedRosterPages();
+      expect(published.length).toBeGreaterThan(1);
+      const merged = published
+        .map((e) => JSON.parse(eckDecrypt(newEck, e.content)) as RosterContent)
+        .flatMap((p) => p.attendees);
+      expect(merged).toHaveLength(roster.attendees.length - 1);
+      expect(merged.some((a) => a.pubkey === victim)).toBe(false);
+      // Explicit budget: a revoke re-grants the rotated ECK to every remaining
+      // member, so this case does 599 real NIP-44 encryptions. It lands around
+      // 4.5s alone and tips over vitest's 5s default under a loaded suite — a
+      // slow test, not a hanging one.
+    }, 60_000);
   });
 
   it("refuses to revoke against a roster that doesn't list the person being revoked", async () => {
@@ -754,5 +939,42 @@ describe("updateEventConfig relay editing", () => {
       /at least one relay/,
     );
     expect(publishSigned).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The "valid for (hours)" field on the shared entry code.
+ *
+ * The regression this pins is not a crash — it is a silent substitution. The
+ * handler used to compute `Math.max(1, hours) * 3600`, so an organizer asking
+ * for no expiry (0, the same thing 0 means in the headcount field next to it)
+ * got a one-hour code: the most restrictive window the form can express, handed
+ * out as if it were the least. Nothing on screen said so, and the symptom only
+ * surfaces hours later as "some people got in, most are stuck in the queue".
+ */
+describe("sharedInviteExp", () => {
+  const NOW = 1_789_500_000_000; // ms
+
+  it("omits exp entirely for 0, so the published code never expires", () => {
+    expect(sharedInviteExp(0, NOW)).toBeUndefined();
+  });
+
+  it("treats an emptied field (null/undefined/NaN) as no expiry, not as one hour", () => {
+    expect(sharedInviteExp(null, NOW)).toBeUndefined();
+    expect(sharedInviteExp(undefined, NOW)).toBeUndefined();
+    expect(sharedInviteExp(NaN, NOW)).toBeUndefined();
+    expect(sharedInviteExp(-5, NOW)).toBeUndefined();
+  });
+
+  it("converts hours to a unix-SECONDS deadline", () => {
+    expect(sharedInviteExp(1, NOW)).toBe(1_789_500_000 + 3600);
+    expect(sharedInviteExp(4, NOW)).toBe(1_789_500_000 + 4 * 3600);
+    expect(sharedInviteExp(168, NOW)).toBe(1_789_500_000 + 168 * 3600);
+  });
+
+  it("produces an integer for a fractional hour count", () => {
+    const exp = sharedInviteExp(0.5, NOW);
+    expect(exp).toBe(1_789_500_000 + 1800);
+    expect(Number.isInteger(exp)).toBe(true);
   });
 });

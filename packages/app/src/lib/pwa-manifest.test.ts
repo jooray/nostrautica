@@ -31,6 +31,37 @@ describe("PWA manifest is linked (audit U6) — source templates", () => {
     expect(cfg).toMatch(/icon-192\.png/);
     expect(cfg).toMatch(/icon-512\.png/);
   });
+
+  it("declares a maskable icon, so Android doesn't box the logo in white", () => {
+    // Without one, Chrome on Android treats every icon as legacy: it shrinks it
+    // and centres it on a white adaptive-icon background. Reported 2026-09-18 as
+    // "a purple square on a white box" — which it was, because the icons were
+    // also flat colour (see the file assertions below).
+    expect(read("vite.config.ts")).toMatch(/purpose:\s*"maskable"/);
+  });
+
+  it("links an apple-touch-icon, so iOS doesn't screenshot the page", () => {
+    // iOS never reads the manifest's icons for Add to Home Screen.
+    expect(read("src/app.html")).toMatch(
+      /<link\s+rel="apple-touch-icon"\s+href="%sveltekit\.assets%\/apple-touch-icon\.png"\s*\/?>/,
+    );
+  });
+
+  it("the icon files are real artwork, not the flat-colour placeholders", () => {
+    // The originals were 545 B and 1879 B: single-colour #7c5cff fills, committed
+    // as placeholders in July and shipped for two months. Size is a crude proxy
+    // but it is the one that would have caught it — a 512x512 PNG of actual
+    // artwork cannot be 2 KB, and a flat fill cannot be 50 KB.
+    for (const [file, minBytes] of [
+      ["static/icon-192.png", 4_000],
+      ["static/icon-512.png", 10_000],
+      ["static/icon-512-maskable.png", 10_000],
+      ["static/apple-touch-icon.png", 4_000],
+    ] as const) {
+      const size = readFileSync(resolve(pkgRoot, file)).byteLength;
+      expect(size, `${file} looks like a flat-colour placeholder`).toBeGreaterThan(minBytes);
+    }
+  });
 });
 
 // Full artifact assertions run only when a build exists (produced by

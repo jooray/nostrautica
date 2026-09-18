@@ -99,6 +99,53 @@ export function assertNip44CiphertextCeiling(ciphertext: string): void {
   }
 }
 
+// The other end of the same layout: the SMALLEST legal classic v2 payload is a
+// 1-byte plaintext, whose padded region is 2 + 32 bytes, giving
+// 1 + 32 + 34 + 32 = 99 raw bytes = 132 base64 chars. The spec names both bounds
+// (NIP-44 "Implementation details": 132..87472 chars, 99..65603 bytes) precisely
+// so a decoder can reject junk before allocating for it.
+const NIP44_MIN_CIPHERTEXT_B64 = 132;
+
+/** Standard base64 alphabet with canonical padding — no URL-safe chars, no whitespace. */
+const NIP44_B64 = /^[A-Za-z0-9+/]+={0,2}$/;
+
+/**
+ * Whether `ciphertext` could be a NIP-44 v2 payload AT ALL. A shape test on the
+ * base64 envelope — it proves nothing about whether the thing decrypts.
+ *
+ * This exists for one job: never hand a REMOTE signer a string that provably is
+ * not NIP-44. The app's own decrypts fail cheaply and in-process, but every
+ * `AppSigner.nip44Decrypt` on a NIP-46 connection is a relay round trip to
+ * someone's phone, and some signers surface a failure as a push notification.
+ * Clave (iOS) does, and on 2026-09-17 a user reported a recurring
+ * "nip44_decrypt failed: Invalid base64" that turned out to be their own kind-10000
+ * mute list, written by another client in 2024 and encrypted with NIP-04 —
+ * `<base64>?iv=<base64>`, which is not base64 at all. We had asked their signer
+ * to decrypt it on every visit to a screen that reads mutes, forever, because the
+ * failure was never definitive enough to stop retrying. We could have known the
+ * answer without asking.
+ *
+ * Deliberately conservative: it rejects exactly what a strict decoder rejects
+ * (alphabet, padding, the spec's length window) and nothing more. It does NOT
+ * check the version byte — a payload whose version this client doesn't know is a
+ * different condition, and NIP-44 requires it be reported as "unsupported
+ * version" rather than as a base64 error. A `#` prefix (the spec's marker for a
+ * future non-base64 version) does fail here, which is correct for the only thing
+ * callers do with a `false`: don't spend a signer round trip on it.
+ */
+export function isNip44Ciphertext(ciphertext: unknown): ciphertext is string {
+  if (typeof ciphertext !== "string") return false;
+  if (ciphertext.length < NIP44_MIN_CIPHERTEXT_B64) return false;
+  if (ciphertext.length > NIP44_MAX_CIPHERTEXT_B64) return false;
+  if (ciphertext.length % 4 !== 0) return false;
+  return NIP44_B64.test(ciphertext);
+}
+
+/** True for a legacy NIP-04 payload (`<base64>?iv=<base64>`), which is not NIP-44. */
+export function isNip04Ciphertext(ciphertext: unknown): boolean {
+  return typeof ciphertext === "string" && ciphertext.includes("?iv=");
+}
+
 export function eckEncrypt(eck: Uint8Array, plaintext: string): string {
   if (eck.length !== 32) throw new Error("ECK must be 32 bytes");
   assertNip44Ceiling(plaintext);

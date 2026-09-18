@@ -65,6 +65,12 @@ function warm(key: string, run: () => Promise<unknown>): void {
   inflight.set(key, job);
 }
 
+/** Test-only: forget which warms already ran, so each case starts cold. */
+export function __resetPrefetchForTests(): void {
+  inflight.clear();
+  doneAt.clear();
+}
+
 /** Decryption without a user-visible prompt is only possible with a local key. */
 function isSilentSigner(signer: AppSigner | null | undefined): signer is AppSigner {
   return !!signer && (signer.method === "local" || !!signer.getSecretKey?.());
@@ -91,16 +97,29 @@ export function prefetchJoinLanding(ctx: EventContext): void {
 }
 
 /**
- * Warm the Attendees tab: directory entries (ECK-decrypted from the keystore —
- * no signer, no prompt) + their kind-0 profiles; the match list too when the
- * signer can decrypt it silently.
+ * Warm the People tab: the roster + every directory entry, fully ECK-decrypted
+ * (from the keystore — no signer, no prompt), plus their kind-0 profiles; the
+ * match list too when the signer can decrypt it silently. Matched people lead
+ * the People page, so a warm directory with a cold match list still paints half
+ * a screen — both halves are warmed here.
+ *
+ * This is the one keyed job for the People tab. `prefetchEventContent` used to
+ * inline a SECOND copy of the directory+profiles+matches fan-out under its own
+ * key, and both fire on every event open, so the app fetched, signature-checked
+ * and decrypted the whole roster twice, concurrently, on the main thread, while
+ * the event page was still painting.
+ *
+ * The explicit `fetchRoster` that used to run first is gone too: `fetchDirectory`
+ * fetches and caches the roster itself (and now shares that read with the People
+ * page's own stream), so awaiting it here was a third relay round-trip for an
+ * event we were about to ask for anyway — and a serial one, which delayed the
+ * entry read by a full round-trip.
  */
 export function prefetchAttendeesTab(
   ctx: EventContext,
   signer: AppSigner | null,
 ): void {
   warm(`attendees:${ctx.coordinate}`, async () => {
-    await fetchRoster(ctx);
     const entries = await fetchDirectory(ctx);
     if (entries.length) await fetchProfiles(entries.map((e) => e.pubkey));
   });
@@ -148,27 +167,28 @@ export function prefetchIdentity(signer: AppSigner | null): void {
 
 /**
  * Content warmers for a coordinate (§2.15), run when a member opens/joins an
- * event: directory + profiles + posts + attendee posts + event page + talks +
- * theme (all keystore-ECK or public — no signer prompt); matches only for a
- * silent signer. "Joining an event precaches the People tab."
+ * event: the People tab (delegated to `prefetchAttendeesTab` — directory +
+ * profiles, and matches for a silent signer) plus posts + attendee posts +
+ * event page + talks + theme. All keystore-ECK or public — no signer prompt.
+ * "Joining an event precaches the People tab."
  */
 export function prefetchEventContent(ctx: EventContext, signer: AppSigner | null): void {
+  // People is warmed by its own keyed job rather than a second copy inlined
+  // here. Delegating (instead of repeating the directory + profiles + matches
+  // fan-out) is what makes the `attendees:` key actually dedupe it: the two
+  // warmers are called back to back from the event page, so the inline copy
+  // guaranteed every event open decrypted and signature-checked the entire
+  // roster twice over.
+  prefetchAttendeesTab(ctx, signer);
   warm(`content:${ctx.coordinate}`, () =>
     Promise.allSettled([
       fetchEventPage(ctx),
       fetchEventPosts(ctx),
       fetchAttendeePosts(ctx),
-      (async () => {
-        const entries = await fetchDirectory(ctx);
-        if (entries.length) await fetchProfiles(entries.map((e) => e.pubkey));
-      })(),
       ctx.config.talks !== "off" ? fetchTalks(ctx) : Promise.resolve(),
       fetchEventTheme(ctx),
     ]),
   );
-  if (ctx.config.coordinator && isSilentSigner(signer)) {
-    warm(`matches:${ctx.coordinate}`, () => fetchMatches(signer, ctx));
-  }
 }
 
 /**

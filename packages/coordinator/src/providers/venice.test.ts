@@ -510,3 +510,301 @@ describe("readJsonCapped", () => {
     await expect(llm.completeStructured(req)).rejects.toBeInstanceOf(ProviderResponseTooLargeError);
   });
 });
+
+/**
+ * Driving a model that reasons whether or not it was asked to (2026-09-14).
+ *
+ * `docs/MODEL-BAKEOFF.md` has said since August that `z-ai-glm-5-3-flash` — the
+ * model that beats the deployed scorer on every quality axis the bake-off
+ * measures — is blocked in this adapter. Two of the three things it blamed are
+ * fixed (lenient parsing, per-model `disable_thinking`). What is left was found by
+ * driving the live model through this very code:
+ *
+ *  1. `disable_thinking` no longer earns a 400. It is accepted and then ignored —
+ *     and the model spends the ENTIRE `max_tokens` budget reasoning and returns
+ *     empty content: 12000/12000 completion tokens, all reasoning,
+ *     `finish_reason=length`, 4 of 4 calls. The existing recovery watches for a
+ *     400 and so never fires; every call fails, and every failure is billed for
+ *     12000 output tokens. Omitting the parameter answered 4 of 4.
+ *  2. Reasoning is billed out of the SAME `max_tokens` pool as the answer. With
+ *     the parameter gone the model still spent 3013–6088 tokens per call thinking
+ *     inside the 12000 `batchMaxTokens(10)` sizes for the answer alone, finishing
+ *     at 89% of the ceiling on the worst of six. It fits until it doesn't, and a
+ *     truncated batch is a failed batch plus its paid retries.
+ *
+ * These pin both, and that the deployed model's request is untouched.
+ */
+describe("a model that reasons unconditionally", () => {
+  const GLM = "z-ai-glm-5-3-flash";
+  const bodyOf = (call: unknown) => JSON.parse((call as RequestInit).body as string);
+  const sentThinking = (call: unknown) =>
+    Object.prototype.hasOwnProperty.call(bodyOf(call).venice_parameters, "disable_thinking");
+
+  /** The whole budget spent on reasoning, no answer: what GLM 5.3 Flash returns. */
+  const burned = (ceiling: number, content: unknown = "") =>
+    JSON.stringify({
+      choices: [{ finish_reason: "length", message: { content } }],
+      usage: {
+        prompt_tokens: 4403,
+        completion_tokens: ceiling,
+        total_tokens: 4403 + ceiling,
+        completion_tokens_details: { reasoning_tokens: ceiling },
+      },
+    });
+
+  /** A real answer, with the reasoning it was billed for alongside it. */
+  const answered = JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content: '{"a":1}' } }],
+    usage: {
+      prompt_tokens: 4403,
+      completion_tokens: 6936,
+      total_tokens: 11339,
+      completion_tokens_details: { reasoning_tokens: 3456 },
+    },
+  });
+
+  /** Venice as measured: burns the budget iff the suppression parameter is sent. */
+  function stubGlm() {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) =>
+      sentThinking(init)
+        ? new Response(burned(bodyOf(init).max_tokens), { status: 200 })
+        : new Response(answered, { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    return fetchMock;
+  }
+
+  it("learns from a budget spent entirely on reasoning, not only from a 400", async () => {
+    // The old recovery keyed on HTTP 400 "reasoning is mandatory". Venice stopped
+    // answering that way, so the fact now arrives as a truncation — and a
+    // truncation used to end the call. That alone is a total outage for this model.
+    const fetchMock = stubGlm();
+    const llm = new VeniceLlm({ payment: apiKey, net });
+
+    const first = await llm.completeStructured({ ...req, model: GLM, maxTokens: 12000 });
+    expect(first.value).toEqual({ a: 1 });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(sentThinking(fetchMock.mock.calls[0][1])).toBe(true);
+    expect(sentThinking(fetchMock.mock.calls[1][1])).toBe(false);
+  });
+
+  it("remembers it, so the second call does not re-buy the lesson", async () => {
+    // Rediscovering this per call is not merely wasteful: the doomed probe costs a
+    // full budget of output tokens every time, which for the match role is once
+    // per batch for the length of the event.
+    const fetchMock = stubGlm();
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    await llm.completeStructured({ ...req, model: GLM, maxTokens: 12000 });
+    await llm.completeStructured({ ...req, model: GLM, maxTokens: 12000 });
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(sentThinking(fetchMock.mock.calls[2][1])).toBe(false);
+  });
+
+  it("reserves reasoning tokens ON TOP of the caller's answer budget", async () => {
+    // maxTokens is what the CALLER needs for its JSON (batchMaxTokens(10) = 12000
+    // for ten candidates). Leaving the chain-of-thought to eat into it is what put
+    // the model at 89% of its ceiling on an ordinary call.
+    const fetchMock = stubGlm();
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    await llm.completeStructured({ ...req, model: GLM, maxTokens: 12000 });
+    expect(bodyOf(fetchMock.mock.calls[0][1]).max_tokens).toBe(12000);
+    expect(bodyOf(fetchMock.mock.calls[1][1]).max_tokens).toBe(20000); // 12000 + 8000 reserve
+
+    await llm.completeStructured({ ...req, model: GLM, maxTokens: 12000 });
+    expect(bodyOf(fetchMock.mock.calls[2][1]).max_tokens).toBe(20000);
+  });
+
+  it("counts the reasoning the failed attempt burned — Venice billed for it", async () => {
+    // The retry's usage alone understates the call by a whole budget of output
+    // tokens, which is exactly the figure docs/MODEL-BAKEOFF.md quotes per 100
+    // attendees. A cost estimate that only counts the attempt that worked is wrong
+    // in the direction that makes a model look adoptable.
+    stubGlm();
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    const { usage } = await llm.completeStructured({ ...req, model: GLM, maxTokens: 12000 });
+    expect(usage.completionTokens).toBe(12000 + 6936);
+    expect(usage.reasoningTokens).toBe(12000 + 3456);
+    expect(usage.promptTokens).toBe(4403 * 2);
+  });
+
+  it("reports reasoning tokens on an ordinary successful call", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(answered, { status: 200 })));
+    const llm = new VeniceLlm({ payment: apiKey, net, disableThinking: { [GLM]: false } });
+    const { usage } = await llm.completeStructured({ ...req, model: GLM });
+    expect(usage.reasoningTokens).toBe(3456);
+    // Venice reports reasoning INSIDE completion_tokens (verified against the live
+    // model), so it must not be added on top — that would double-bill it.
+    expect(usage.completionTokens).toBe(6936);
+  });
+
+  it("takes the traits from config and skips the doomed call entirely", async () => {
+    const fetchMock = stubGlm();
+    const llm = new VeniceLlm({
+      payment: apiKey,
+      net,
+      modelTraits: { [GLM]: { disableThinking: false, reasoningReserveTokens: 8000 } },
+    });
+    await llm.completeStructured({ ...req, model: GLM, maxTokens: 12000 });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(sentThinking(fetchMock.mock.calls[0][1])).toBe(false);
+    expect(bodyOf(fetchMock.mock.calls[0][1]).max_tokens).toBe(20000);
+  });
+
+  it("lets models.<role>.disable_thinking override a trait block", async () => {
+    // `disableThinking` is the key an operator can actually set in coordinator.toml
+    // today; a stale trait default must not silently win over an explicit setting.
+    const fetchMock = vi.fn(async () => new Response(answered, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const llm = new VeniceLlm({
+      payment: apiKey,
+      net,
+      modelTraits: { "some-model": { disableThinking: false } },
+      disableThinking: { "some-model": true },
+    });
+    await llm.completeStructured({ ...req, model: "some-model" });
+    expect(sentThinking(fetchMock.mock.calls[0][1])).toBe(true);
+  });
+
+  it("treats an empty body cut off mid-thought as truncation, not a shape failure", async () => {
+    // A model that never reaches its answer returns "" — or nothing at all. Both
+    // used to surface as "no string content", which reads as a broken provider
+    // rather than a budget the chain-of-thought ate.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(burned(12000, undefined), { status: 200 })));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const llm = new VeniceLlm({ payment: apiKey, net, disableThinking: { [GLM]: false } });
+    const thrown = await llm
+      .completeStructured({ ...req, model: GLM, maxTokens: 12000 })
+      .catch((e) => e);
+    expect(String((thrown as Error).message)).toMatch(/truncated at the 20000-token ceiling/);
+    expect(String((thrown as Error).message)).not.toMatch(/no string content/);
+  });
+
+  it("names reasoning in the message when reasoning is what filled the budget", async () => {
+    // "raise the ceiling" and "this model thinks 6000 tokens per call" want
+    // different fixes, and the log used to be unable to tell them apart.
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(burned(20000), { status: 200 })));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const llm = new VeniceLlm({
+      payment: apiKey,
+      net,
+      modelTraits: { [GLM]: { disableThinking: false, reasoningReserveTokens: 8000 } },
+    });
+    const thrown = await llm
+      .completeStructured({ ...req, model: GLM, maxTokens: 12000 })
+      .catch((e) => e);
+    expect(thrown).toBeInstanceOf(ProviderContractError);
+    expect(String((thrown as Error).message)).toMatch(/20000 completion tokens went on reasoning/);
+    expect(String((thrown as Error).message)).toMatch(/reasoningReserveTokens \(currently 8000\)/);
+  });
+
+  it("does not retry forever once the reserve is already in place", async () => {
+    // One correction per call. A corrected request that still truncates is a real
+    // error and must be loud, not the first rung of a billed retry ladder.
+    const fetchMock = vi.fn(async () => new Response(burned(20000), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    await expect(
+      llm.completeStructured({ ...req, model: GLM, maxTokens: 12000 }),
+    ).rejects.toBeInstanceOf(ProviderContractError);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+/**
+ * The deployed scorer must not notice any of the above. `deepseek-v4-flash-0731`
+ * accepts `disable_thinking` and reasons zero tokens, so every one of these paths
+ * has to leave its request byte-identical — the capability is additive.
+ */
+describe("the deployed model's request is unchanged", () => {
+  const DEPLOYED = "deepseek-v4-flash-0731";
+  const bodyOf = (call: unknown) => JSON.parse((call as RequestInit).body as string);
+  const ok = JSON.stringify({
+    choices: [{ finish_reason: "stop", message: { content: '{"a":1}' } }],
+    usage: { prompt_tokens: 4403, completion_tokens: 3100, total_tokens: 7503 },
+  });
+
+  it("still sends disable_thinking and exactly the ceiling it was asked for", async () => {
+    const fetchMock = vi.fn(async () => new Response(ok, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    const { usage } = await llm.completeStructured({ ...req, model: DEPLOYED, maxTokens: 12000 });
+    const body = bodyOf(fetchMock.mock.calls[0][1]);
+    expect(body.max_tokens).toBe(12000); // no reserve, so no change to the budget
+    expect(body.venice_parameters).toMatchObject({
+      include_venice_system_prompt: false,
+      disable_thinking: true,
+      strip_thinking_response: true,
+    });
+    expect(usage).toMatchObject({ promptTokens: 4403, completionTokens: 3100, totalTokens: 7503 });
+  });
+
+  it("keeps the default ceiling for a caller that names none", async () => {
+    const fetchMock = vi.fn(async () => new Response(ok, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    await llm.completeStructured({ ...req, model: DEPLOYED });
+    expect(bodyOf(fetchMock.mock.calls[0][1]).max_tokens).toBe(4096);
+  });
+
+  it("still calls a truncation with no reasoning a plain truncation", async () => {
+    // The non-reasoning case wants a bigger batchMaxTokens, not a provider retry.
+    // Retrying it would spend a second full budget to learn nothing.
+    const plain = JSON.stringify({
+      choices: [{ finish_reason: "length", message: { content: '{"matches":[{"ind' } }],
+      usage: { prompt_tokens: 1, completion_tokens: 12000, total_tokens: 12001 },
+    });
+    const fetchMock = vi.fn(async () => new Response(plain, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    const thrown = await llm
+      .completeStructured({ ...req, model: DEPLOYED, maxTokens: 12000 })
+      .catch((e) => e);
+    expect(String((thrown as Error).message)).toMatch(/truncated at the 12000-token ceiling/);
+    expect(String((thrown as Error).message)).not.toMatch(/reasoning/);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Usage arithmetic, which is what every per-100-attendees figure is built on.
+ */
+describe("token usage is read so nothing bills silently", () => {
+  const withUsage = (usage: unknown) =>
+    JSON.stringify({ choices: [{ finish_reason: "stop", message: { content: "{}" } }], usage });
+
+  it("does not under-count when total_tokens exceeds prompt + completion", async () => {
+    // The only way this could silently UNDER-bill: a gateway reporting
+    // completion_tokens as CONTENT only would hide the reasoning charge entirely,
+    // and every cost figure derived from it would be low by exactly that much.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(withUsage({ prompt_tokens: 100, completion_tokens: 50, total_tokens: 500 }))),
+    );
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    const { usage } = await llm.completeStructured(req);
+    expect(usage.completionTokens).toBe(400);
+    expect(usage.totalTokens).toBe(500);
+  });
+
+  it("does not report a call with no total_tokens as free", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(withUsage({ prompt_tokens: 100, completion_tokens: 50 }))),
+    );
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    const { usage } = await llm.completeStructured(req);
+    expect(usage.totalTokens).toBe(150);
+  });
+
+  it("ignores nonsense rather than propagating NaN into a cost sum", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(withUsage({ prompt_tokens: "lots", completion_tokens: -5 }))),
+    );
+    const llm = new VeniceLlm({ payment: apiKey, net });
+    const { usage } = await llm.completeStructured(req);
+    expect(usage).toMatchObject({ promptTokens: 0, completionTokens: 0, totalTokens: 0 });
+  });
+});

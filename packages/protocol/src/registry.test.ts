@@ -46,7 +46,7 @@ describe("CUSTOM_KIND_REGISTRY — allocation authority (§13.1)", () => {
     expect(registryConstants).toEqual(sourceConstants);
   });
 
-  it("covers EXACTLY the addressable range 31600–31611 and rumor range 21600–21610", () => {
+  it("covers EXACTLY the addressable range 31600–31612 and rumor range 21600–21610", () => {
     const addr = CUSTOM_KIND_REGISTRY.filter((e) => e.klass === "addressable")
       .map((e) => e.kind)
       .sort((a, b) => a - b);

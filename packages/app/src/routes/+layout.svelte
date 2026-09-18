@@ -14,6 +14,7 @@
   import { onNip46AuthUrl } from "$lib/signer/nip46.js";
   import { loadLoginMethod } from "$lib/signer/keystore.js";
   import { online } from "$lib/stores/online.svelte.js";
+  import { viewport } from "$lib/stores/viewport.svelte.js";
   import { connectivity } from "$lib/stores/connectivity.svelte.js";
   import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
@@ -73,6 +74,8 @@
     setTimeout(() => splash.remove(), 320);
   }
 
+  // Structural breakpoint for the desktop shell (see stores/viewport).
+  onMount(() => viewport.init());
   onMount(async () => {
     dismissSplash();
     // Release provenance (§13.9): log the embedded manifest once so a deployed
@@ -498,9 +501,12 @@
   {/if}
   {#if showCompactHeader}
     {#if eventShell.ctx}
-      <EventHeader ctx={eventShell.ctx} compact link status={compactStatus} />
+      <div class="compact-event-strip">
+        <EventHeader ctx={eventShell.ctx} compact link status={compactStatus} />
+      </div>
     {:else}
       <div
+        class="compact-event-strip"
         aria-hidden="true"
         style="height:3rem;margin:0.5rem 0 1rem;border-radius:var(--radius);background:var(--bg-elev2);opacity:0.5"
       ></div>

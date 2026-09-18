@@ -78,11 +78,14 @@
       {t("readiness.allSet")}
     </span>
     {#if readiness.matchesReady}
-      <button class="btn primary" style="margin-top:0.75rem" onclick={() => router.go({ name: "matches", naddr })}>
+      <button class="btn primary" style="margin-top:0.75rem" onclick={() => router.go({ name: "attendees", naddr })}>
         {t("readiness.cta.matches")}
       </button>
     {/if}
-    {#if readiness.viewerIsMember}
+    <!-- Not when the matches CTA is already up: since People and Matches merged
+         (2026-09-13) both buttons land on the same list, and two buttons with
+         different labels going to one place is worse than one. -->
+    {#if readiness.viewerIsMember && !readiness.matchesReady}
       <!-- People is member-gated (UX-O4): only offer "See who's here" to members. -->
       <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "attendees", naddr })}>
         {t("event.seeWhosHere")}
@@ -123,11 +126,14 @@
       </button>
     {/if}
     {#if readiness.matchesReady}
-      <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "matches", naddr })}>
+      <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "attendees", naddr })}>
         {t("readiness.cta.matches")}
       </button>
     {/if}
-    {#if readiness.viewerIsMember}
+    <!-- Not when the matches CTA is already up: since People and Matches merged
+         (2026-09-13) both buttons land on the same list, and two buttons with
+         different labels going to one place is worse than one. -->
+    {#if readiness.viewerIsMember && !readiness.matchesReady}
       <!-- People is member-gated (UX-O4): only offer "See who's here" to members. -->
       <button class="btn" style="margin-top:0.5rem" onclick={() => router.go({ name: "attendees", naddr })}>
         {t("event.seeWhosHere")}

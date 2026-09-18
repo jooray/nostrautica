@@ -22,7 +22,6 @@ const EAGER_ROUTES = new Set([
   "join",
   "attendees",
   "attendee",
-  "matches",
   "me",
   "eventMore",
   "notFound",

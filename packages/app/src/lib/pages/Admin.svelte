@@ -35,6 +35,7 @@
     fetchCoordinatorLastSeen,
     cachedCoordinatorLastSeen,
     generateInvites,
+    sharedInviteExp,
     fetchPublishedInvites,
     revokeAttendeeClient,
     sendAdminCommand,
@@ -82,7 +83,7 @@
   import AdminCommunicate from "$lib/components/AdminCommunicate.svelte";
   import AdminPeople from "$lib/components/AdminPeople.svelte";
   import AdminQueue from "$lib/components/AdminQueue.svelte";
-  import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { t, tp, i18n } from "$lib/i18n/i18n.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -666,11 +667,30 @@
   // redeem, for the "QR on the opening slide" case. The link is still the secret
   // — the 31601 publishes only its hash — so the event's naddr alone gets nobody
   // in. The hours field is what keeps a forwarded link from being a standing
-  // door key, which is the price of the code being shared at all.
-  let sharedUses = $state(100);
-  let sharedHours = $state(4);
+  // door key, which is the price of the code being shared at all — but that is
+  // advice, not a rule the form enforces: a community with no door and no
+  // closing time is a real case, so 0 hours mints a code that never expires and
+  // the form says so in words before it does.
+  let sharedUses = $state<number | null>(100);
+  let sharedHours = $state<number | null>(4);
   let sharedInvite = $state<GeneratedInvite | null>(null);
   let generatingShared = $state(false);
+
+  /** A deadline as the organizer reads it, or undefined for a code with none. */
+  function expiryLabel(exp: number | undefined): string {
+    if (exp === undefined) return t("admin.invites.shared.noExpiry");
+    return t("admin.invites.shared.expiresAt", {
+      date: new Date(exp * 1000).toLocaleString(i18n.locale, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }),
+    });
+  }
+
+  // What the form WILL produce, stated before the code is minted — 0 in the hours
+  // box is the answer an organizer gives when they mean "no deadline", and it has
+  // to be visibly that rather than something the handler quietly reinterprets.
+  const sharedExpPreview = $derived(sharedInviteExp(sharedHours, Date.now()));
 
   async function makeSharedInvite() {
     if (!ctx || !session.signer) return;
@@ -679,9 +699,10 @@
     try {
       const base = window.location.origin + window.location.pathname;
       const [code] = await generateInvites(session.signer, ctx, 1, base, "door", {
-        uses: sharedUses > 0 ? sharedUses : INVITE_USES_UNLIMITED,
-        // Unix SECONDS on the wire, like every other timestamp.
-        exp: Math.floor(Date.now() / 1000) + Math.max(1, sharedHours) * 3600,
+        uses: sharedUses && sharedUses > 0 ? sharedUses : INVITE_USES_UNLIMITED,
+        // Unix SECONDS on the wire, like every other timestamp — and absent
+        // entirely when the organizer asked for no expiry (see sharedInviteExp).
+        exp: sharedInviteExp(sharedHours, Date.now()),
       });
       sharedInvite = code ?? null;
       void refreshInviteReport();
@@ -1113,7 +1134,7 @@
       {/if}
       <!-- id is a stable, non-translated hook for e2e/screenshot-refresh.mjs
            (participant/11-matches) — the button's own label is translated per
-           locale, so it can't be matched by text across en/sk/cs. -->
+           locale, so it can't be matched by text across the shipped locales. -->
       <button id="recompute-matches" class="btn inline" onclick={recomputeMatches} disabled={recomputing}>
         {recomputing ? t("admin.coordinator.recomputing") : t("admin.coordinator.recompute")}
       </button>
@@ -1255,20 +1276,31 @@
     <details style="margin-top:0.75rem">
       <summary class="field-label" style="cursor:pointer">{t("admin.invites.shared.title")}</summary>
       <p class="muted" style="margin:0.5rem 0;font-size:0.85rem">{t("admin.invites.shared.body")}</p>
-      <div class="row" style="flex-wrap:wrap;align-items:flex-end;gap:0.75rem">
+      <div class="row" style="flex-wrap:wrap;align-items:flex-start;gap:0.75rem">
         <label style="display:flex;flex-direction:column;gap:0.3rem">
           <span class="muted" style="font-size:0.85rem">{t("admin.invites.shared.uses")}</span>
           <input type="number" min="0" max="5000" bind:value={sharedUses} style="max-width:6rem" />
+          <span class="muted" style="font-size:0.8rem">{t("admin.invites.shared.usesHint")}</span>
         </label>
         <label style="display:flex;flex-direction:column;gap:0.3rem">
           <span class="muted" style="font-size:0.85rem">{t("admin.invites.shared.hours")}</span>
-          <input type="number" min="1" max="168" bind:value={sharedHours} style="max-width:6rem" />
+          <!-- min=0, because 0 is a real answer here and not a rejected one: it
+               means the code carries no deadline at all (sharedInviteExp). -->
+          <input type="number" min="0" max="168" bind:value={sharedHours} style="max-width:6rem" />
+          <!-- Says what THIS form will actually mint, before it is minted. The
+               bug that made this necessary was silent: 0 hours was read as "no
+               expiry" by the organizer and written as "one hour" by the handler,
+               and nothing on the page disagreed with either of them. -->
+          <span
+            style="font-size:0.8rem"
+            class={sharedExpPreview === undefined ? "" : "muted"}
+          >{expiryLabel(sharedExpPreview)}</span>
         </label>
         <button class="btn inline" onclick={makeSharedInvite} disabled={generatingShared}>
           {generatingShared ? t("admin.invites.generating") : t("admin.invites.shared.generate")}
         </button>
       </div>
-      <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem">{t("admin.invites.shared.usesHint")}</p>
+      <p class="muted" style="margin:0.5rem 0 0;font-size:0.85rem">{t("admin.invites.shared.forwardHint")}</p>
       {#if sharedInvite}
         <!-- §13.3: this is an nsec on screen, as a QR AND as literal text, and it
              is the HIGHEST-value one the app renders — a shared code with
@@ -1281,6 +1313,13 @@
         <div class="card" style="margin-top:0.75rem;text-align:center">
           <QrCode data={sharedInvite.link} size={512} />
           <p class="muted" style="margin:0.5rem 0 0;font-size:0.8rem;word-break:break-all">{sharedInvite.link}</p>
+          <!-- Restated on the artifact itself, not just next to the form: this
+               panel is what an organizer screenshots, re-opens and hands around,
+               and "when does it stop working" is the one property of it that
+               cannot be read off the link. -->
+          <p style="margin:0.4rem 0 0;font-size:0.85rem" class={sharedInvite.exp === undefined ? "" : "muted"}>
+            {expiryLabel(sharedInvite.exp)}
+          </p>
           <div class="row" style="justify-content:center;margin-top:0.5rem">
             <button class="btn inline" onclick={() => copyLink(sharedInvite!.link)}>
               {t("admin.invites.copyLink")}

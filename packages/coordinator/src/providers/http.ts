@@ -31,7 +31,11 @@ export class ProviderTimeoutError extends Error {
 export const PROVIDER_TIMEOUTS = {
   /** Model/info discovery — small, fast metadata reads. */
   metadata: 30_000,
-  /** Chat completions — reasoning models can be slow; give real headroom. */
+  /**
+   * Chat completions — the FLOOR, not the whole story; see
+   * {@link completionTimeoutMs}. A flat 120s was below the p95 of the calls this
+   * daemon actually makes and production was losing batches to it.
+   */
   completion: 120_000,
   /** Embeddings — batched but bounded. */
   embedding: 60_000,
@@ -47,6 +51,30 @@ export const PROVIDER_TIMEOUTS = {
    */
   payment: 30_000,
 } as const;
+
+/**
+ * How long a completion may take, given how much output it was ALLOWED to
+ * generate. A deadline that ignores `max_tokens` is really two different limits
+ * wearing one number: generous for a 500-token summary, and too tight for the
+ * 12,000-token budget `batchMaxTokens(10)` hands the match scorer.
+ *
+ * The flat 120s was the latter. Measured on the production shape (reverse batch,
+ * K=10, both languages, 96 calls per model) the DEPLOYED model's p95 is 130.6s
+ * and its p50 is 92s — so the ceiling sat below the 95th percentile of ordinary
+ * work, and the coordinator log shows exactly that: `score_batch` and
+ * `score_reverse_batch` failing at 120,03Xms and retrying. The retry is not free
+ * either — the timed-out call still generated its tokens and is still billed, so
+ * every one of these costs 120s of the serial job loop AND pays twice.
+ *
+ * Scaling with the token budget keeps the guard meaningful where it matters: a
+ * small call still has to answer promptly, and only a call we deliberately
+ * asked for a lot of output gets the longer rope. 25ms per allowed token is
+ * roughly 2x the observed p95 for the worst shape, which is headroom for a bad
+ * day rather than an invitation to hang.
+ */
+export function completionTimeoutMs(maxTokens?: number): number {
+  return Math.max(PROVIDER_TIMEOUTS.completion, (maxTokens ?? 0) * 25);
+}
 
 /**
  * Bound a promise that cannot be cancelled — `PaymentStrategy.prepare()` takes no

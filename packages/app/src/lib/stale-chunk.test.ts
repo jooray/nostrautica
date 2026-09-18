@@ -48,7 +48,7 @@ describe("recoverFromStaleChunk", () => {
     refreshGuard.__resetForTests();
   });
 
-  it("DEFERS the reload while unsaved work is held, then runs it on release (R8)", () => {
+  it("DEFERS the reload while unsaved work is held, then runs it on release (R8)", async () => {
     // A completed recording / selected file / unsaved form holds the guard dirty.
     const release = refreshGuard.hold("record");
     // Recovery is requested (caller skips the dead-end error), but the reload must
@@ -57,8 +57,12 @@ describe("recoverFromStaleChunk", () => {
     expect(reload).not.toHaveBeenCalled();
     // Cooldown latch must NOT be stamped yet — the reload hasn't actually run.
     expect(store.has("nostrautica:stale-chunk-reload")).toBe(false);
-    // Work saved/cleared → the deferred reload applies automatically, once.
+    // Work saved/cleared → the deferred reload applies automatically, once. One
+    // microtask later: the guard defers its post-release check so a Svelte
+    // `$effect` re-run (release + re-hold in one flush) can't be read as "clean"
+    // (audit A-4).
     release();
+    await Promise.resolve();
     expect(reload).toHaveBeenCalledTimes(1);
     expect(store.has("nostrautica:stale-chunk-reload")).toBe(true);
   });

@@ -11,8 +11,17 @@ content, and MLS (Marmot) group chat with multi-device support.
 
 ## 1. Terms and actors
 
-- **Event**: a NIP-52 kind `31923` calendar event. Its canonical identifier everywhere is
-  the coordinate `31923:<E_id-pubkey>:<d>` (the *coordinate*).
+- **Space**: the thing attendees join. It is published in one of exactly two kinds, and
+  its canonical identifier everywhere is the coordinate `<kind>:<E_id-pubkey>:<d>` (the
+  *coordinate*):
+  - **Event** — a NIP-52 kind `31923` calendar event. It happens on a date, in a place,
+    and ends. Interoperates with any NIP-52 client.
+  - **Community** (added 2026-09-13) — a kind `31612` standing group. No date, no venue,
+    no end. See §2.1.
+
+  Everything downstream of the coordinate — the `31600` config, the ECK, the roster, the
+  directory, matching, chat — is addressed by the coordinate and is identical for both.
+  Where this document says "event" without qualification, it means either.
 - **`E_id`**: the *event identity* keypair. Signs everything "official" the event
   publishes. Never used for encryption. Held by the organizer and co-organizers only.
 - **`E_inbox`**: the *event inbox* keypair. Signs nothing, ever. Its pubkey is the NIP-44
@@ -29,6 +38,55 @@ content, and MLS (Marmot) group chat with multi-device support.
 
 All hex values are lowercase. *hex32* means `/^[0-9a-f]{64}$/`.
 
+### 1.1 Community (kind `31612`)
+
+A community is a standing group: people who already share a chat somewhere and could
+network if they knew who to talk to. It has no start, no end and no venue.
+
+**Why not `31923` with a placeholder start.** Kind `31923` is a NIP-52 *time-based
+calendar event* whose `start` is mandatory. A community publishing one would have to
+invent a value — its creation moment is the only defensible choice — and every NIP-52
+calendar client on the network would then show it as a zero-length event on the afternoon
+it was made, and index it in date filters. That is publishing noise into other people's
+software to satisfy a field that carries no meaning here. A community is simply not a
+calendar event, so it gets its own kind and calendar clients never see it.
+
+**Tags.** `31923`'s minus time and place:
+
+| tag | |
+|---|---|
+| `d` | the space identifier, identical to the `31600` config's `d` |
+| `title` | required |
+| `summary` | optional |
+| `image` | optional |
+| `t` | optional hashtags |
+
+No `start`, no `end`, no `location`, and no NIP-52 `D` day-index tags. A community that
+carried a day index would reappear in exactly the date filters this kind exists to stay
+out of.
+
+**Everything else is unchanged.** The `31600` config, the ECK, the roster, the directory,
+the match lists and group chat are addressed by coordinate and behave identically. There
+is no `mode` tag on the config: the kind in the coordinate is the single source of truth,
+and a second one would only be somewhere for the two to disagree.
+
+**Coordinate handling.** Anywhere an event identity is required — a key grant, a
+coordinator grant, a membership coordinate — the kind must be one of `31923` or `31612`
+and nothing else. That guard is an allowlist (audit R18) and widening it to two values
+does not weaken it: every downstream record is keyed by the whole coordinate string, so
+`31612:<E_id>:<d>` authorises nothing for `31923:<E_id>:<d>` and the two namespaces stay
+separate even for the same author and identifier.
+
+**Forward and backward compatibility.** No existing kind changed and no existing tag
+changed, so every record published before this section stays valid and byte-identical. A
+client that does not know `31612` does not see communities at all, which is the correct
+degradation: it cannot misread one as an event, because it never resolves the coordinate.
+No `v` bump; the `31600` config inside a community still carries `v=2`.
+
+**Approval.** A community defaults to `approval: "open"` (§6.3): anyone holding the invite
+link is a member. An older client or coordinator meeting `"open"` falls back to `"manual"`
+per the tolerant-parse rule, which is stricter than intended rather than looser.
+
 ## 2. Wire version
 
 `PROTOCOL_VERSION = 2`.
@@ -38,6 +96,11 @@ All hex values are lowercase. *hex32* means `/^[0-9a-f]{64}$/`.
   "any positive integer"). Clients **SHOULD** surface an "update required" message when
   they observe a higher version from an authority key they trust (the event's `E_id` or
   configured coordinator).
+- **One exception, and only one:** a `31604` roster payload may declare `v: 3` when it is
+  paginated (§6.2.1). That kind alone has a wire problem — it is a single NIP-44 payload
+  with a hard 65,535-byte ceiling — and scoping the bump to it avoids a flag day across
+  every other kind to fix one of them. A roster that fits keeps `v: 2`. No other payload,
+  and no event `v` tag, may be anything but `2`.
 - Readers of public custom kinds **MUST** ignore events whose `v` tag is absent or not
   `"2"`.
 - Rationale: an explicit-rejection parse means a future breaking payload can never be
@@ -245,6 +308,7 @@ randomized up to 2 days into the past).
 | 31609 | Event Theme | `E_id` | public | event `d` |
 | 31610 | Talk | coordinator (or `E_id`) | ECK | blinded |
 | 31611 | Coordinator Announcement | coordinator | public | `nostrautica:coordinator` |
+| 31612 | Community | `E_id` | public | space `d` |
 
 | Rumor | Name | Seal author → recipient |
 |---:|---|---|
@@ -263,7 +327,7 @@ randomized up to 2 days into the past).
 Standard kinds used: 0, 1, 3, 5, 6, 13, 14, 1059, 10000, 10002, 10050, 10063, 24242,
 30023, 30078, 31923/31924/31925, and Marmot's 30443/443/444/445.
 
-`31610` extends past the originally-reserved `31600`–`31609` addressable block, and
+`31610` and `31612` extend past the originally-reserved `31600`–`31609` addressable block, and
 `21610` past the originally-reserved `21600`–`21609` rumor block; both remain inside their
 respective standard Nostr ranges (parameterized-replaceable 30000–39999, ephemeral
 20000–29999).
@@ -319,8 +383,8 @@ silently drop them.
   - `["chat", "marmot"]` × N, group-chat backends; omitted when chat is disabled.
     Operative only when a `coordinator` tag is also present.
   - `["retention", <days>]`: optional positive integer. When present, the coordinator
-    **MUST** delete the event's member records (31603, 31604, 31605, 31606, published
-    31610 talks) via NIP-09 and cease processing `<days>` days after the event's end
+    **MUST** delete the event's member records (31603, every 31604 page, 31605, 31606,
+    published 31610 talks) via NIP-09 and cease processing `<days>` days after the event's end
     time, and clients **MUST** surface the declared retention at join time. Absent =
     indefinite retention. Deletion remains best-effort (relays may not honor NIP-09); the
     privacy model never depends on it succeeding, and client wording must not overpromise.
@@ -364,6 +428,7 @@ silently drop them.
     rev?: int ≥0                     // per-event self-copy only; the client's own
                                       // durable store of the last 21601 `rev` it sent
                                       // (survives a device change)
+    correction_rev?: int ≥0           // same, for the last 21608 correction `rev`
   }
   ```
   `AttendeeProfile = { about: string ≤5000 (default ""), skills: string[≤200] ≤50
@@ -412,14 +477,18 @@ silently drop them.
 #### `31604`: Roster
 
 - **Class:** parameterized-replaceable. **Signer:** the coordinator, or `E_id` without
-  one. **Sealing:** ECK. **`d`:** event `d` (one roster per event, not blinded).
-- **Tags:** `["d", <event-d>]`, `["a", <coordinate>]`, `["eck", <version>]`, `["v","2"]`.
+  one. **Sealing:** ECK. **`d`:** event `d` for page 0 (not blinded); `<event-d>:N` for
+  page N of a paginated roster (see below).
+- **Tags:** `["d", <page-d>]`, `["a", <coordinate>]`, `["eck", <version>]`, `["v","2"]`.
+  The `v` TAG is `"2"` on every page, including a paginated one — the event envelope is
+  unchanged; it is the payload that declares a version.
 - **Content:**
   ```
   {
-    v: 2,
+    v: 2 | 3,                         // 3 only on a paginated roster, see §6.2.1
     eck_current: int >0,
     nostr_group_id?: hex32,           // this event's active Marmot MLS group (§10.4)
+    pages?: int 2..40,                // page 0 of a paginated roster ONLY
     attendees: [
       {
         pubkey: hex32,
@@ -429,12 +498,78 @@ silently drop them.
           { pubkey: hex32, label?: string ≤60, added_at: int }  // added_at: unix SECONDS
         ] ≤5                         // per-device chat keys attested for this account
       }
-    ] ≤2000
+    ] ≤700                           // per PAGE; ≤2000 across the whole roster
   }
   ```
   `nostr_group_id` is the authoritative event→group routing binding (§10.4); it is
   absent for chat-off events. `chat_keys` is absent for an attendee with no attested
-  device.
+  device. A payload carrying `pages` beside `v: 2` is invalid and **MUST** be rejected.
+
+  **Neither array cap is the operative limit.** One 31604 is one NIP-44 v2 payload, so a
+  page is bounded by that layer's 65,535-byte plaintext ceiling (§7.4). A minimal entry
+  costs about 135 bytes and one carrying a chat device about 265, so a page holds
+  somewhere between roughly 240 and 480 members depending on how many have attested a
+  device — well under the `≤700` parse bound, which exists only so a hostile payload
+  cannot allocate an unbounded array before the byte check runs.
+
+  A coordinator **MUST NOT** approve past `MAX_ROSTER` (2000) members or 40 pages, and
+  **SHOULD** tell the organizer (a `21606` with `error_category: "roster_full"`, and
+  `"roster_nearly_full"` on the way there) rather than failing mid-publish with the ECK
+  grant already delivered.
+
+##### 6.2.1 Roster pagination
+
+A roster that fits in one NIP-44 payload is published exactly as it always was: one
+31604 at the event's `d`, `v: 2`, no `pages` key, byte-identical to what shipped before
+this section existed. **Nothing below applies to it**, and that covers every event and
+community under a few hundred members.
+
+A roster that does not fit is split across several 31604s under the same author:
+
+| page | `d` | carries |
+|---|---|---|
+| 0 | `<event-d>` | `pages`, `eck_current`, `nostr_group_id`, the first entries |
+| N | `<event-d>:N` | `eck_current`, the next entries |
+
+`eck_current` and `nostr_group_id` are read from page 0 and are authoritative for the
+whole roster; a continuation page repeats `eck_current` only because the payload schema
+requires it. Entries are packed front to back, so appending a member changes the last
+page and nothing before it: a writer **SHOULD** republish only the pages whose contents
+actually changed, or one approval costs one relay publish per page for the length of the
+event. A reader fetches page 0, learns `pages`, and fetches 1..N-1 in a single REQ
+(`#d: ["<d>:1", "<d>:2", …]`) — two round trips, whatever the size.
+
+Because `<event-d>:N` could also be some *other* space's own `d` under the same
+coordinator, a reader **MUST** check a continuation page's `["a", <coordinate>]` tag as
+well as its author. The content is ECK-sealed per event, so a collision can only
+withhold a page, never forge one — but withholding it must not pass unnoticed. A reader
+that cannot read every page **MUST NOT** present the pages it did read as the roster; a
+partial membership list is indistinguishable from an event that shrank.
+
+**Why pages under distinct `d`s, and not the alternatives.** A manifest kind naming the
+pages reads more cleanly, but the round-trip count is identical — page 0 already is the
+manifest — and it costs a kind allocation for nothing. Dropping `chat_keys` back out of
+the roster roughly doubles what one payload holds, but it takes the device list away
+from the only surface that renders it and buys a single doubling; that is a deferral,
+not a fix. And no compression or entry shrinking was available: `pubkey` is 64 hex
+chars, `d` is a 32-char blinded value, both already minimal.
+
+**What an old client does.** This is the part that decided the design. Zod objects strip
+unknown keys, so simply adding `pages` would be *silently ignored* by every build
+already installed: it would read page 0, see 480 of 600 members, and render that as the
+complete event. So page 0 of a paginated roster declares `v: 3`, and an old client's
+strict `z.literal(2)` parse rejects it through the path §2 already defines — the roster
+is authored by a trusted authority, so the client surfaces "update required" instead of
+dropping it silently. It fails loudly, and only on the rosters it genuinely cannot
+represent.
+
+**This is the one payload field allowed to exceed `PROTOCOL_VERSION`,** and the
+exception is deliberate. Bumping `PROTOCOL_VERSION` to 3 would achieve the same refusal
+and would also invalidate every `31600` config, join request, directory entry, match
+list and `21xxx` rumor on the network — a full wire-v3 flag day across every kind, to
+solve a problem in exactly one of them. The bump is therefore scoped to the payload that
+has the problem. `31604` is the only kind whose `v` may be `2` **or** `3`; every other
+payload keeps the strict literal-2 parse of §2.
 
 #### `31605`: Match List
 
@@ -1044,6 +1179,13 @@ The coordinator issues NIP-09 kind-5 with both `["a", "<kind>:<pubkey>:<d>"]` an
 downgrade, and obsolete `31610` addresses after rotation or rejection. Deletion is
 best-effort; the privacy model never depends on relays honoring it.
 
+A retention sweep that deletes a `31604` **MUST** cover every page address the roster
+could have used (`<event-d>` and `<event-d>:1`…`<event-d>:39`), not only the pages it
+currently has. A roster that grew and later shrank leaves higher pages on relays that no
+reader asks for — `pages` on page 0 says they are not there — but they still hold member
+pubkeys, and nothing records how many pages an event ever had. Deleting an address that
+was never published is a no-op at the relay; missing one leaves member data behind.
+
 ## 13. Security considerations
 
 - **Forward-only revocation**: anyone who held a key reads everything published while it
@@ -1083,7 +1225,9 @@ Wire-normative bounds (`packages/protocol/src/schemas.ts`, `crypto.ts`, `giftwra
 - `MAX_NAME` 200, `MAX_MESSAGE` 2000, `MAX_ABOUT` 5000, `MAX_LOOKING_FOR` 2000,
   `MAX_SKILLS` 50, `MAX_SKILL` 200, `MAX_LINKS` 20, `MAX_URL` 2048,
   `MAX_INVITE_LABEL` 100, `MAX_INVITES` 10000, `MAX_REASONING` 2000, `MAX_MATCHES` 100,
-  `MAX_ROSTER` 2000, `MAX_RELAYS` 30, `MAX_MEDIA` 20 (31602), `MAX_SUBMISSION_MEDIA` 4
+  `MAX_ROSTER` 2000 (total across roster pages), `MAX_ROSTER_PAGE` 700 (entries in one
+  31604 page), `MAX_ROSTER_PAGES` 40, `MAX_RELAYS` 30, `MAX_MEDIA` 20 (31602),
+  `MAX_SUBMISSION_MEDIA` 4
   (21601), `MAX_D` 200, `MAX_MATCH_PAIRS` 200000, `MAX_TITLE` 300, `MAX_POST_BODY`
   100000, `MAX_NOTES` 2000, `MAX_NOTE` 5000, `MAX_LANG` 35, `MAX_TRANSCRIPT_TEXT`
   100000, `MAX_INTRO_TEXT` 2000, `MAX_LIBRARY_TEXTS` 20, `MAX_TALK_TITLE` 200,
@@ -1092,6 +1236,9 @@ Wire-normative bounds (`packages/protocol/src/schemas.ts`, `crypto.ts`, `giftwra
 - Icebreakers (31605, §6.2): ≤ 3 per match entry, ≤ 280 chars each.
 - Members-only post markdown editor cap: 60,000 UTF-8 bytes
   (`MAX_MEMBERS_POST_MARKDOWN_BYTES`). Theme CSS: 32,768 bytes (`MAX_THEME_CSS_BYTES`).
+- Roster page packing budget once a roster paginates: 60,000 UTF-8 bytes
+  (`ROSTER_PAGE_TARGET_BYTES`, §6.2.1). Whether to paginate at all is decided at the real
+  65,535-byte ceiling, so a roster that fits today is never split.
 - Media descriptor: `size ≥ 1` byte; `duration` required for `audio/*` and `video/*`
   mime types; decryption key decodes to exactly 32 bytes, nonce to exactly 12 bytes.
 

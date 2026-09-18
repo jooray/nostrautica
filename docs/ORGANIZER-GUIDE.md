@@ -19,12 +19,16 @@ the event's keys, so **use one browser you'll keep** (and back up your
 identity when prompted).
 
 > **A note on how the app is laid out.** Once you're inside an event, the bottom
-> bar is *event-scoped*: **Overview**, **People**, **Matches**, **Updates**, and
-> **More** all act on the event you're in, with a compact header showing the event's
-> name and your status. Two further tabs, **Talks** and **Chat**, appear only when
-> you've turned those features on (§6.5), for you and for attendees. Your global stuff
-> (all your events, messages, settings, your identity) lives under **More**. As the
-> organizer you also get **Manage event** in that menu, which opens the admin console
+> bar is *event-scoped*: **Overview**, **People**, **Updates**, and **More** all
+> act on the event you're in, with a compact header showing the event's name and
+> your status. Matches, for attendees who have any, show up at the top of
+> **People**. Two further tabs appear only once you've turned those features on
+> (§6.5), for you and for attendees: **Talks** sits between Overview and People
+> if talks are set to be watched before the event ("prerecord-first"), and right
+> after People otherwise; **Chat** comes after People too, following Talks when
+> both are on. Your global stuff (all your
+> events, messages, settings, your identity) lives under **More**. As the organizer
+> you also get **Manage event** in that menu, which opens the admin console
 > described in §3.
 
 ## 1. Create your identity
@@ -85,8 +89,9 @@ Choose **Create an event** and fill in the form:
 
 Pick the language your event runs in. Start typing to search by language name
 in your own language *or* by its two-letter code (type "slov" or "sk" to find
-Slovak). Your own language, the ones your browser prefers, and English/Slovak/
-Czech are pinned to the top; everything else follows alphabetically.
+Slovak). Your own language, the ones your browser prefers, and every language
+the app itself is translated into are pinned to the top; everything else follows
+alphabetically.
 
 ![Choosing the event language](images/organizer/10-language-picker-light.png)
 
@@ -181,12 +186,17 @@ You have three kinds of links to share:
   + QR per code. Send one per person, or print the QR codes. The code rides the
   URL fragment and never touches a server, so treat each link like a ticket.
 - **Shared entry code**: one QR the whole room scans at once, instead of one
-  link per person. Set a headcount (0 for unlimited) and how many hours the
-  code stays valid, then tap **Create shared code** for a single link + QR to
-  put on the opening slide. It only exists in this browser tab, so copy or show
-  it before you close the page, because it can't be retrieved again. Keep the
-  validity window short: once it expires, latecomers simply land in the
-  approval queue instead of being turned away.
+  link per person. Set a headcount and a validity window, then tap **Create
+  shared code** for a single link + QR to put on the opening slide. **0** works
+  in both boxes and means "no limit" in both: 0 people is any number of them,
+  0 hours is a code that never expires. The form says in words what the code you
+  are about to create will do ("Expires 15 Sep 2026, 23:26" or "This code never
+  expires"), and the generated panel repeats it under the QR, so check it says
+  what you meant before handing the link out. The code only exists in this
+  browser tab, so copy or show it before you close the page, because it can't be
+  retrieved again. A short window is safer, because anyone who scans the code can
+  forward the link; and when a code does expire it is not refused, latecomers
+  simply land in the approval queue.
 
 ![Generated invite codes with QR](images/organizer/04-invites-light.png)
 
@@ -434,8 +444,8 @@ plan fails.
 
 ## 7. During the event
 
-- **Roster fills in live**: approved attendees appear as they join; match
-  lists refresh as new intros are processed.
+- **Roster fills in live**: approved attendees appear as they join; their
+  matches, shown at the top of People, refresh as new intros are processed.
 - **Recompute matches**: after a rush of arrivals, tap **↻ Recompute all
   matches** (coordinator required).
 - **Co-organizers**: in **Admin → Settings → Co-organizers**, add someone by

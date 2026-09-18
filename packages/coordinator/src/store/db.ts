@@ -86,6 +86,13 @@ const DAEMON_USAGE_RETENTION_HOURS = 24 * 7;
  *  shared between the thrower and the sweeper so the two cannot drift apart. */
 export const DAEMON_PARK_REASON = "daemon budget exceeded";
 
+/** Park-reason prefix for work whose EVENT is not currently live — suspended by
+ *  startup revalidation (NIP §3.5), or not yet restored (audit B-10). Same
+ *  contract as {@link DAEMON_PARK_REASON}: the reason in the row is the only thing
+ *  that distinguishes these from billing/budget parks, so the release can be scoped
+ *  to them and cannot accidentally un-park work that is waiting on money. */
+export const EVENT_NOT_LIVE_PARK_REASON = "event not live";
+
 /**
  * An ordered, transactional schema migration (audit O3). `up` runs inside a
  * `BEGIN IMMEDIATE` transaction and, on success, `user_version` is advanced to
@@ -228,6 +235,23 @@ function applyBaselineDDL(db: DatabaseSync): void {
     )`,
   );
   db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
+  // Migration (2026-09-13): scheduling class on a job row. Deliberately a plain
+  // defaulted column rather than a numbered migration — an older binary neither
+  // reads nor writes it, and its INSERTs take the DEFAULT, so the file stays
+  // readable both ways and this needs no one-way SCHEMA_VERSION bump.
+  try {
+    db.exec("ALTER TABLE jobs ADD COLUMN priority INTEGER NOT NULL DEFAULT 0");
+    // Classify the rows that predate the column, so the deploy that introduces it
+    // also reorders the queue it inherits. Without this the change would only
+    // apply to jobs enqueued afterwards, and a backlog of reverse batches would
+    // still be the first thing the next arrival waits behind. Inside the same
+    // try/catch on purpose: it runs exactly once, on the transition.
+    const setPriority = db.prepare("UPDATE jobs SET priority = ? WHERE type = ?");
+    for (const [type, priority] of Object.entries(JOB_PRIORITY)) setPriority.run(priority, type);
+  } catch {
+    /* column already exists */
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim_priority ON jobs (state, next_run_at, priority, id)");
 }
 
 /**
@@ -760,6 +784,44 @@ export const MATCH_JOB_TYPES = [
 ] as const;
 
 /**
+ * Jobs the queue runs LAST (higher number = later), keyed by type. Everything
+ * unlisted is 0 and runs in id order as before.
+ *
+ * `score_reverse_batch` is the one piece of matching work whose result the person
+ * who triggered it never sees: it scores the EXISTING attendees against the
+ * newcomer, i.e. it updates other people's match lists. Their lists matter, but
+ * nobody is staring at the screen waiting for them, and a newcomer very much is.
+ *
+ * Measured on the Plan B event (2026-09-11): a newcomer's own three forward
+ * batches finished ~2 minutes after their submission, and then their
+ * `publish_matches` — a 30ms job — sat behind three reverse batches (88s, 134s,
+ * 52s) because `claimNextJob` took rows in id order and the publish row was
+ * created LAST, after the forward batch that produced it. Six minutes to show a
+ * list that had been ready for four.
+ *
+ * `publish_matches` goes the other way, to −1. Each forward batch enqueues one for
+ * the ≤10 candidates it just scored, and the job is a single replaceable publish
+ * measured in tens of milliseconds — so running it the moment it exists means a
+ * list that fills in while the remaining batches score, instead of an empty screen
+ * until the last one lands. Out-of-order publishes are already safe: every
+ * replaceable address goes out under a monotonic `created_at` watermark.
+ *
+ * The trade-off is deliberate: a long enough queue of arrivals can keep reverse
+ * work waiting indefinitely. At an event that is the desired shape — everyone
+ * walking in sees their own matches quickly, and the cross-updates land once the
+ * registration burst stops. It is not a general-purpose fair scheduler.
+ */
+export const JOB_PRIORITY: Readonly<Record<string, number>> = {
+  publish_matches: -1,
+  score_reverse_batch: 1,
+};
+
+/** The scheduling class for a job type (see {@link JOB_PRIORITY}); 0 = foreground. */
+export function jobPriority(type: string): number {
+  return JOB_PRIORITY[type] ?? 0;
+}
+
+/**
  * Per-attendee pipeline job types whose dedupe-key memory an organizer `reprocess`
  * must clear (see {@link Store.clearAttendeeJobMemo}). Both carry `$.coordinate` +
  * `$.pubkey` in their payload, which is what makes a single per-attendee delete
@@ -798,6 +860,8 @@ export interface JobRow {
   claimed_at: number | null;
   lease_until: number | null;
   worker_token: string | null;
+  /** Scheduling class, written from the type at enqueue ({@link jobPriority}). */
+  priority: number;
 }
 
 /** A stored attendee row (audit Q11: typed instead of `any` at the pipeline boundary). */
@@ -1884,9 +1948,19 @@ export class Store {
     ai_profile_json: string | null;
     profile_hash: string | null;
   }[] {
+    // ORDER BY rowid — insertion order, i.e. the order people were admitted.
+    //
+    // Not cosmetic. The 31604 roster packs its pages front to back
+    // (PROTOCOL-NIP.md §6.2), so an approval only costs ONE relay publish as long
+    // as it appends to the end of this list. Without the clause SQLite is free to
+    // answer in (coordinate, pubkey) primary-key order, where a new member lands
+    // in the middle of the list by pubkey and shifts every page after it — one
+    // approval, N republishes, for the length of the event. Updating a row (a
+    // revoke-then-reapprove, a role change) keeps its rowid, so the order is
+    // stable across everything except a genuine new admission.
     return this.db
       .prepare(
-        "SELECT pubkey, role, ai_profile_json, profile_hash FROM attendees WHERE coordinate = ? AND status = 'approved'",
+        "SELECT pubkey, role, ai_profile_json, profile_hash FROM attendees WHERE coordinate = ? AND status = 'approved' ORDER BY rowid",
       )
       .all(coordinate) as any;
   }
@@ -2129,6 +2203,29 @@ export class Store {
     this.db
       .prepare("UPDATE talks SET status = ?, published_at = ?, published_eck_id = COALESCE(?, published_eck_id), updated_at = ? WHERE coordinate = ? AND pubkey = ? AND talk_d = ?")
       .run(status, publishedAt, publishedEckId ?? null, now, coordinate, pubkey, talkD);
+  }
+
+  /**
+   * A speaker's talks that are still waiting for a transcript and could actually
+   * get one: Blossom media (never an `external_url` — those are never fetched, C3
+   * SSRF allowlist) that the speaker opted into matching, with no transcript
+   * attached and not rejected by the organizer. This is the set an organizer
+   * `reprocess` has to re-enqueue (audit B-4): `clearAttendeeJobMemo` deletes the
+   * poisoned `process_talk` row, but its dedupe key is content-addressed on the
+   * media hash, so nothing re-creates it — a re-submission of the identical
+   * recording reproduces the same key and is discarded.
+   */
+  untranscribedTalksBySpeaker(coordinate: string, pubkey: string): TalkRow[] {
+    return this.db
+      .prepare(
+        `SELECT * FROM talks
+          WHERE coordinate = ? AND pubkey = ?
+            AND transcript_json IS NULL
+            AND external_url IS NULL
+            AND process_for_matching = 1
+            AND status != 'rejected'`,
+      )
+      .all(coordinate, pubkey) as unknown as TalkRow[];
   }
 
   /** Every 'published' talk of an event (COORD-7: republish under a rotated ECK). */
@@ -2678,9 +2775,9 @@ export class Store {
   enqueueJob(type: string, dedupeKey: string, payload: unknown, notBefore = 0): EnqueueOutcome {
     const info = this.db
       .prepare(
-        "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at) VALUES (?, ?, ?, 'pending', ?)",
+        "INSERT OR IGNORE INTO jobs (type, dedupe_key, payload, state, next_run_at, priority) VALUES (?, ?, ?, 'pending', ?, ?)",
       )
-      .run(type, dedupeKey, JSON.stringify(payload), notBefore);
+      .run(type, dedupeKey, JSON.stringify(payload), notBefore, jobPriority(type));
     if (Number(info.changes) > 0) return "enqueued";
     const row = this.db.prepare("SELECT state FROM jobs WHERE dedupe_key = ?").get(dedupeKey) as
       | { state: JobState }
@@ -2779,17 +2876,43 @@ export class Store {
    * claim the same row. Attempts are NOT incremented here — lease expiry or a
    * crash must not consume a retry; only a classified failure (`failJob`) does.
    */
-  claimNextJob(now: number, workerToken: string, leaseMs = 5 * 60_000): JobRow | undefined {
+  claimNextJob(
+    now: number,
+    workerToken: string,
+    leaseMs = 5 * 60_000,
+    /**
+     * Restrict which types this claim may take — how the runner keeps a job type
+     * inside its concurrency lane without the lane itself having to be a column.
+     * `onlyTypes: []` means "nothing is claimable", which is a real state (every
+     * lane busy) and answers without touching the database.
+     */
+    types?: { onlyTypes?: string[]; excludeTypes?: string[] },
+  ): JobRow | undefined {
+    if (types?.onlyTypes?.length === 0) return undefined;
+    const filters: string[] = [];
+    const params: string[] = [];
+    if (types?.onlyTypes?.length) {
+      filters.push(`AND type IN (${types.onlyTypes.map(() => "?").join(", ")})`);
+      params.push(...types.onlyTypes);
+    }
+    if (types?.excludeTypes?.length) {
+      filters.push(`AND type NOT IN (${types.excludeTypes.map(() => "?").join(", ")})`);
+      params.push(...types.excludeTypes);
+    }
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db
         .prepare(
+          // Scheduling class first, then id (see JOB_PRIORITY). A stranded lease is
+          // reclaimed under its own class: it is work that was already started, and
+          // demoting or promoting it on recovery would be a second, invisible rule.
           `SELECT * FROM jobs
-             WHERE (state = 'pending' AND next_run_at <= ?)
-                OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?)
-             ORDER BY id LIMIT 1`,
+             WHERE ((state = 'pending' AND next_run_at <= ?)
+                OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?))
+                ${filters.join(" ")}
+             ORDER BY priority, id LIMIT 1`,
         )
-        .get(now, now) as JobRow | undefined;
+        .get(now, now, ...params) as JobRow | undefined;
       if (!row) {
         this.db.exec("COMMIT");
         return undefined;
@@ -2957,6 +3080,24 @@ export class Store {
          WHERE state = 'waiting' AND last_error LIKE '${DAEMON_PARK_REASON}%'`,
       )
       .run();
+    return Number(info.changes);
+  }
+
+  /**
+   * Re-enqueue jobs parked because their EVENT was not live (audit B-10), for one
+   * coordinate — called when that event comes back (a successful install/restore).
+   * Reason-scoped for the same reason as {@link resumeDaemonParkedJobs}: an event
+   * coming back says nothing about a billing block or a per-event budget, and those
+   * parks must survive it.
+   */
+  resumeEventNotLiveJobs(coordinate: string): number {
+    const info = this.db
+      .prepare(
+        `UPDATE jobs SET state = 'pending', next_run_at = 0, last_error = NULL
+         WHERE state = 'waiting' AND json_extract(payload, '$.coordinate') = ?
+           AND last_error LIKE '${EVENT_NOT_LIVE_PARK_REASON}%'`,
+      )
+      .run(coordinate);
     return Number(info.changes);
   }
 

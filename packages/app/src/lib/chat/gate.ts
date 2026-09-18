@@ -70,3 +70,37 @@ export function evaluateChatGate(i: ChatGateInput): ChatGate {
   if (!i.hasSigner || !i.showChat) return "unavailable";
   return "enter";
 }
+
+/**
+ * Can the Chat page open the room from state this device ALREADY holds, without
+ * first asking the network "am I allowed in?"
+ *
+ * The page used to answer that question from scratch on every single open: a
+ * relay round-trip for the event context, a full gift-wrap grant scan (paged
+ * relay reads plus — on a remote signer — two NIP-46 round-trips per unprocessed
+ * wrap), then a shell re-sync, and only then did it drop "Checking your access…"
+ * (`chat.checking`). For a member opening chat for the tenth time that is seconds of
+ * spinner to re-derive an answer that had not changed and could not change: the
+ * thing that makes someone a chat member is an ECK sitting in THIS device's
+ * keystore (`eventShell.showChat` = approved member + `chat=marmot`), which is a
+ * local cryptographic fact, not a claim the relay has to confirm.
+ *
+ * So this is NOT an optimistic paint. It never widens who gets in — it is the
+ * same predicate `evaluateChatGate` settles on, read from the shell that has
+ * already resolved it for this event, instead of recomputed over the wire. When
+ * the shell has NOT resolved a member (a deep link straight to /chat, a fresh
+ * device, a genuine non-member), this returns false and the page pays for the
+ * honest "checking" pass — a wrong-but-fast room is worse than a slow one.
+ *
+ * `hasCtx` matters because the room needs the event context (relays, coordinator)
+ * to render at all; without a cached one there is a relay round-trip to make
+ * anyway, so there is nothing to win by skipping the rest of the pass.
+ */
+export function canEnterChatFromLocalState(
+  i: ChatGateInput & { hasCtx: boolean },
+): boolean {
+  if (!i.hasCtx) return false;
+  // Exactly the gate's own "enter" conditions, minus `membershipKnown` — which
+  // is only ever a statement about the page's own network pass having finished.
+  return evaluateChatGate({ ...i, membershipKnown: true }) === "enter";
+}

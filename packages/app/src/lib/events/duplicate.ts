@@ -5,7 +5,7 @@
  * assignment, and no start/end dates. Create mints fresh keys and a fresh `d` as
  * always, so a duplicate can never collide with or impersonate the original.
  */
-import type { EventConfig } from "@nostrautica/protocol";
+import type { EventConfig, Approval } from "@nostrautica/protocol";
 
 /** The create-form fields a duplicate pre-fills (a strict subset of the config). */
 export interface DuplicatePrefill {
@@ -16,7 +16,7 @@ export interface DuplicatePrefill {
   talks: "off" | "on" | "prerecord-first";
   matching: "on" | "off";
   matchVisibility: "pair" | "event";
-  approval: "manual" | "invite" | "manual+invite";
+  approval: Approval;
   lang: string;
   maxVideoSec: number;
   maxTalkSec: number;

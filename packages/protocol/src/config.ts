@@ -22,7 +22,22 @@ import {
  */
 export const UNLIMITED_SEC = 0;
 
-export type Approval = "manual" | "invite" | "manual+invite";
+/**
+ * How somebody gets in.
+ *
+ * `"open"` (2026-09-13) is for communities: the trust already exists wherever
+ * the invite link was posted — a group chat whose members know each other — and
+ * asking an admin to click eighty times to re-confirm it is work they will not
+ * do. Anyone holding the link is in.
+ *
+ * Adding a value here is safe in both directions because `parseConfigTags`
+ * falls back to `"manual"` on anything it does not recognise rather than
+ * throwing. An older client or coordinator meeting an `"open"` config therefore
+ * degrades to requiring approval — STRICTER than intended, never looser, which
+ * is the only acceptable direction for a field that decides who can read an
+ * event's encrypted content.
+ */
+export type Approval = "manual" | "invite" | "manual+invite" | "open";
 export type MatchVisibility = "pair" | "event";
 /**
  * Prerecorded-talks journey mode (spec F2, audit U11):
@@ -233,7 +248,7 @@ function urlValues(tags: string[][], name: string, protocol: string): string[] {
   });
 }
 
-const APPROVALS: Approval[] = ["manual", "invite", "manual+invite"];
+const APPROVALS: Approval[] = ["manual", "invite", "manual+invite", "open"];
 const VISIBILITIES: MatchVisibility[] = ["pair", "event"];
 const TALKS_MODES: TalksMode[] = ["off", "on", "prerecord-first"];
 

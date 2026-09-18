@@ -26,16 +26,17 @@ import {
   assertNip44CiphertextCeiling,
   assertVerifiedSeal,
   finalizeUnwrappedRumor,
+  GIFTWRAP_MAX_BACKDATE_SEC,
+  isNip44Ciphertext,
   nip44Encrypt,
   type RumorKind,
 } from "@nostrautica/protocol";
 import type { Rumor, GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 
-const DAY = 24 * 60 * 60;
-
 /**
- * A timestamp randomized up to 2 days into the past (NIP-59).
+ * A timestamp randomized up to {@link GIFTWRAP_MAX_BACKDATE_SEC} into the past
+ * (NIP-59).
  *
  * `crypto.getRandomValues`, not `Math.random` (audit PROTO-2). This offset is a
  * PRIVACY parameter — it is what stops the wrap's `created_at` from revealing
@@ -49,9 +50,9 @@ function randomPastTimestamp(): number {
   const now = Math.floor(Date.now() / 1000);
   const buf = new Uint32Array(1);
   crypto.getRandomValues(buf);
-  // Scale a uniform 32-bit draw onto [0, 2 days) — no modulo bias, since the
-  // range is not a divisor of 2^32.
-  const offset = Math.floor((buf[0]! / 2 ** 32) * 2 * DAY);
+  // Scale a uniform 32-bit draw onto [0, GIFTWRAP_MAX_BACKDATE_SEC) — no modulo
+  // bias, since the range is not a divisor of 2^32.
+  const offset = Math.floor((buf[0]! / 2 ** 32) * GIFTWRAP_MAX_BACKDATE_SEC);
   return now - offset;
 }
 
@@ -139,11 +140,23 @@ export async function signerUnwrap(
   // session through the ordinary DM and grant scans. Anything past the ceiling
   // cannot be a valid encryption of a legal plaintext, so refusing it costs
   // nothing correct.
+  //
+  // The ceiling bounds SIZE; `isNip44Ciphertext` bounds SHAPE, and this path is
+  // where the shape matters most, because `wrap.content` is the only ciphertext
+  // in the app that a stranger chooses. Anyone may `#p`-tag a kind-1059 at this
+  // user with arbitrary bytes in it, and we were forwarding all of it. A remote
+  // signer answers "invalid base64" to that — after a relay round trip, and on
+  // Clave (iOS) after showing the user a "Signing Failed" notification — and
+  // `fetchDms` deliberately does not memoize a failed unwrap, so each junk wrap
+  // was re-sent MAX_UNWRAP_ATTEMPTS times per session. Deciding it here costs a
+  // regex.
   assertNip44CiphertextCeiling(wrap.content);
+  if (!isNip44Ciphertext(wrap.content)) throw new Error("gift wrap content is not NIP-44");
   const sealJson = await signer.nip44Decrypt(wrap.pubkey, wrap.content);
   const seal: unknown = JSON.parse(sealJson);
   assertVerifiedSeal(seal);
   assertNip44CiphertextCeiling(seal.content);
+  if (!isNip44Ciphertext(seal.content)) throw new Error("seal content is not NIP-44");
   const rumorJson = await signer.nip44Decrypt(seal.pubkey, seal.content);
   const rumor: unknown = JSON.parse(rumorJson);
   return finalizeUnwrappedRumor(rumor, seal.pubkey);

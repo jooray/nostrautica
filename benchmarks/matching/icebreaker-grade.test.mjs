@@ -6,7 +6,14 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { attributionOf, isBriefing, gradeIcebreaker, summarize } from "./icebreaker-grade.mjs";
+import {
+  attributionOf,
+  isBriefing,
+  gradeIcebreaker,
+  gradeReasoning,
+  namedInThirdPerson,
+  summarize,
+} from "./icebreaker-grade.mjs";
 
 const target = {
   firstName: "Juraj",
@@ -411,4 +418,84 @@ test("round seven: the category list is built from stems, so PLURALS still carry
   ]) {
     assert.ok(gradeIcebreaker(bad, sender, recipient).includes("THEFT"), `should be THEFT: ${bad}`);
   }
+});
+
+// --- reasoning_for_target (added 2026-09-10) ---------------------------------
+// The field the grader never looked at, pinned against the production card that
+// exposed it and against the correct output it must not flag.
+
+test("the production card: the reader written about in the third person is INVERTED", () => {
+  // Verbatim shape of the 2026-09-10 card (Slovak, accents stripped the way the
+  // grader sees them elsewhere in this file). The reader is Juraj; the reasoning
+  // addresses Milan and describes Juraj as a third party.
+  const reader = { firstName: "Juraj", signature: { entity: "Nostrautica" } };
+  const other = { firstName: "Milan", signature: { entity: "Bitcoin Pulse" } };
+  for (const bad of [
+    "Milane, Juraj je autor nastroja Nostrautica a romanu Krotitelia entropie.",
+    "Juraj je autor nastroja Nostrautica, ktory sa zaujima o cypherpunk.",
+    "Juraj vytvoril Nostrauticu a moze ti ponuknut zaujimave pohlady.",
+  ]) {
+    assert.ok(gradeReasoning(bad, reader, other).includes("INVERTED"), `should be INVERTED: ${bad}`);
+  }
+});
+
+test("the intended host voice is NOT flagged", () => {
+  // These are what the prompt asks for: the reader is "you", the other person is
+  // named in the third person, and the reader's OWN artifact is "your". Every one
+  // of these is a violation one field over, which is the whole point.
+  const reader = { firstName: "Juraj", signature: { entity: "Nostrautica" } };
+  const other = { firstName: "Gideon", signature: { entity: "Marrowlight" } };
+  for (const ok of [
+    "Gideon je pravnik a producent — opytaj sa ho na Marrowlight.",
+    "Mal by si chytit Gideona: tvoja Nostrautica a jeho branding si sadnu.",
+    "Ask him about Marrowlight — your Nostrautica needs exactly that eye.",
+    "Gideon plays bass and would get what you built.",
+  ]) {
+    assert.deepEqual(gradeReasoning(ok, reader, other), [], `should be clean: ${ok}`);
+  }
+});
+
+test("the other person's artifact called \"your\" is MISATTRIBUTED", () => {
+  const reader = { firstName: "Juraj", signature: { entity: "Nostrautica" } };
+  const other = { firstName: "Gideon", signature: { entity: "Marrowlight" } };
+  for (const bad of [
+    "Tvoj Marrowlight projekt je vizualne silny.",
+    "Your Marrowlight album is exactly the aesthetic here.",
+  ]) {
+    assert.ok(
+      gradeReasoning(bad, reader, other).includes("MISATTRIBUTED"),
+      `should be MISATTRIBUTED: ${bad}`,
+    );
+  }
+});
+
+test("namedInThirdPerson does not inherit isBriefing's third-party half", () => {
+  // The split that makes gradeReasoning possible: "ask him about X" is a briefing
+  // in an icebreaker and the house style in a reasoning.
+  assert.equal(isBriefing("Ask him about Marrowlight.", "Gideon"), true);
+  assert.equal(namedInThirdPerson("Ask him about Marrowlight.", "Gideon"), false);
+  // A vocative is an address, not a description — in either field.
+  assert.equal(namedInThirdPerson("Ahoj Gideon, pracujem na tom.", "Gideon"), false);
+});
+
+test("round eight: a NOMINATIVE relative clause makes \"si\" reflexive, not second person", () => {
+  // Real GLM 5.3 Flash output, flagged by the new reasoning grader. "ktorá …
+  // navrhla si vlastnú peňaženku Copperwake" is "who … designed her OWN wallet",
+  // and Copperwake is indeed the candidate's. Correct text, wrong grade.
+  const reader = { firstName: "Kenji", signature: { entity: "Sundial Custody" } };
+  const other = { firstName: "Sunny", signature: { entity: "Copperwake" } };
+  const ok =
+    "Sunny je presne to, čo hľadáš: embedded inžinierka, ktorá píše C a navrhla si vlastnú " +
+    "hardvérovú peňaženku Copperwake. Tvoje tamper-evident zariadenia a jej firmware sú tím.";
+  assert.deepEqual(gradeReasoning(ok, reader, other), []);
+  assert.equal(attributionOf(ok, "Copperwake"), "none");
+});
+
+test("round eight does not blind the grader to a real second-person claim", () => {
+  // The object case leaves the subject free, so here "si" IS second person and
+  // the claim must survive. Trading the false positive above for a miss on this
+  // would defeat the point of the whole file.
+  assert.equal(attributionOf("kniha, ktorú si napísal, Tamers of Entropy, ma dostala.", "Tamers of Entropy"), "second");
+  assert.equal(attributionOf("Tvoja kniha Tamers of Entropy ma dostala.", "Tamers of Entropy"), "second");
+  assert.equal(attributionOf("Vytvoril si Nostrauticu a to je presne ono.", "Nostrautica"), "second");
 });

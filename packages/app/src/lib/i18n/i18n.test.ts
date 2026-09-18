@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { i18n, pluralCategory, langFromHash } from "./i18n.svelte.js";
-import { messages } from "./messages.js";
+import { messages, LOCALES, type Locale } from "./messages.js";
 
 describe("i18n interpolation", () => {
   it("substitutes {name} placeholders", () => {
@@ -48,54 +48,89 @@ describe("plural categories", () => {
     expect(pluralCategory("cs", 5)).toBe("many");
     expect(pluralCategory("cs", 0)).toBe("many");
   });
+
+  it("german and spanish: 1 vs many, never few", () => {
+    // Both fall through pluralCategory's default branch. Asserted rather than
+    // assumed, because a `.few` key added to either catalog would be dead
+    // weight that tp() can never select, and nothing else would catch it.
+    for (const loc of ["de", "es"] as const) {
+      expect(pluralCategory(loc, 1)).toBe("one");
+      expect(pluralCategory(loc, 0)).toBe("many");
+      expect(pluralCategory(loc, 2)).toBe("many");
+      expect(pluralCategory(loc, 5)).toBe("many");
+    }
+  });
 });
 
 describe("message catalog completeness", () => {
   // `en` is the source of truth for the key set (spec: messages.ts top comment).
-  // Slavic locales (sk/cs) additionally define a `.few` form for every `.one`/
-  // `.many` plural family, since they need the 1 / 2-4 / 5+ split; English only
-  // ever needs one/many. So sk and cs should have IDENTICAL key sets to each
-  // other, and both should be supersets of en's key set.
-  const enKeys = Object.keys(messages.en);
-  const skKeys = Object.keys(messages.sk);
-  const csKeys = Object.keys(messages.cs);
+  //
+  // The catalogs fall into two families, decided by how many plural forms the
+  // language needs. sk and cs need 1 / 2-4 / 5+, so they carry an extra `.few`
+  // for every plural family; en, de and es need only 1 / other, so their key
+  // sets are identical to en's. Every catalog is therefore a superset of en,
+  // and each family agrees with itself exactly.
+  const THREE_FORM: Locale[] = ["sk", "cs"];
+  const TWO_FORM: Locale[] = LOCALES.filter((l) => !THREE_FORM.includes(l));
+  const keysOf = (loc: Locale) => Object.keys(messages[loc]);
+  const enKeys = keysOf("en");
 
-  it("every en key exists in sk and cs", () => {
-    const skSet = new Set(skKeys);
-    const csSet = new Set(csKeys);
-    const missingFromSk = enKeys.filter((k) => !skSet.has(k));
-    const missingFromCs = enKeys.filter((k) => !csSet.has(k));
-    expect(missingFromSk).toEqual([]);
-    expect(missingFromCs).toEqual([]);
+  it("every en key exists in every other locale", () => {
+    for (const loc of LOCALES) {
+      const set = new Set(keysOf(loc));
+      expect(
+        enKeys.filter((k) => !set.has(k)),
+        `${loc} is missing keys that en has`,
+      ).toEqual([]);
+    }
   });
 
-  it("sk and cs have exactly the same key set (same plural families)", () => {
-    const skSet = new Set(skKeys);
-    const csSet = new Set(csKeys);
-    const missingFromCs = skKeys.filter((k) => !csSet.has(k));
-    const extraInCs = csKeys.filter((k) => !skSet.has(k));
-    expect(missingFromCs).toEqual([]);
-    expect(extraInCs).toEqual([]);
+  it("the two-form locales have exactly en's key set (no stray .few)", () => {
+    // A `.few` key in de or es is unreachable: pluralCategory never returns
+    // "few" for them, so the string would sit in the catalog looking translated
+    // and never render. This is the test that catches it.
+    for (const loc of TWO_FORM) {
+      const keys = keysOf(loc);
+      const enSet = new Set(enKeys);
+      expect(keys.filter((k) => !enSet.has(k)), `${loc} has keys en does not`).toEqual([]);
+      expect(keys.filter((k) => k.endsWith(".few")), `${loc} has unreachable .few keys`).toEqual(
+        [],
+      );
+    }
+  });
+
+  it("the three-form locales have exactly the same key set as each other", () => {
+    const [first, ...rest] = THREE_FORM;
+    const firstKeys = keysOf(first);
+    const firstSet = new Set(firstKeys);
+    for (const loc of rest) {
+      const set = new Set(keysOf(loc));
+      expect(firstKeys.filter((k) => !set.has(k)), `${loc} missing vs ${first}`).toEqual([]);
+      expect(keysOf(loc).filter((k) => !firstSet.has(k)), `${loc} extra vs ${first}`).toEqual([]);
+    }
   });
 
   it("no duplicate keys within a locale", () => {
-    for (const [locale, keys] of Object.entries({ en: enKeys, sk: skKeys, cs: csKeys })) {
+    for (const locale of LOCALES) {
       const seen = new Set<string>();
-      const dupes = keys.filter((k) => (seen.has(k) ? true : (seen.add(k), false)));
+      const dupes = keysOf(locale).filter((k) => (seen.has(k) ? true : (seen.add(k), false)));
       expect(dupes, `duplicate keys in ${locale}`).toEqual([]);
     }
   });
 
-  it("every .one plural family has matching .few and .many forms in sk and cs", () => {
+  it("every .one plural family has the forms its locale needs", () => {
     const oneKeys = enKeys.filter((k) => k.endsWith(".one"));
     expect(oneKeys.length).toBeGreaterThan(0);
-    const skSet = new Set(skKeys);
-    const csSet = new Set(csKeys);
-    for (const key of oneKeys) {
-      const base = key.slice(0, -".one".length);
-      for (const suffix of [".few", ".many"] as const) {
-        expect(skSet.has(base + suffix), `sk missing ${base}${suffix}`).toBe(true);
-        expect(csSet.has(base + suffix), `cs missing ${base}${suffix}`).toBe(true);
+    for (const loc of LOCALES) {
+      const set = new Set(keysOf(loc));
+      const needed = THREE_FORM.includes(loc)
+        ? ([".few", ".many"] as const)
+        : ([".many"] as const);
+      for (const key of oneKeys) {
+        const base = key.slice(0, -".one".length);
+        for (const suffix of needed) {
+          expect(set.has(base + suffix), `${loc} missing ${base}${suffix}`).toBe(true);
+        }
       }
     }
   });
@@ -119,9 +154,14 @@ describe("event-language adoption (spec §7.1)", () => {
   });
 
   it("ignores unavailable languages and falls back to the current locale", () => {
+    // The unshipped language is PICKED from LOCALES rather than written down.
+    // This test used to hardcode "de" with the note "no de catalog today", and
+    // the day German shipped it started asserting that German was ignored.
+    const unshipped = ["fr", "ja", "pt", "fi"].find((l) => !(LOCALES as string[]).includes(l));
+    expect(unshipped, "every candidate is now a shipped locale").toBeTruthy();
     i18n.explicit = false;
     i18n.locale = "en";
-    i18n.adoptEventLang("de"); // no de catalog today
+    i18n.adoptEventLang(unshipped!);
     expect(i18n.locale).toBe("en");
   });
 
@@ -215,7 +255,7 @@ describe("invite-link language (?lang=)", () => {
     // A language with no catalog (the 31600 `lang` tag is any ISO 639-1) must
     // fall through to detection rather than pick a wrong catalog.
     expect(langFromHash(`#/e/${naddr}/join?code=nsec1xyz&lang=hu`)).toBeUndefined();
-    // Attacker-supplied: never anything but one of the three shipped locales.
+    // Attacker-supplied: never anything but one of the shipped locales.
     expect(langFromHash("#/e/x/join?lang=../../etc/passwd")).toBeUndefined();
     expect(langFromHash(`#/e/${naddr}/join?code=nsec1xyz`)).toBeUndefined();
     expect(langFromHash("#/e/naddr1abc/join")).toBeUndefined();
@@ -286,11 +326,11 @@ describe("i18n plural resolution", () => {
 
 describe("counter totals are never hard-coded in message text", () => {
   // Regression: "event.offline.downloading" read "Downloading… ({n} of 6)" in
-  // all three locales while the offline pack had grown to eight steps, so the
-  // card rendered "Downloading… (8 of 6)". A total that lives in the string
-  // cannot be kept in sync with the code that counts; it must be a parameter.
+  // every locale while the offline pack had grown to eight steps, so the card
+  // rendered "Downloading… (8 of 6)". A total that lives in the string cannot be
+  // kept in sync with the code that counts; it must be a parameter.
   it("the offline download counter takes its total as a parameter", () => {
-    for (const locale of ["en", "sk", "cs"] as const) {
+    for (const locale of LOCALES) {
       const text = messages[locale]["event.offline.downloading"] as string;
       expect(text, locale).toContain("{n}");
       expect(text, locale).toContain("{total}");

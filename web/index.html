@@ -63,7 +63,20 @@
         <a href="#en" data-lang="en" aria-current="true">EN</a>
         <a href="#sk" data-lang="sk" aria-current="false">SK</a>
         <a href="#cs" data-lang="cs" aria-current="false">CS</a>
+        <a href="#de" data-lang="de" aria-current="false">DE</a>
+        <a href="#es" data-lang="es" aria-current="false">ES</a>
       </div>
+
+      <!-- Same choice as the pill row above, for viewports too narrow to hold it.
+           CSS shows exactly one of the two, so only one is ever in the tab order
+           and there is no duplicate-control confusion for a screen reader. -->
+      <select id="lang-select" class="lang-select" data-i18n-aria="a11y.lang_label" aria-label="Language">
+        <option value="en">EN</option>
+        <option value="sk">SK</option>
+        <option value="cs">CS</option>
+        <option value="de">DE</option>
+        <option value="es">ES</option>
+      </select>
 
       <button type="button" id="copy-link" class="icon-btn" data-i18n-aria="a11y.copy_link" aria-label="Copy link to this page">
         <svg class="icon-link" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M9.5 14.5 14.5 9.5M10.5 6.5l1-1a4 4 0 0 1 5.66 5.66l-1 1M13.5 17.5l-1 1a4 4 0 0 1-5.66-5.66l1-1"/></svg>
@@ -122,8 +135,8 @@
         <div class="phone-stack">
           <div class="phone phone-primary">
             <picture>
-              <source class="src-dark" srcset="assets/screenshots/11-matches-dark.png" media="(prefers-color-scheme: dark)" width="390" height="844">
-              <img src="assets/screenshots/11-matches-light.png" width="390" height="844" fetchpriority="high" decoding="async" alt="Nostrautica match list: Nina Designer marked Good match, with the reason 'your interests and goals line up well for this event' and a Message button.">
+              <source class="src-dark" srcset="assets/screenshots/11-people-matches-dark.png" media="(prefers-color-scheme: dark)" width="390" height="844">
+              <img src="assets/screenshots/11-people-matches-light.png" width="390" height="844" fetchpriority="high" decoding="async" alt="Nostrautica's People list for an event: a Good matches band holding Olga Organizer, with the reason 'You should meet them - your interests and goals line up well for this event', above an Everyone else section listing the other attendees.">
             </picture>
           </div>
           <div class="phone phone-secondary">

@@ -79,6 +79,15 @@ export interface TokenUsage {
   promptTokens: number;
   completionTokens: number;
   totalTokens: number;
+  /**
+   * Of `completionTokens`, how many went on chain-of-thought (absent when the
+   * provider does not say). Reported separately because it is otherwise invisible
+   * — `strip_thinking_response` removes the reasoning TEXT but not the charge for
+   * it — and a model that reasons 6000 tokens per call is dear per call however
+   * cheap it is per token. Not an extra charge on top of `completionTokens`: on
+   * Venice it is a subset of it (verified 2026-09-14).
+   */
+  reasoningTokens?: number;
 }
 
 export interface SttProvider {

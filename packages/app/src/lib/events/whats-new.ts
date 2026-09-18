@@ -32,8 +32,17 @@ export function saveWatermark(coordinate: string, w: Watermark): void {
   cacheSet(key(coordinate), w, w.at || Math.floor(Date.now() / 1000));
 }
 
-/** Match pubkeys in `matches` the watermark hasn't seen yet — the "new" ones. */
-export function newMatchPubkeys(matches: MatchListContent | undefined, seen: string[]): string[] {
+/**
+ * Match pubkeys in `matches` the watermark hasn't seen yet — the "new" ones.
+ *
+ * Typed on the minimum it reads rather than on `MatchListContent`, so the People
+ * list can ask the same question about a bare `Match[]` it is already holding
+ * without first reassembling the envelope (`v`/`computed_at`) around it.
+ */
+export function newMatchPubkeys(
+  matches: { matches: readonly { pubkey: string }[] } | undefined,
+  seen: string[],
+): string[] {
   if (!matches) return [];
   const seenSet = new Set(seen);
   return matches.matches.map((m) => m.pubkey).filter((p) => !seenSet.has(p));

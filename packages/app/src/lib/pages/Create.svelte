@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Approval } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import {
@@ -37,6 +38,14 @@
   import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
 
+  /**
+   * Event or standing community. A community is the same record without an end,
+   * so this switches off the parts of the form that ask when and where, and
+   * changes the defaults rather than the machinery: nothing below branches on
+   * it except what a community genuinely has no answer for.
+   */
+  let mode = $state<"event" | "community">("event");
+  const isCommunity = $derived(mode === "community");
   let title = $state("");
   let summary = $state("");
   let startLocal = $state("");
@@ -64,7 +73,7 @@
   // in the exact state as create-then-attach-from-Admin (see submit()).
   let coordinatorPubkey = $state<string | null>(null);
   let matchVisibility = $state<"pair" | "event">("pair");
-  let approval = $state<"manual" | "invite" | "manual+invite">("manual+invite");
+  let approval = $state<Approval>("manual+invite");
   let lang = $state<string>("en"); // ISO 639-1 event language (default English)
 
   let busy = $state(false);
@@ -246,7 +255,7 @@
         message: !session.loggedIn && !organizerName.trim() ? t("create.error.nameRequired") : null,
       },
       { id: "t", message: !title.trim() ? t("create.error.titleRequired") : null },
-      { id: "st", message: !startLocal ? t("create.error.startRequired") : null },
+      { id: "st", message: !isCommunity && !startLocal ? t("create.error.startRequired") : null },
       { id: "en", message: endBeforeStart ? t("create.error.endBeforeStart") : null },
     ]);
     if (!result.ok) {
@@ -281,9 +290,11 @@
       const createInput: CreateEventInput = {
         title: title.trim(),
         summary: summary.trim(),
-        start: Math.floor(new Date(startLocal).getTime() / 1000),
-        end: endLocal ? Math.floor(new Date(endLocal).getTime() / 1000) : undefined,
-        location: locationStr.trim() || undefined,
+        // A community has no when and no where, so it sends neither rather than
+        // sending a placeholder somebody would later have to interpret.
+        start: isCommunity ? undefined : Math.floor(new Date(startLocal).getTime() / 1000),
+        end: isCommunity || !endLocal ? undefined : Math.floor(new Date(endLocal).getTime() / 1000),
+        location: isCommunity ? undefined : locationStr.trim() || undefined,
         // Both images optional: store only what the organizer uploaded. The
         // attendee UI falls back to generated gradients for display.
         icon: iconUrl.trim() || undefined,
@@ -293,9 +304,12 @@
         matching,
         matchVisibility,
         approval,
+        mode,
         nostrContext: 100,
         lang,
-        talks,
+        // A community has no programme, so it never carries the talks journey
+        // even if the control was left on before the kind was switched.
+        talks: isCommunity ? "off" : talks,
         chat: chatEnabled ? ["marmot"] : [],
       };
       const result = await createEvent(signer, createInput, blindingKey);
@@ -451,7 +465,7 @@
         message: !session.loggedIn && !organizerName.trim() ? t("create.error.nameRequired") : null,
       },
       { id: "t", message: !title.trim() ? t("create.error.titleRequired") : null },
-      { id: "st", message: !startLocal ? t("create.error.startRequired") : null },
+      { id: "st", message: !isCommunity && !startLocal ? t("create.error.startRequired") : null },
       { id: "en", message: endBeforeStart ? t("create.error.endBeforeStart") : null },
     ]).errors,
   );
@@ -588,6 +602,37 @@
         </p>
       </div>
     {/if}
+    <fieldset class="modepick">
+      <legend class="field-label">{t("create.field.kind")}</legend>
+      <div class="row" style="flex-wrap:wrap">
+        <button
+          type="button"
+          class="btn inline"
+          class:primary={!isCommunity}
+          aria-pressed={!isCommunity}
+          onclick={() => {
+            mode = "event";
+            approval = "manual+invite";
+          }}>{t("create.kind.event")}</button
+        >
+        <button
+          type="button"
+          class="btn inline"
+          class:primary={isCommunity}
+          aria-pressed={isCommunity}
+          onclick={() => {
+            mode = "community";
+            // The trust already exists wherever the link gets posted; asking an
+            // admin to re-confirm it eighty times is work they will not do.
+            approval = "open";
+            talks = "off";
+          }}>{t("create.kind.community")}</button
+        >
+      </div>
+      <p class="muted" style="margin:0.35rem 0 0">
+        {isCommunity ? t("create.kind.community.body") : t("create.kind.event.body")}
+      </p>
+    </fieldset>
     <div>
       <label for="t">{t("create.field.title")}</label>
       <input
@@ -603,6 +648,7 @@
       <label for="s">{t("create.field.summary")}</label>
       <textarea id="s" rows="3" bind:value={summary}></textarea>
     </div>
+    {#if !isCommunity}
     <div class="row" style="gap:0.75rem;align-items:flex-start;flex-wrap:wrap">
       <div style="flex:1;min-width:180px">
         <label for="st">{t("create.field.start")}</label>
@@ -636,6 +682,7 @@
       <label for="loc">{t("create.field.location")}</label>
       <input id="loc" bind:value={locationStr} placeholder={t("create.field.location.placeholder")} />
     </div>
+    {/if}
     <div>
       <label for="lang">{t("create.field.language")}</label>
       <LanguagePicker id="lang" bind:value={lang} />
@@ -819,7 +866,7 @@
       {t("create.rotationNote")}
     </p>
     <button class="btn primary" onclick={submit} disabled={busy}>
-      {busy ? t("create.creating") : t("create.submit")}
+      {busy ? t("create.creating") : isCommunity ? t("create.submit.community") : t("create.submit")}
     </button>
   </div>
 {/if}

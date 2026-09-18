@@ -6,13 +6,15 @@
    * name), formatted "Slovak (sk)". Typing filters case/diacritic-insensitively
    * against the localized name, the English name, and the code.
    *
-   * Ordering: current UI locale → navigator.languages (base codes) → en, sk, cs,
-   * deduped, pinned to the top with a subtle divider; everything else follows
-   * alphabetically by displayed name. Keyboard: ↑/↓ move, Enter selects, Esc closes.
+   * Ordering: current UI locale → navigator.languages (base codes) → every locale
+   * the app itself ships a catalog for (LOCALES), deduped, pinned to the top with a
+   * subtle divider; everything else follows alphabetically by displayed name.
+   * Keyboard: ↑/↓ move, Enter selects, Esc closes.
    */
   import { tick } from "svelte";
   import { LANGUAGES } from "@nostrautica/protocol";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
+  import { LOCALES } from "$lib/i18n/messages.js";
 
   let {
     value = $bindable("en"),
@@ -55,7 +57,9 @@
     };
   })();
 
-  // Pinned codes: current locale → navigator.languages base codes → en, sk, cs.
+  // Pinned codes: current locale → navigator.languages base codes → the locales the
+  // app ships a UI catalog for. Reading LOCALES rather than repeating the list keeps
+  // a newly shipped language pinned without a second edit here.
   const pinnedCodes = $derived.by<string[]>(() => {
     const known = new Set(LANGUAGES.map((l) => l.code));
     const navLangs =
@@ -63,7 +67,7 @@
         ? (navigator.languages ?? [navigator.language]).map((l) => l.slice(0, 2).toLowerCase())
         : [];
     const out: string[] = [];
-    for (const c of [i18n.locale, ...navLangs, "en", "sk", "cs"]) {
+    for (const c of [i18n.locale, ...navLangs, ...LOCALES]) {
       if (known.has(c) && !out.includes(c)) out.push(c);
     }
     return out;

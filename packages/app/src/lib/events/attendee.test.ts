@@ -5,9 +5,10 @@
  * configured coordinator for key grants) — a grant forged by an arbitrary Nostr
  * key claiming to be that authority is rejected. Pure crypto, no relays.
  */
-import { describe, it, expect, beforeEach, vi } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import {
+  GIFTWRAP_MAX_BACKDATE_SEC,
   makeCoordinate,
   bytesToHex,
   bytesToBase64,
@@ -19,12 +20,29 @@ import {
   type Rumor,
   type KeyGrantContent,
   type OrganizerGrantContent,
+  KIND_COMMUNITY,
 } from "@nostrautica/protocol";
 import { LocalSigner } from "$lib/signer/local.js";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
-import { authenticateKeyGrant, authenticateOrganizerGrant, fetchMatches, cachedMatches, receiveGrants, MAX_GRANT_WRAPS } from "./attendee.js";
+import {
+  authenticateKeyGrant,
+  authenticateOrganizerGrant,
+  fetchMatches,
+  cachedMatches,
+  receiveGrants,
+  MAX_GRANT_WRAPS,
+  GRANT_BACKFILL_TTL_MS,
+  GRANT_SCAN_LOOKBACK_SEC,
+  GRANT_PAGE_SIZE,
+  GRANT_MAX_PAGES,
+} from "./attendee.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
-import { startScanBudget, scanIncomplete, type ScanOutcome } from "./scan-budget.js";
+import {
+  startScanBudget,
+  scanIncomplete,
+  unreachableEventCount,
+  type ScanOutcome,
+} from "./scan-budget.js";
 
 // Cache-path setup (CACHING-PLAN §2.3): mock the relay stream so fetchMatches
 // runs against a fixed 31605, and inject an in-memory keystore for the ECK.
@@ -161,6 +179,30 @@ describe("C2 — authenticateKeyGrant (21602)", () => {
 
   it("accepts a grant sealed by E_id", () => {
     expect(authenticateKeyGrant(fakeRumor(eid, KIND_KEY_GRANT, grant), grant, config)).toBe(true);
+  });
+
+  it("accepts a grant for a COMMUNITY, not only a dated event", () => {
+    // Regression. Both grant authenticators compared the coordinate's kind
+    // against KIND_CALENDAR_EVENT alone, so the moment communities got their own
+    // kind (31612) every key grant for one was refused. A key grant is how an
+    // approved member receives the ECK, so a community would have worked for
+    // exactly one person: its creator, who self-approves locally and would never
+    // have seen it fail. Both kinds now go through the protocol's own allowlist.
+    const communityCoord = makeCoordinate(eid, "cypherpunks-sk", KIND_COMMUNITY);
+    const g: KeyGrantContent = { ...grant, a: communityCoord };
+    expect(authenticateKeyGrant(fakeRumor(eid, KIND_KEY_GRANT, g), g, config)).toBe(true);
+  });
+
+  it("still refuses a coordinate that is neither space kind", () => {
+    // The guard is an allowlist, not "any kind that parses" (audit R18): an
+    // alias like `1:<E_id>:<d>` must not open a divergent namespace against the
+    // same author and identifier.
+    for (const kind of [1, 30023, 31600, 31924]) {
+      const g: KeyGrantContent = { ...grant, a: `${kind}:${eid}:cypherpunk-2026` };
+      expect(authenticateKeyGrant(fakeRumor(eid, KIND_KEY_GRANT, g), g, config), `kind ${kind}`).toBe(
+        false,
+      );
+    }
   });
 
   it("accepts a grant sealed by the configured coordinator", () => {
@@ -553,6 +595,48 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     expect(scanIncomplete(outcomes[0]!)).toBe(true);
   });
 
+  it("an EMPTY read does not latch the backfill marker (audit A-3)", async () => {
+    // `fetchEventsRelayOnly` does not reject on failure — it settles with whatever
+    // arrived inside its window — so a relay timeout, a dropped socket, and an EOSE
+    // that beat the wraps home are all indistinguishable from an empty inbox here.
+    // `unwrapFailed === 0` was trivially true for every one of them, so one bad
+    // read latched the marker and narrowed every LATER scan on this device to
+    // now − 3 days. An ECK grant for an event joined last month then became
+    // permanently undiscoverable: the user opens their own event and is told they
+    // are a visitor who should join it.
+    const store = new Map<string, string>();
+    const priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v),
+      },
+    });
+    try {
+      // Scan 1 and 2 both come back empty (the relay never answered).
+      fetchEventsRelayOnly.mockResolvedValue([]);
+      fetchEvents.mockResolvedValue([signedConfig()]);
+      expect(await receiveGrants(attendee)).toEqual([]);
+      expect((fetchEventsRelayOnly.mock.calls[0]![0] as { since: number }).since).toBe(0);
+      expect(await receiveGrants(attendee)).toEqual([]);
+      // Still a FULL-history read: nothing has been proven about this inbox yet.
+      expect((fetchEventsRelayOnly.mock.calls[1]![0] as { since: number }).since).toBe(0);
+
+      // The relay comes back, carrying a grant published weeks ago. Because the
+      // window was never narrowed, this scan still sees it.
+      fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap()]);
+      expect(await receiveGrants(attendee)).toEqual([coordinate]);
+      // Now the pass was genuinely meaningful, so the marker latches and later
+      // scans use the narrow live-overlap window.
+      await receiveGrants(attendee);
+      expect((fetchEventsRelayOnly.mock.calls[3]![0] as { since: number }).since).toBeGreaterThan(0);
+    } finally {
+      if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+      else delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+  });
+
   it("a truncated full-history pass does not latch the backfill marker", async () => {
     // A pass that ran out of budget saw only part of the history. Latching would
     // narrow every later scan to giftwrapSince() and permanently hide the wraps
@@ -640,7 +724,283 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     expect((await loadEventKeys(coordinate))?.eck.map((v) => v.id)).toEqual([2]);
 
     // The config fetch targeted the event's own relay ∪ the app defaults.
-    const relays = fetchEvents.mock.calls[0]![1] as string[];
+    // Located by FILTER, not by call index: `receiveGrants` also reads the
+    // account's own kind-10050 inbox list to widen the wrap search, so pinning
+    // this to `calls[0]` asserted something about call ordering rather than
+    // about relay selection, and broke the moment a second read was added.
+    const configCall = fetchEvents.mock.calls.find(
+      (c) => ((c[0] as { kinds?: number[] }).kinds ?? []).includes(KIND_EVENT_CONFIG),
+    );
+    const relays = configCall![1] as string[];
     expect(relays).toEqual(expect.arrayContaining(["wss://custom-relay.example", ...DEFAULT_RELAYS]));
+  });
+});
+
+/**
+ * The multi-device blindness of 2026-09-13, from every side that can cause it.
+ *
+ * Reported shape: same npub on a desktop and a phone; an event joined on the
+ * desktop never appeared on the phone, which had been logged in for months and
+ * said "No events yet". The 21602 key grant was on the relays the whole time —
+ * the phone had latched its full-history backfill marker in July and had been
+ * asking a now−3-days question ever since, and nothing could widen it again.
+ *
+ * Every test here pins one rule that, if it silently regresses, restores that
+ * exact failure: permanent, invisible, and indistinguishable from an empty
+ * account.
+ */
+describe("grant backfill window", () => {
+  const eidSk = generateSecretKey();
+  const eid = getPublicKey(eidSk);
+  const coordSk = generateSecretKey();
+  const coordinator = getPublicKey(coordSk);
+  const inbox = getPublicKey(generateSecretKey());
+  const coordinate = makeCoordinate(eid, "backfill-2026");
+  const attendee = LocalSigner.generate();
+  let attendeePk: string;
+  let store: Map<string, string>;
+  let priorStorage: PropertyDescriptor | undefined;
+
+  const markerKey = () => `nostrautica-grants-backfilled:${attendeePk}`;
+  const sinceOf = (call: number) =>
+    (fetchEventsRelayOnly.mock.calls[call]![0] as { since: number }).since;
+
+  function signedConfig(at = 1_700_000_000) {
+    return finalizeEvent(
+      {
+        kind: KIND_EVENT_CONFIG,
+        created_at: at,
+        tags: [
+          ["d", "backfill-2026"],
+          ["v", "2"],
+          ["inbox", inbox],
+          ["coordinator", coordinator, "1"],
+        ],
+        content: "",
+      },
+      eidSk,
+    );
+  }
+
+  /** A genuine 21602 gift-wrapped to the attendee by the event's coordinator. */
+  async function keyGrantWrap(eckId = 1, v = 2) {
+    return signerWrap(new LocalSigner(coordSk), attendeePk, {
+      kind: KIND_KEY_GRANT,
+      content: {
+        v,
+        a: coordinate,
+        role: "attendee",
+        eck: [{ id: eckId, key: bytesToBase64(generateEck()) }],
+        granted_by: coordinator,
+      },
+    });
+  }
+
+  beforeEach(async () => {
+    attendeePk = await attendee.getPublicKey();
+    __resetPersistForTests();
+    __setPersistBackend(memPersist());
+    __setKeystoreBackend(memKeystore());
+    setActiveOwner(attendeePk);
+    setActiveCacheOwner(attendeePk);
+    fetchEvents.mockReset();
+    fetchEventsRelayOnly.mockReset();
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    // vitest runs this package under `environment: "node"`, where there is no
+    // localStorage at all and every marker read/write is swallowed — so the
+    // marker has to be given somewhere real to live before any of this is
+    // observable.
+    store = new Map<string, string>();
+    priorStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: {
+        getItem: (k: string) => store.get(k) ?? null,
+        setItem: (k: string, v: string) => void store.set(k, v),
+      },
+    });
+  });
+
+  afterEach(() => {
+    if (priorStorage) Object.defineProperty(globalThis, "localStorage", priorStorage);
+    else delete (globalThis as { localStorage?: unknown }).localStorage;
+  });
+
+  it("treats the legacy \"1\" marker as expired, not as a completed sweep", async () => {
+    // THE migration case: `"1"` is what every already-affected device has in
+    // localStorage right now. Read as a timestamp it is 1ms past the epoch; read
+    // as "done" it is the bug. It must mean "we don't know", so the very first
+    // scan after this ships re-widens to the full history and finds the grant
+    // those devices have been unable to see for months.
+    store.set(markerKey(), "1");
+    fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap()]);
+
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect(sinceOf(0)).toBe(0);
+    // …and having actually completed one, it records a real timestamp, so the
+    // next scan is allowed to be narrow again.
+    expect(Number(store.get(markerKey()))).toBeGreaterThan(1_600_000_000_000);
+    await receiveGrants(attendee);
+    expect(sinceOf(1)).toBeGreaterThan(0);
+  });
+
+  it("re-widens once the marker is older than the TTL", async () => {
+    // Custody first, so this test isolates the TTL: an empty keystore re-widens
+    // on its own (next test), which would mask the rule under examination here.
+    await saveEventKeys({ coordinate, role: "attendee", eck: [{ id: 1, key: "x" }] });
+    fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap()]);
+    // A sweep from just inside the window is still trusted…
+    store.set(markerKey(), String(Date.now() - (GRANT_BACKFILL_TTL_MS - 60_000)));
+    await receiveGrants(attendee);
+    expect(sinceOf(0)).toBeGreaterThan(0);
+
+    // …and one from just outside it is not. Without this the marker is a
+    // one-way door: a grant published the week after it latched can never be
+    // seen by this device again.
+    store.set(markerKey(), String(Date.now() - (GRANT_BACKFILL_TTL_MS + 60_000)));
+    await receiveGrants(attendee);
+    expect(sinceOf(1)).toBe(0);
+  });
+
+  it("re-widens whenever the keystore holds nothing for this identity", async () => {
+    // "I already checked" and "I hold no events at all" cannot both be true. A
+    // restored identity on a device that once latched the marker would otherwise
+    // sit on a narrow window with an empty keystore and a full inbox on relays.
+    store.set(markerKey(), String(Date.now())); // as fresh as it gets
+    fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap()]);
+
+    expect(await loadEventKeys(coordinate)).toBeUndefined();
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect(sinceOf(0)).toBe(0);
+
+    // Now that custody exists, the fresh marker is believed again.
+    await receiveGrants(attendee);
+    expect(sinceOf(1)).toBeGreaterThan(0);
+  });
+
+  it("the narrow window covers the whole interval the marker lets it skip", async () => {
+    // The two numbers are one mechanism, and for a while they were picked
+    // independently: the marker bought 7 days of skipping while the narrow scan
+    // reached back 3, leaving 4 days in which a grant could be published and this
+    // device would never ask a question wide enough to see it. NIP-59's
+    // up-to-2-day backdating stretched that blind window to 6.
+    //
+    // Reported 2026-09-17: an attendee approved on the 13th had both 21602 wraps
+    // on the relays at `created_at` 09-12 and 09-13, and on the 17th their second
+    // device — fresh marker, custody held, so the narrow branch — was asking only
+    // for wraps newer than 09-14. Stuck on "waiting for organizer approval", with
+    // no error anywhere, until the marker happened to expire.
+    store.set(markerKey(), String(Date.now()));
+    await saveEventKeys({ coordinate, role: "attendee", eck: [{ id: 1, key: "x" }] });
+    fetchEventsRelayOnly.mockResolvedValue([]);
+
+    await receiveGrants(attendee);
+    const since = sinceOf(0);
+    expect(since).toBeGreaterThan(0); // narrow branch, not a full sweep
+
+    const reach = Math.floor(Date.now() / 1000) - since;
+    expect(reach).toBeGreaterThanOrEqual(
+      GRANT_BACKFILL_TTL_MS / 1000 + GIFTWRAP_MAX_BACKDATE_SEC,
+    );
+    expect(GRANT_SCAN_LOOKBACK_SEC).toBeGreaterThanOrEqual(
+      GRANT_BACKFILL_TTL_MS / 1000 + GIFTWRAP_MAX_BACKDATE_SEC,
+    );
+
+    // The reported case, concretely: a grant wrap four days old is inside it.
+    expect(since).toBeLessThan(Math.floor(Date.now() / 1000) - 4 * 24 * 60 * 60);
+  });
+
+  it("`force` re-widens regardless of a fresh marker", async () => {
+    // This is the "Search my whole history" button. Without `force` reaching the
+    // grant scan, the one control the user had for "you're wrong, look again"
+    // re-asked the same narrow question and answered the same way.
+    store.set(markerKey(), String(Date.now()));
+    await saveEventKeys({ coordinate, role: "attendee", eck: [{ id: 1, key: "x" }] });
+    fetchEventsRelayOnly.mockResolvedValue([]);
+
+    await receiveGrants(attendee);
+    expect(sinceOf(0)).toBeGreaterThan(0); // marker fresh + custody held → narrow
+    await receiveGrants(attendee, { force: true });
+    expect(sinceOf(1)).toBe(0);
+  });
+
+  it("does not latch the marker when the relay cut the sweep short", async () => {
+    // The read carried no `limit` at all, which never meant "everything" — it
+    // meant the relay chose, newest-first. A sweep capped at the relay's ceiling
+    // saw only the newest slice and then latched as if it had read the whole
+    // history: the same permanent blindness as the marker itself, reached from
+    // the other side.
+    let page = 0;
+    fetchEventsRelayOnly.mockImplementation(async () => {
+      // A full page every time, with fresh ids and older timestamps, so the
+      // pagination always has somewhere further back to go and can only stop at
+      // its own page cap.
+      const base = page++ * GRANT_PAGE_SIZE;
+      return Array.from({ length: GRANT_PAGE_SIZE }, (_, i) => ({
+        id: `w${base + i}`,
+        pubkey: coordinator,
+        created_at: 2_000_000_000 - base - i,
+        kind: 1059,
+        tags: [["p", "f".repeat(64)]], // not addressed to us: skipped, no signer cost
+        content: "",
+        sig: "",
+      }));
+    });
+
+    await receiveGrants(attendee);
+    expect(sinceOf(0)).toBe(0);
+    expect(page).toBe(GRANT_MAX_PAGES); // it really did walk to the cap
+    expect(store.get(markerKey())).toBeUndefined();
+
+    // Still a FULL-history read next time — the marker stayed unset.
+    fetchEventsRelayOnly.mockResolvedValue([]);
+    await receiveGrants(attendee);
+    expect(sinceOf(GRANT_MAX_PAGES)).toBe(0);
+  });
+
+  it("stops paginating at the end of the history and latches", async () => {
+    // The other half of the rule above: a SHORT page is the end, and only that
+    // earns the marker. Without it the TTL would be the only thing ever
+    // re-widening, and a normal account would pay a full sweep every load.
+    fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap()]);
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect(fetchEventsRelayOnly.mock.calls.length).toBe(1); // one short page, done
+    expect(store.get(markerKey())).toBeDefined();
+  });
+
+  it("does NOT memoize a grant from a newer protocol version", async () => {
+    // The PWA auto-updates within a minute. Memoizing a payload we were one
+    // release away from understanding meant the build that could finally read it
+    // had already been told never to look at that wrap again — the grant was
+    // burned by the very mechanism meant to save signer prompts.
+    const future = await keyGrantWrap(1, 3);
+    fetchEventsRelayOnly.mockResolvedValue([future]);
+
+    expect(await receiveGrants(attendee)).toEqual([]);
+    expect(await loadEventKeys(coordinate)).toBeUndefined();
+    expect(cacheGet<Record<string, true>>("grantwraps")?.data?.[future.id]).toBeUndefined();
+
+    // A genuinely malformed grant at the CURRENT version stays memoized — the
+    // exemption is for "from the future", not for "unparseable".
+    const junk = await signerWrap(new LocalSigner(coordSk), attendeePk, {
+      kind: KIND_KEY_GRANT,
+      content: { v: 2, a: coordinate, role: "attendee" }, // no eck / granted_by
+    });
+    fetchEventsRelayOnly.mockResolvedValue([junk]);
+    await receiveGrants(attendee);
+    expect(cacheGet<Record<string, true>>("grantwraps")?.data?.[junk.id]).toBe(true);
+  });
+
+  it("counts a grant whose event config is unreachable instead of dropping it silently", async () => {
+    // The device is HOLDING the key and cannot open it, because the event's
+    // 31600 is on relays it doesn't know. This branch used to `continue` without
+    // a word, on every scan, forever, while Home rendered "No events yet".
+    fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap()]);
+    fetchEvents.mockResolvedValue([]); // the 31600 is nowhere fetchable
+
+    const outcomes: ScanOutcome[] = [];
+    expect(await receiveGrants(attendee, { onOutcome: (o) => outcomes.push(o) })).toEqual([]);
+    expect(outcomes[0]!.unreachableEvents).toBe(1);
+    expect(unreachableEventCount(outcomes)).toBe(1);
   });
 });

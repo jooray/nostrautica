@@ -18,35 +18,11 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { signerWrap } from "$lib/events/giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
+import { deriveBlindingKey } from "$lib/events/blinding.js";
+import { claimCorrectionRev } from "$lib/media/submit.js";
 
 /** The correction body an attendee edits — `v`/`a`/`rev` are filled in here. */
 export type CorrectionInput = Omit<ProfileCorrectionContent, "v" | "a" | "rev">;
-
-// Per-(coordinate) correction revision counter (NIP §3.3). Corrections have no
-// relay-backed per-event record to read a revision off (unlike the 21601 self-copy
-// or a published talk), so the client keeps this monotonic counter in its own
-// device-local storage and bumps it on every correction. A same-rev cross-device
-// race is still resolved deterministically by the coordinator's (rev, created_at,
-// id) total order.
-const CORRECTION_REV_PREFIX = "nostrautica:correction-rev:";
-function nextCorrectionRev(coordinate: string): number {
-  const key = `${CORRECTION_REV_PREFIX}${coordinate}`;
-  let prev = -1;
-  try {
-    const raw = localStorage.getItem(key);
-    const n = raw != null ? Number(raw) : NaN;
-    if (Number.isInteger(n) && n >= 0) prev = n;
-  } catch {
-    /* storage unavailable (private mode) — start from 0 */
-  }
-  const rev = prev + 1;
-  try {
-    localStorage.setItem(key, String(rev));
-  } catch {
-    /* best-effort — a lost bump only risks a same-rev tie the coordinator breaks */
-  }
-  return rev;
-}
 
 /**
  * Publish a 21608 profile correction to the event's E_inbox (gift-wrapped).
@@ -58,10 +34,19 @@ export async function submitProfileCorrection(
   ctx: EventContext,
   input: CorrectionInput,
 ): Promise<boolean> {
+  // The `rev` comes from the relay-backed 31602 self-copy as well as this device's
+  // own high-water mark (audit A-5). It used to be a purely device-local counter,
+  // so a second device — or the same one after a storage clear — started again from
+  // 0 while the coordinator still held rev 3 from the first. Its §3.3 ordering then
+  // discarded every edit the new device made, and the UI said "saved" because the
+  // gift wrap really had been delivered: delivery succeeded, application did not,
+  // and nothing anywhere said so.
+  const blindingKey = await deriveBlindingKey(signer);
+  const { rev, record } = await claimCorrectionRev(signer, ctx, blindingKey);
   const content = profileCorrectionContentSchema.parse({
     v: 2,
     a: ctx.coordinate,
-    rev: nextCorrectionRev(ctx.coordinate),
+    rev,
     ...input,
   });
   const wrap = await signerWrap(signer, ctx.config.inbox, {
@@ -69,5 +54,13 @@ export async function submitProfileCorrection(
     content,
     tags: [["a", ctx.coordinate]],
   });
-  return publishOrQueue(wrap as any, ctx.config.relays);
+  const published = await publishOrQueue(wrap as any, ctx.config.relays);
+  // Record the rev where the NEXT device will find it. Best-effort on purpose: the
+  // correction itself is already sent, and the local high-water mark (written by
+  // claimCorrectionRev before this) means a failure here can only cost the next
+  // device a stale floor, never this edit.
+  await record().catch((e: unknown) => {
+    console.warn("[correction] could not record the correction rev on the self-copy:", e);
+  });
+  return published;
 }

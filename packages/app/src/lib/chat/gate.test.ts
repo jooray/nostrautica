@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
+  canEnterChatFromLocalState,
   evaluateChatGate,
   shouldPrewarmChat,
   type ChatGateInput,
@@ -90,5 +91,49 @@ describe("shouldPrewarmChat (background enrolment)", () => {
     expect(shouldPrewarmChat({ ...warm, showChat: false })).toBe(false);
     expect(shouldPrewarmChat({ ...warm, hasSigner: false })).toBe(false);
     expect(shouldPrewarmChat({ ...warm, hasCtx: false })).toBe(false);
+  });
+});
+
+describe("canEnterChatFromLocalState (open the room without a network pass)", () => {
+  const local = { ...base, membershipKnown: false, hasCtx: true };
+
+  it("opens the room for a member the shell has already resolved, with no await", () => {
+    // The page's own membershipKnown is irrelevant here — that flag only ever
+    // described its network pass, which is exactly what this skips.
+    expect(canEnterChatFromLocalState(local)).toBe(true);
+  });
+
+  it("refuses while the shell is mid-sync or is still on another event", () => {
+    // A shell that is still resolving can be showing the PREVIOUS event's
+    // membership; entering on it would be the "fast wrong answer".
+    expect(canEnterChatFromLocalState({ ...local, loading: true })).toBe(false);
+    expect(canEnterChatFromLocalState({ ...local, shellNaddr: "naddr-other" })).toBe(false);
+  });
+
+  it("refuses for a non-member, a chat-off event, and a logged-out viewer", () => {
+    expect(canEnterChatFromLocalState({ ...local, showChat: false })).toBe(false);
+    expect(canEnterChatFromLocalState({ ...local, hasSigner: false })).toBe(false);
+  });
+
+  it("refuses without a cached context — there is a relay round-trip to make anyway", () => {
+    expect(canEnterChatFromLocalState({ ...local, hasCtx: false })).toBe(false);
+  });
+
+  it("never enters where the settled gate would not", () => {
+    // The whole safety argument in one assertion: anything this lets through is
+    // something `evaluateChatGate` also calls "enter" once it settles, so the
+    // fast path can only change WHEN the room opens, never WHO it opens for.
+    const cases: ChatGateInput[] = [
+      base,
+      { ...base, showChat: false },
+      { ...base, hasSigner: false },
+      { ...base, loading: true },
+      { ...base, shellNaddr: "naddr-other" },
+    ];
+    for (const c of cases) {
+      if (canEnterChatFromLocalState({ ...c, hasCtx: true })) {
+        expect(evaluateChatGate({ ...c, membershipKnown: true })).toBe("enter");
+      }
+    }
   });
 });

@@ -20,6 +20,7 @@ const { MockStt, MockLlm } = await import(new URL("providers/mock.js", DIST));
 const { makeChatNetwork } = await import(new URL("chat/network.js", DIST));
 const { createMarmotClientMls } = await import(new URL("chat/mls.js", DIST));
 const { setRelayConnectPolicy } = await import(new URL("net/relay-guard.js", DIST));
+const { buildCoordinatorAnnounce } = await import(new URL("nostr/publisher.js", DIST));
 
 // C4 (audit): the coordinator refuses ws:// and loopback/private relay hosts unless
 // the operator opts in — the connect-time SSRF guard (relay-guard) refuses the
@@ -126,6 +127,28 @@ const coordinator = new Coordinator({
 });
 
 await coordinator.start();
+
+// Publish the kind-31611 discovery announcement (docs/COORDINATOR-DISCOVERY-PLAN.md).
+// See mock-coordinator.mjs for the full story: only the real CLI (main.ts) ever did
+// this, so CoordinatorPicker.svelte's discovery subscription found nothing against
+// either double and every wait for `.coord-card` timed out. `chat: ["marmot"]`
+// reflects the chatMls wiring above, matching what a real coordinator with Marmot
+// enabled would disclose.
+try {
+  const announce = buildCoordinatorAnnounce(coordSk, {
+    v: 2,
+    name: "Mock Coordinator (chat)",
+    about: "Local e2e/screenshot double with Marmot group chat — MockStt/MockLlm, no real API calls.",
+    relays: [RELAY],
+    features: { matching: true, talks: false, chat: ["marmot"] },
+    pricing: { model: "free" },
+  });
+  await client.publish(announce, [RELAY]);
+  console.log("[mock-coordinator-chat] published kind-31611 discovery announcement");
+} catch (e) {
+  console.warn("[mock-coordinator-chat] announce publish failed:", e instanceof Error ? e.message : e);
+}
+
 console.log("[mock-coordinator-chat] running — attach the npub above in Admin (chat=marmot events)");
 
 let stopped = false;

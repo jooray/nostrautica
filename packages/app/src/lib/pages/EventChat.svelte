@@ -8,19 +8,25 @@
   import { onMount, tick, untrack } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
+  import { npubEncode } from "nostr-tools/nip19";
+  import { sendDm } from "$lib/events/dm.js";
+  import { parseDmCommand, matchDmTargets, type DmTarget } from "$lib/chat/dm-command.js";
+  import { outbox } from "$lib/stores/outbox.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import {
     loadEventContext,
     cachedEventContext,
+    ensureEventContext,
     type EventContext,
   } from "$lib/events/event-context.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { receiveGrants, fetchRoster, cachedRoster } from "$lib/events/attendee.js";
   import { buildDeviceAccountMap, chatMembers } from "$lib/chat/members.js";
   import type { RosterContent } from "@nostrautica/protocol";
-  import { evaluateChatGate } from "$lib/chat/gate.js";
+  import { evaluateChatGate, canEnterChatFromLocalState } from "$lib/chat/gate.js";
   import { chatSession, ChatUnroutableError } from "$lib/chat/session.svelte.js";
   import { fillHeight } from "$lib/components/fill-height.js";
+  import { autoGrow } from "$lib/components/auto-grow.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { avatarHues } from "$lib/identity/avatar.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
@@ -33,6 +39,7 @@
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
   import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
+  import { perfMark } from "$lib/perf.js";
 
   /** Sender display: chat identities publish their own kind-0 (identity.ts —
    *  local-key accounts reuse the real profile; device-key accounts publish
@@ -126,6 +133,46 @@
       const saved = loadDraft(`chat:${naddr}`);
       if (saved) draft = saved;
     }
+    // The event context is public (31600 + 31923 + kind-0) and cached across
+    // reloads, so read it before anything async: the room needs it for the
+    // coordinator identity and the relay set, and awaiting a relay for a copy we
+    // already hold was the first of four round-trips this mount used to serialise.
+    const cached = cachedEventContext(naddr);
+    if (cached) ctx = cached;
+
+    // ── Fast path: this device already knows it is a member ───────────────────
+    // "Checking your access…" (`chat.checking`) used to cover a full network re-derivation of
+    // something already settled: connect → 31600/31923 fetch → a paged gift-wrap
+    // grant scan (two signer round-trips per unprocessed wrap, i.e. an Amber
+    // prompt storm on a remote signer) → a shell re-sync. Every one of those ran
+    // on EVERY open, and on a repeat open none of them could change the answer:
+    // membership in an event's chat is an ECK in THIS device's keystore, which
+    // `eventShell` has already resolved for this event (it resolves the role from
+    // local custody, deliberately without waiting for a relay).
+    //
+    // This is not an optimistic paint (see gate.ts): the predicate is the gate's
+    // own, and nothing below widens it. A non-member, a fresh device, or a deep
+    // link that beat the shell still falls through to the honest pass.
+    if (
+      cached &&
+      canEnterChatFromLocalState({
+        membershipKnown: true,
+        shellNaddr: eventShell.naddr,
+        naddr,
+        loading: eventShell.loading,
+        showChat: eventShell.showChat,
+        hasSigner: !!session.signer,
+        hasCtx: true,
+      })
+    ) {
+      // Release the gate BEFORE any await — this is the whole point.
+      membershipKnown = true;
+      roster = cachedRoster(cached.coordinate);
+      void refreshInBackground(cached);
+      return;
+    }
+
+    // ── Slow path: membership is genuinely unknown on this device ─────────────
     try {
       await connectNdk();
       ctx = await loadEventContext(naddr);
@@ -152,6 +199,40 @@
       membershipKnown = true;
     }
   });
+
+  /**
+   * Fast-path follow-up: refresh what the room shows, without ever reopening the
+   * gate that is now (correctly) settled.
+   *
+   * Two things are deliberately NOT done here. `eventShell.sync()` is not called:
+   * it sets `eventShell.loading`, which `evaluateChatGate` reads as "membership
+   * unknown", so a background sync would drop a rendered room back to "Checking
+   * your access…" seconds after opening it. `refreshRole()` does the part that
+   * matters — re-resolve the role from local custody — and is network-free, so a
+   * membership that has genuinely gone away still closes the room reactively.
+   *
+   * `receiveGrants` is not called either: an ECK grant scan cannot make an
+   * already-approved member any more approved for THIS event, and on a remote
+   * signer it is two NIP-46 round-trips per unprocessed wrap. Ingesting new
+   * grants stays where it belongs — the identity-level warmers and EventHome's
+   * approval poll, which run whether or not chat is ever opened.
+   */
+  async function refreshInBackground(context: EventContext): Promise<void> {
+    try {
+      await connectNdk();
+      // Public context, SWR: cached copy already applied above; this only lands a
+      // newer one (e.g. the organizer swapped the coordinator or a relay).
+      void ensureEventContext(naddr, (fresh) => {
+        ctx = fresh;
+      }).catch(() => {});
+      const fresh = await fetchRoster(context).catch(() => undefined);
+      if (fresh) roster = fresh;
+      await eventShell.refreshRole().catch(() => {});
+    } catch {
+      /* the room is already usable from local state — a failed refresh is not an
+         error the user needs to see, and `chatSession` reports real chat faults */
+    }
+  }
 
   // No dispose here: the session outlives this page (it belongs to the event),
   // and the layout tears it down when the user leaves the event or logs out.
@@ -198,6 +279,23 @@
     return chatSession.phase === "ready" ? "ready" : "setup";
   });
 
+  // Perf instrumentation (perf.ts), measured from the route change that brought
+  // the user here — the owner's complaint is literally "tap Chat, wait". The two
+  // phases mean something specific for this page:
+  //   cache-paint     — the room itself is on screen (history, members, the
+  //                     composer), i.e. "Checking your access…" is gone.
+  //   network-settled — the composer is LIVE: the MLS group is joined and a
+  //                     message can actually be sent. On a prewarmed session this
+  //                     lands with the paint; on a first ever open it waits for
+  //                     the coordinator's Add + welcome, which is the honest
+  //                     enrolment cost and worth seeing separately.
+  $effect(() => {
+    if (phase === "setup" || phase === "evicted" || phase === "ready") {
+      perfMark("EventChat", "cache-paint");
+    }
+    if (phase === "ready") perfMark("EventChat", "network-settled");
+  });
+
   // Show the "taking longer than usual" hint if we're still in setup after a
   // grace period; clear it whenever we leave setup. Reruns cleanly on retry.
   $effect(() => {
@@ -241,6 +339,11 @@
     // A leader has its own client; an interactive follower proxies through the
     // leader tab (chatSession.send). Only a read-only follower can't send.
     if (!text || sending || readOnly) return;
+    // Defence in depth: the composer's Enter is intercepted and the Send button
+    // is disabled while a slash command owns the line, but this is the one
+    // mistake with a real cost — broadcasting a message meant for one person to
+    // the whole room — so the send path refuses it as well.
+    if (dmCommand) return;
     sending = true;
     sendError = null;
     sendUnroutable = false;
@@ -374,6 +477,125 @@
   // Plural-aware "N devices" affix for a chat member.
   function devicesLabel(n: number): string {
     return tp("chat.members.devices", n);
+  }
+
+  // ── who is that? ────────────────────────────────────────────────────────────
+  // Every sender in here is a chat DEVICE key; the person is the ACCOUNT it maps
+  // to (roster chat_keys), which is also the pubkey the attendee page is keyed by.
+  // Going through accountOf matters for anyone with two devices: both of their
+  // bubbles must open one profile, not two npubs that look like strangers.
+  function openProfile(pubkey: string): void {
+    router.go({ name: "attendee", naddr, npub: npubEncode(accountOf(pubkey)) });
+  }
+
+  /**
+   * A bubble is a click target AND selectable text, and the text has to win: a
+   * click that ends a selection is the user copying a message, not asking for a
+   * profile. Without this, every attempt to copy someone's message navigates
+   * away and loses the selection.
+   */
+  function openProfileUnlessSelecting(pubkey: string): void {
+    if (typeof window !== "undefined" && (window.getSelection()?.toString() ?? "") !== "") return;
+    openProfile(pubkey);
+  }
+
+  // ── /m and /msg (IRC) ───────────────────────────────────────────────────────
+  // `/msg <nick> <text>` sends a NIP-17 DM and leaves for that conversation, and
+  // `/msg <nick>` alone just opens it — the same split IRC has between /msg and
+  // /query. The parsing lives in lib/chat/dm-command.ts, where the multi-word
+  // name cases are pinned as tests; the DM goes to the ACCOUNT, never the chat
+  // device key, which is app-scoped and would deliver nowhere else.
+
+  /** Everyone in the room except yourself. */
+  const dmTargets = $derived.by(() => {
+    const me = chatPubkey ? accountOf(chatPubkey) : "";
+    return members
+      .map((mem) => ({ account: mem.account, name: nameOf(mem.account) }))
+      .filter((x) => x.account !== me)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  });
+  const dmCommand = $derived(parseDmCommand(draft, dmTargets));
+  const dmMatches = $derived(
+    dmCommand && !dmCommand.ready ? matchDmTargets(dmTargets, dmCommand.query) : [],
+  );
+
+  let dmPick = $state(0);
+  let dmBusy = $state(false);
+  let dmError = $state<string | null>(null);
+  // Keep the highlighted row inside the list as it shrinks under the typing.
+  $effect(() => {
+    if (dmPick >= dmMatches.length) dmPick = 0;
+  });
+
+  /** Complete the composer to `/msg <name> ` and let them type the message. */
+  function completeNick(target: DmTarget): void {
+    draft = `/msg ${target.name} `;
+    dmError = null;
+  }
+
+  async function runDmCommand(target: DmTarget, body: string): Promise<void> {
+    if (dmBusy || !session.signer) return;
+    dmBusy = true;
+    dmError = null;
+    try {
+      if (body) {
+        // Same contract as the DM screen: `false` means every publish retry
+        // failed and the wrap is in the durable queue, so say "queued" rather
+        // than implying it left the device.
+        const published = await sendDm(session.signer, target.account, body);
+        if (!published) outbox.noteQueued();
+      }
+      draft = "";
+      router.go({ name: "dmPeer", npub: npubEncode(target.account) });
+    } catch (e) {
+      dmError = e instanceof Error ? e.message : String(e);
+    } finally {
+      dmBusy = false;
+    }
+  }
+
+  /**
+   * The composer's Enter, when a slash command owns the line. Returns true when
+   * it handled the key, so the normal group-chat send never also runs — sending
+   * "/msg Juraj hi" to the whole room is the failure this guards.
+   */
+  function handleCommandKey(e: KeyboardEvent): boolean {
+    if (!dmCommand) return false;
+    if (!dmCommand.ready) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        if (dmMatches.length === 0) return false;
+        e.preventDefault();
+        dmPick = (dmPick + (e.key === "ArrowDown" ? 1 : dmMatches.length - 1)) % dmMatches.length;
+        return true;
+      }
+      if (e.key === "Escape" && dmMatches.length) {
+        e.preventDefault();
+        draft = "";
+        return true;
+      }
+      if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+        const pick = dmMatches[dmPick];
+        if (!pick) {
+          // A command with no match must not fall through to the room.
+          if (e.key === "Enter") {
+            e.preventDefault();
+            dmError = t("chat.cmd.noSuchPerson");
+            return true;
+          }
+          return false;
+        }
+        e.preventDefault();
+        completeNick(pick);
+        return true;
+      }
+      return false;
+    }
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      void runDmCommand(dmCommand.target, dmCommand.body);
+      return true;
+    }
+    return false;
   }
 
   // ── why setup is stuck, when the coordinator actually told us ───────────────
@@ -552,25 +774,62 @@
           {#if displayMode === "irc"}
             <p class="irc-line">
               <span class="irc-time">{timeLabel(m.createdAt)}</span>
-              <span class="irc-nick" style="--nick-h:{nickHue(m.pubkey)}">&lt;{nameOf(m.pubkey)}&gt;</span>
+              <button
+                type="button"
+                class="irc-nick linklike"
+                style="--nick-h:{nickHue(m.pubkey)}"
+                title={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
+                onclick={() => openProfile(m.pubkey)}
+              >&lt;{nameOf(m.pubkey)}&gt;</button>
               <span class="irc-text">{m.content}</span>
             </p>
           {:else}
             {@const showSender = i === 0 || g.items[i - 1]!.pubkey !== m.pubkey}
             <div class="msg" class:mine>
               {#if showSender}
-                <Avatar
-                  pubkey={accountOf(m.pubkey)}
-                  name={nameOf(m.pubkey)}
-                  picture={pictureOf(m.pubkey)}
-                  size={26}
-                />
+                <button
+                  type="button"
+                  class="avatar-btn"
+                  title={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
+                  aria-label={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
+                  onclick={() => openProfile(m.pubkey)}
+                >
+                  <Avatar
+                    pubkey={accountOf(m.pubkey)}
+                    name={nameOf(m.pubkey)}
+                    picture={pictureOf(m.pubkey)}
+                    size={26}
+                  />
+                </button>
               {:else}
                 <span class="avatar-spacer" aria-hidden="true"></span>
               {/if}
               <div class="col">
-                {#if showSender}<span class="sender">{nameOf(m.pubkey)}</span>{/if}
-                <div class="bubble">
+                {#if showSender}
+                  <button
+                    type="button"
+                    class="sender linklike"
+                    title={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
+                    onclick={() => openProfile(m.pubkey)}
+                  >{nameOf(m.pubkey)}</button>
+                {/if}
+                <!-- The bubble opens the profile too (user request 2026-09-10).
+                     role/tabindex rather than a <button> so the message stays
+                     ordinary selectable text, and the click is ignored mid
+                     selection — see openProfileUnlessSelecting. -->
+                <div
+                  class="bubble"
+                  role="button"
+                  tabindex="0"
+                  title={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
+                  onclick={() => openProfileUnlessSelecting(m.pubkey)}
+                  onkeydown={(e) => {
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      openProfile(m.pubkey);
+                    }
+                  }}
+                >
                   <p class="text">{m.content}</p>
                   <span class="time">{timeLabel(m.createdAt)}</span>
                 </div>
@@ -600,12 +859,42 @@
     </div>
   {:else}
     <form class="compose" bind:this={composerEl} onsubmit={(e) => { e.preventDefault(); void send(); }}>
+      <!-- /m · /msg autocomplete. Above the composer, so it never covers the
+           message it is helping to address. -->
+      {#if dmCommand && !dmCommand.ready && dmMatches.length > 0}
+        <ul class="nickpop" role="listbox" aria-label={t("chat.cmd.pickPerson")}>
+          {#each dmMatches as c, i (c.account)}
+            <li>
+              <button
+                type="button"
+                role="option"
+                aria-selected={i === dmPick}
+                class:on={i === dmPick}
+                onmouseenter={() => (dmPick = i)}
+                onclick={() => completeNick(c)}
+              >
+                <Avatar pubkey={c.account} name={c.name} size={20} />
+                <span>{c.name}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+      {#if dmCommand?.ready}
+        <p class="cmdhint" role="status">
+          {dmCommand.body
+            ? t("chat.cmd.willSend", { name: dmCommand.target.name })
+            : t("chat.cmd.willOpen", { name: dmCommand.target.name })}
+        </p>
+      {/if}
       <textarea
         bind:value={draft}
         rows="1"
+        use:autoGrow={draft}
         placeholder={t("chat.compose.placeholder")}
         disabled={phase === "setup" || phase === "evicted"}
         onkeydown={(e) => {
+          if (handleCommandKey(e)) return;
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             void send();
@@ -615,12 +904,15 @@
       <button
         class="send"
         type="submit"
-        disabled={!draft.trim() || sending || phase === "setup" || phase === "evicted"}
-        aria-label={t("chat.send")}
+        disabled={!draft.trim() || sending || dmBusy || !!dmCommand || phase === "setup" || phase === "evicted"}
+        aria-label={dmCommand ? t("chat.cmd.pickPerson") : t("chat.send")}
       >
         <Icon name="send" size={20} />
       </button>
     </form>
+    {#if dmError}
+      <p class="send-error" role="alert">{dmError}</p>
+    {/if}
   {/if}
 
   <!-- A failed send is "this device is no longer in the group", not "try again
@@ -900,15 +1192,119 @@
     white-space: pre-wrap;
     overflow-wrap: anywhere;
   }
+  /* Sender name, avatar and bubble all open the profile (user request
+     2026-09-10). They are buttons/click targets, so every inherited button
+     chrome has to be stripped back to the text that was there before. */
+  .sender.linklike,
+  .irc-nick.linklike {
+    background: none;
+    border: none;
+    padding: 0;
+    font: inherit;
+    cursor: pointer;
+  }
+  .sender.linklike {
+    font-size: 0.72rem;
+    font-weight: 650;
+    color: var(--text-dim);
+    align-self: flex-start;
+  }
+  .msg.mine .sender.linklike {
+    align-self: flex-end;
+  }
+  .irc-nick.linklike {
+    font-weight: 700;
+    color: hsl(var(--nick-h) 70% 68%);
+  }
+  :global([data-theme="light"]) .irc-nick.linklike {
+    color: hsl(var(--nick-h) 65% 38%);
+  }
+  .sender.linklike:hover,
+  .irc-nick.linklike:hover {
+    text-decoration: underline;
+  }
+  .avatar-btn {
+    background: none;
+    border: none;
+    padding: 0;
+    line-height: 0;
+    cursor: pointer;
+    flex: none;
+    border-radius: 50%;
+  }
+  .bubble {
+    cursor: pointer;
+  }
+  /* Keyboard focus has to be visible on a div that behaves like a button. */
+  .bubble:focus-visible,
+  .avatar-btn:focus-visible,
+  .sender.linklike:focus-visible,
+  .irc-nick.linklike:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  /* /m · /msg autocomplete */
+  .nickpop {
+    position: absolute;
+    bottom: calc(100% + 0.35rem);
+    left: 0;
+    right: 0;
+    z-index: 5;
+    margin: 0;
+    padding: 0.25rem;
+    list-style: none;
+    max-height: 13rem;
+    overflow-y: auto;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgb(0 0 0 / 0.28);
+  }
+  .nickpop button {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    width: 100%;
+    padding: 0.35rem 0.45rem;
+    background: none;
+    border: none;
+    border-radius: 7px;
+    font: inherit;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+  }
+  .nickpop button.on {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .cmdhint {
+    position: absolute;
+    bottom: calc(100% + 0.35rem);
+    left: 0;
+    margin: 0;
+    font-size: 0.78rem;
+    color: var(--text-dim);
+  }
   .compose {
     position: sticky;
-    bottom: 0;
+    /* ABOVE the fixed bottom nav, not under it (audit A-1). `bottom: 0` pins the
+       composer to the bottom of the SCROLLPORT, which is exactly where the fixed
+       nav is — so once the page was tall enough for the composer to be pinned at
+       all (any desktop-width window: the e2e project runs 1280x720), the nav
+       covered it and a click on Send landed on the nav's Updates tab instead.
+       --nav-band is the same allowance the shell reserves for that bar, so the
+       two can no longer drift apart. */
+    bottom: var(--nav-band);
     display: flex;
     gap: 0.5rem;
     align-items: flex-end;
     padding: 0.5rem 0;
     background: var(--bg);
   }
+  /* One row at rest, growing with the draft (use:autoGrow) to max-height, then
+     scrolling — a message longer than a line used to scroll out of sight inside
+     a one-line box. */
   .compose textarea {
     flex: 1;
     resize: none;

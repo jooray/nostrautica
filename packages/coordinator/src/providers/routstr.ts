@@ -176,6 +176,10 @@ export class RoutstrLlm implements LlmProvider {
         promptTokens: body.usage?.prompt_tokens ?? 0,
         completionTokens: body.usage?.completion_tokens ?? 0,
         totalTokens: body.usage?.total_tokens ?? 0,
+        // Same OpenAI-shaped field Venice reports; surfaced here too so a
+        // reasoning model routed through Routstr does not quietly lose the one
+        // number that explains its cost per call (see TokenUsage).
+        reasoningTokens: body.usage?.completion_tokens_details?.reasoning_tokens ?? 0,
       },
     };
   }

@@ -16,6 +16,7 @@ import {
   wrapRumor,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
+  KIND_PROFILE,
   KIND_KEY_GRANT,
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
@@ -29,14 +30,23 @@ import {
   KIND_TALK_SUBMISSION,
   KIND_ATTENDEE_WITHDRAWAL,
   KIND_DELETION,
+  KIND_CALENDAR_EVENT,
+  KIND_COMMUNITY,
   talkContentSchema,
   directoryEntryContentSchema,
   matchListContentSchema,
   matchMatrixContentSchema,
   rosterContentSchema,
+  mergeRosterPages,
+  rosterPageD,
+  MAX_ROSTER,
+  MAX_ROSTER_PAGES,
+  NIP44_MAX_PLAINTEXT_BYTES,
   keyGrantContentSchema,
   coordinatorStatusContentSchema,
   unwrapRumor,
+  sha256Hex,
+  utf8ToBytes,
   RUMOR_MAX_CLOCK_SKEW_SEC,
   type EckVersion,
 } from "@nostrautica/protocol";
@@ -56,6 +66,11 @@ class FakeTransport implements Transport {
   subs: { filter: any; relays?: string[]; onEvent: (e: NostrEvent) => void; closed: boolean }[] = [];
   /** Recorded fetch filters (COORD-29 tests). */
   fetches: any[] = [];
+  /** Recorded fetches WITH the relay set each one targeted. `fetches` above drops
+   *  the relays, which made the profile-refresh relay union untestable — and that
+   *  union is precisely the thing whose failure mode is silent (read the event's
+   *  relays only, find no kind 0, conclude "unchanged", do nothing, print OK). */
+  fetchCalls: { filter: any; relays?: string[] }[] = [];
   /** Throw on the next N publishes (COORD-2 failure injection). */
   failPublishes = 0;
   /** When true, a fetch touching kind 31600 returns [] — simulates an unfetchable
@@ -90,19 +105,32 @@ class FakeTransport implements Transport {
    *  so a test can mutate `seed` to model a 31600 that only names the coordinator
    *  after propagation (i.e. the value differs between the 1st and a later fetch). */
   beforeFetch?: (filter: any) => void;
-  async fetch(filter: any): Promise<NostrEvent[]> {
+  /** When > 0, every fetch takes this long — so a boot that fans out across events
+   *  genuinely overlaps and {@link peakInFlightFetches} measures something real. */
+  fetchDelayMs = 0;
+  inFlightFetches = 0;
+  peakInFlightFetches = 0;
+  async fetch(filter: any, relays?: string[]): Promise<NostrEvent[]> {
     this.fetches.push(filter);
+    this.fetchCalls.push({ filter, relays });
     this.beforeFetch?.(filter);
-    if (this.blockConfig && filter.kinds?.includes(31600)) return [];
-    return [...this.seed, ...this.published].filter((e) => {
-      if (filter.kinds && !filter.kinds.includes(e.kind)) return false;
-      if (filter.authors && !filter.authors.includes(e.pubkey)) return false;
-      if (filter["#d"]) {
-        const d = e.tags.find((t) => t[0] === "d")?.[1];
-        if (!d || !filter["#d"].includes(d)) return false;
-      }
-      return true;
-    });
+    this.inFlightFetches++;
+    this.peakInFlightFetches = Math.max(this.peakInFlightFetches, this.inFlightFetches);
+    try {
+      if (this.fetchDelayMs > 0) await new Promise((r) => setTimeout(r, this.fetchDelayMs));
+      if (this.blockConfig && filter.kinds?.includes(31600)) return [];
+      return [...this.seed, ...this.published].filter((e) => {
+        if (filter.kinds && !filter.kinds.includes(e.kind)) return false;
+        if (filter.authors && !filter.authors.includes(e.pubkey)) return false;
+        if (filter["#d"]) {
+          const d = e.tags.find((t) => t[0] === "d")?.[1];
+          if (!d || !filter["#d"].includes(d)) return false;
+        }
+        return true;
+      });
+    } finally {
+      this.inFlightFetches--;
+    }
   }
   subscribe(filter: any, onEvent: (e: NostrEvent) => void, relays?: string[]): () => void {
     const sub = { filter, relays, onEvent, closed: false };
@@ -308,6 +336,8 @@ interface Harness {
   eidSk: Uint8Array;
   einboxSk: Uint8Array;
   coordinate: string;
+  /** The space's kind — 31923 (default) or 31612 when `opts.spaceKind` says so. */
+  spaceKind: number;
   eck: Uint8Array;
   invites: Uint8Array[];
   nextInvite: number;
@@ -342,6 +372,13 @@ async function setup(
     /** Per-role provider routing (H-1): route summary+translate to one instance
      *  ("provA") and match+embed to another ("provB"), exposed as h.llmA/h.llmB. */
     splitProviders?: boolean;
+    /**
+     * Which of the two space kinds this space is published under (PROTOCOL-NIP.md
+     * §1.1): 31923 (dated NIP-52 event, the default) or 31612 (standing community).
+     * Drives BOTH the coordinate's kind and the kind of the seeded metadata record,
+     * because those two are the same thing — a coordinate is `kind:pubkey:d`.
+     */
+    spaceKind?: number;
     /** Retention policy (NIP §6.2): seed a `retention` tag on the 31600 and an
      *  `end` tag on the 31923 so the retention sweep has a deadline to test. */
     retentionDays?: number;
@@ -380,7 +417,8 @@ async function setup(
   const eidPubkey = getPublicKey(eidSk);
   const einboxSk = generateSecretKey();
   const d = "cypherpunk";
-  const coordinate = makeCoordinate(eidPubkey, d);
+  const spaceKind = opts.spaceKind ?? KIND_CALENDAR_EVENT;
+  const coordinate = makeCoordinate(eidPubkey, d, spaceKind);
   const eck = generateEck();
   const eckVersions: EckVersion[] = [{ id: 1, key: bytesToBase64(eck) }];
   const invites = Array.from({ length: 6 }, () => generateSecretKey());
@@ -391,7 +429,7 @@ async function setup(
   const store = new Store(":memory:", coordSk);
   const transport = new FakeTransport();
   transport.seed.push(
-    { kind: 31923, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
+    { kind: spaceKind, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
     { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
     ...(opts.extraSeed?.({ eidPubkey, d, coordPubkey, inboxPubkey: getPublicKey(einboxSk) }) ?? []),
@@ -471,7 +509,7 @@ async function setup(
     });
   }
 
-  return { coordinator, transport, store, llm, llmA, llmB, stt, counters, coordSk, eidSk, einboxSk, coordinate, eck, invites, nextInvite: 0, clock };
+  return { coordinator, transport, store, llm, llmA, llmB, stt, counters, coordSk, eidSk, einboxSk, coordinate, spaceKind, eck, invites, nextInvite: 0, clock };
 }
 
 async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Promise<string> {
@@ -1233,6 +1271,33 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     expect(h.transport.published.some((e) => e.kind === KIND_MATCH_MATRIX)).toBe(true);
   });
 
+  it("flipping the event language actually re-summarizes the attendees (audit B-11)", async () => {
+    // `applyConfigUpdate` asks for a rebuild per approved attendee when `lang` or
+    // `nostr_context` changes, because both are inputs to the derived AI content.
+    // The enqueue was keyed on the PROFILE hash alone — which hadn't changed —
+    // so every one of those collided with the already-`done` row and was
+    // discarded. The organizer switched the event to Slovak, the log said the
+    // enqueue was dropped, and not a single profile was rebuilt.
+    const h = await setup(0, { lang: "en" });
+    const sk = generateSecretKey();
+    await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    const translationsBefore = h.counters.translateCalls;
+    expect(h.store.pendingJobCount()).toBe(0);
+
+    const newer = {
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 100,
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "1"], ["matching", "on"], ["lang", "sk"]],
+      content: "", id: "cfg-lang", sig: "",
+    } as any;
+    await h.coordinator.handleConfigUpdate(h.coordinate, newer);
+    // The rebuild is really queued (not swallowed by a terminal row)…
+    expect(h.store.pendingJobCount()).toBeGreaterThan(0);
+    await h.coordinator.jobs.drain();
+    // …and it really re-ran the language-dependent stage.
+    expect(h.counters.translateCalls).toBeGreaterThan(translationsBefore);
+  });
+
   it("a config edit whose matrix publish fails is RETRIED durably, not silently lost (CORE-N-2)", async () => {
     // The applied-config watermark moved to this 31600 before its outward effects
     // ran, and `subscribeEventConfig`'s callback swallowed the throw. So a relay
@@ -1520,6 +1585,274 @@ async function admin(
   await h.coordinator.handleCoordinatorWrap(wrap as any);
 }
 
+/**
+ * Audit B-8 — the roster's REAL ceiling, enforced where it can still be acted on.
+ *
+ * A 31604 PAGE is one NIP-44 payload, capped at 65,535 plaintext bytes. That used
+ * to be the ceiling on the whole roster, which put an event's real limit somewhere
+ * between roughly 240 and 480 approved members — nowhere near the 2,000 the schema
+ * and the join gate advertise — and past it `buildRoster` threw from INSIDE the
+ * approve path, with the ECK grant already published and the organizer holding a
+ * crypto error for the 400th person at the door.
+ *
+ * Pagination (PROTOCOL-NIP.md §6.2) moved the ceiling out to the advertised
+ * number. What did NOT change, and is what these tests are really about, is the
+ * ordering: the gate runs BEFORE anything is granted, and a refusal reaches the
+ * organizer as something they can act on rather than as a failed publish.
+ */
+describe("audit B-8 — the 31604 roster ceiling is enforced at approval", () => {
+  /** Fill the event's approved set until the roster is at `fraction` of capacity. */
+  function fillRoster(h: Harness, count: number): void {
+    for (let i = 0; i < count; i++) {
+      h.store.upsertAttendee({
+        coordinate: h.coordinate,
+        pubkey: i.toString(16).padStart(64, "0"),
+        status: "approved",
+        now: h.clock.t,
+      });
+    }
+  }
+
+  it("refuses an approval that would not fit, tells the organizer, and grants nothing", async () => {
+    const h = await setup();
+    fillRoster(h, MAX_ROSTER); // the advertised total, in full
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
+    const grantsBefore = grantsTo(h, sk).length;
+
+    await admin(h, "approve", { pubkey: pk });
+
+    // Still pending — and, crucially, holding no key.
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(grantsTo(h, sk).length).toBe(grantsBefore);
+    // The organizer is told, in terms they can act on.
+    const status = h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+      .find((s) => s.error_category === "roster_full");
+    expect(status).toBeDefined();
+    expect(status!.retryable).toBe(false);
+  });
+
+  it("an auto-approving invite cannot conjure space either", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pubkey = getPublicKey(sk);
+    // They were already known to the event when there was still room — the intake
+    // cap (MAX_ATTENDEES_PER_EVENT, which counts PENDING rows that cost nothing on
+    // the wire) is a different gate and not what this test is about. What is: the
+    // roster gate runs on the auto-approval path too, not only on manual approval.
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey, status: "pending", now: h.clock.t });
+    fillRoster(h, MAX_ROSTER);
+
+    await joinOnly(h, sk, "with-a-valid-code");
+
+    // The invite proof is valid; the roster is not. They land in the manual queue.
+    expect(h.store.getAttendee(h.coordinate, pubkey)?.status).toBe("pending");
+    expect(grantsTo(h, sk)).toHaveLength(0);
+  });
+
+  it("warns ONCE as the roster approaches the ceiling, while it can still be planned around", async () => {
+    const h = await setup();
+    fillRoster(h, Math.ceil(MAX_ROSTER * 0.9)); // the warning threshold
+    const rosterStatuses = () =>
+      h.transport.published
+        .filter((e) => e.kind === 1059)
+        .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+        .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+        .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+        .filter((s) => s.error_category === "roster_nearly_full");
+
+    for (const name of ["a", "b", "c"]) {
+      const sk = generateSecretKey();
+      const pk = getPublicKey(sk);
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", displayName: name, now: h.clock.t });
+      await admin(h, "approve", { pubkey: pk });
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved"); // still admitted
+    }
+    expect(rosterStatuses()).toHaveLength(1); // one notice, not one per approval
+  });
+
+  it("an ordinary event approves normally and says nothing about capacity", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    const noisy = h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+      .filter((s) => s.stage === "roster");
+    expect(noisy).toHaveLength(0);
+  });
+});
+
+/**
+ * Roster pagination (PROTOCOL-NIP.md §6.2). The event the ceiling used to refuse
+ * — several hundred people, each with an attested chat device — now publishes,
+ * as pages, and an approval still costs one relay publish.
+ */
+describe("31604 roster pagination", () => {
+  function fillRoster(h: Harness, count: number): void {
+    for (let i = 0; i < count; i++) {
+      h.store.upsertAttendee({
+        coordinate: h.coordinate,
+        pubkey: i.toString(16).padStart(64, "0"),
+        status: "approved",
+        now: h.clock.t,
+      });
+    }
+  }
+
+  /** Every 31604 the coordinator published, newest per page `d`, in page order. */
+  function rosterPages(h: Harness): NostrEvent[] {
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const byD = new Map<string, NostrEvent>();
+    for (const e of h.transport.published.filter((e) => e.kind === KIND_ROSTER)) {
+      const d = e.tags.find((t) => t[0] === "d")?.[1];
+      if (d !== undefined) byD.set(d, e);
+    }
+    const out: NostrEvent[] = [];
+    for (let i = 0; byD.has(rosterPageD(identifier, i)); i++) out.push(byD.get(rosterPageD(identifier, i))!);
+    return out;
+  }
+
+  it("an event past the single-payload ceiling publishes as pages that each encrypt", async () => {
+    const h = await setup();
+    fillRoster(h, 600);
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
+
+    await admin(h, "approve", { pubkey: pk });
+
+    // Admitted — this is exactly the approval the ceiling used to refuse.
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(grantsTo(h, sk).length).toBeGreaterThan(0);
+
+    const pages = rosterPages(h);
+    expect(pages.length).toBeGreaterThan(1);
+    const parsed = pages.map((e) => {
+      const plaintext = eckDecrypt(h.eck, e.content);
+      // Measured on the real plaintext NIP-44 encrypted, not an entry-size estimate.
+      expect(utf8ToBytes(plaintext).length).toBeLessThanOrEqual(NIP44_MAX_PLAINTEXT_BYTES);
+      return rosterContentSchema.parse(JSON.parse(plaintext));
+    });
+    // Page 0 declares the count; the others are addressed <d>:1, <d>:2, …
+    expect(parsed[0]!.v).toBe(3);
+    expect(parsed[0]!.pages).toBe(pages.length);
+    expect(parsed[0]!.eck_current).toBeGreaterThan(0);
+    // Every member, exactly once, including the one just approved.
+    const merged = mergeRosterPages(parsed);
+    expect(merged.attendees).toHaveLength(601);
+    expect(new Set(merged.attendees.map((a) => a.pubkey)).size).toBe(601);
+    expect(merged.attendees.some((a) => a.pubkey === pk)).toBe(true);
+  });
+
+  it("an approval republishes ONLY the page it changed, not all of them", async () => {
+    const h = await setup();
+    fillRoster(h, 600);
+    const approve = async () => {
+      const pk = getPublicKey(generateSecretKey());
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
+      await admin(h, "approve", { pubkey: pk });
+      return pk;
+    };
+    // First approval primes the per-page record by publishing every page once.
+    await approve();
+    const pageCount = rosterPages(h).length;
+    expect(pageCount).toBeGreaterThan(1);
+    const before = h.transport.published.filter((e) => e.kind === KIND_ROSTER).length;
+
+    await approve();
+
+    const published = h.transport.published.filter((e) => e.kind === KIND_ROSTER).length - before;
+    // One publish, not `pageCount` of them. This is the difference between an
+    // approval costing one relay round trip and costing N for the whole event.
+    expect(published).toBe(1);
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const last = h.transport.published.filter((e) => e.kind === KIND_ROSTER).at(-1)!;
+    expect(last.tags.find((t) => t[0] === "d")?.[1]).toBe(rosterPageD(identifier, pageCount - 1));
+  });
+
+  it("a roster that still fits publishes exactly one 31604, at the event d, with v:2", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const pages = rosterPages(h);
+    expect(pages).toHaveLength(1);
+    expect(pages[0]!.tags.find((t) => t[0] === "d")?.[1]).toBe(identifier);
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, pages[0]!.content)));
+    expect(roster.v).toBe(2);
+    expect(roster.pages).toBeUndefined();
+  });
+
+  it("retention deletes every address pagination could have used, not just page 0", async () => {
+    // A roster that grew and then SHRANK leaves stale higher pages on relays, and
+    // nothing durably records how many pages an event ever had. Deleting an
+    // address that was never published is a no-op; missing one leaves member
+    // pubkeys behind after the retention window closed.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+
+    await h.coordinator.retentionSweep();
+
+    const deletion = h.transport.published.filter((e) => e.kind === KIND_DELETION).at(-1)!;
+    const addrs = new Set(deletion.tags.filter((t) => t[0] === "a").map((t) => t[1]));
+    const coordPk = getPublicKey(h.coordSk);
+    for (let i = 0; i < MAX_ROSTER_PAGES; i++) {
+      expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD(identifier, i)}`), `page ${i}`).toBe(true);
+    }
+  });
+});
+
+describe("audit B-4 — reprocess repairs a poisoned TALK, not just the attendee profile", () => {
+  it("re-enqueues the speaker's untranscribed talk so a fixed outage can actually transcribe it", async () => {
+    // `clearAttendeeJobMemo` deliberately covers `process_talk`, because a poisoned
+    // talk row is otherwise unrecoverable: its dedupe key is content-addressed on
+    // the media hash, so re-submitting the identical recording reproduces the same
+    // key and the enqueue is discarded. Deleting the row was only half the repair —
+    // nothing re-created the job, so the organizer's reprocess left the talk
+    // transcript-less for good and the speaker's only remedy was to re-record
+    // something they had already recorded.
+    const opts = { talks: "on" as const, failTranscribe: true };
+    const h = await setup(0, opts);
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    const x = "ab".repeat(32);
+    await submitTalk(h, speakerSk, {
+      talkD: "t1",
+      title: "Zero-knowledge proofs",
+      media: talkMedia(700, x),
+      processForMatching: true,
+    });
+
+    // Burn the retry tail until the talk job poisons (STT/blob outage).
+    for (let i = 0; i < 30; i++) {
+      await h.coordinator.jobs.drain();
+      h.clock.t += 5 * 60 * 60_000;
+    }
+    expect(h.store.getTalk(h.coordinate, pk, "t1")?.transcript_json).toBeNull();
+    expect(h.store.jobStateCounts().poison).toBeGreaterThan(0);
+
+    // The outage is over and the organizer presses reprocess for this speaker.
+    opts.failTranscribe = false;
+    await admin(h, "reprocess", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+
+    expect(h.store.getTalk(h.coordinate, pk, "t1")?.transcript_json).not.toBeNull();
+  });
+});
+
 /** Every published 31610 talk entry (decrypted). */
 function publishedTalks(h: Harness) {
   return h.transport.published
@@ -1736,6 +2069,109 @@ async function joinOnly(
   await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
   return { wrap, pubkey: attendeePubkey };
 }
+
+/**
+ * Audit B-1 / B-2 — a join is a membership transition and orders like one.
+ *
+ * `handleJoin` writes the attendee row, then AWAITS a relay round-trip
+ * (`fetchInviteHashes`) before writing the status its entitlement decision
+ * produced. That await is long enough for an organizer to approve the person
+ * sitting in front of them, and the second write was unconditional.
+ */
+describe("audit B-1/B-2 — join ordering against the rest of the membership chain", () => {
+  /** A join with NO invite proof → entitlement says "manual queue" → pending. */
+  async function joinNoInvite(h: Harness, attendeeSk: Uint8Array, name: string): Promise<void> {
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(attendeeSk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name, message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+      }) as any,
+    );
+  }
+
+  it("an approval landing mid-entitlement is not overwritten back to pending", async () => {
+    // Pre-fix: the row went approved (grant published, ECK really in the
+    // attendee's hands) and then back to `pending` when the stalled fetch
+    // resolved — so the roster, the admin list and the matching set all disagreed
+    // with what the attendee could actually decrypt, until something happened to
+    // touch the row again.
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const realFetch = h.transport.fetch.bind(h.transport);
+    h.transport.fetch = async (filter: any) => {
+      if (filter.kinds?.includes(31601)) await gate; // hold the entitlement read open
+      return realFetch(filter);
+    };
+
+    const joining = joinNoInvite(h, sk, "mid-entitlement");
+    // The row is enrolled as `pending` before the fetch resolves (the 2026-07-29
+    // fix that this one builds on).
+    await vi.waitFor(() => expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending"));
+
+    // The organizer approves while the join is still parked in that fetch.
+    const approving = admin(h, "approve", { pubkey: pk });
+    release();
+    await Promise.all([joining, approving]);
+
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(grantsTo(h, sk).length).toBeGreaterThan(0); // and they really hold the ECK
+  });
+
+  it("a join older than an applied revoke does not resurrect the member as pending", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    // The organizer revokes them; that command completes and owns `member:<pk>`.
+    await admin(h, "revoke", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+
+    // A DISTINCT join rumor from before the revoke turns up late (a slow relay, a
+    // backfill rescan). It must not undo the revoke's state.
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "late-duplicate", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+        created_at: Math.floor(h.clock.t / 1000) - 3600,
+      }) as any,
+    );
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+  });
+
+  it("a genuine re-join AFTER a revoke is newer, so it enrolls again as pending", async () => {
+    // The guard must not become "revoked is forever": a fresh join is a newer
+    // membership command and wins honestly, landing back in the manual queue
+    // (never straight to approved — a re-join needs the organizer again).
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "revoke", { pubkey: pk });
+
+    h.clock.t += 60_000;
+    const inboxPk = getPublicKey(h.einboxSk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, inboxPk, {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "second-chance", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+        created_at: Math.floor(h.clock.t / 1000),
+      }) as any,
+    );
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+  });
+});
 
 describe("audit COORD-2 — rumor handling is failure-safe", () => {
   it("a transient publish failure leaves the rumor unseen; the retry re-grants and recovers", async () => {
@@ -2378,6 +2814,68 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
     expect(h.store.getAttendee(h.coordinate, p2.pubkey)).toBeDefined();
   });
 
+  /**
+   * Audit B-10. A suspension (NIP §3.5 — the newest 31600 wasn't fetchable at
+   * startup revalidation, which a relay outage at boot is enough to cause) drops
+   * the event out of the live map but keeps its custody and its queued work. Every
+   * event-scoped job handler then hit its `events.get()` early return, and the
+   * runner read that as SUCCESS: the row went `done`. Its dedupe key is derived
+   * from stage inputs, so when the event came back the same work could not be
+   * re-enqueued — the attendee's pipeline was simply never going to run, and
+   * nothing anywhere said so.
+   */
+  it("work queued while an event is SUSPENDED parks and resumes, instead of completing as done", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    // Suspend it exactly as startup revalidation does: config unfetchable.
+    h.transport.blockConfig = true;
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "restore",
+    });
+    expect(h.store.getEvent(h.coordinate)).toBeDefined(); // suspended, not detached
+
+    // Work queued (or already queued) for a suspended event must not be consumed.
+    h.coordinator.jobs.enqueue("process_attendee", `proc:${h.coordinate}:${pk}:while-suspended`, {
+      coordinate: h.coordinate,
+      pubkey: pk,
+    });
+    await h.coordinator.jobs.drain();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(1);
+
+    // The event comes back → the parked work is released and actually runs.
+    h.transport.blockConfig = false;
+    h.clock.t += 60_000;
+    await h.coordinator.retrySuspendedEvents();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+    await h.coordinator.jobs.drain();
+    expect(h.store.jobStateCounts().done).toBeGreaterThan(0);
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
+  it("work queued for a DETACHED event completes rather than parking forever", async () => {
+    // The mirror case: custody is deleted and the tombstone bars re-install, so
+    // there is nothing left for the work to act on and a park would be litter no
+    // release condition could ever clear.
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "detach", {});
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+
+    h.coordinator.jobs.enqueue("process_attendee", `proc:${h.coordinate}:${pk}:after-detach`, {
+      coordinate: h.coordinate,
+      pubkey: pk,
+    });
+    await h.coordinator.jobs.drain();
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
   // Regression (prod incident): after the v2 deploy the coordinator crash-looped at
   // startup because a still-installed pre-v2 event's newest 31600 carried ["v","1"];
   // parseEventConfig threw "unsupported v tag 1" out of installEvent → start() → fatal.
@@ -2786,20 +3284,26 @@ class StubMls implements ChatMls {
   invited: string[] = [];
   removed: string[][] = [];
   failIsMember = false;
+  /** Membership-aware, like the real library: a leaf exists once the Add lands.
+   *  Without this the stub models a group nobody is ever in, which hides every
+   *  decision that turns on "is this person already enrolled". */
+  members = new Set<string>();
   async createGroup() {
     return { mlsGroupIdHex: "mls-1", nostrGroupIdHex: "ng-1" };
   }
   async isEligible() {
     return true;
   }
-  async isMember() {
+  async isMember(_g: string, pubkey: string) {
     if (this.failIsMember) throw new Error("simulated MLS outage");
-    return false;
+    return this.members.has(pubkey);
   }
   async invite(_g: string, kp: any) {
     this.invited.push(kp.pubkey);
+    this.members.add(kp.pubkey);
   }
   async removePubkeys(_g: string, pks: string[]) {
+    for (const p of pks) this.members.delete(p);
     this.removed.push(pks);
   }
   async ingest() {}
@@ -3352,6 +3856,50 @@ describe("D5 §9 — persisted billing state machine (§13.4)", () => {
     await h.coordinator.jobs.drain();
     expect(h.store.getBillingState(h.coordinate)?.state).toBe("ok");
     expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+    expect(h.llm.completeCalls).toBeGreaterThan(0);
+  });
+
+  it("a failed unblock announcement still resumes the parked work (audit B-3)", async () => {
+    // The unblock did two things in the wrong order: persist `ok`, publish the
+    // 21606, THEN resume. A relay that refused the publish threw out of the
+    // function with `ok` already written and nothing resumed — and every later
+    // evaluation saw prev=ok, next=ok, `changed=false`, so the resume branch was
+    // never reached again. The event was billing-fine and its paid work sat
+    // `waiting` forever; the only remedy was an organizer recompute that nobody
+    // had a reason to run.
+    //
+    // Driven through the JOIN path on purpose: `recompute`/`reprocess` also call
+    // `resumeParkedWork` explicitly, so those two paths mask this entirely. Every
+    // other trigger — an attendee-count change, a revoke, an install — relies on
+    // the transition branch alone.
+    let over = true;
+    const h = await setup(0, {
+      evaluateBilling: (_eid, count) => (over && count >= 2 ? { state: "payment_required", reason: "x" } : { state: "ok" }),
+    });
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design"); // count 2 → blocked
+    await h.coordinator.jobs.drain();
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("blocked");
+    expect(h.store.waitingJobCount(h.coordinate)).toBeGreaterThan(0);
+
+    // Payment resolved. The next attendee-count change re-evaluates → blocked→ok,
+    // but the relay refuses the 21606 that announces it (and ONLY that: the grant
+    // wraps to attendees must still go out, or the join fails for its own reasons).
+    over = false;
+    const eidPk = getPublicKey(h.eidSk);
+    h.transport.onPublish = (e) => {
+      if (e.kind === 1059 && e.tags.some((t) => t[0] === "p" && t[1] === eidPk)) {
+        throw new Error("simulated relay outage (status wrap)");
+      }
+    };
+    await join(h, generateSecretKey(), "code").catch(() => {});
+    h.transport.onPublish = undefined;
+
+    // The durable state and the queue agree even though the announcement failed.
+    expect(h.store.getBillingState(h.coordinate)?.state).toBe("ok");
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+    // …and the work really runs now, without any further organizer action.
+    await h.coordinator.jobs.drain();
     expect(h.llm.completeCalls).toBeGreaterThan(0);
   });
 
@@ -4144,6 +4692,40 @@ describe("NIP §6.3 — attendee withdrawal (21610)", () => {
     expect(h2.store.getTranscript(x2)).not.toBeUndefined();
   });
 
+  /**
+   * Audit B-9. The default withdrawal purges the leaver's artifacts —
+   * `marmot_chat_keys` among them — inside the same per-member lock that enqueues
+   * the `chat_revoke_member` job. That job builds its MLS remove list by READING
+   * those rows, so by the time it ran there was nothing left to read: only the
+   * account key was removed and the leaver's DEVICE leaf stayed in the group,
+   * still able to decrypt everything said in it until an unrelated commit
+   * happened to churn the epoch. "Leave the event" is the common path and an MLS
+   * Remove is the only real post-compromise boundary the chat has.
+   */
+  it("a delete_data withdrawal still MLS-removes the leaver's DEVICE leaf, not just the account", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const leaverSk = generateSecretKey();
+    const leaverPk = await join(h, leaverSk, "crypto");
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({
+      coordinate: h.coordinate,
+      accountPubkey: leaverPk,
+      chatPubkey: devicePk,
+      now: h.clock.t,
+    });
+    await h.coordinator.jobs.drain();
+
+    await withdraw(h, leaverSk, { deleteData: true });
+    // The purge has already happened by here — the bindings are gone…
+    expect(h.store.chatKeysForAccount(h.coordinate, leaverPk)).toEqual([]);
+    // …and the removal must STILL name the device, from the list captured at
+    // revoke time and carried in the job payload.
+    await h.coordinator.jobs.drain();
+    expect(mls.removed.length).toBe(1);
+    expect([...mls.removed[0]!].sort()).toEqual([leaverPk, devicePk].sort());
+  });
+
   it("a re-delivered stale withdrawal cannot re-withdraw after a rejoin (per-subject watermark)", async () => {
     const h = await setup();
     const sk = generateSecretKey();
@@ -4378,6 +4960,67 @@ describe("audit P9 — 31923 metadata selection uses the latest-event comparator
       tags: [["d", "cypherpunk"], ["title", "Stale"], ["end", "1"]], content: "", sig: "",
     } as any);
     expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
+  });
+});
+
+describe("a community's metadata is read under its OWN kind (31612), not 31923", () => {
+  it("installs a 31612 community with its real title/summary/topics in the scoring context", async () => {
+    const h = await setup(0, { spaceKind: KIND_COMMUNITY });
+    expect(h.coordinate.startsWith(`${KIND_COMMUNITY}:`)).toBe(true);
+    // Against the unfixed code this is the placeholder `"the event"` with no
+    // topics: the install fetched a 31612 and then selected `kind === 31923`
+    // from the result, which matches nothing. Every match prompt for every
+    // community would have read "EVENT: the event", with no ABOUT and no TOPICS.
+    expect(h.coordinator.scoringContextOf(h.coordinate)).toMatchObject({
+      title: "Cypherpunk Assembly",
+      hashtags: ["cypherpunk"],
+    });
+  });
+
+  it("subscribes for live 31612 edits and applies them", async () => {
+    const h = await setup(0, { spaceKind: KIND_COMMUNITY });
+    // The config subscription must ASK for 31612. A 31923-only filter means the
+    // relay never sends a community's title edit at all, so the coordinator keeps
+    // scoring against install-time metadata until the daemon is restarted.
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(KIND_COMMUNITY) && s.filter.kinds?.includes(31600),
+    );
+    expect(cfgSub, "no config subscription asked for kind 31612").toBeDefined();
+    cfgSub!.onEvent({
+      kind: KIND_COMMUNITY, pubkey: getPublicKey(h.eidSk), created_at: 20, id: "c-20",
+      tags: [["d", "cypherpunk"], ["title", "Renamed Community"], ["summary", "now about rust"]],
+      content: "", sig: "",
+    } as any);
+    expect(h.coordinator.scoringContextOf(h.coordinate)).toMatchObject({
+      title: "Renamed Community",
+      summary: "now about rust",
+    });
+  });
+
+  it("a community has no retention anchor — it is a standing group, not a dated event", async () => {
+    const h = await setup(0, { spaceKind: KIND_COMMUNITY });
+    // Deliberate: 31612 carries no `start`/`end`, so eventEndSec stays 0 and the
+    // retention sweep never expires a community. Pinned so a future "fix" doesn't
+    // synthesise an end date for communities.
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(0);
+  });
+
+  it("does not cross the two namespaces: a 31923 sharing the E_id and `d` never edits the community", async () => {
+    const h = await setup(0, { spaceKind: KIND_COMMUNITY });
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(KIND_COMMUNITY) && s.filter.kinds?.includes(31600),
+    )!;
+    // Same author, same `d`, different kind ⇒ a DIFFERENT space (`31923:X:d` and
+    // `31612:X:d` are two coordinates). Widening the guard to "either space kind"
+    // would let this rename the community and, worse, hand it an `end` date that
+    // arms the retention sweep against it.
+    cfgSub.onEvent({
+      kind: KIND_CALENDAR_EVENT, pubkey: getPublicKey(h.eidSk), created_at: 99, id: "ev-99",
+      tags: [["d", "cypherpunk"], ["title", "A Different, Dated Event"], ["end", "5000"]],
+      content: "", sig: "",
+    } as any);
+    expect(h.coordinator.scoringContextOf(h.coordinate)!.title).toBe("Cypherpunk Assembly");
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(0);
   });
 });
 
@@ -5475,5 +6118,306 @@ describe("prod 2026-07-24 — an organizer recompute must actually re-run the sc
     } finally {
       spy.mockRestore();
     }
+  });
+});
+
+describe("profile refresh — a kind-0 edited OUTSIDE Nostrautica re-enriches and re-matches", () => {
+  // The reported bug: somebody who had used Nostr for years joined with that
+  // identity, then updated their profile in their usual client. Nostrautica kept
+  // describing and matching them on the bio they had on the day they joined,
+  // because nothing coordinator-side had changed and only coordinator-side events
+  // ever started a pipeline run.
+  function processJobKeys(h: Harness, pubkey: string): string[] {
+    return (
+      (h.store as any).db
+        .prepare("SELECT dedupe_key FROM jobs WHERE type = 'process_attendee' AND dedupe_key LIKE ?")
+        .all(`proc:${h.coordinate}:${pubkey}:%`) as { dedupe_key: string }[]
+    ).map((r) => r.dedupe_key);
+  }
+
+  /** Publish (or supersede) an attendee's public kind 0. Replaceable: a later
+   *  `created_at` wins, exactly as the §3.1 rule resolves it in production. */
+  function setKind0(h: Harness, pubkey: string, about: string, createdAt: number): void {
+    h.transport.seed.push({
+      kind: KIND_PROFILE,
+      pubkey,
+      created_at: createdAt,
+      tags: [],
+      content: JSON.stringify({ name: "Long-time Nostr user", about }),
+      id: `k0-${pubkey.slice(0, 8)}-${createdAt}`,
+      sig: "",
+    } as any);
+  }
+
+  const k0Hash = (bio: string) => sha256Hex(utf8ToBytes(bio)).slice(0, 16);
+
+  it("an UNCHANGED kind 0 enqueues nothing — the sweep must be free to run hourly", async () => {
+    const h = await setup(3);
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    setKind0(h, pk, "Cypherpunk, cryptographer, coffee.", 100);
+    await h.coordinator.jobs.drain();
+
+    // First sighting: the sweep has never expressed this bio as a key, so it
+    // enqueues once. That run is the documented cost of carrying no watermark.
+    await h.coordinator.profileRefreshSweep();
+    await h.coordinator.jobs.drain();
+    const baseline = processJobKeys(h, pk);
+    expect(baseline.some((k) => k.endsWith(`:k0=${k0Hash("Cypherpunk, cryptographer, coffee.")}`))).toBe(true);
+
+    // Every subsequent sweep over the same bio must be a pure no-op. If this ever
+    // fails, the hourly timer is re-billing the whole roster every hour.
+    await h.coordinator.profileRefreshSweep();
+    await h.coordinator.profileRefreshSweep();
+    expect(processJobKeys(h, pk)).toEqual(baseline);
+  });
+
+  it("a CHANGED kind 0 enqueues exactly one job, keyed by the new bio", async () => {
+    const h = await setup(3);
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    setKind0(h, pk, "Old bio from years ago.", 100);
+    await h.coordinator.jobs.drain();
+    await h.coordinator.profileRefreshSweep();
+    await h.coordinator.jobs.drain();
+    const before = processJobKeys(h, pk);
+
+    // The user updates their profile in their own client.
+    const NEW_BIO = "Now doing hardware wallets and post-quantum signatures.";
+    setKind0(h, pk, NEW_BIO, 200);
+    await h.coordinator.profileRefreshSweep();
+
+    const after = processJobKeys(h, pk);
+    const added = after.filter((k) => !before.includes(k));
+    expect(added).toHaveLength(1);
+    // Keyed by the NEW bio, and otherwise the same key family the submission path
+    // builds — same `proc:<coordinate>:<pubkey>:` prefix, so `supersedePendingJobs`
+    // still coalesces across both paths instead of paying for the attendee twice.
+    expect(added[0]).toBe(`${before[0]!.split(":k0=")[0]}:k0=${k0Hash(NEW_BIO)}`);
+    expect(added[0]!.startsWith(`proc:${h.coordinate}:${pk}:`)).toBe(true);
+  });
+
+  it("skips the event entirely when nostr_context = 0 — the bio is not a model input there", async () => {
+    const h = await setup(0);
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    setKind0(h, pk, "A bio nothing will read.", 100);
+    await h.coordinator.jobs.drain();
+    const before = processJobKeys(h, pk);
+
+    await h.coordinator.profileRefreshSweep();
+    setKind0(h, pk, "A completely different bio.", 200);
+    await h.coordinator.profileRefreshSweep();
+
+    // No enqueue, and no kind-0 fetch either — with n = 0 the pipeline never reads
+    // kind 0, so re-running would rebuild a byte-identical ai_profile.
+    expect(processJobKeys(h, pk)).toEqual(before);
+    expect(h.transport.fetchCalls.some((c) => c.filter?.kinds?.includes(KIND_PROFILE))).toBe(false);
+  });
+
+  it("reads kind 0 from the attendee's OWN relays, not just the event's", async () => {
+    // The test that would have caught the silent no-op. A person who has been on
+    // Nostr for years publishes their kind 0 to THEIR relays; nothing obliges the
+    // event's relay list to carry it. Reading only `configRelays` finds nothing,
+    // concludes "unchanged", does nothing — and every deploy marker still prints
+    // OK, because nothing failed.
+    const h = await setup(3, { eventRelays: ["wss://event-only"], defaultRelays: ["wss://the-users-own-relay"] });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    setKind0(h, pk, "Bio that lives on my own relay.", 100);
+    await h.coordinator.jobs.drain();
+
+    h.transport.fetchCalls.length = 0;
+    await h.coordinator.profileRefreshSweep();
+
+    const k0Fetch = h.transport.fetchCalls.find((c) => c.filter?.kinds?.includes(KIND_PROFILE));
+    expect(k0Fetch).toBeDefined();
+    expect(k0Fetch!.relays).toContain("wss://the-users-own-relay");
+    expect(k0Fetch!.relays).toContain("wss://event-only");
+    // ONE batched query for the whole event, not one per attendee.
+    expect(k0Fetch!.filter.authors).toContain(pk);
+
+    // The pipeline's own read has to use the SAME union, or the sweep detects a
+    // change on a relay the run cannot see and rebuilds an identical ai_profile.
+    h.transport.fetchCalls.length = 0;
+    setKind0(h, pk, "Updated on my own relay again.", 200);
+    await h.coordinator.profileRefreshSweep();
+    await h.coordinator.jobs.drain();
+    const pipelineK0 = h.transport.fetchCalls.filter((c) => c.filter?.kinds?.includes(KIND_PROFILE));
+    expect(pipelineK0.length).toBeGreaterThan(0);
+    for (const c of pipelineK0) expect(c.relays).toContain("wss://the-users-own-relay");
+  });
+});
+
+/**
+ * Boot cost. `restart-coordinator.sh` measures the gap between the process
+ * starting and the daemon's own "watching for installs, submissions, admin
+ * commands" line, warns at 60 s and FAILS THE DEPLOY at 240 s
+ * (docs/DEPLOYMENT.md). That number was 47–66 s and rising, because every stored
+ * event was restored strictly one after another while almost all of the work is
+ * independent relay I/O against a different inbox and a different MLS group.
+ */
+describe("boot restores stored events concurrently", () => {
+  /** A store holding `n` already-installed, chat-off events, plus their configs. */
+  function seedEvents(
+    store: Store,
+    transport: FakeTransport,
+    coordPubkey: string,
+    n: number,
+  ): string[] {
+    const coordinates: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const eidSk = generateSecretKey();
+      const eidPubkey = getPublicKey(eidSk);
+      const d = `event-${i}`;
+      const coordinate = makeCoordinate(eidPubkey, d);
+      const inboxSk = generateSecretKey();
+      transport.seed.push({
+        kind: 31600,
+        pubkey: eidPubkey,
+        created_at: 1,
+        id: `cfg-${i}`,
+        sig: "",
+        content: "",
+        tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(inboxSk)], ["coordinator", coordPubkey, "1"]],
+      } as any);
+      store.upsertEvent({
+        coordinate,
+        configJson: "{}",
+        inboxNsec: bytesToHex(inboxSk),
+        eckJson: JSON.stringify([{ id: 1, key: bytesToBase64(generateEck()) }]),
+        configRelays: JSON.stringify(["wss://test"]),
+        gen: 1,
+        now: Date.now(),
+      });
+      store.recordInstalledGen(coordinate, 1);
+      coordinates.push(coordinate);
+    }
+    return coordinates;
+  }
+
+  function bootCoordinator(store: Store, transport: FakeTransport, coordSk: Uint8Array): Coordinator {
+    return new Coordinator({
+      store,
+      transport,
+      coordSk,
+      stt: new MockStt({ default: "x" }),
+      llm: new MockLlm(() => ({})),
+      summaryModel: { provider: "mock", model: "m" },
+      matchModel: { provider: "mock", model: "m" },
+      embedModel: { provider: "mock", model: "m" },
+      translateModel: { provider: "mock", model: "m" },
+      sttModel: "mock",
+      defaultRelays: ["wss://test"],
+      maxEvents: 50,
+      sleep: async () => {},
+    });
+  }
+
+  it("has several events' relay reads in flight at once, and still restores every one", async () => {
+    const coordSk = generateSecretKey();
+    const store = new Store(":memory:", coordSk);
+    const transport = new FakeTransport();
+    const coordinates = seedEvents(store, transport, getPublicKey(coordSk), 4);
+    transport.fetchDelayMs = 20; // long enough for the fan-out to actually overlap
+
+    const coordinator = bootCoordinator(store, transport, coordSk);
+    await coordinator.start();
+    coordinator.stop();
+
+    expect(transport.peakInFlightFetches).toBeGreaterThan(1);
+    // Every event still ends up live — concurrency must not lose one.
+    for (const c of coordinates) expect(coordinator.eckOf(c)).toHaveLength(1);
+  });
+
+  it("never runs more than the bound at once, however many events are stored", async () => {
+    const coordSk = generateSecretKey();
+    const store = new Store(":memory:", coordSk);
+    const transport = new FakeTransport();
+    seedEvents(store, transport, getPublicKey(coordSk), 20);
+    transport.fetchDelayMs = 5;
+
+    const coordinator = bootCoordinator(store, transport, coordSk);
+    await coordinator.start();
+    coordinator.stop();
+
+    // A boot that fans out over twenty events unbounded puts sixty-odd concurrent
+    // REQs on each relay socket; the bound is what stops that.
+    expect(transport.peakInFlightFetches).toBeLessThanOrEqual(4);
+  });
+});
+
+/**
+ * `suspendEvent` is reachable for the whole life of the process — a config that
+ * stops being fetchable, a re-install that can't revalidate. The retry timer was
+ * created only `if (this.suspended.size > 0)` AT BOOT, so on a daemon that started
+ * clean an event suspended later had nothing to ever retry it: the log said
+ * "SUSPENDED … retry in 5000ms" and no retry existed. It stayed deaf until the
+ * next deploy.
+ */
+describe("the suspended-event retry timer exists even when nothing was suspended at boot", () => {
+  it("retries suspensions that happen after start()", async () => {
+    const h = await setup();
+    vi.useFakeTimers();
+    try {
+      const spy = vi.spyOn(h.coordinator, "retrySuspendedEvents").mockResolvedValue(undefined);
+      await h.coordinator.start(); // nothing suspended: the config is fetchable
+      expect(spy).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(spy).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      h.coordinator.stop();
+    }
+  });
+});
+
+/**
+ * `chat_sync_member` is enqueued the instant an attendee is approved, and on a
+ * chat event it then completes in 0–1 ms having done nothing: the account has no
+ * attested device yet, because the client publishes its key package and its 21607
+ * later, when it prewarms chat. Nothing looked again, so the member's first open
+ * waited on the passive 30443 watcher.
+ */
+describe("chat enrolment is re-checked for a bounded window after the grant", () => {
+  it("picks the device up on a re-check when it appears after the approval", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto"); // auto-approved
+    await h.coordinator.jobs.drain(); // the approval-time sync: nothing to add yet
+    expect(mls.invited).toEqual([]);
+
+    // Prewarm: the client now binds a device and publishes its key package.
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-late", tags: [], content: "", sig: "" } as any);
+
+    // Nothing else happens — no attestation rumor, no watcher delivery. The bounded
+    // re-check is the only thing that can notice.
+    h.clock.t += 10_000;
+    await h.coordinator.jobs.drain();
+
+    expect(mls.invited).toEqual([devicePk]);
+  });
+
+  it("stops the chain once the member is enrolled, instead of re-checking forever", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    await h.coordinator.jobs.drain();
+    expect(mls.invited).toEqual([devicePk]);
+
+    // The member holds a leaf now, so the chain has its answer and must stop —
+    // every further re-check would be one relay read per member per event.
+    const kpReadsAfterEnrolment = h.transport.fetches.filter((f: any) => f.kinds?.includes(30443)).length;
+    for (let i = 0; i < 6; i++) {
+      h.clock.t += 300_000;
+      await h.coordinator.jobs.drain();
+    }
+    expect(h.transport.fetches.filter((f: any) => f.kinds?.includes(30443)).length).toBe(kpReadsAfterEnrolment);
+    expect(h.store.pendingJobCount()).toBe(0);
   });
 });

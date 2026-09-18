@@ -1,7 +1,6 @@
 /** Organizer edits for the public NIP-52 event and its event-identity profile. */
 import { finalizeEvent } from "nostr-tools/pure";
 import {
-  KIND_CALENDAR_EVENT,
   KIND_PROFILE,
   hexToBytes,
   parseCoordinate,
@@ -56,10 +55,11 @@ export async function updateEventMetadata(
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
-  const { pubkey, identifier } = parseCoordinate(ctx.coordinate);
+  // See event-context: the coordinate names the kind.
+  const { kind, pubkey, identifier } = parseCoordinate(ctx.coordinate);
   const [calendarEvents, profileEvents] = await Promise.all([
     fetchEvents(
-      { kinds: [KIND_CALENDAR_EVENT], authors: [pubkey], "#d": [identifier] },
+      { kinds: [kind], authors: [pubkey], "#d": [identifier] },
       ctx.config.relays,
     ).then(onlyVerified),
     fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }, ctx.config.relays).then(onlyVerified),
@@ -99,14 +99,18 @@ export async function updateEventMetadata(
   // same-second re-edit can't tie-and-lose on the id comparison.
   const [calendarRes, profileRes] = await Promise.all([
     publishMonotonic({
-      kind: KIND_CALENDAR_EVENT,
+      // The coordinate's own kind, not the calendar one: republishing a
+      // community's metadata as 31923 would mint a SECOND record under a
+      // different coordinate and orphan the community from everything that
+      // points at it.
+      kind,
       author: pubkey,
       identifier,
       relays: ctx.config.relays,
       owner: pubkey,
       sign: (created_at) =>
         finalizeEvent(
-          { kind: KIND_CALENDAR_EVENT, created_at, tags, content: input.summary },
+          { kind, created_at, tags, content: input.summary },
           eidSk,
         ) as VerifiedEvent,
     }),

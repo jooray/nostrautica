@@ -144,6 +144,9 @@
   const hasPublicAbout = $derived(profileState === "loaded" && !!existingAbout.trim());
   /** What will actually be submitted as `profile.about`, whichever branch we're in. */
   const aboutValue = $derived(
+    // Still the right PREVIEW even though only `eventAbout` is submitted now:
+    // the kind-0 bio is what the roster will display for them, it is just read
+    // live rather than copied into the entry.
     session.loggedIn ? (hasPublicAbout ? existingAbout : eventAbout) : newAbout,
   );
   // Field-level name validation (audit §7.3.7). The required name field differs
@@ -433,8 +436,26 @@
           return;
         }
         displayName = eventDisplayName.trim() || existingName;
-        // Their kind-0 bio when they have one, otherwise whatever they typed here.
-        about = hasPublicAbout ? existingAbout : eventAbout.trim();
+        /**
+         * `about` is what they wrote FOR THIS EVENT, and nothing else.
+         *
+         * It used to be `hasPublicAbout ? existingAbout : eventAbout` — a
+         * verbatim copy of their kind-0 bio taken at this moment and then frozen
+         * forever. A Nostr user of several years joins, notices their bio is out
+         * of date, fixes it on their own client, and Nostrautica goes on showing
+         * the old one indefinitely: nothing ever re-reads kind 0 into this field,
+         * and nothing can, because by then the field is indistinguishable from a
+         * bio somebody deliberately wrote for this event in MyProfile. One field,
+         * two meanings, no flag to tell them apart (reported 2026-09-13).
+         *
+         * So the copy stops being made. The live bio is not mirrored anywhere —
+         * it is read from kind 0 at render time, where it cannot go stale, and
+         * every surface that shows a bio already has it (`ProfileMeta.about`,
+         * fetched for the whole roster). This field stays empty unless they type
+         * something here, which is the only thing that was ever unambiguous
+         * about it.
+         */
+        about = eventAbout.trim();
       }
 
       const signer = session.signer!;

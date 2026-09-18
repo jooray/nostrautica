@@ -304,16 +304,46 @@ describe("processing failure (LEAD-1: the journey could not say \"failed\")", ()
     expect(stateOf(r, "processing")).toBe("complete");
   });
 
-  it("the monotonic latch is not defeated by a failure notice", () => {
+  it("the monotonic latch still beats a failure notice we cannot corroborate", () => {
+    // `processed: undefined` = the directory entry could not be READ (offline, a
+    // rotated ECK, a relay gap). The failure notice is a cached 21606 that may
+    // predate a retry which fixed it, so with nothing to corroborate it the latch
+    // wins — which is the whole reason the latch exists. Telling someone whose
+    // profile is fine that it failed, because they happened to open the app on a
+    // train, is the failure mode being avoided here.
     const r = deriveReadiness(
       base({
-        processed: false,
+        processed: undefined,
         matchesAvailable: false,
         latched: new Set<ReadinessStepId>(["processing"]),
         processingFailed: { stage: "process_attendee", errorCategory: "media_fetch" },
       }),
     );
     expect(stateOf(r, "processing")).toBe("complete");
+  });
+
+  /**
+   * Audit A-2. `processed: false` is NOT an absence of evidence — the entry was
+   * read and carries no ai_profile, so nothing is built, the attendee is absent
+   * from everyone's matches, and the coordinator has sealed them a 21606 saying
+   * why. The latch used to paper over exactly that, so the journey widget said
+   * "5 of 5 complete" with no CTA while the banner at the top of the same screen
+   * said processing had failed. This is the shape a re-submission that poisons
+   * after a successful first pass produces.
+   */
+  it("a latched step still reports FAILED when the entry proves nothing is built", () => {
+    const r = deriveReadiness(
+      base({
+        processed: false,
+        matchesAvailable: false,
+        latched: new Set<ReadinessStepId>(["joined", "backup", "intro", "processing", "matches"]),
+        processingFailed: { stage: "process_attendee", errorCategory: "provider_contract" },
+      }),
+    );
+    expect(stateOf(r, "processing")).toBe("failed");
+    expect(r.allComplete).toBe(false);
+    // And the widget names the next step instead of naming nothing.
+    expect(r.primary?.labelKey).toBe("readiness.cta.editProfile");
   });
 
   it("a non-member is never offered the processing CTA", () => {

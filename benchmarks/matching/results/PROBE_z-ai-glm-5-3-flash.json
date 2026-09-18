@@ -1,0 +1,55 @@
+{
+  "model": "z-ai-glm-5-3-flash",
+  "calls": 5,
+  "ok": 4,
+  "failed": 1,
+  "kinds": {
+    "truncated": 1
+  },
+  "entryYield": 100,
+  "latencyMsP50": 73063,
+  "usage": {
+    "promptTokens": 21999,
+    "completionTokens": 44425,
+    "totalTokens": 66424,
+    "reasoningTokens": 29891
+  },
+  "usdSpent": 0.025512,
+  "at": "2026-09-13T22:37:38.112Z",
+  "rows": [
+    {
+      "ok": true,
+      "ms": 180497,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    },
+    {
+      "ok": false,
+      "ms": 117927,
+      "kind": "truncated",
+      "message": "provider venice output failed the reverse_batch_score contract (model z-ai-glm-5-3-flash): response truncated at the 20000-token ceiling (finish_reason=length); 2549 of 20000 completion tokens went on reasoning, which is billed and drawn from the same budget as the answer — raise this model's reason"
+    },
+    {
+      "ok": true,
+      "ms": 73063,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    },
+    {
+      "ok": true,
+      "ms": 55092,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    },
+    {
+      "ok": true,
+      "ms": 51512,
+      "scored": 10,
+      "asked": 10,
+      "missing": 0
+    }
+  ]
+}

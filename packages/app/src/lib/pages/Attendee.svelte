@@ -1,3 +1,38 @@
+<script lang="ts" module>
+  import { profileDisplayName } from "$lib/events/social.js";
+
+  /**
+   * The name at the top of an attendee's page, in the order this app trusts its
+   * three sources: their live kind-0, the name frozen into their directory entry
+   * at join time, then a slice of their event bio, then the generic fallback.
+   *
+   * The kind-0 step goes through `profileDisplayName` — it used to read the raw
+   * `name` field off the parsed content, which is the ONE field the rest of the
+   * app does not prefer. Everything else (the People roster, matches, talk
+   * cards, DM headers) resolves names through `fetchProfiles`, which resolves
+   * `display_name` first, so the same person could be "Ada Lovelace" in the
+   * roster and "ada1815" on the page you opened by tapping that row. Worse, the
+   * wrong name arrived SECOND here: the cache paint below uses the already-
+   * resolved cached meta, then the relay fetch overwrote `kind0` with the raw
+   * content and the heading changed under the reader.
+   *
+   * Pure and exported so the precedence is unit-testable without a browser (the
+   * same reason Attendees.svelte exports its empty-state classifier).
+   */
+  export function attendeeDisplayName(
+    kind0: unknown,
+    entry: { name?: string; profile?: { about?: string } } | null | undefined,
+    fallback: string,
+  ): string {
+    return (
+      profileDisplayName(kind0) ||
+      entry?.name ||
+      entry?.profile?.about?.slice(0, 40) ||
+      fallback
+    );
+  }
+</script>
+
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { decode, nprofileEncode } from "nostr-tools/nip19";
@@ -21,6 +56,8 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import FollowButton from "$lib/components/FollowButton.svelte";
   import MatchDetails from "$lib/components/MatchDetails.svelte";
+  import { viewport } from "$lib/stores/viewport.svelte.js";
+  import { STRONG_FLOOR, bandAtCut, strongCutFor } from "$lib/events/confidence.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
@@ -51,6 +88,14 @@
   // (UX feedback 2026-07-29): Matches → profile was a one-way door, so the
   // reasoning and icebreakers you came for vanished on arrival.
   let myMatch = $state<Match | null>(null);
+  /**
+   * The viewer's own "strong" cut, carried alongside the single match: the band
+   * depends on the WHOLE match list (confidence.ts), which this page otherwise
+   * throws away after picking one entry out of it. Defaulting to the bare floor
+   * means a match shown before any list has loaded is banded conservatively
+   * rather than optimistically.
+   */
+  let strongCut = $state(STRONG_FLOOR);
   let copied = $state<"npub" | "nprofile" | null>(null);
   const muted = $derived(!!pubkey && mutes.isMuted(pubkey));
 
@@ -72,7 +117,9 @@
         // Cached per-event settings (want-to-meet/met/note) paint instantly (§2.8).
         settings = cachedPerEventSettings(cached.coordinate) ?? null;
         if (settings) noteDraft = settings.notes[pubkey] ?? "";
-        myMatch = cachedMatches(cached.coordinate)?.matches.find((m) => m.pubkey === pubkey) ?? null;
+        const cachedList = cachedMatches(cached.coordinate)?.matches;
+        if (cachedList) strongCut = strongCutFor(cachedList);
+        myMatch = cachedList?.find((m) => m.pubkey === pubkey) ?? null;
       }
       if (kind0 || entry) {
         loading = false;
@@ -127,7 +174,10 @@
         // a match computed since the last visit must not stay invisible here.
         // Non-members / no coordinator resolve to undefined; the section hides.
         void fetchMatches(session.signer, eventCtx)
-          .then((list) => (myMatch = list?.matches.find((m) => m.pubkey === pubkey) ?? myMatch))
+          .then((list) => {
+            if (list) strongCut = strongCutFor(list.matches);
+            myMatch = list?.matches.find((m) => m.pubkey === pubkey) ?? myMatch;
+          })
           .catch(() => {});
         const me = await session.signer.getPublicKey();
         // Bound the follow-list fetch (audit UX-10): an unbounded fetch on a bad
@@ -243,9 +293,7 @@
     }
   }
 
-  const displayName = $derived(
-    kind0?.name || entry?.name || entry?.profile.about?.slice(0, 40) || t("attendee.name"),
-  );
+  const displayName = $derived(attendeeDisplayName(kind0, entry, t("attendee.name")));
   const has = (list?: string[]) => !!list?.includes(pubkey);
 
   // A coordinator-published translation of the user's authored fields into the
@@ -259,6 +307,26 @@
   const aboutText = $derived(
     (useTranslated && translation?.about) || entry?.profile.about || kind0?.about || "",
   );
+  /**
+   * Their CURRENT Nostr bio, shown alongside the event bio when the two differ.
+   *
+   * `entry.profile.about` is one field with two meanings and no flag to tell
+   * them apart: for anyone who joined before 2026-09-13 it is a verbatim copy of
+   * their kind-0 bio frozen at join, and for anyone who edited it in MyProfile
+   * it is a bio deliberately written for this event. Preferring kind 0 would
+   * silently clobber the second; preferring the entry is the reported bug, where
+   * a user updates their Nostr profile and Nostrautica shows the old one
+   * forever.
+   *
+   * So neither wins and nothing is guessed — when the two texts differ, both are
+   * on the page and the reader can see which is which. Empty when the entry has
+   * no authored bio, because then the line above IS the kind-0 bio already.
+   */
+  const nostrAbout = $derived.by(() => {
+    const live = kind0?.about?.trim();
+    if (!live) return "";
+    return live === aboutText.trim() ? "" : live;
+  });
   const lookingForText = $derived(
     (useTranslated && translation?.looking_for) || entry?.profile.looking_for || "",
   );
@@ -315,11 +383,7 @@
   }
 </script>
 
-<button class="btn inline" style="margin:0.5rem 0" onclick={() => router.go({ name: "attendees", naddr })}>
-  {t("attendee.back")}
-</button>
-
-{#if error}<ErrorState {error} />{/if}
+{#if error}<ErrorState {error} body={mutes.unreadable ? "mute.unreadable" : undefined} />{/if}
 
 {#if invalidNpub}
   <!-- No interactive shell for a malformed link (audit UX-23). -->
@@ -371,6 +435,13 @@
 
   {#if aboutText}
     <p style="margin-top:0.75rem">{aboutText}</p>
+  {/if}
+
+  {#if nostrAbout}
+    <div class="nostr-about">
+      <div class="field-label">{t("attendee.nostrAbout")}</div>
+      <p class="muted">{nostrAbout}</p>
+    </div>
   {/if}
 
   {#if entry?.intro_text}
@@ -444,23 +515,7 @@
     >
       {t("attendee.message")}
     </button>
-    {#if muted}
-      <button class="btn inline" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
-    {:else}
-      <button class="btn inline danger" onclick={() => (confirmMute = !confirmMute)} disabled={busy}>{t("attendee.mute")}</button>
-    {/if}
   </div>
-
-  <!-- Directly under the button that opened it, not below the identity chips. -->
-  {#if confirmMute && !muted}
-    <div class="card warn" style="margin-top:0.5rem">
-      <p class="muted">{t("mute.confirm")}</p>
-      <div class="row">
-        <button class="btn danger" onclick={toggleMute} disabled={busy}>{t("attendee.mute")}</button>
-        <button class="btn" onclick={() => (confirmMute = false)}>{t("attendee.mute.cancel")}</button>
-      </div>
-    </div>
-  {/if}
 
   <!-- Public identity: copy it or open the person in any other Nostr client. The
        values themselves stay off-screen — nobody reads an npub, they paste it. -->
@@ -476,7 +531,28 @@
     <a class="chip" href={njumpUrl} target="_blank" rel="noopener noreferrer">
       {t("attendee.id.njump")}<Icon name="arrowUpRight" size={13} />
     </a>
+    <!-- Mute lives with the utilities, not with Follow and Message: it is rare,
+         it is about you rather than about them, and as a `danger` button third
+         in the primary row it was the loudest control on the page. -->
+    {#if muted}
+      <button class="chip" onclick={toggleMute} disabled={busy}>{t("attendee.unmute")}</button>
+    {:else}
+      <button class="chip mute" onclick={() => (confirmMute = !confirmMute)} disabled={busy} aria-expanded={confirmMute}>
+        {t("attendee.mute")}
+      </button>
+    {/if}
   </div>
+
+  <!-- Directly under the control that opened it. -->
+  {#if confirmMute && !muted}
+    <div class="card warn" style="margin-top:0.5rem">
+      <p class="muted">{t("mute.confirm")}</p>
+      <div class="row">
+        <button class="btn danger" onclick={toggleMute} disabled={busy}>{t("attendee.mute")}</button>
+        <button class="btn" onclick={() => (confirmMute = false)}>{t("attendee.mute.cancel")}</button>
+      </div>
+    </div>
+  {/if}
   <span class="visually-hidden" role="status">{copied ? t("attendee.id.copied") : ""}</span>
 </div>
 
@@ -487,7 +563,7 @@
 {#if myMatch}
   <div class="card match">
     <div class="field-label" style="margin-top:0">{t("attendee.yourMatch")}</div>
-    <MatchDetails match={myMatch}>
+    <MatchDetails match={myMatch} band={bandAtCut(myMatch.score, strongCut)} showReasoning={!viewport.wide}>
       {#snippet actions()}
         <div class="mact">
           <button class="btn inline primary" onclick={introduce}>
@@ -536,6 +612,12 @@
   .small {
     font-size: 0.8rem;
   }
+  .nostr-about {
+    margin-top: 0.75rem;
+  }
+  .nostr-about p {
+    margin: 0.15rem 0 0;
+  }
   /* Primary actions on one row (they wrap before they squash). */
   .acts {
     display: flex;
@@ -576,6 +658,10 @@
   .chip:hover {
     color: var(--accent);
     border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  }
+  .chip.mute:hover {
+    color: var(--danger);
+    border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
   }
   .match {
     display: flex;

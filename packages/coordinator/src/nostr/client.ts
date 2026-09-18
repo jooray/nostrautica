@@ -48,6 +48,16 @@ function relayLog(msg: string): void {
 const RESUBSCRIBE_BACKOFF_MS = [5_000, 15_000, 60_000, 300_000];
 
 /**
+ * Safety bound on {@link NostrClient.fetchAll}'s dense-cluster stepping (audit
+ * B-6): how many CONSECUTIVE pages may add nothing new before the walk gives up.
+ * Each such page costs one relay round trip and moves `until` back by a second, so
+ * a relay that answers every window with the same events cannot turn the walk into
+ * an unbounded crawl. Reset by any page that adds something, so a genuinely long
+ * history broken up by a few flooded seconds still completes.
+ */
+const MAX_NO_PROGRESS_PAGES = 100;
+
+/**
  * Cross-relay event dedupe with a bounded memory footprint.
  *
  * `SimplePool.subscribe` deduped by id across the relay group for us. Subscribing
@@ -171,10 +181,10 @@ export class NostrClient {
    * (a short page = the end of history). Each page's window is `until = <oldest seen> +
    * overlapSec` so an event exactly on a page boundary is never skipped (deduped by id).
    *
-   * Termination: stops on a short page (complete), on a page that adds no NEW events
-   * (no forward progress — e.g. a dense same-second cluster the relay can't page past),
-   * or at `maxTotal` (a hard safety bound). Callers process every returned event through
-   * the normal seen-ledger-deduped path, so re-fetched boundary/overlap events are free.
+   * Termination: stops on a short page (complete) or at `maxTotal` (a hard safety
+   * bound). A page that adds no NEW events does NOT stop the walk — see below.
+   * Callers process every returned event through the normal seen-ledger-deduped
+   * path, so re-fetched boundary/overlap events are free.
    */
   async fetchAll(
     filter: Filter,
@@ -188,6 +198,10 @@ export class NostrClient {
     const seen = new Set<string>();
     const all: NostrEvent[] = [];
     let until = filter.until;
+    // Consecutive pages that added nothing (see the cluster step below). Each one
+    // costs a relay round trip and moves `until` back by a second, so a relay
+    // serving nothing but duplicates can't turn the walk into an unbounded crawl.
+    let noProgress = 0;
     for (;;) {
       const page = await this.fetch({ ...filter, until, limit: pageSize }, relays, timeoutMs, pageSize);
       let added = 0;
@@ -202,11 +216,30 @@ export class NostrClient {
       }
       // Complete: the relay returned fewer than a full page → end of history reached.
       if (page.length < pageSize) break;
-      // No forward progress (all duplicates / can't page past a same-second cluster).
-      if (added === 0 || !Number.isFinite(oldest)) break;
+      if (!Number.isFinite(oldest)) break; // defensive: a full page with no timestamps
       if (all.length >= maxTotal) break;
       // Next window: at/just after the oldest we saw, WITH overlap (deduped by id).
-      const nextUntil = oldest + overlapSec;
+      //
+      // Unless nothing new arrived. A full page of already-seen ids means the
+      // `oldest + overlapSec` window cannot move: that is what a dense same-second
+      // cluster looks like from here (more than `pageSize` events sharing one
+      // `created_at`, served newest-first), and it needs no attacker — one busy
+      // second of a live event's inbox does it. Stopping there was the bug (audit
+      // B-6): the walk returned the cluster and reported itself complete, so every
+      // OLDER event in the history — an install grant, a join request from an hour
+      // ago — was never fetched, which is the exact silent-truncation failure this
+      // pagination was written to close. Step strictly BELOW the cluster instead.
+      // That can skip an unseen event sharing `oldest` exactly, which is a far
+      // smaller loss than abandoning all older history, and the `until` value
+      // strictly decreases so the walk still terminates.
+      if (added === 0 && ++noProgress > MAX_NO_PROGRESS_PAGES) {
+        relayLog(
+          `[relay] fetchAll: ${MAX_NO_PROGRESS_PAGES} consecutive pages added nothing new — stopping the walk at until=${until}`,
+        );
+        break;
+      }
+      if (added > 0) noProgress = 0;
+      const nextUntil = added === 0 ? oldest - 1 : oldest + overlapSec;
       if (until !== undefined && nextUntil >= until) break; // window can't advance
       until = nextUntil;
     }

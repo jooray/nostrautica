@@ -19,6 +19,30 @@ export type EnqueueFn = (
   notBefore?: number,
 ) => EnqueueOutcome;
 
+/** How long a pooled worker waits for a sibling to free the lane it needs. */
+const IDLE_POLL_MS = 50;
+
+/**
+ * What ONE drain call currently has in flight: workers claiming or running a job
+ * (`busy`), and how many of those are in each lane.
+ *
+ * Per drain, not per process, and not read off {@link JobRunner.inFlight}: a job
+ * claimed by a caller outside this drain — a lease another process took over, or a
+ * test holding one paused to prove a stale commit is discarded — is not this
+ * pool's to account for, and counting it would let one external job block the
+ * drain from claiming any serial work at all.
+ */
+interface PoolState {
+  busy: number;
+  score: number;
+  serial: number;
+}
+
+/** Which lane a job type runs in (see {@link SCORE_LANE}). */
+function laneOf(type: string): "score" | "serial" {
+  return (SCORE_LANE as readonly string[]).includes(type) ? "score" : "serial";
+}
+
 /** `[hh:mm:ss] ` prefix, matching coordinator.ts's `log()`. */
 function stamp(): string {
   return new Date().toISOString().slice(11, 19);
@@ -49,6 +73,24 @@ export interface PoisonInfo {
   parked?: { reason: string };
 }
 
+/**
+ * Job types that may run beside one another. Everything NOT listed shares one
+ * implicit `serial` lane with a limit of 1, which is the whole daemon's
+ * behaviour up to now — so adding a lane can only ever relax a constraint that
+ * was there, never silently widen one that was not.
+ *
+ * Only the two LLM scoring types are listed, and deliberately. They are the long
+ * jobs — 50 to 134 seconds each in production, against tens of milliseconds for a
+ * publish — and they are the ones that touch nothing shared: one provider call
+ * through a reentrant client, writes to directed pair rows that are idempotent and
+ * re-checked after the call, and an enqueue through a synchronous store. No MLS
+ * group state, no roster, no ECK, no command watermarks, no media download, no
+ * byte budget. Every other type keeps the guarantee it has today: at most one of
+ * anything else runs at a time, and it never overlaps another job that could be
+ * reading the same rows.
+ */
+export const SCORE_LANE = ["score_batch", "score_reverse_batch"] as const;
+
 export interface JobRunnerOptions {
   /** Legacy knobs: exponential doubling `baseBackoffMs * 2^(attempt-1)`, capped
    *  at `maxAttempts` tries. Overridden by `backoffScheduleMs` when given; used
@@ -65,6 +107,12 @@ export interface JobRunnerOptions {
   backoffScheduleMs?: number[];
   /** Lease duration for a claimed job (audit H1). Default 5 minutes. */
   leaseMs?: number;
+  /**
+   * How many {@link SCORE_LANE} jobs may run at once (default 1 — strictly serial,
+   * the historical behaviour every other test relies on). The daemon raises it;
+   * see `main.ts` for the one configuration that must NOT.
+   */
+  scoreConcurrency?: number;
   now?: () => number;
   /** Called when a job exhausts its retries and enters the poison state (Q12). */
   onPoison?: (info: PoisonInfo) => void;
@@ -123,6 +171,7 @@ export class JobRunner {
   private readonly maxAttempts: number;
   private readonly backoffSchedule: number[];
   private readonly leaseMs: number;
+  private readonly scoreConcurrency: number;
   private readonly now: () => number;
   private readonly onPoison?: (info: PoisonInfo) => void;
   private readonly poisonExempt?: (err: unknown) => string | undefined;
@@ -136,6 +185,7 @@ export class JobRunner {
         : DEFAULT_BACKOFF_SCHEDULE_MS);
     this.maxAttempts = opts.maxAttempts ?? this.backoffSchedule.length + 1;
     this.leaseMs = opts.leaseMs ?? 5 * 60_000;
+    this.scoreConcurrency = Math.max(1, opts.scoreConcurrency ?? 1);
     this.now = opts.now ?? (() => Date.now());
     this.onPoison = opts.onPoison;
     this.poisonExempt = opts.poisonExempt;
@@ -220,30 +270,100 @@ export class JobRunner {
     if (!this.abortController.signal.aborted) this.abortController.abort(new Error(reason));
   }
 
-  /** Run one claimable job under a fresh lease. Returns true if a job was processed. */
-  async runOne(): Promise<boolean> {
+  /**
+   * Which types this worker may claim right now, given what its siblings are
+   * already running. The serial lane (everything not in {@link SCORE_LANE}) holds
+   * one job at a time, so once one is in flight a second worker may only take
+   * score work — and once the score lane is full, only serial work.
+   */
+  private claimableTypes(pool: PoolState): { onlyTypes?: string[]; excludeTypes?: string[] } {
+    const scoreFull = pool.score >= this.scoreConcurrency;
+    const serialFull = pool.serial >= 1;
+    if (serialFull && scoreFull) return { onlyTypes: [] }; // nothing claimable
+    if (serialFull) return { onlyTypes: [...SCORE_LANE] };
+    if (scoreFull) return { excludeTypes: [...SCORE_LANE] };
+    return {};
+  }
+
+  /**
+   * Run one claimable job under a fresh lease. Returns true if a job was processed.
+   *
+   * `pool` is the drain's own accounting; without it the claim is unrestricted,
+   * which is what a direct caller (a test driving one job at a time) expects.
+   */
+  async runOne(pool?: PoolState): Promise<boolean> {
     const token = randomUUID();
-    const job = this.store.claimNextJob(this.now(), token, this.leaseMs);
+    const job = this.store.claimNextJob(
+      this.now(),
+      token,
+      this.leaseMs,
+      pool ? this.claimableTypes(pool) : undefined,
+    );
     if (!job) return false;
-    await this.execute(job, token);
+    const lane = laneOf(job.type);
+    if (pool) pool[lane]++;
+    try {
+      await this.execute(job, token);
+    } finally {
+      if (pool) pool[lane]--;
+    }
     return true;
   }
 
-  /** Drain the queue until no runnable jobs remain (bounded to avoid loops). Stops
-   *  claiming new jobs once {@link stopClaiming} has been called (graceful shutdown). */
+  /**
+   * Drain the queue until no runnable jobs remain (bounded to avoid loops). Stops
+   * claiming new jobs once {@link stopClaiming} has been called (graceful shutdown).
+   *
+   * With `scoreConcurrency > 1` this runs a small pool. Every worker promise is
+   * awaited here and the first rejection is rethrown, because an un-awaited one
+   * would reach `unhandledRejection` — which this daemon turns into `exit(1)`
+   * (lifecycle.ts) — and would take the process down with the other workers still
+   * writing. The caller (`main.ts`) keeps ONE drain promise that now covers all of
+   * them, so the graceful-shutdown window still waits for every live handler
+   * before the store and the daemon lock are closed.
+   */
   async drain(maxIterations = 10_000): Promise<void> {
+    const pool: PoolState = { busy: 0, score: 0, serial: 0 };
+    if (this.scoreConcurrency <= 1) return this.workerLoop(maxIterations, pool);
+    const workers = Array.from({ length: this.scoreConcurrency }, () => this.workerLoop(maxIterations, pool));
+    const settled = await Promise.allSettled(workers);
+    const failed = settled.find((r) => r.status === "rejected");
+    if (failed) throw (failed as PromiseRejectedResult).reason;
+  }
+
+  private async workerLoop(maxIterations: number, pool: PoolState): Promise<void> {
     for (let i = 0; i < maxIterations; i++) {
       if (this.stopping) return;
-      if (!(await this.runOne())) return;
+      pool.busy++;
+      let ran: boolean;
+      try {
+        ran = await this.runOne(pool);
+      } finally {
+        pool.busy--;
+      }
+      if (ran) continue;
+      // Nothing claimable BY THIS WORKER. That is not the same as an empty queue: a
+      // SIBLING may be holding the lane whose turn it is, and a worker that returned
+      // here would leave the pool at one until the next drain — for the whole length
+      // of a sibling's 130-second scoring call. So wait for a sibling, and finish
+      // only once no sibling is running either.
+      //
+      // Counted per drain, deliberately, and not off `inFlight`: a job claimed by a
+      // caller OUTSIDE this drain (tests hold one paused mid-STT to prove a stale
+      // commit is discarded) is not this pool's to wait for, and waiting on it
+      // deadlocks a drain that is otherwise finished.
+      if (pool.busy === 0) return;
+      await new Promise((r) => setTimeout(r, IDLE_POLL_MS));
     }
   }
 
   /**
-   * The job currently executing, or undefined when idle. Read by
-   * {@link reportQueueDepth} so a stalled handler is visible as "running for 340s"
-   * rather than as an absence of output.
+   * The jobs executing right now, keyed by job id. Read by {@link reportQueueDepth}
+   * so a stalled handler is visible as "running for 340s" rather than as an absence
+   * of output — and, since the pool, so that a second live job is visible at all
+   * instead of one silently overwriting the other's entry.
    */
-  private inFlight?: { id: number; type: string; startedAt: number };
+  private inFlight = new Map<number, { id: number; type: string; startedAt: number }>();
 
   /**
    * One line describing the queue, emitted only when there is something to say.
@@ -262,12 +382,14 @@ export class JobRunner {
     const waiting = counts.waiting ?? 0;
     const running = counts.running ?? 0;
     const poison = counts.poison ?? 0;
-    if (pending === 0 && waiting === 0 && running === 0 && poison === 0 && !this.inFlight) return;
-    const active = this.inFlight
-      ? `${this.inFlight.type} #${this.inFlight.id} for ${Math.round((this.now() - this.inFlight.startedAt) / 1000)}s`
-      : "idle";
+    if (pending === 0 && waiting === 0 && running === 0 && poison === 0 && this.inFlight.size === 0) return;
+    const active =
+      [...this.inFlight.values()]
+        .map((j) => `${j.type} #${j.id} for ${Math.round((this.now() - j.startedAt) / 1000)}s`)
+        .join(", ") || "idle";
+    const label = this.inFlight.size > 1 ? "workers" : "worker";
     console.log(
-      `[${stamp()}] [jobs] queue: ${pending} pending, ${running} running, ${waiting} waiting (parked), ${poison} poisoned — worker: ${active}`,
+      `[${stamp()}] [jobs] queue: ${pending} pending, ${running} running, ${waiting} waiting (parked), ${poison} poisoned — ${label}: ${active}`,
     );
   }
 
@@ -288,7 +410,7 @@ export class JobRunner {
       return;
     }
     const startedAt = this.now();
-    this.inFlight = { id: job.id, type: job.type, startedAt };
+    this.inFlight.set(job.id, { id: job.id, type: job.type, startedAt });
     console.log(`[${stamp()}] [job] ${job.type} #${job.id} started (attempt ${job.attempts + 1})`);
     // Heartbeat the lease while the handler runs (audit P0-6). A pipeline handler
     // can download + transcode media, call several models, or score a batch — far
@@ -408,7 +530,7 @@ export class JobRunner {
       }
     } finally {
       clearInterval(heartbeat);
-      this.inFlight = undefined;
+      this.inFlight.delete(job.id);
     }
   }
 }

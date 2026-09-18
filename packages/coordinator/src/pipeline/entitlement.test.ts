@@ -139,6 +139,26 @@ describe("invite entitlement (spec §6.5)", () => {
     expect(store.inviteRedemptions(coord, getPublicKey(inviteSk))).toBe(0);
   });
 
+  it("an entry with no `exp` never stops auto-approving, however long after it was published", () => {
+    // The wire shape the organizer form produces for "0 hours" — no `exp` key at
+    // all, because `exp` is `positive()` in the schema and has no sentinel for
+    // "never" (app: sharedInviteExp). Worth its own case rather than leaning on
+    // the unlimited-code test above, which walks `now` from 1ms to 50ms and so
+    // would pass just as happily if absence of `exp` were read as expiry at 0.
+    const store = new Store();
+    const checker = new InviteChecker(store);
+    const inviteSk = generateSecretKey();
+    const published = publish(getPublicKey(inviteSk), { uses: INVITE_USES_UNLIMITED }); // no exp
+    const latecomer = getPublicKey(generateSecretKey());
+    const fiveYearsOn = 5 * 365 * 24 * 3600 * 1000;
+    const decision = evaluateEntitlement(
+      [checker],
+      { coordinate: coord, attendeePubkey: latecomer, invite: makeInviteProof(inviteSk, coord, latecomer), publishedInvites: published },
+      fiveYearsOn,
+    );
+    expect(decision.grant).toBe(true);
+  });
+
   it("treats an entry with no `uses` as single-use (what an older publisher meant)", () => {
     const store = new Store();
     const checker = new InviteChecker(store);

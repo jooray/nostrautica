@@ -285,11 +285,23 @@ next model that ships.
    the prompt could not be fixed. It could. 0423 remains the better model on
    speed and cost and is still live if that ever matters, but there is no longer
    a defect forcing the choice.
-3. **GLM 5.3 Flash wins on quality and is still not adoptable**: 68% of its
-   icebreaker calls return a shape the schema forbids, and tolerating that in
-   `venice.ts` costs more than the model is worth. Revisit if z.ai fixes it. It
-   is one command.
-4. **No Qwen. No Minimax.**
+3. **GLM 5.3 Flash wins on quality and is still not adoptable, for fewer
+   reasons than before.** On the live prompt the undeclared-shape blocker is
+   gone (65/96 → 0/96), leaving only the two provider changes this document
+   already judged defensible. But Venice repriced it 60% on 2026-09-10, so it is
+   now dearer than what we run ($0.398 vs $0.281 per 100 attendees) rather than
+   cheaper. Quality-wise it is the best model in the table.
+4. **No Qwen, three of them now, and no Minimax.** `qwen-3-8-flash`
+   (2026-09-10) is the closest any challenger has come mechanically and the
+   furthest any has been on output language: 28 of 48 Slovak batches fully
+   English against the deployed model's 0, on the identical live prompt.
+5. **Arm D now measures R6, the prompt production sends** (suite v2,
+   2026-09-10, all six cards re-run). The R3 numbers quoted in rounds 1-3 stand
+   as a record of that prompt; the current table is not comparable with them.
+   One consequence worth carrying: the Qwen language verdicts were partly
+   measuring the old prompt, and `qwen3-6-35b-a3b`'s Czech rate fell from 58.9%
+   to 8.4% on the new one. It fails on attribution instead.
+   See [Suite v2](#suite-v2-every-card-re-measured-on-the-prompt-production-sends).
 
 The original round-1 reasoning follows.
 
@@ -515,6 +527,248 @@ the regression it repairs got in.
 
 ---
 
+## Round 4: Qwen 3.8 Flash, and the arm that was measuring last month's prompt
+
+Venice shipped `qwen-3-8-flash` (Qwen 3.8 Flash, $0.14/$0.49 per Mtok, 1M
+context, `privacy: anonymized`), the model the "Adding the next model" section
+below was written in anticipation of. It went through the same five arms on
+2026-09-10, plus two arms that did not exist before, for a reason this round
+discovered rather than planned.
+
+**Verdict: no.** It is the first challenger with no mechanical blocker at all,
+and on a Slovak event it writes English in two thirds of its openers.
+
+### What it does well, which is not nothing
+
+| | `qwen-3-8-flash` | `deepseek-v4-flash-0731` (deployed) |
+|---|---|---|
+| r@1 / r@3, eval subset (2 seeds) | 0.75 / 0.90 | 0.75 / 0.90 |
+| r@1 / r@3, full-190 | **0.75 / 0.90** | 0.65 / 0.85 |
+| strong–weak separation | **0.58** | 0.55 |
+| position bias (full-190) | **0.04** | 0.11 |
+| strict `JSON.parse` | **100%** (82/82) | 100% |
+| declared response shape | **96/96 calls** | 96/96 |
+| `disable_thinking` | **accepted** (0 reasoning tokens) | accepted |
+| p50 latency / output tok/s | **12.3 s / 65.8** | 22.1 s / 41.6 |
+| $/100 attendees | $0.306 | **$0.281** |
+
+On the harder full-190 ranking it beats the deployed model by two gold pairs,
+with a third of the position bias, at twice the throughput. Everything
+`venice.ts` needs, it does: no 400 on `disable_thinking`, no code fence, no
+renamed wrapper, no undeclared shape. GLM 5.3 Flash's two hard blockers are
+simply absent here. If the only arms that existed were the ones this benchmark
+had in July, this would read as an upgrade.
+
+### The language failure, measured against the prompt production actually sends
+
+The first pass put it at **22.1% in-language** on Slovak: 811 of 1052 openers
+in English, and whole-call rather than mid-message, **31 of 48 calls came back
+entirely in English**, 7 mixed, 10 clean.
+
+That number came from arm D, which runs the **R3** variant, and R3 has been the
+*pre-fix* prompt since 2026-08-26 (see the section below). So it was re-run
+against **R6**, what `reverseSystemPrompt()` returns today, alongside a matched
+same-day control on the deployed model. All four cells, same fixture, same
+afternoon, runs overlapping in time:
+
+| model | prompt | Slovak in-language | calls fully English |
+|---|---|---|---|
+| `deepseek-v4-flash-0731` | **R6 (live)** | **97.7%** | **0 / 48** |
+| `deepseek-v4-flash-0731` | R3 (pre-fix) | 70.7% | 11 / 48 |
+| `qwen-3-8-flash` | **R6 (live)** | 34.5% | **28 / 48** |
+| `qwen-3-8-flash` | R3 (pre-fix) | 22.1% | 31 / 48 |
+
+**The shipped fix does nothing for this model**: 31/48 → 28/48, Fisher exact
+p = 0.68. Against the deployed model on the identical prompt it is 28/48 versus
+0/48, **p = 2.6 × 10⁻¹¹**. The same reminder that takes DeepSeek to zero leaves
+Qwen writing English on more than half of its batches. Whatever the sentence
+does, this model does not read it.
+
+Attribution is the second disqualifier and R6 does not help there either: 3.0%
+(32/1073) on the live prompt, 2.5% on R3, against the deployed model's 0.4%
+today. It is also the first model since `qwen3-6-35b-a3b` to produce third-party
+briefings at all.
+
+Blind judging (same judge, same rubric, same content-addressed pack as every
+earlier round) puts it **last of six on reasoning** at 3.40, with **14 of 20
+items flagged `generic`**. The prose is accurate and gives an attendee nothing to
+do with it: "Yusuf helps scale open-source privacy tools, which could amplify
+your workshop curriculum" is a true sentence and not an introduction.
+
+### The thing this round actually found: arm D has been benchmarking a superseded prompt
+
+`bakeoff.mjs` freezes `SUITE.icebreakerVariant = "R3"`. On 2026-08-26 the
+output-language reminder shipped, the deployed prompt became **R6**, and
+`reverse-variants.mjs` was updated to say so in as many words: *"R3 … is now the
+PRE-FIX control … The current deployed prompt is R6."* Nothing propagated that to
+the suite. Every model benchmarked since has had its language and attribution
+measured on a prompt production stopped sending three weeks ago.
+
+The card's fingerprint should have caught it and instead disguised it: it hashed
+`reverseSystemPrompt()` (R6, live) while the arm sent R3. So cards written after
+the fix carried an R6 hash over an R3 measurement, and when the drift check was
+repaired it promptly announced that six cards "were NOT measured under the same
+prompt", about six arms that had all sent byte-identical R3
+(`63e056b48b6c6e8c` on every one of them). A drift detector that invents drift is
+worth no more than one that misses it; this one managed both within an hour.
+
+Three fixes landed:
+
+- the icebreaker cache key now includes the SHA of the system prompt, not just
+  the variant label, because a label here names whatever `scoring.ts` said on
+  the day;
+- the fingerprint records **both** the measured variant (`icebreaker.system.R3.sk`)
+  and the live prompt (`icebreaker.system.LIVE.sk`), so a card shows on its face
+  whether it measured what ships;
+- `bakeoff.mjs` says loudly, at the end of every run, when the two differ.
+
+**Since resolved.** Pointing `SUITE.icebreakerVariant` at R6 meant bumping
+`SUITE_VERSION` and re-running arm D for all six cards, because the report
+refuses to mix suite versions. That was done the same day; see
+[Suite v2](#suite-v2-every-card-re-measured-on-the-prompt-production-sends).
+Three verdicts moved.
+
+### And the R3 control is far noisier than one draw suggests
+
+Re-running the deployed model's R3 Slovak arm today, against bytes that have not
+changed since August, produced **11/48** fully-English calls where the
+2026-08-26 card recorded **3/48**. Pooling every R3-equivalent control draw ever
+taken (3/48, 8/48, 9/48, 11/48), the control sits nearer 80–85% in-language than
+the card's 93.3%, which was a lucky draw that has been quoted in three subsequent
+rounds.
+
+This does not weaken the round-3 verdict; it strengthens it. Every control draw
+sits far above every R6 draw (0/48 today, 1/48 and 1/96 in August), and today's
+matched pair re-establishes the fix independently: **11/48 → 0/48, p = 0.0005**.
+What it does mean is that a single 48-call draw of this metric cannot separate
+80% from 93%, and no future round should quote one as if it could.
+
+*Round 4 cost: $0.48 of Venice API: $0.22 for the five frozen arms, $0.26 for
+the three R3/R6 arms this round added.*
+
+---
+
+## Suite v2: every card re-measured on the prompt production sends
+
+Round 4 left arm D pointed at R3 and flagged the fix as a decision rather than a
+bug. The decision was taken on 2026-09-10: `SUITE.icebreakerVariant` is now
+**R6**, which is `reverseSystemPrompt()` itself rather than a snapshot of it,
+`SUITE_VERSION` is 2, and all six cards were re-run. The v1 cards are kept in
+`results/bakeoff/v1-R3/` because their numbers are quoted throughout rounds 1-3
+and remain the correct record of what R3 measured.
+
+`node bakeoff-report.mjs --md`, suite v2, all six models measured against the
+same live prompt.
+
+| model | $/Mtok | r@1 190 | r@3 190 | sep | strictJSON | sk-in-lang | attr-err | reason-inv | judge R | judge IB | p50 s | $/100 |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| z-ai-glm-5-3-flash | $0.15/$0.5 | **0.80** | **0.90** | **0.64** | 3.7% | 98.8% | **0.2%** | **0%** | **4.70** | **4.70** | 16.1 | $0.398 |
+| qwen-3-8-flash | $0.14/$0.49 | 0.75 | 0.90 | 0.58 | **100%** | **34.5%** | 2.0% | 4.9% | 3.40 | 3.15 | 12.3 | $0.306 |
+| deepseek-v4-flash | $0.138/$0.275 | 0.75 | 0.90 | 0.56 | **100%** | **99.4%** | 0.5% | 1.3% | 4.45 | 3.55 | **10.5** | **$0.224** |
+| qwen3-6-35b-a3b | $0.1/$1 | 0.60 | 0.85 | 0.57 | **100%** | 83.5% | 3.4% | 2.2% | 3.85 | 3.55 | **4.4** | $0.475 |
+| **deepseek-v4-flash-0731** | $0.175/$0.35 | 0.65 | 0.85 | 0.55 | **100%** | **97.7%** | **0.3%** | **0%** | 4.25 | **4.20** | 22.1 | $0.281 |
+| qwen-3-8-27b | $0.45/$3.2 | 0.65 | 0.85 | 0.52 | **100%** | 79.4% | 1.8% | 5.5% | 3.90 | 3.55 | 11.3 | $1.734 |
+
+`reason-inv` is new and populated for the first time here: `reasoning_for_target`
+inversions, from the grader added the same day. Every earlier card reads "–",
+which is not zero.
+
+### The prompt was carrying more of the Qwen verdicts than anyone knew
+
+Moving from R3 to R6 is one sentence of prompt, and it moves the Slovak column
+for almost every model:
+
+| model | R3 | R6 | what changed |
+|---|---|---|---|
+| `qwen3-6-35b-a3b` | 31.2% | **83.5%** | Czech openers 841 → 117 |
+| `qwen-3-8-27b` | 62.5% | **79.4%** | English 303 → 179, Czech 76 → 2 |
+| `deepseek-v4-flash-0731` | 93.3% | **97.7%** | English 90 → 29 |
+| `z-ai-glm-5-3-flash` | 96.7% | **98.8%** | Czech 23 → 0 |
+| `deepseek-v4-flash` | 99.6% | 99.4% | already at ceiling |
+| **`qwen-3-8-flash`** | 22.1% | **34.5%** | English 811 → 697 |
+
+Round 2's headline, *"`qwen3-6-35b-a3b` answers a Slovak event in Czech 59% of
+the time"*, was true of the prompt then deployed and is not true of the prompt
+deployed now: 8.4%. The model is still not adoptable, and the reason is now
+attribution (3.4%) rather than language. Read that sentence in Round 2 as a
+statement about R3.
+
+`qwen-3-8-flash` is the one model the sentence does not reach. It gains 12
+points where the others gain 17, 21 and 52, and it stays four times below the
+floor. That is what makes its failure a property of the model rather than of the
+prompt it was measured under.
+
+### Three verdicts from earlier rounds that this changes
+
+**GLM 5.3 Flash lost a hard blocker.** Under R3 it answered the reverse batch
+with undeclared top-level shapes on 65 of 96 calls, which
+[Deployability §2b](#2b-the-strict-schema-is-not-honoured-at-all-on-the-harder-shape)
+called the point where tolerating it "costs more than the model is worth". Under
+R6: **0 of 96**. What remains is the two provider changes that section already
+judged defensible, per-model `disable_thinking` and lenient parsing, and *not*
+the third one it refused to make. Its prose also improved from 4.10 to **4.70**,
+15 of 20 sampled openers scored 5, and its Czech leakage went to zero. It is now
+the best model in this table on every quality axis it is measured on.
+
+**And it got 60% more expensive.** Venice repriced it between the snapshots:
+$0.09375/$0.3125 on 2026-08-26, $0.15/$0.50 on 2026-09-10. That is $0.398 per
+100 attendees against the deployed model's $0.281, so the "cheaper and faster"
+half of the round-1 verdict no longer holds. It is faster; it is not cheaper.
+The price is not in the pinned `PRICING` table, so nothing warned about the
+drift, which is an argument for pinning any model a verdict depends on.
+
+**Round 3's case for rolling back to 0423 is weaker on the live prompt.** Its
+Slovak attribution is now significantly worse than the deployed model's (1.3% vs
+0.4%, p = 0.0275, where under R3 the same comparison was null), its icebreaker
+prose grades below it (3.55 vs 4.20), and it inverts `reasoning_for_target` on
+1.3% of entries where 0731 inverts none. It keeps its advantages in speed, cost
+and raw ranking. The rollback was already not on the table; it is now less
+attractive than the round-3 numbers made it look.
+
+**`qwen-3-8-27b`'s attribution was flattered by R3.** It recorded 0.1% there, the
+best of any model tested. On the live prompt it is 1.8%, significantly worse than
+the deployed model (p = 0.006), with 5.5% reasoning inversions on top.
+
+### What the deployed model looks like on its own prompt
+
+97.7% Slovak in-language, 0.3% attribution errors pooled and 0.4% in Slovak,
+**zero** reasoning inversions in 960 entries, 100% strict JSON, and icebreaker
+prose at 4.20 against 3.45 under R3. Every one of those is better than the card
+that has been quoted since August, because that card measured the prompt it no
+longer runs.
+
+**No model change.** `deepseek-v4-flash-0731` stays. The one model that beats it
+on quality, `z-ai-glm-5-3-flash`, is no longer blocked on the adapter, and that
+is worth separating from whether it is adoptable.
+
+The adapter changes landed on 2026-09-14. `providers/venice.ts` now learns from a
+model's own behaviour that it reasons unconditionally and reserves completion
+tokens for the reasoning on top of the caller's answer budget, so an operator can
+point `models.match` at such a model with nothing but the id. The August blocker
+was also not what it looked like: Venice had stopped refusing `disable_thinking`
+with a 400 and started accepting it and ignoring it, whereupon GLM 5.3 Flash
+spent the entire budget on chain-of-thought and returned empty content on 4 of 4
+calls. The recovery was watching for the 400, so it never fired.
+
+What stops the model now is the model. Driven through production's own code at
+production's own shape (reverse batch, K=10, Slovak, `batchMaxTokens(10)`), it
+answered 4 of 5 calls. The fifth hit the 20000-token ceiling having spent only
+2549 tokens on reasoning, so it produced roughly 17k tokens of "answer" for ten
+candidates. No reserve fixes that, and a truncated batch is unparseable JSON:
+the whole batch fails and is billed for the full ceiling plus its retries. It is
+also slow, 73s at the median against 12s for `deepseek-v4-1-flash` on the same
+probe, and it still costs 42% more per attendee. A 20% batch-failure rate at six
+times the latency is not a quality win.
+
+Re-run `node provider-probe.mjs z-ai-glm-5-3-flash --refresh` before revisiting
+this: the finding above is one run of five calls, which is enough to disqualify
+and not enough to characterise.
+
+*Suite v2 cost: $2.07 of Venice API across six models' arm D. The scoring arms
+were cached, so re-running them cost nothing.*
+
+---
+
 ## Adding the next model
 
 ```sh
@@ -563,3 +817,60 @@ Samples are stratified (reasoning by hidden gold label, icebreakers by language)
 text that separates models is what they write about two people with little to say
 to each other.
 
+
+---
+
+## 2026-09-13: DeepSeek V4.1 Flash
+
+**Question.** Venice shipped `deepseek-v4-1-flash`. Is it worth replacing
+`deepseek-v4-flash-0731`, given it is dearer?
+
+**Short answer.** It is not a quality upgrade. It is a *latency* upgrade, and
+it costs 3.2x, not the 2.7x the price list suggests.
+
+| | 0731 (production) | v4.1 Flash |
+|---|---|---|
+| recall@1, full 190 | 0.65 | **0.75** |
+| recall@3, full 190 | 0.85 | **0.90** |
+| recall@1 / @3, subset | 0.75 / 0.90 | 0.75 / **0.95** |
+| separation | **0.55** | 0.53 |
+| ordering > weak | **0.98** | 0.96 |
+| position bias | 0.11 | **0.08** |
+| strict JSON | 100% | 100% |
+| Slovak stayed Slovak | **97.7%** | 96.5% |
+| attribution errors | 0.3% (9/2836) | 0.1% (2/2812) |
+| inverted reasoning | **0% (0/960)** | 0.2% (2/960) |
+| p50 latency, K=10 | 22.1 s | **4.2 s** |
+| output tok/s | 41.6 | **179.6** |
+| **$ per 100 attendees** | **$0.281** | $0.911 |
+
+**On the price.** Input is 2.14x ($0.175 → $0.375) but output is **4.29x**
+($0.35 → $1.50), and pair scoring is output-heavy: a reasoning paragraph per
+candidate. On this workload that lands at **3.24x**, so a blended headline
+figure taken from a price list understates it.
+
+**On the quality.** The one real gain is recall@1 on the harder full-190
+ranking, 0.65 → 0.75. Everything else is a wash or slightly worse: separation,
+ordering and inverted-reasoning all move the wrong way, and Slovak openers
+stayed Slovak slightly less often. The attribution-error improvement looks good
+at 0.1% against 0.3% but **does not survive the permutation test (p=0.124)** —
+that is the sample size talking, not the model.
+
+**Not comparable yet:** no subjective grades. Every other row in the table above
+carries human-judged reasoning and icebreaker scores; this one does not. Run
+`node judge-pack.mjs`, grade `judging/pack.md`, and re-run the report before
+treating the prose quality as measured.
+
+**Deployability: clean.** `node provider-probe.mjs deepseek-v4-1-flash` drove it
+through `providers/venice.ts` unchanged, 5/5 calls, 100% of requested entries
+scored. No provider work needed, unlike GLM 5.3 Flash above.
+
+**Recommendation.** Do not switch for quality; the evidence is not there for
+3.2x. Switch only if the 5x latency drop is the thing being bought — and note
+that the coordinator scores in batches on its own schedule, so scoring latency
+is mostly invisible to attendees, unlike the newcomer-first path.
+
+**The more interesting row is still `z-ai-glm-5-3-flash`**: better than both on
+recall (0.80/0.80), separation (0.64) and judged prose (4.70/4.70), at $0.398
+per 100 attendees — cheaper than V4.1 Flash and only 1.4x the incumbent. Its
+blockers are in `providers/venice.ts`, not in the model.

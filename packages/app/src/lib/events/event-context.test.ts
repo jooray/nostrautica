@@ -8,7 +8,12 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { generateSecretKey, getPublicKey, finalizeEvent, verifiedSymbol } from "nostr-tools/pure";
 import { naddrEncode } from "nostr-tools/nip19";
-import { KIND_EVENT_CONFIG, KIND_CALENDAR_EVENT, makeCoordinate } from "@nostrautica/protocol";
+import {
+  KIND_EVENT_CONFIG,
+  KIND_CALENDAR_EVENT,
+  KIND_PROFILE,
+  makeCoordinate,
+} from "@nostrautica/protocol";
 
 const { fetchEvents, addRelays } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
@@ -106,6 +111,36 @@ describe("loadEventContext — forged-config rejection (APPK-1)", () => {
     routeByKind([signedConfig(1_000, ["wss://event-home.example"])]);
     await loadEventContext(naddr);
     expect(eventRelayHints(coordinate)).toEqual(["wss://event-home.example"]);
+  });
+
+  /**
+   * The event's OWN kind-0 is the title fallback when the 31923/31612 carries no
+   * `title` tag, and it was read as a bare `kind0.name`. An organizer who renamed
+   * the event in any other Nostr client edits the field those clients label
+   * "Display name" — so the rename was invisible here, and an event whose kind-0
+   * has only a `display_name` rendered as "Untitled event" while Damus, Amethyst
+   * and Primal all showed its real name.
+   */
+  it("falls back to the event kind-0 display_name, not just its name", async () => {
+    const profile = (content: string) =>
+      finalizeEvent({ kind: KIND_PROFILE, created_at: 1_500, tags: [], content }, eidSk);
+    const withProfile = (content: string) => {
+      fetchEvents.mockImplementation((filter: { kinds?: number[] }) => {
+        if (filter.kinds?.[0] === KIND_EVENT_CONFIG) return Promise.resolve([signedConfig(1_000)]);
+        if (filter.kinds?.[0] === KIND_PROFILE) return Promise.resolve([profile(content)]);
+        return Promise.resolve([]); // no calendar event, so kind-0 IS the title
+      });
+    };
+
+    withProfile(JSON.stringify({ display_name: "Ada's Salon" }));
+    expect((await loadEventContext(naddr)).title).toBe("Ada's Salon");
+
+    withProfile(JSON.stringify({ name: "ada-salon-2019", display_name: "Ada's Salon" }));
+    expect((await loadEventContext(naddr)).title).toBe("Ada's Salon");
+
+    // An empty `name` is not a title — some profile editors write the key blank.
+    withProfile(JSON.stringify({ name: "  " }));
+    expect((await loadEventContext(naddr)).title).toBe("Untitled event");
   });
 
   it("uses edited event metadata as the context cache freshness stamp", async () => {

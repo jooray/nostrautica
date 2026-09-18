@@ -1,7 +1,7 @@
 /**
  * Screenshot refresh (docs pass 2026-07-21): captures every stem the guides
  * reference — organizer + participant journeys, matches, chat, DM — across
- * en/sk/cs, light + dark, at the repo's 390x844 mobile-viewport convention.
+ * en/sk/cs/de/es, light + dark, at the repo's 390x844 mobile-viewport convention.
  *
  * Locale and theme are both set via localStorage (`nostrautica:lang` /
  * `nostrautica:theme`) BEFORE any page script runs, never by clicking a
@@ -39,6 +39,8 @@ const LOCALE_PROOF = {
   en: ["Meet the right people", "Get started"],
   sk: ["Stretnite", "Začať"],
   cs: ["Poznejte", "Začít"],
+  de: ["Triff die richtigen", "Loslegen"],
+  es: ["Conoce a las personas", "Comenzar"],
 };
 
 // The mock coordinator (e2e/local-infra/mock-coordinator-chat.mjs) has proven
@@ -105,6 +107,36 @@ const COPY = {
     postBody: "Těšíme se na všechny — program a podrobnosti uvnitř.",
     talkTitle: "Bleskovka: Nostr pro nováčky",
   },
+  de: {
+    eventSummary:
+      "Ein entspannter Abend für Nostr-Leute und neugierige Neulinge: kurze Vorstellungen, gute Gespräche und ein paar Lightning Talks am Wasser.",
+    eventLocation: "Berlin",
+    ninaIntro: "Rust-Entwicklerin, ich baue Werkzeuge für Privatsphäre. Ich suche eine Mitgründerin oder einen Mitgründer, dem Bedienbarkeit wichtig ist.",
+    nadiaIntro: "Produktdesignerin, die Kryptografie verständlich machen will. Ich suche Entwicklerinnen und Entwickler zum Zusammenarbeiten.",
+    ninaAbout: "Neu bei Nostr, freue mich darauf, Leute kennenzulernen.",
+    dm: "Hallo! Ich freue mich auf das Event.",
+    chatWelcome: "Willkommen zusammen! Schön, euch hier zu sehen.",
+    chatReply: "Danke fürs Organisieren, ich freue mich drauf!",
+    chatProof: /organisier|freue mich/i,
+    postTitle: "Willkommen beim Treffen",
+    postBody: "Wir freuen uns auf alle. Programm und Details stehen drin.",
+    talkTitle: "Lightning Talk: Nostr für Einsteiger",
+  },
+  es: {
+    eventSummary:
+      "Una tarde tranquila para gente de Nostr y curiosos que llegan por primera vez: presentaciones breves, buenas conversaciones y algunas charlas relámpago junto al agua.",
+    eventLocation: "Madrid",
+    ninaIntro: "Desarrolladora de Rust, trabajo en herramientas de privacidad. Busco alguien con quien fundar algo y a quien le importe la usabilidad.",
+    nadiaIntro: "Diseñadora de producto a la que le gusta hacer la criptografía comprensible. Busco gente que programe para colaborar.",
+    ninaAbout: "Acabo de llegar a Nostr y tengo ganas de conocer gente.",
+    dm: "¡Hola! Tengo ganas de que llegue el evento.",
+    chatWelcome: "¡Bienvenidos! Me alegra verlos por aquí.",
+    chatReply: "Gracias por organizarlo, ¡tengo muchas ganas!",
+    chatProof: /organiz|ganas/i,
+    postTitle: "Bienvenidos al encuentro",
+    postBody: "Tenemos ganas de verlos a todos. El programa y los detalles están dentro.",
+    talkTitle: "Charla relámpago: Nostr para quien empieza",
+  },
 }[LOCALE];
 
 const shots = [];
@@ -155,7 +187,31 @@ async function clearOutboxErrors(page) {
   }
 }
 
+/**
+ * Optional stem allow-list (`ONLY=01-create-form,14-more,…`).
+ *
+ * The journey is linear — a late stem is only reachable by walking the whole
+ * run — so this skips no navigation and no state-building. It decides only
+ * which stems are WRITTEN, which is what a targeted refresh needs: a run that
+ * re-shoots all ~50 stems rewrites ~300 files whose only real difference is a
+ * fresh set of random keys, burying the handful that genuinely changed.
+ *
+ * Gates `clearStem` as well as `shoot`, deliberately: clearStem deletes a
+ * stem's files BEFORE the attempt, so filtering only the write would delete
+ * good captures for every stem not in the list. Unset = capture everything, so
+ * the default behaviour of this script is unchanged.
+ */
+const ONLY = (process.env.ONLY ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const wanted = (stem) => ONLY.length === 0 || ONLY.includes(stem);
+
 async function shoot(page, dir, stem, theme) {
+  if (!wanted(stem)) {
+    console.log(`  (ONLY) not capturing ${dir}/${stem}-${theme}.png`);
+    return;
+  }
   mkdirSync(`${DOCS}/${dir}`, { recursive: true });
   const path = stemPath(dir, stem, theme);
   await clearOutboxErrors(page);
@@ -186,6 +242,7 @@ function skip(label, reason) {
  * must not delete a good capture from a previous INCLUDE_FLAKY=1 run.
  */
 function clearStem(dir, stem, themes = ["light", "dark"]) {
+  if (!wanted(stem)) return;
   for (const theme of themes) {
     const p = stemPath(dir, stem, theme);
     try {
@@ -428,8 +485,17 @@ async function pollReload(page, check, { maxMs = 40000, stepMs = 4000 } = {}) {
  * exactly the silent-substitution failure mode this file needs to never
  * reproduce (see clearStem's comment). If the source wasn't captured this
  * run (or ever), this silently no-ops — it mirrors, it never substitutes.
+ *
+ * ENGLISH RUNS ONLY, and that guard is the whole point of this note. The source
+ * `dir` is locale-scoped (`participant`, `participant-sk`, `participant-cs`)
+ * while `WEB` is not, so without it a three-locale refresh mirrored all three in
+ * sequence and whichever ran LAST won. `cs` is last, so the single English
+ * landing page (`web/index.html`, which has no locale variants) shipped Czech
+ * screenshots — ten of its twelve, live in production, and the guard above was
+ * carefully worded about stem substitution while this walked straight past it.
  */
 function mirrorToWeb(dir, stem, theme) {
+  if (LOCALE !== "en") return;
   const name = `${stem}-${theme}.png`;
   const src = `${DOCS}/${dir}/${name}`;
   const dest = `${WEB}/${name}`;
@@ -1152,7 +1218,7 @@ async function main() {
   if (!INCLUDE_FLAKY) {
     skip("21-transcript", "INCLUDE_FLAKY not set — coordinator dependency, deferred");
     skip("23-my-profile-edited", "INCLUDE_FLAKY not set — coordinator dependency, deferred");
-    skip("11-matches", "INCLUDE_FLAKY not set — coordinator dependency, deferred");
+    skip("11-people-matches", "INCLUDE_FLAKY not set — coordinator dependency, deferred");
   } else {
     // ---- participant/21-transcript (Olga's own profile, if the audio intro landed) ----
     if (transcriptOk) {
@@ -1241,14 +1307,25 @@ async function main() {
       skip("23-my-profile-edited", String(e).slice(0, 150));
     }
 
-    // ---- participant/11-matches ----
+    // ---- participant/11-people-matches: the merged People list once matches
+    // have landed (2026-09-13 merge — see Attendees.svelte's "People — the
+    // merged roster + matches surface" header comment). The old dedicated
+    // Matches tab/route is gone; #/e/<naddr>/matches now resolves to the
+    // "attendees" route (routes.ts case "matches"), so navigate straight to
+    // /attendees rather than lean on that redirect. Distinct from
+    // participant/08-attendees above, which is captured earlier in the run —
+    // before any intro has been processed — and so never has a match section
+    // to show; this stem exists specifically to show the "Strong matches" /
+    // "Good matches" h2.band-head section headings with at least one
+    // MatchEntry ("article.entry", MatchEntry.svelte) and its full reasoning
+    // above the plain roster.
     // clearStem BEFORE the attempt, matching 21-transcript / 15-dm-chat above:
     // this stem is coordinator-dependent and the mock coordinator's documented
     // stall means gotMatches below can legitimately come back false, in which
     // case there must be no file at all here rather than a stale one from an
     // earlier, unrelated successful run standing in for it unnoticed.
     try {
-      clearStem(partDir, "11-matches");
+      clearStem(partDir, "11-people-matches");
       await olga.goto(`/#/e/${naddr}/admin`);
       await olga.waitForTimeout(800);
       // id, not translated text (admin.coordinator.recompute is "↻ Recompute
@@ -1257,31 +1334,47 @@ async function main() {
       // Admin.svelte gave this button a stable id for exactly this reason.
       const recomputeBtn = olga.locator("#recompute-matches");
       if (await recomputeBtn.count()) await recomputeBtn.first().click();
-      await nina.goto(`/#/e/${naddr}/matches`);
+      await nina.goto(`/#/e/${naddr}/attendees`);
       await nina.waitForTimeout(1500);
       // Bigger budget (the mock coordinator's stall makes 40s too tight) — and,
-      // critically, GATE the shot on gotMatches. The old code logged a skip() on
-      // timeout but then shot anyway, which is exactly how a past run ended up
-      // shipping "Fetching your matches…" as the 11-matches screenshot: a real
-      // .card.match never renders while loading is true (Matches.svelte:187-188),
-      // so requiring it before ever pressing the shutter is sufficient to rule
-      // out the loading state — no separate text-based wait needed.
+      // critically, GATE the shot on a real match section actually rendering.
+      // A real MatchEntry never renders while the page's own `loading` is
+      // true, so requiring both the section heading AND an entry before ever
+      // pressing the shutter rules out a loading/empty roster ending up as
+      // this stem's file (the exact failure mode the old 11-matches code had
+      // to be specifically fixed for).
       const gotMatches = await pollReload(
         nina,
-        async () => (await nina.locator(".card.match").count()) > 0,
+        async () =>
+          (await nina.locator("h2.band-head").count()) > 0 && (await nina.locator("article.entry").count()) > 0,
         { maxMs: 90000, stepMs: 5000 },
       );
       if (gotMatches) {
+        await nina.locator("h2.band-head").first().scrollIntoViewIfNeeded();
         await nina.waitForTimeout(400);
-        await shoot(nina, partDir, "11-matches", "light");
-        await setTheme(nina, "dark");
-        await shoot(nina, partDir, "11-matches", "dark");
-        await setTheme(nina, "light");
+        await shoot(nina, partDir, "11-people-matches", "light");
+        // The landing page's HERO image, so it must be mirrored. It was the one
+        // stem web/index.html embeds that nothing kept in sync: the People/Matches
+        // merge renamed this stem from `11-matches`, the old mirror calls went with
+        // the old name, and index.html was left pointing at a file that no longer
+        // existed — a 404 on the most prominent image on the site, with
+        // fetchpriority="high", until 2026-09-14.
+        mirrorToWeb(partDir, "11-people-matches", "light");
+        // setThemeNoReload: a real reload re-fetches the roster/match list
+        // from relays, same rationale as 08-attendees above — nothing here
+        // needs a refetch just to re-theme the same on-screen state.
+        await setThemeNoReload(nina, "dark");
+        await shoot(nina, partDir, "11-people-matches", "dark");
+        mirrorToWeb(partDir, "11-people-matches", "dark");
+        await setThemeNoReload(nina, "light");
       } else {
-        skip("11-matches", "no match rows appeared within the poll budget — skipping rather than shoot a loading/empty state");
+        skip(
+          "11-people-matches",
+          "no match section appeared within the poll budget — skipping rather than shoot a loading/empty state",
+        );
       }
     } catch (e) {
-      skip("11-matches", String(e).slice(0, 150));
+      skip("11-people-matches", String(e).slice(0, 150));
     }
   }
 
@@ -1362,7 +1455,15 @@ async function main() {
         // silently navigating to /#/dm — which is exactly why
         // 18-mute-confirm shipped byte-identical to 14-messages: both ended
         // up screenshotting the same messages-list route.
-        const muteBtn = nina.locator("main .row button.inline").first();
+        // DmChat's header now carries icon-only quick actions ahead of Mute in
+        // the same .row.hdr — "the same quick actions a People row offers"
+        // (DmChat.svelte, 2026-09-10): a want-to-meet bookmark and an
+        // open-profile button, both button.inline.icon-btn. `.first()` over
+        // plain button.inline now hits the bookmark button instead of Mute.
+        // Mute is the only button.inline inside .acts that ISN'T also
+        // .icon-btn, which is stable regardless of whether those icon actions
+        // render at all (they're conditional on primaryEvent/peer).
+        const muteBtn = nina.locator(".acts button.inline:not(.icon-btn)").first();
         if (await muteBtn.count()) {
           await muteBtn.click();
           // toggleMute disables the button (muteBusy) for the duration of the

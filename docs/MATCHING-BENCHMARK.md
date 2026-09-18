@@ -68,6 +68,129 @@ Two things changed besides the id:
 - **Failure modes to watch:** the only invented-facts case in judging was glm-5-2 asserting a candidate "needs exactly" something she never asked for (judged 2.5); occasional prompt-rubric echo ("puzzle-piece fit") appears when a rubric phrase is colorful, keep rubric wording drab. Long reasonings (4–7 sentences) came mostly from pairwise P0; BP3 batched stays near the 1–2 sentence target.
 - **Ops:** strict `json_schema` worked on every kept model with zero format failures across ~2.3k calls (after excluding glm-5-turbo pairwise). deepseek-v4-flash showed no position bias at all (−0.01) and is the cheapest model tested ($0.138/$0.275 per Mtok).
 
+## Negative result: the flat top is not a prompt problem (2026-09-12)
+
+Production's Plan B event (39 attendees with profile content, 1,482 directed
+scores) rendered "Strong match" on essentially every match an attendee opened.
+The first suspicion was score compression — the defect this document's rubric
+anchors were written to fix — so the scores were pulled and looked at directly.
+
+**They were not compressed.** Across all 1,482 pairs only 28% clear 0.80, spread
+smoothly over 0.05–0.95, mean 0.60. The scorer uses its range. What produced the
+symptom was the badge: an ABSOLUTE threshold applied to a list already truncated
+to the top `top_k` **by rank**. Of the top 20 each attendee is shown, 51% clear
+0.80, and 30 of 39 saw an all-strong top five. That is a UI bug, fixed in
+`packages/app/src/lib/events/confidence.ts`, not a scoring one.
+
+What survived the fix is a real property of the data: **the top of a list is
+genuinely flat.** Scores land on multiples of 0.05, so 1,482 of them take 19
+distinct values; 19 of 39 attendees had a tied #1, and an average top five holds
+only 2.46 distinct scores. Five attendees have six or more pairs tied at 0.95.
+
+So four prompt variants were run against that real roster, two seeds each, to see
+whether the flatness was something the prompt was causing. Each is the deployed
+BP3 plus exactly one inserted block:
+
+| variant | strong% | all-strong top-5 | sd | distinct | tau | dirGap | meta% |
+|---|---|---|---|---|---|---|---|
+| V0 deployed prompt | 23 | 17/39 | 0.230 | 18 | 0.71 | 0.159 | 1.9 |
+| V1 discount the event baseline | 23 | 16/39 | 0.230 | 18 | 0.68 | 0.163 | **4.1** |
+| V2 explicit per-batch quota | 25 | 16/39 | 0.235 | 30 | 0.72 | 0.167 | 3.1 |
+| V3 ask for two decimals | 24 | 18/39 | 0.228 | **32** | 0.69 | 0.152 | 2.0 |
+| V4 V1 + V2 | 22 | 15/39 | 0.231 | 19 | 0.69 | 0.165 | 3.4 |
+
+`tau` = Kendall between the two seeds; `dirGap` = mean |A→B − B→A|; `meta%` =
+reasonings containing analytical framing. Metrics were chosen so a prompt that
+merely adds NOISE cannot win: spread must rise while `tau` and `dirGap` hold.
+
+**Nothing moved.** strong% 22–25, all-strong top fives 15–18 of 39, sd 0.228–0.235.
+At n=39 with two seeds those are indistinguishable.
+
+Three findings worth keeping:
+
+- **Telling the model to discount what the event shares backfires, visibly.** V1's
+  block leaked into the user-facing text and made it dismissive: *"…ale nemá pre
+  vás obchodný potenciál. Zhodíte sa len v téme krypta, čo je na tejto akcii
+  bežné."* — "has no business potential for you", shown to an attendee. Dismissive
+  phrasing doubled (17→34 per 1,482; V4: 40), meta-commentary doubled, and
+  language drift at a Czech event nearly doubled (4.3%→7.3% Slovak function words).
+  This is the leak this document already warns about under "keep rubric wording
+  drab", and drab wording was not enough: the INSTRUCTION leaked, not its adjectives.
+- **Finer granularity does not reach the top.** V3 raised distinct score values
+  from 18 to 32, but tied #1s got WORSE (18→22 of 39) and distinct values inside a
+  top five barely moved (2.69→2.82). The extra precision lands mid-distribution;
+  the model still snaps to 0.90/0.95 at the top. So the ties are not an expressive
+  limit it was working around.
+- **A quota is not obeyed as one.** V2 asked for "one or two above 0.8 in a batch
+  of ten" and produced 25% strong — slightly MORE than the baseline.
+
+The conclusion is mechanical, not linguistic. `scoreBatch` judges each candidate
+independently — deliberately, so scores stay comparable across the four batches a
+38-candidate target needs — and nothing in that design ever asks "of these ten,
+which is best?". Three different ways of asking the scorer to spread itself failed,
+and the granularity result rules out the reading that it wanted to and could not.
+When it says ten people are 0.95, that is its answer.
+
+Caveats: one event, one language (cs), one model, n=39. The harness reproduces
+production's DISTRIBUTION (strong% 20 vs 23, sd 0.227 vs 0.230, distinct 19 vs 18)
+but not its second-order structure (rater share of variance 38% vs 20%, hub Gini
+0.52 vs 0.65) — production scored this roster incrementally over eight days as
+people joined, so every pair was judged beside whatever batch peers were pending
+at the time, and 6% of its rows predate an edit to one of the two profiles. Read
+the table as variant-vs-V0; variant-vs-production is not a claim it can support.
+
+*Cost: $2.24 across 1,560 calls, 0 unparsed and 0 failed. The roster is real
+attendees, so the fixture and harness stay local — see
+`benchmarks/matching/private/README.md`, which is gitignored.*
+
+## Follow-up: a rerank pass, and what it exposed about the scorer (2026-09-13)
+
+The negative result above pointed at the mechanism rather than the wording, so the
+obvious next thing was tested: take each target's top-N by score and ask, in one
+call, for a strict order over them — the question independent scoring never asks.
+39 targets, two runs per configuration, the shortlist presented in a DIFFERENT
+shuffled order each run. The reranker emits an order and nothing else; after V1's
+leak there is no reason to give a second prompt a prose channel.
+
+The only honest question about the output is whether it is reproducible, and the
+baseline for that is not zero — it is how well the **scorer** agrees with itself
+on exactly the same shortlists. That comparison is the finding:
+
+| ordering the top 5 | cross-seed Kendall tau | same #1 in both runs |
+|---|---|---|
+| current scorer | 0.215 | 11/39 (28%) |
+| listwise rerank | **0.463** | **19/38 (50%)** |
+
+| ordering the top 10 | | |
+|---|---|---|
+| current scorer | 0.242 | 9/39 (23%) |
+| listwise rerank | 0.289 | 16/39 (41%) |
+
+**The scorer's top-of-list order is barely reproducible.** Re-run matching with the
+candidates shuffled into different batches and the attendee's #1 match changes
+about three times in four. That is not a reranking problem, it is a property of
+what ships today, and it was invisible until something was measured against it:
+the sweep's headline tau of 0.71 runs over all 38 candidates, where Kendall skips
+tied pairs and most comparisons are between an obvious 0.9 and an obvious 0.2.
+Restricted to the five people an attendee actually looks at — near-identical
+scores, which is the hard case — it falls to 0.215.
+
+Reranking roughly doubles that, and only at a short list. At N=10 the returned
+order correlates with the order the model was SHOWN (0.313) about as much as with
+itself across runs (0.289): ten near-identical profiles is past what it can hold,
+and it starts echoing the list back. At N=5 content wins over position (0.463 vs
+0.353).
+
+So a rerank over the top ~5 is worth building; over the top 10 it is not. Neither
+is a fix for the flat top — the reranker disagrees with the scorer's order about
+as much as it disagrees with itself (tauScore 0.27–0.29), so it is not resolving
+the ties so much as replacing one unstable order with a less unstable one. Before
+implementing, the thing to settle is what "better" means here, because no metric
+on this page can distinguish a more reproducible order from a more USEFUL one.
+That needs the human labels `evaluate.mjs --labels` was written to collect.
+
+*Cost: $0.06 across 156 calls.*
+
 ## Recommendation
 
 - **Winner: `deepseek-v4-flash` + BP3 prompt, batched K=10**: best recall@1 (0.75), best separation (0.59), judge 4.53, zero format failures/position bias, **$0.22 per 100 attendees** (≈45× cheaper than today's glm-5-2+P0 pairwise). ⚠ Not Venice private-tier: adopting it means relaxing `require_private` (an `e2ee-deepseek-v4-flash` private variant exists but lacks `response_schema` support, would need instructed-JSON parsing).

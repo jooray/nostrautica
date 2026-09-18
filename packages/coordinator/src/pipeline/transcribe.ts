@@ -218,17 +218,28 @@ export async function transcribeMedia(
     // undone by one unparseable header.
     //
     // MediaPolicyError (not a throw that poisons the attendee): this rejects THIS
-    // media only — an empty transcript is cached, no STT — and processAttendee
-    // carries on with the attendee's other media and their authored profile.
+    // media only — no STT — and processAttendee carries on with the attendee's
+    // other media and their authored profile.
+    //
+    // NEITHER branch caches (audit B-7). The transcript cache is keyed by blob
+    // sha256 ALONE and is shared across every event this coordinator serves, but
+    // both of these verdicts depend on THIS event's limit: the same blob is a
+    // rejection under a 90s intro cap and perfectly fine under a 900s one. Caching
+    // `""` here meant the strict event poisoned the lenient one — an attendee
+    // reusing one intro at two events (the reuse flow the product advertises) got
+    // silence at the second, with `stt.calls` never incremented and no way to tell
+    // it from a genuinely silent recording. The declared-size check above still
+    // caches, because a size/hash mismatch is a property of the blob and no event's
+    // configuration can make it acceptable. The cost of not caching is one repeat
+    // download+probe per processing attempt, and those bytes are metered
+    // (`onUsage`, just above) exactly as an accepted blob's are.
     if (realDurationSec === undefined) {
-      deps.store.putTranscript(descriptor.x, "", now());
       throw new MediaPolicyError(
         `could not determine the decoded duration (ffprobe gave no usable answer) and a ` +
           `${deps.maxDurationSec}s event limit is enforced — unprobeable media is rejected, not waved through`,
       );
     }
     if (realDurationSec > deps.maxDurationSec) {
-      deps.store.putTranscript(descriptor.x, "", now());
       throw new MediaPolicyError(
         `decoded duration ${realDurationSec}s exceeds the ${deps.maxDurationSec}s event limit`,
       );

@@ -123,7 +123,7 @@
         aria-label={favorite ? t("talks.favorite.remove") : t("talks.favorite.add")}
         onclick={toggleFavorite}
       >
-        <Icon name="star" size={18} />
+        <Icon name="bookmark" size={18} />
       </button>
     </div>
     <div class="row" style="align-items:center;gap:0.5rem">

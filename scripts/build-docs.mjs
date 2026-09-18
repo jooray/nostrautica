@@ -59,6 +59,10 @@ const SECTIONS = [
       { file: "PARTICIPANT-GUIDE-sk.md", title: "Príručka účastníka (Slovensky)" },
       { file: "ORGANIZER-GUIDE-cs.md", title: "Průvodce pro organizátory (Česky)" },
       { file: "PARTICIPANT-GUIDE-cs.md", title: "Průvodce pro účastníky (Česky)" },
+      { file: "ORGANIZER-GUIDE-de.md", title: "Leitfaden für Veranstalter (Deutsch)" },
+      { file: "PARTICIPANT-GUIDE-de.md", title: "Leitfaden für Teilnehmende (Deutsch)" },
+      { file: "ORGANIZER-GUIDE-es.md", title: "Guía para organizadores (Español)" },
+      { file: "PARTICIPANT-GUIDE-es.md", title: "Guía para asistentes (Español)" },
     ],
   },
   {
@@ -376,12 +380,112 @@ export function build(outDir) {
     throw new Error(`docs link check failed: ${errors.length} broken internal link(s)`);
   }
 
+  const missingAssets = checkLandingAssets(ROOT);
+  if (missingAssets.length) {
+    console.error(`[docs] landing-page asset check FAILED: ${missingAssets.length} missing file(s):`);
+    for (const m of missingAssets) console.error(`  ✗ web/${m}`);
+    process.exitCode = 1;
+    throw new Error(`landing page references ${missingAssets.length} file(s) that do not exist`);
+  }
+
+  const missingImages = checkGuideImages(ROOT);
+  if (missingImages.length) {
+    console.error(`[docs] guide image check FAILED: ${missingImages.length} missing file(s):`);
+    for (const m of missingImages) console.error(`  ✗ docs/${m}`);
+    process.exitCode = 1;
+    throw new Error(`the guides reference ${missingImages.length} image(s) that do not exist`);
+  }
+
   console.log(
     `[docs] built ${pages.size} pages → ${outDir}` +
       (warnings.length ? ` (${warnings.length} link warning(s))` : "") +
-      `; link check passed`,
+      `; link check passed; landing assets OK; guide images OK`,
   );
   return { pages, errors, warnings };
+}
+
+
+/**
+ * Every local asset `web/index.html` embeds must exist on disk.
+ *
+ * The landing page is hand-written and its images are produced by a different
+ * tool (`e2e/screenshot-refresh.mjs`), so nothing connected the two: when the
+ * People/Matches merge renamed the `11-matches` stem to `11-people-matches`,
+ * index.html kept pointing at the old name and the site's HERO image — the one
+ * carrying `fetchpriority="high"` — was a 404 in production until 2026-09-14.
+ * Nobody noticed because a missing <img> renders as empty space, and the docs
+ * link checker below only ever looked at the docs pages.
+ *
+ * Deliberately part of the deploy build rather than a unit test: the build is
+ * what the post-receive hook runs, so a broken reference stops the deploy
+ * instead of shipping and waiting to be spotted.
+ */
+/**
+ * Every image the docs reference must exist, in both themes.
+ *
+ * The same class of bug as checkLandingAssets above, one directory over: a
+ * missing <img> renders as blank space, the link checker only ever looked at
+ * links between pages, and `e2e/screenshot-refresh.mjs` exits 0 when a stem is
+ * SKIPPED rather than captured (a skip is a normal outcome there, since the
+ * coordinator double can go inert mid-run). So a guide can ship pointing at an
+ * image nobody ever took and the only symptom is a gap on the page.
+ *
+ * Both themes, because of the pairing rule this generator implements: a
+ * reference ending `-light.png` also renders its `-dark.png` sibling. A missing
+ * dark file is invisible while you are reading in light mode.
+ *
+ * Shares its implementation with `scripts/check-guide-images.mjs`, which is the
+ * same check runnable on its own while editing a guide.
+ */
+export function checkGuideImages(root) {
+  const docsDir = join(root, "docs");
+  if (!existsSync(docsDir)) return [];
+  const missing = new Set();
+  for (const file of readdirSync(docsDir).filter((f) => f.endsWith(".md"))) {
+    const md = readFileSync(join(docsDir, file), "utf8");
+    const refs = new Set();
+    for (const m of md.matchAll(/!\[[^\]]*\]\((images\/[^)\s]+\.png)\)/g)) refs.add(m[1]);
+    for (const m of md.matchAll(/<img[^>]+src="(images\/[^"]+\.png)"/g)) refs.add(m[1]);
+    for (const ref of refs) {
+      const needed = ref.endsWith("-light.png")
+        ? [ref, ref.replace(/-light\.png$/, "-dark.png")]
+        : [ref];
+      for (const need of needed) {
+        if (!existsSync(join(docsDir, need))) missing.add(need);
+      }
+    }
+  }
+  return [...missing].sort();
+}
+
+export function checkLandingAssets(root) {
+  const landing = join(root, "web", "index.html");
+  if (!existsSync(landing)) return [];
+  const html = readFileSync(landing, "utf8");
+  const refs = new Set();
+  // The lookbehind matters: without it `data-i18n-href="footer.x_href"` matches
+  // on its `-href` tail and every i18n key is reported as a missing file.
+  for (const m of html.matchAll(/(?<![-\w])(src|srcset|href)="([^"]+)"/g)) {
+    const [, attr, value] = m;
+    // Only srcset is a comma-separated candidate list with descriptors. Splitting
+    // src/href the same way tears a `data:image/svg+xml,...` URI apart at its
+    // commas and spaces and reports the fragments as missing files.
+    const candidates =
+      attr === "srcset" ? value.split(",").map((c) => c.trim().split(/\s+/)[0]) : [value.trim()];
+    for (const ref of candidates) {
+      if (!ref) continue;
+      // Local, relative, and a real file reference: skip absolute URLs, anchors,
+      // protocol-relative links, data URIs, and root-relative app/docs routes the
+      // static server resolves outside web/.
+      if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|#|\/)/i.test(ref)) continue;
+      refs.add(ref.split("?")[0].split("#")[0]);
+    }
+  }
+  const missing = [];
+  for (const ref of refs) {
+    if (!existsSync(join(root, "web", ref))) missing.push(ref);
+  }
+  return missing.sort();
 }
 
 // Only build when invoked directly (so tests can import the helpers above).

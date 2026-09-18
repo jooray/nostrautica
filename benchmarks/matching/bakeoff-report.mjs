@@ -25,6 +25,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { ciExact, permutationTestRate } from "./stats.mjs";
+import { languageFloorCheck } from "./language-adherence.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const CARDS = join(here, "results", "bakeoff");
@@ -45,18 +46,47 @@ if (versions.length > 1) {
 // Prompt drift. Cards measured under different prompt bytes are not rows of one
 // table; the usual cause is a coordinator rebuild between two models' runs.
 const fps = cards.filter((c) => c.promptFingerprint);
+// Fingerprint KEYS have been renamed once already (`icebreaker.system.R3.sk` →
+// `icebreaker.system.sk`, when the fingerprint started calling the coordinator's
+// own builder instead of reconstructing the prompt). Comparing raw key names put
+// the old and new hashes in different buckets, so the two never met and the
+// check passed silently on cards that genuinely differed — the drift detector
+// blind to the drift it exists for, a second time. Normalise the name, and say
+// so loudly when two cards do not even describe the same prompts.
+const canonicalFpName = (n) => n.replace(/\.(R\d+|IB\d+|L\d+|BP\d+|P\d+)(?=\.|$)/g, "");
 if (fps.length > 1) {
-  const names = [...new Set(fps.flatMap((c) => Object.keys(c.promptFingerprint)))];
+  const names = [...new Set(fps.flatMap((c) => Object.keys(c.promptFingerprint).map(canonicalFpName)))];
   for (const n of names) {
-    const seen = [...new Set(fps.map((c) => c.promptFingerprint[n]).filter(Boolean))];
-    if (seen.length > 1) {
-      console.log(`⚠ prompt \`${n}\` differs between cards (${seen.join(" vs ")}) — ` +
-        `re-run the older model against the current prompt before trusting this table.\n`);
+    const seen = new Map();
+    for (const c of fps) {
+      for (const [k, v] of Object.entries(c.promptFingerprint)) {
+        if (canonicalFpName(k) !== n) continue;
+        if (!seen.has(v)) seen.set(v, []);
+        seen.get(v).push(c.model);
+      }
+    }
+    if (seen.size > 1) {
+      console.log(`⚠ prompt \`${n}\` differs between cards — this table's rows were NOT ` +
+        `measured under the same prompt:`);
+      for (const [hash, models] of seen) console.log(`    ${hash}  ${models.join(", ")}`);
+      console.log(`  Re-run the older models' affected arm against the current prompt ` +
+        `before comparing those columns.\n`);
     }
   }
 }
 const noFp = cards.filter((c) => !c.promptFingerprint).map((c) => c.model);
 if (noFp.length) console.log(`⚠ no prompt fingerprint recorded for: ${noFp.join(", ")} (re-run bakeoff.mjs — it is cached and free)\n`);
+
+// Deployability measured against production's OWN provider (provider-probe.mjs),
+// if it has been run. This outranks every inference drawn from harness telemetry:
+// the harness is a reimplementation of providers/venice.ts, and both times this
+// report has been wrong about adoption, it was wrong because the two drifted.
+const probes = {};
+for (const f of readdirSync(join(here, "results"))) {
+  if (!f.startsWith("PROBE_") || !f.endsWith(".json")) continue;
+  const p = JSON.parse(readFileSync(join(here, "results", f), "utf8"));
+  if (p.model) probes[p.model] = p;
+}
 
 // Subjective grades, if any have been recorded.
 const J = join(here, "judging");
@@ -79,12 +109,41 @@ const fmt = (n, d = 2) => (typeof n === "number" && isFinite(n) ? n.toFixed(d) :
 /** Anything that makes the model unusable in production as it is coded today. */
 function blockers(c) {
   const out = [];
+  const notes = [];
+  // Both of the entries that used to live here described providers/venice.ts as
+  // it was in August, and BOTH stopped being true while this function went on
+  // printing them — blocking the suite's quality-and-cost winner on defects the
+  // coordinator had already fixed:
+  //
+  //   • `disable_thinking` became per-model on 2026-08-26 (cbc564d): venice.ts
+  //     probes once, remembers the refusal for the process, and honours
+  //     `models.<role>.disable_thinking`. A model that rejects it is handled.
+  //   • the bare `JSON.parse` became `parseModelJson` on 2026-09-04 (5f5468c),
+  //     which strips a whole-output fence and falls back to the outermost JSON
+  //     span. A fenced responder is no longer a total outage.
+  //
+  // So neither is a blocker now. `disableThinking:false` is a cost note (reasoning
+  // tokens are billed even when hidden), and the parse gate asks the question
+  // production actually asks — measured with production's own parser, imported
+  // from dist by lib.mjs rather than reimplemented here.
   if (c.requestProfile?.disableThinking === false) {
-    out.push("rejects `disable_thinking` (venice.ts sends it unconditionally → HTTP 400)");
+    notes.push("reasons unconditionally — venice.ts handles this per-model, but reasoning tokens are billed");
   }
+  const vj = c.scoring?.veniceJson;
   const sj = c.scoring?.strictJson;
-  if (sj && sj.known > 0 && sj.pct !== null && sj.pct < 100) {
-    out.push(`only ${sj.pct}% of responses survive \`JSON.parse\` (venice.ts does not parse leniently)`);
+  if (vj && vj.known > 0 && vj.pct !== null && vj.pct < 100) {
+    out.push(`only ${vj.pct}% of responses survive \`parseModelJson\` — venice.ts rejects the rest`);
+  } else if (!vj?.known && sj && sj.known > 0 && sj.pct !== null && sj.pct < 100) {
+    // An older card whose calls were cached before raw bodies were kept, and
+    // whose model did NOT parse strictly — so nothing can be derived and the
+    // real number is genuinely unknown. Say that, rather than blocking on the
+    // obsolete metric or quietly reporting a clean sheet. A cached run cannot
+    // answer this: the cache held only the parsed entries, so grading it needs
+    // fresh calls (`--refresh`, or a cache wipe for that model).
+    notes.push(
+      `${sj.pct}% bare-JSON.parse rate, and parseModelJson was never measured on this card — ` +
+        `re-run with --refresh to find out whether venice.ts would accept it`,
+    );
   }
   if ((c.scoring?.full190?.formatFails ?? 0) > 0) out.push(`${c.scoring.full190.formatFails} format failures`);
   if ((c.icebreakers?.shapeDeviations ?? 0) > 0) {
@@ -96,15 +155,31 @@ function blockers(c) {
     out.push(`${c.icebreakers.failedCalls} icebreaker call(s) returned no parseable JSON at all`);
   }
   // A model that answers a Slovak event in Czech is not a quality gradation, it
-  // is a wrong answer that every attendee sees. 5% is the threshold at which the
-  // deployed model's own regression would have been caught.
+  // is a wrong answer that every attendee sees. The floor and its calibration
+  // live in language-adherence.mjs, so this gate and the run summary cannot
+  // drift apart the way they had.
   for (const [lang, l] of Object.entries(c.icebreakers?.language ?? {})) {
-    if (l.inLanguagePct < 95) {
-      out.push(`only ${l.inLanguagePct}% of ${lang} openers were actually in ${lang} ` +
-        `(${l.english} English, ${l.czech} Czech, n=${l.n})`);
-    }
+    const v = languageFloorCheck(lang, l);
+    if (!v.ok) out.push(v.detail);
   }
-  return out;
+  // The empirical verdict, last so it reads as the summary it is. A model that
+  // cannot complete a production call is not deployable whatever the rest of
+  // the table says — and this is the only check that runs the real code path.
+  const probe = probes[c.model];
+  if (probe && probe.failed > 0) {
+    const kinds = Object.entries(probe.kinds ?? {}).map(([k, n]) => `${k}×${n}`).join(", ");
+    out.push(
+      `provider probe: only ${probe.ok}/${probe.calls} production calls succeeded through ` +
+        `providers/venice.ts (${kinds})`,
+    );
+  } else if (!probe) {
+    notes.push("not probed against providers/venice.ts — run `node provider-probe.mjs <model>`");
+  } else if (probe.entryYield !== null && probe.entryYield < 99) {
+    // Succeeding while dropping targets is a partial outage: a missing entry is
+    // a pair that never gets scored.
+    out.push(`provider probe: only ${probe.entryYield}% of requested entries came back scored`);
+  }
+  return { blocking: out, notes };
 }
 
 const rows = cards.map((c) => ({
@@ -124,7 +199,7 @@ const rows = cards.map((c) => ({
 })).sort((a, b) => (b.full.recall3 - a.full.recall3) || (b.full.sepStrongWeak - a.full.sepStrongWeak));
 
 const H = ["model", "$/Mtok", "r@1 sub", "r@3 sub", "r@1 190", "r@3 190", "sep", "ord>W", "posB",
-  "strictJSON", "sk-in-lang", "attr-err", "brief", "judge R", "judge IB", "p50 s", "tok/s", "$/100"];
+  "strictJSON", "sk-in-lang", "attr-err", "reason-inv", "brief", "judge R", "judge IB", "p50 s", "tok/s", "$/100"];
 const cells = rows.map((r) => [
   r.model,
   r.price,
@@ -134,6 +209,11 @@ const cells = rows.map((r) => [
   r.strict.known ? `${r.strict.pct}%` : "–",
   r.ice?.language?.sk ? `${r.ice.language.sk.inLanguagePct}%` : "–",
   r.ice ? `${r.ice.pooled.attributionErrorPct}% (${r.ice.pooled.attributionErrors}/${r.ice.pooled.total})` : "–",
+  // reasoning_for_target inversions. "–" means the card predates the arm, which
+  // is not the same as zero — see bakeoff.mjs.
+  r.ice?.reasoning
+    ? `${r.ice.reasoning.pooled.invertedPct}% (${r.ice.reasoning.pooled.inverted}/${r.ice.reasoning.pooled.total})`
+    : "–",
   r.ice ? `${r.ice.pooled.briefingPct}%` : "–",
   fmt(mean(r.judge?.reasoning), 2), fmt(mean(r.judge?.icebreaker), 2),
   (r.p50 / 1000).toFixed(1),
@@ -154,10 +234,13 @@ if (MD) {
 
 console.log("");
 for (const r of rows) {
-  if (r.blockers.length) {
+  if (r.blockers.blocking.length) {
     console.log(`✗ ${r.model} — NOT deployable as coded today:`);
-    for (const b of r.blockers) console.log(`    • ${b}`);
+    for (const b of r.blockers.blocking) console.log(`    • ${b}`);
   }
+  // Worth knowing, not disqualifying — kept visually distinct from a blocker so
+  // the two can never be read as the same verdict again.
+  for (const n of r.blockers.notes) console.log(`· ${r.model} — ${n}`);
 }
 
 // ── exact statistics on the attribution counts ───────────────────────────────
