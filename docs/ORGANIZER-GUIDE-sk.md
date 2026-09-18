@@ -98,8 +98,8 @@ Zvoľte **Vytvoriť podujatie** a vyplňte formulár:
 Vyberte jazyk, v ktorom vaše podujatie beží. Začnite písať a vyhľadajte ho podľa
 názvu jazyka vo vašom vlastnom jazyku *alebo* podľa dvojpísmenového kódu
 (napíšte „slov“ alebo „sk“ a nájdete slovenčinu). Váš vlastný jazyk, jazyky
-preferované vaším prehliadačom a angličtina/slovenčina/čeština sú pripnuté
-navrchu; zvyšok nasleduje abecedne.
+preferované vaším prehliadačom a všetky jazyky, do ktorých je preložená samotná
+aplikácia, sú pripnuté navrchu; zvyšok nasleduje abecedne.
 
 ![Výber jazyka podujatia](images/organizer-sk/10-language-picker-light.png)
 

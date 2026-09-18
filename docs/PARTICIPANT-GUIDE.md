@@ -386,7 +386,7 @@ key, open one of them, choose "log in with a key", and paste it in. You're
 already there.
 
 One more thing: **More → Settings** has a dark mode and a language switch
-(English / Slovenčina / Čeština), and your choice sticks:
+(English / Slovenčina / Čeština / Deutsch / Español), and your choice sticks:
 
 ![Settings](images/app/settings-light.png)
 

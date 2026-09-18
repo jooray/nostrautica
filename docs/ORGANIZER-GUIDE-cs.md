@@ -95,8 +95,8 @@ Zvolte **Vytvořit akci** a vyplňte formulář:
 Vyberte jazyk, ve kterém vaše akce běží. Začněte psát a vyhledejte ho podle
 názvu jazyka ve vašem vlastním jazyce *nebo* podle dvoupísmenného kódu (napište
 „česk“ nebo „cs“ a najdete češtinu). Váš vlastní jazyk, jazyky preferované vaším
-prohlížečem a angličtina/slovenština/čeština jsou připnuté nahoře; zbytek
-následuje abecedně.
+prohlížečem a všechny jazyky, do kterých je přeložená samotná aplikace, jsou
+připnuté nahoře; zbytek následuje abecedně.
 
 ![Výběr jazyka akce](images/organizer-cs/10-language-picker-light.png)
 

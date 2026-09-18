@@ -415,7 +415,8 @@ Zkopírujte si klíč, otevřete některou z nich, zvolte „přihlásit se klí
 vložte ho. A jste tam.
 
 Ještě jedna věc: **Více → Nastavení** má tmavý režim a přepínač jazyka
-(angličtina / slovenština / čeština), a vaše volba zůstává zapamatovaná:
+(angličtina / slovenština / čeština / němčina / španělština), a vaše volba
+zůstává zapamatovaná:
 
 ![Nastavení](images/app-cs/settings-light.png)
 

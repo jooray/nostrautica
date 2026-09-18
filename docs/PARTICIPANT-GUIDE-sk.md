@@ -415,7 +415,8 @@ Skopírujte si kľúč, otvorte niektorú z nich, zvoľte „prihlásiť sa kľ�
 vložte ho. A ste tam.
 
 Ešte jedna vec: **Viac → Nastavenia** má tmavý režim a prepínač jazyka
-(angličtina / slovenčina / čeština), a vaša voľba zostáva zapamätaná:
+(angličtina / slovenčina / čeština / nemčina / španielčina), a vaša voľba
+zostáva zapamätaná:
 
 ![Nastavenia](images/app-sk/settings-light.png)
 

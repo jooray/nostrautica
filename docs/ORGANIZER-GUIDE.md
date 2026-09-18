@@ -89,8 +89,9 @@ Choose **Create an event** and fill in the form:
 
 Pick the language your event runs in. Start typing to search by language name
 in your own language *or* by its two-letter code (type "slov" or "sk" to find
-Slovak). Your own language, the ones your browser prefers, and English/Slovak/
-Czech are pinned to the top; everything else follows alphabetically.
+Slovak). Your own language, the ones your browser prefers, and every language
+the app itself is translated into are pinned to the top; everything else follows
+alphabetically.
 
 ![Choosing the event language](images/organizer/10-language-picker-light.png)
 
