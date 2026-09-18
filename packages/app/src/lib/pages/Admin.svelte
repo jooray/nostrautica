@@ -1134,7 +1134,7 @@
       {/if}
       <!-- id is a stable, non-translated hook for e2e/screenshot-refresh.mjs
            (participant/11-matches) — the button's own label is translated per
-           locale, so it can't be matched by text across en/sk/cs. -->
+           locale, so it can't be matched by text across the shipped locales. -->
       <button id="recompute-matches" class="btn inline" onclick={recomputeMatches} disabled={recomputing}>
         {recomputing ? t("admin.coordinator.recomputing") : t("admin.coordinator.recompute")}
       </button>

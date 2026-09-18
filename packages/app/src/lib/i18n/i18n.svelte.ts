@@ -9,8 +9,8 @@
  *
  * Pluralization: `tp("key", n, params)` picks a plural form by suffixing the key
  * with the locale's category (`.one` / `.few` / `.many`) and exposes the count as
- * `{n}`. Slovak and Czech have three forms (1 / 2–4 / 5+); English collapses to
- * one / many.
+ * `{n}`. Slovak and Czech have three forms (1 / 2-4 / 5+); English, German and
+ * Spanish collapse to one / many.
  */
 import { messages, LOCALES, type Locale, type MessageKey } from "./messages.js";
 
@@ -50,7 +50,7 @@ function asLocale(value: string | null | undefined): Locale | undefined {
  * is in hand before any network round-trip.
  *
  * The value is attacker-supplied (anyone can craft a link), which is survivable
- * because the only thing it can do is pick one of the three shipped catalogs and
+ * because the only thing it can do is pick one of the shipped catalogs and
  * it can never set `explicit` — a wrong guess is one Settings visit away from
  * being fixed, and can never overwrite a choice the user already made.
  *
@@ -65,7 +65,11 @@ export function langFromHash(hash: string): Locale | undefined {
 
 export type PluralCategory = "one" | "few" | "many";
 
-/** Plural category for a count, per locale (en: 1 / other; sk/cs: 1 / 2–4 / 5+). */
+/**
+ * Plural category for a count, per locale. Slovak and Czech split 1 / 2-4 / 5+;
+ * every other shipped locale (en, de, es) splits 1 / other, which is what the
+ * fallthrough below returns, so adding a two-form language needs no change here.
+ */
 export function pluralCategory(locale: Locale, n: number): PluralCategory {
   const abs = Math.abs(n);
   if (locale === "sk" || locale === "cs") {
@@ -227,9 +231,11 @@ export function tp(base: string, n: number, params?: Record<string, string | num
  *
  * Deliberately NOT a placeholder ("{thing} has ended"). Slovak and Czech decline
  * the noun and change the preposition with it: `na podujatí` against
- * `v komunite`. A slot that holds a nominative noun produces broken grammar in
- * two of the three shipped languages, and the one language it works in is the
- * one we are least likely to notice it in.
+ * `v komunite`. German declines the article the same way (`beim Event` against
+ * `in der Community`), and Spanish changes the preposition (`en el evento`
+ * against `en la comunidad`). A slot that holds a nominative noun produces
+ * broken grammar in every shipped language except English, which is the one we
+ * are least likely to notice it in.
  */
 export function tc(
   key: MessageKey,
