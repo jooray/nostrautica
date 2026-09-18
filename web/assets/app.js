@@ -11,9 +11,9 @@
 
   /* ---------- Language ---------- */
 
-  // A language encoded in the URL hash (#en / #sk / #cs, or #cz as an alias),
-  // so a link can open the page in a chosen language. Returns null if the hash
-  // isn't a language (e.g. an in-page anchor like #attendees).
+  // A language encoded in the URL hash (#en / #sk / #cs / #de / #es, or #cz as
+  // an alias), so a link can open the page in a chosen language. Returns null if
+  // the hash isn't a language (e.g. an in-page anchor like #attendees).
   function langFromHash() {
     var h = String(location.hash || "").replace(/^#/, "").toLowerCase();
     if (h.indexOf("cz") === 0) h = "cs";
@@ -34,11 +34,13 @@
       ? navigator.languages
       : [navigator.language || "en"];
 
+    // Match against LANGS rather than an if-ladder, so a language added to
+    // i18n.js is autodetected without a second edit here. "cs-CZ" and the
+    // legacy "cz" tag both fold to the "cs" catalog.
     for (var i = 0; i < prefs.length; i++) {
-      var code = String(prefs[i] || "").toLowerCase();
-      if (code.indexOf("sk") === 0) return "sk";
-      if (code.indexOf("cs") === 0 || code.indexOf("cz") === 0) return "cs";
-      if (code.indexOf("en") === 0) return "en";
+      var code = String(prefs[i] || "").slice(0, 2).toLowerCase();
+      if (code === "cz") code = "cs";
+      if (LANGS.indexOf(code) !== -1) return code;
     }
     return "en";
   }
@@ -80,6 +82,12 @@
       var isCurrent = btn.getAttribute("data-lang") === lang;
       btn.setAttribute("aria-current", isCurrent ? "true" : "false");
     });
+
+    // The narrow-screen select mirrors the pill row. Only one of the two is
+    // ever visible, but both are kept current so rotating a phone mid-visit
+    // doesn't reveal a stale control.
+    var langSelect = document.getElementById("lang-select");
+    if (langSelect && langSelect.value !== lang) langSelect.value = lang;
 
     // Refresh the theme-toggle aria-label in the now-current language.
     syncThemeButtonLabel();
@@ -175,6 +183,13 @@
       setLang(btn.getAttribute("data-lang"), true);
     });
   });
+
+  var langSelectEl = document.getElementById("lang-select");
+  if (langSelectEl) {
+    langSelectEl.addEventListener("change", function () {
+      setLang(langSelectEl.value, true);
+    });
+  }
 
   // If the hash changes to a language (pasted #sk link, manual edit, back/forward),
   // follow it. In-page anchors like #attendees return null and are ignored.

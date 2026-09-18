@@ -271,6 +271,37 @@ button:focus-visible,
 .lang-switch button:not([aria-current="true"]):hover,
 .lang-switch a:not([aria-current="true"]):hover { color: var(--text); }
 
+/* Narrow-screen counterpart to .lang-switch. Five two-letter pills plus the
+   theme toggle and the menu button need ~245px of the nav row; a 320px phone
+   has about 150px to give once the wordmark has had its share. The pill row is
+   the better control when it fits, so it stays and this replaces it below the
+   breakpoint rather than the other way round. */
+.lang-select {
+  display: none;
+  appearance: none;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-family: var(--mono);
+  font-size: 0.74rem;
+  letter-spacing: 0.03em;
+  padding: 0.4rem 1.35rem 0.4rem 0.6rem;
+  cursor: pointer;
+  /* Chevron drawn inline so the control needs no extra markup or icon font. */
+  background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+    linear-gradient(135deg, currentColor 50%, transparent 50%);
+  background-position: right 0.62rem top 52%, right 0.42rem top 52%;
+  background-size: 0.2rem 0.2rem, 0.2rem 0.2rem;
+  background-repeat: no-repeat;
+}
+.lang-select:hover { color: var(--text); }
+.lang-select:focus-visible { outline: 2px solid var(--accent-solid); outline-offset: 2px; }
+/* The closed control is transparent so it sits on the page background, but the
+   OPEN list is painted by the browser and inherits that transparency in Firefox,
+   which renders the options unreadably. Give them real colours. */
+.lang-select option { background: var(--bg); color: var(--text); }
+
 /* Copy shareable link */
 #copy-link .icon-check { display: none; }
 #copy-link.copied { border-color: var(--teal); color: var(--teal); }
@@ -676,7 +707,13 @@ section { position: relative; padding-block: clamp(3.5rem, 8vw, 6.5rem); }
 .footer-bottom a:hover { color: var(--accent); }
 
 /* ---------- Responsive ---------- */
-@media (max-width: 980px) {
+/* The nav row collapses into the hamburger on its OWN breakpoint, wider than the
+   980px one below that reflows the hero and the grids. German nav labels are
+   materially longer than the English ones ("Wie es funktioniert" against "How it
+   works"), and the row did not fit between 981 and 1023px in German however
+   tightly it was spaced. Those two breakpoints answer different questions and
+   had no business sharing a number. */
+@media (max-width: 1023px) {
   .nav-toggle { display: inline-flex; }
   .nav-links {
     position: absolute;
@@ -693,6 +730,19 @@ section { position: relative; padding-block: clamp(3.5rem, 8vw, 6.5rem); }
   }
   .nav-links.open { display: flex; }
   .nav-links a { padding: 0.65rem 0; width: 100%; }
+}
+
+/* From 1024px the full row is back, but German still needs the spacing pulled in
+   to clear the viewport (measured: 1063px wanted of 1024 available at the
+   untightened spacing). Tightening beats hiding the CTA, which is the one thing
+   in the row people are meant to click. */
+@media (min-width: 1024px) and (max-width: 1150px) {
+  .nav-links { gap: 1.1rem; font-size: 0.86rem; }
+  .site-nav .nav-controls { gap: 0.45rem; }
+  #copy-link, .copy-status { display: none; }
+}
+
+@media (max-width: 980px) {
   .hero .wrap { grid-template-columns: 1fr; }
   .hero-visual { order: -1; min-height: 360px; }
   .hero-emblem { display: none; }
@@ -724,8 +774,16 @@ section { position: relative; padding-block: clamp(3.5rem, 8vw, 6.5rem); }
 @media (max-width: 560px) {
   .site-nav .nav-controls { gap: 0.4rem; }
   .nav-controls .btn { display: none; }
-  .lang-switch button,
-  .lang-switch a { padding: 0.35rem 0.5rem; }
   #copy-link, .copy-status { display: none; }
   .brand { font-size: 0.98rem; gap: 0.4rem; }
+}
+
+/* The pill row holds five languages from 640px up; below that it pushes the nav
+   row past the viewport (measured, not guessed: at 620px the row wants 631px and
+   the CTA is still showing). Swap in the select instead. The number is the
+   measurement, which is why it isn't one of the round breakpoints above: change
+   the set of languages and it moves. */
+@media (max-width: 639px) {
+  .lang-switch { display: none; }
+  .lang-select { display: block; }
 }
