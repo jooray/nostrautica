@@ -1,7 +1,7 @@
 /**
  * Screenshot refresh (docs pass 2026-07-21): captures every stem the guides
  * reference — organizer + participant journeys, matches, chat, DM — across
- * en/sk/cs, light + dark, at the repo's 390x844 mobile-viewport convention.
+ * en/sk/cs/de/es, light + dark, at the repo's 390x844 mobile-viewport convention.
  *
  * Locale and theme are both set via localStorage (`nostrautica:lang` /
  * `nostrautica:theme`) BEFORE any page script runs, never by clicking a
@@ -39,6 +39,8 @@ const LOCALE_PROOF = {
   en: ["Meet the right people", "Get started"],
   sk: ["Stretnite", "Začať"],
   cs: ["Poznejte", "Začít"],
+  de: ["Triff die richtigen", "Loslegen"],
+  es: ["Conoce a las personas", "Comenzar"],
 };
 
 // The mock coordinator (e2e/local-infra/mock-coordinator-chat.mjs) has proven
@@ -104,6 +106,36 @@ const COPY = {
     postTitle: "Vítejte na srazu",
     postBody: "Těšíme se na všechny — program a podrobnosti uvnitř.",
     talkTitle: "Bleskovka: Nostr pro nováčky",
+  },
+  de: {
+    eventSummary:
+      "Ein entspannter Abend für Nostr-Leute und neugierige Neulinge: kurze Vorstellungen, gute Gespräche und ein paar Lightning Talks am Wasser.",
+    eventLocation: "Berlin",
+    ninaIntro: "Rust-Entwicklerin, ich baue Werkzeuge für Privatsphäre. Ich suche eine Mitgründerin oder einen Mitgründer, dem Bedienbarkeit wichtig ist.",
+    nadiaIntro: "Produktdesignerin, die Kryptografie verständlich machen will. Ich suche Entwicklerinnen und Entwickler zum Zusammenarbeiten.",
+    ninaAbout: "Neu bei Nostr, freue mich darauf, Leute kennenzulernen.",
+    dm: "Hallo! Ich freue mich auf das Event.",
+    chatWelcome: "Willkommen zusammen! Schön, euch hier zu sehen.",
+    chatReply: "Danke fürs Organisieren, ich freue mich drauf!",
+    chatProof: /organisier|freue mich/i,
+    postTitle: "Willkommen beim Treffen",
+    postBody: "Wir freuen uns auf alle. Programm und Details stehen drin.",
+    talkTitle: "Lightning Talk: Nostr für Einsteiger",
+  },
+  es: {
+    eventSummary:
+      "Una tarde tranquila para gente de Nostr y curiosos que llegan por primera vez: presentaciones breves, buenas conversaciones y algunas charlas relámpago junto al agua.",
+    eventLocation: "Madrid",
+    ninaIntro: "Desarrolladora de Rust, trabajo en herramientas de privacidad. Busco alguien con quien fundar algo y a quien le importe la usabilidad.",
+    nadiaIntro: "Diseñadora de producto a la que le gusta hacer la criptografía comprensible. Busco gente que programe para colaborar.",
+    ninaAbout: "Acabo de llegar a Nostr y tengo ganas de conocer gente.",
+    dm: "¡Hola! Tengo ganas de que llegue el evento.",
+    chatWelcome: "¡Bienvenidos! Me alegra verlos por aquí.",
+    chatReply: "Gracias por organizarlo, ¡tengo muchas ganas!",
+    chatProof: /organiz|ganas/i,
+    postTitle: "Bienvenidos al encuentro",
+    postBody: "Tenemos ganas de verlos a todos. El programa y los detalles están dentro.",
+    talkTitle: "Charla relámpago: Nostr para quien empieza",
   },
 }[LOCALE];
 

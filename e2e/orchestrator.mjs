@@ -9,6 +9,15 @@
  *   chat         + a coordinator with the real Marmot admin bot (a provider double).
  *   full         everything above, all specs.
  *
+ * Plus one non-spec mode:
+ *   shots        the `chat` infrastructure, but instead of Playwright specs it runs
+ *                e2e/screenshot-refresh.mjs once per locale to refresh the guides'
+ *                images. Locales come from SHOT_LOCALES (default: every locale the
+ *                app ships). It exists so the capture runs on the SAME stack the
+ *                specs do: hand-starting the pieces is what produced the
+ *                double-bound-port and stale-CSP failures this file was written to
+ *                end, and the capture needs all of relay + Blossom + coordinator.
+ *
  * The defining property (audit D-11): if a selected tier's infrastructure can't
  * start or fails its health probe, SETUP FAILS LOUDLY (exit 1) — it is never a
  * silent Playwright skip. A tier that starts clean then runs its specs.
@@ -23,6 +32,8 @@
  *       ONE Blossom ever binds 3000 (no double-bind, §13.7).
  *
  * Usage:  node e2e/orchestrator.mjs <smoke|integration|chat|full> [-- <playwright args>]
+ *         node e2e/orchestrator.mjs shots            (all shipped locales)
+ *         SHOT_LOCALES=de,es node e2e/orchestrator.mjs shots
  */
 import { spawn, execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
@@ -38,7 +49,7 @@ import { dirname, resolve } from "node:path";
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..");
 
-const TIERS = ["smoke", "integration", "chat", "full"];
+const TIERS = ["smoke", "integration", "chat", "full", "shots"];
 const argv = process.argv.slice(2);
 const tier = argv[0];
 const passthroughIdx = argv.indexOf("--");
@@ -55,7 +66,14 @@ const NEEDS = {
   integration: { relay: true, blossom: true, coordinator: false },
   chat: { relay: true, blossom: true, coordinator: true },
   full: { relay: true, blossom: true, coordinator: true },
+  shots: { relay: true, blossom: true, coordinator: true },
 }[tier];
+/** Screenshot mode: capture instead of running specs. */
+const SHOTS = tier === "shots";
+const SHOT_LOCALES = (process.env.SHOT_LOCALES ?? "en,sk,cs,de,es")
+  .split(",")
+  .map((l) => l.trim())
+  .filter(Boolean);
 // Chat specs (tests/chat) run ONLY on the coordinator tiers — they need the Marmot
 // admin bot the smoke/integration tiers never start (audit O8). The chat suite is a
 // distinct spec dir, not the same smoke/integration specs the old chat tier re-ran.
@@ -377,6 +395,83 @@ function startCoordinator() {
   spawnTracked("coordinator", "node", [resolve(HERE, script)], { env });
 }
 
+/**
+ * Screenshot mode. Playwright's `webServer` normally owns `vite preview`, but the
+ * capture script is a plain node program, so this mode starts the preview itself
+ * (same command, same PUBLIC_CSP_EXTRA_CONNECT — gotcha #1) and tracks it so
+ * teardown still reaches it.
+ *
+ * Locales run SEQUENTIALLY on purpose. Each one drives several personas through
+ * the same relay and coordinator double, and two in flight would interleave
+ * their publishes and put one locale's fixture text in another's screenshots.
+ *
+ * COORDINATOR_NPUB is passed explicitly: screenshot-refresh.mjs defaults to the
+ * npub of a hand-run mock, which is NOT the identity this orchestrator gives the
+ * double. Leaving it to the default is how a run completes with every
+ * coordinator-dependent stem silently skipped.
+ *
+ * INCLUDE_FLAKY defaults to 1 here, against the capture script's own default.
+ * That flag gates eighteen stems behind "the coordinator double sometimes goes
+ * inert", and the guides reference most of them (the transcript, the matches
+ * list, DMs, mutes, talks, the report). Capturing without it produces a run that
+ * exits 0 and leaves the guides pointing at images that were never taken. Set
+ * INCLUDE_FLAKY=0 explicitly for a fast pass over the reliable stems only.
+ */
+async function runShots(env) {
+  log("infrastructure healthy — starting preview for the screenshot run");
+  await ensureComponent(
+    "preview",
+    () => httpOk(`http://127.0.0.1:${PORTS.preview}/`),
+    () =>
+      spawnTracked(
+        "preview",
+        "sh",
+        [
+          "-c",
+          `PUBLIC_CSP_EXTRA_CONNECT=" ws: wss: http: https:" pnpm --filter @nostrautica/app preview --host 127.0.0.1 --port ${PORTS.preview} --strictPort`,
+        ],
+        { cwd: REPO_ROOT, env: process.env },
+      ),
+  );
+  // 120s to match playwright.config.ts's webServer budget: a cold `vite preview`
+  // on a loaded machine has been seen past the 30s default.
+  await pollUntil("preview", () => httpOk(`http://127.0.0.1:${PORTS.preview}/`), {
+    timeoutMs: 120_000,
+  });
+  if (anyChildDied() || tearingDown) return;
+
+  const failures = [];
+  for (const locale of SHOT_LOCALES) {
+    log(`capturing screenshots: locale ${locale}`);
+    const code = await new Promise((done) => {
+      // infra:false — this process is SUPPOSED to exit; tracking it only so a
+      // SIGINT to the orchestrator tears down the browser it drives.
+      const child = spawnTracked("screenshot-refresh", "node", [resolve(HERE, "screenshot-refresh.mjs")], {
+        env: {
+          ...env,
+          LOCALE: locale,
+          COORDINATOR_NPUB: COORD_NPUB,
+          NOSTRAUTICA_URL: `http://127.0.0.1:${PORTS.preview}`,
+          NODE_TLS_REJECT_UNAUTHORIZED: "0",
+          INCLUDE_FLAKY: process.env.INCLUDE_FLAKY ?? "1",
+        },
+        infra: false,
+      });
+      child.on("exit", (c) => done(c ?? 1));
+      child.on("error", () => done(1));
+    });
+    if (code !== 0) {
+      failures.push(locale);
+      log(`locale ${locale} FAILED (exit ${code})`);
+    }
+  }
+  if (failures.length) {
+    return fail(`screenshot capture failed for: ${failures.join(", ")}`);
+  }
+  log(`screenshot capture OK for: ${SHOT_LOCALES.join(", ")}`);
+  teardown(0);
+}
+
 // ── run ─────────────────────────────────────────────────────────────────────
 async function main() {
   log(`tier: ${tier}`);
@@ -420,7 +515,6 @@ async function main() {
     log("coordinator double is up");
   }
 
-  log(`infrastructure healthy — running Playwright (${SPEC_DIRS.join(", ")})`);
   const env = {
     ...process.env,
     // Specs gate on this; the orchestrator only reaches here with the relay UP, so
@@ -432,6 +526,10 @@ async function main() {
     // without a coordinator, so those specs self-skip loudly-safely.
     ...(NEEDS.coordinator ? { NOSTRAUTICA_E2E_COORDINATOR_NPUB: COORD_NPUB } : {}),
   };
+
+  if (SHOTS) return runShots(env);
+
+  log(`infrastructure healthy — running Playwright (${SPEC_DIRS.join(", ")})`);
   // Tracked so a SIGINT to the orchestrator also tears down the Playwright group.
   const pw = spawnTracked("playwright", "pnpm", ["exec", "playwright", "test", ...SPEC_DIRS, ...projectArgs, ...playwrightArgs], {
     cwd: HERE,

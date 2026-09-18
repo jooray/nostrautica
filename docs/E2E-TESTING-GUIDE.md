@@ -425,6 +425,43 @@ the UI changed.
 | `participant/13-me` | Nostr hand-off / Me page | Nina · phone | Participant guide |
 | `app/settings` | settings (theme + language) | any | Both guides |
 
+### 5.1 Refreshing them all: `pnpm e2e:shots`
+
+The table above is what a manual pass captures. The automated refresh is:
+
+```sh
+pnpm e2e:shots                        # every shipped locale
+SHOT_LOCALES=de,es pnpm e2e:shots     # just the ones you changed
+```
+
+This is an orchestrator mode, not a separate script: it brings up the same
+relay, Blossom, HTTPS proxy and coordinator double the `chat` tier uses, starts
+its own `vite preview` (Playwright normally owns that, and the capture script
+is not Playwright), then runs `e2e/screenshot-refresh.mjs` once per locale and
+tears the whole stack down. Running the capture script by hand against
+hand-started infrastructure is possible and is how the double-bound-port and
+stale-CSP problems in §1.1 keep coming back; prefer the mode.
+
+Two things it handles that a hand-run does not:
+
+- **`COORDINATOR_NPUB`.** `screenshot-refresh.mjs` defaults to the npub of a
+  hand-run mock, which is not the identity the orchestrator gives its double. A
+  hand-run with the default finishes "successfully" with every
+  coordinator-dependent stem silently skipped.
+- **Locale isolation.** Locales run one at a time. They drive the same personas
+  through the same relay, so two in flight interleave their publishes and put
+  one language's fixture text into another language's screenshots.
+
+Every stem is captured in **both themes**: the script sets
+`nostrautica:theme` in localStorage before any page script runs, rather than
+clicking a toggle whose accessible name is itself translated. That was a real
+bug: the toggle never matched in sk/cs, so every "dark" file was a byte copy of
+its light sibling. `checkDuplicateOutput()` at the end of the run is the guard,
+and it is worth reading its output rather than just the exit code.
+
+Output goes to `docs/images/{organizer,participant,app}` for English and
+`-<locale>` suffixed directories for everything else.
+
 ---
 
 ## 6. Producing the two user guides
