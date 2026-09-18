@@ -31,6 +31,7 @@
  */
 import { marked } from "marked";
 import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join, dirname, resolve, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -388,6 +389,15 @@ export function build(outDir) {
     throw new Error(`landing page references ${missingAssets.length} file(s) that do not exist`);
   }
 
+  const staleVersions = checkLandingAssetVersions(ROOT);
+  if (staleVersions.length) {
+    console.error(`[docs] landing asset version check FAILED: ${staleVersions.length} stale stamp(s):`);
+    for (const m of staleVersions) console.error(`  ✗ ${m}`);
+    console.error(`  run: node scripts/stamp-landing-assets.mjs`);
+    process.exitCode = 1;
+    throw new Error(`landing page references ${staleVersions.length} asset(s) with a stale ?v= stamp`);
+  }
+
   const missingImages = checkGuideImages(ROOT);
   if (missingImages.length) {
     console.error(`[docs] guide image check FAILED: ${missingImages.length} missing file(s):`);
@@ -399,7 +409,7 @@ export function build(outDir) {
   console.log(
     `[docs] built ${pages.size} pages → ${outDir}` +
       (warnings.length ? ` (${warnings.length} link warning(s))` : "") +
-      `; link check passed; landing assets OK; guide images OK`,
+      `; link check passed; landing assets OK; asset stamps OK; guide images OK`,
   );
   return { pages, errors, warnings };
 }
@@ -420,6 +430,40 @@ export function build(outDir) {
  * what the post-receive hook runs, so a broken reference stops the deploy
  * instead of shipping and waiting to be spotted.
  */
+/**
+ * Every local CSS/JS the landing page loads must carry a `?v=` matching its
+ * current contents.
+ *
+ * nginx serves index.html with `cache-control: no-cache` and its assets with
+ * `max-age=86400`, so the two can be a day out of step on a returning visitor.
+ * That is how the five-language switcher shipped broken: new markup carrying a
+ * <select> the cached CSS had no rule for (so both switchers rendered), driven by
+ * cached JS that still listed three languages (so DE and ES silently loaded
+ * English). Nothing was wrong with what was deployed; the browser simply held
+ * half of it.
+ *
+ * The stamp is what breaks the tie, and this is what makes forgetting it loud.
+ * In the deploy build rather than a unit test, for the same reason as the checks
+ * around it: the build is what the post-receive hook runs.
+ */
+export function checkLandingAssetVersions(root) {
+  const landing = join(root, "web", "index.html");
+  if (!existsSync(landing)) return [];
+  const html = readFileSync(landing, "utf8");
+  const stale = [];
+  const re = /(?:href|src)="([^"]+\.(?:css|js))(?:\?v=([0-9a-f]+))?"/g;
+  for (const m of html.matchAll(re)) {
+    const [, ref, declared] = m;
+    if (/^(?:[a-z][a-z0-9+.-]*:|\/\/|\/)/i.test(ref)) continue;
+    const abs = join(root, "web", ref);
+    if (!existsSync(abs)) continue; // checkLandingAssets already reports this
+    const actual = createHash("sha256").update(readFileSync(abs)).digest("hex").slice(0, 8);
+    if (!declared) stale.push(`web/${ref} has no ?v= stamp`);
+    else if (declared !== actual) stale.push(`web/${ref}?v=${declared} but the file hashes to ${actual}`);
+  }
+  return stale;
+}
+
 /**
  * Every image the docs reference must exist, in both themes.
  *
