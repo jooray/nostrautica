@@ -236,6 +236,70 @@ let hydrated = false;
 let hydrating: Promise<void> | null = null;
 
 /**
+ * Resolved when the boot bulk read has ACTUALLY folded IndexedDB into the mirror
+ * — which is a different moment from `hydrateAppCache()` resolving.
+ *
+ * `hydrateAppCache()` is bounded at 1500 ms on purpose: boot must not wait for a
+ * slow disk. But that bound resolves the boot promise (and bumps
+ * `cacheHydration`) while the mirror may still be COMPLETELY COLD, and a cold
+ * mirror is indistinguishable from an empty one. For a snapshot — a roster, an
+ * event context — reading it early is harmless: you paint nothing and re-read on
+ * the next bump.
+ *
+ * For an ACCUMULATED record it is not harmless, and this is the bug it exists to
+ * stop (user report 2026-09-18). Three DM records accumulate: the per-wrap
+ * unwrap memo, the inbox scan cursor, and the per-peer read watermarks. Reading
+ * any of them cold yields "nothing decrypted, nothing scanned, nothing read",
+ * and the write that follows carries `at = now`, which beats the real record
+ * both in the mirror (`cacheSet`) and on disk (the versioned `put`). So a cold
+ * read didn't just paint an empty badge — it DELETED the history it failed to
+ * see. Every reload re-walked DM history from scratch and every already-read
+ * message counted as unread until the mirror caught up.
+ *
+ * Callers that accumulate therefore await this instead. All of them are already
+ * behind a relay round-trip, so the wait is free in practice.
+ */
+let mirrorReady: Promise<void> | null = null;
+let markMirrorReady: (() => void) | null = null;
+let mirrorSettled = false;
+
+/** Upper bound on `whenCacheReady`, so a wedged IDB can't block a caller forever. */
+const MIRROR_READY_BOUND_MS = 8_000;
+
+/**
+ * Await the real bulk read (bounded). Resolves immediately once it has landed,
+ * and immediately when there is no backend to read (SSR, tests, IDB disabled).
+ *
+ * Use this — not `hydrateAppCache()` — before reading a cache record that the
+ * app then writes BACK in full, where "not there yet" and "not there" would
+ * produce the same, destructive, write.
+ */
+export function whenCacheReady(): Promise<void> {
+  if (cacheIsReady()) return Promise.resolve();
+  if (!mirrorReady) {
+    mirrorReady = new Promise<void>((resolve) => {
+      const bound = setTimeout(resolve, MIRROR_READY_BOUND_MS);
+      markMirrorReady = () => {
+        clearTimeout(bound);
+        resolve();
+      };
+    });
+    // Idempotent: a caller that gets here before boot did still starts the read.
+    void hydrateAppCache();
+  }
+  return mirrorReady;
+}
+
+/**
+ * The same question as `whenCacheReady`, asked synchronously — for the reactive
+ * paths that must decide what to render THIS tick rather than await. True when
+ * the bulk read has landed, and true when there is no store to read at all.
+ */
+export function cacheIsReady(): boolean {
+  return !backend || mirrorSettled;
+}
+
+/**
  * Owner-cache generation (H-5). Bumped every time owner-scoped state is
  * invalidated (logout / `clearOwnerCache`). A hydration or asynchronous cache
  * write that STARTED before a logout but only COMPLETES after it must not
@@ -448,6 +512,10 @@ export function hydrateAppCache(): Promise<void> {
         // ALWAYS bump, even when the 1500 ms bound already marked boot hydrated:
         // that earlier signal described a mirror that was still cold.
         cacheHydration.markHydrated();
+        // The mirror now says what the disk says. Release the callers that must
+        // not read it before this point (see `whenCacheReady`).
+        mirrorSettled = true;
+        markMirrorReady?.();
         // Opportunistic prune once hydrated (idle; never blocks boot).
         scheduleIdle(() => void pruneCache());
       });
@@ -593,6 +661,9 @@ export function __resetPersistForTests(): void {
   mirror.clear();
   hydrated = false;
   hydrating = null;
+  mirrorReady = null;
+  markMirrorReady = null;
+  mirrorSettled = false;
   activeOwner = null;
   generation = 0;
   mirrorBytes = 0;

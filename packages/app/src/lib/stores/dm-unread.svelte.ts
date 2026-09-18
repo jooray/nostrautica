@@ -1,5 +1,5 @@
 import { scanDmGiftWraps, type DmMessage } from "$lib/events/dm.js";
-import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, cacheIsReady, whenCacheReady } from "$lib/cache/persist.js";
 
 export interface DmPosition {
   at: number;
@@ -80,6 +80,21 @@ export class DmUnreadStore {
   private activity = $state<EncryptedActivity>({ initialized: false, known: [], pending: [] });
   private polling: Promise<void> | null = null;
   private onLocalAdvance: ((owner: string) => void) | null = null;
+  /**
+   * Whether the persisted watermark map has actually been read back off disk.
+   *
+   * Boot does not wait for IndexedDB, so `init()` legitimately runs against a
+   * cold mirror and loads `{}` — "nothing has ever been read". Messages,
+   * meanwhile, arrive from relays on their own schedule. Counting one against
+   * the other is how a reload put a badge of 9 on Chat for every message the
+   * user had already read, which then cleared itself a few seconds later when
+   * the mirror caught up (user report 2026-09-18).
+   *
+   * An unknown count is not zero unread — but it is not nine either, and a badge
+   * has no way to say "I don't know yet". Silence is the only honest rendering,
+   * and it lasts until the disk answers (bounded inside `whenCacheReady`).
+   */
+  private loaded = $state(false);
 
   /**
    * Called whenever a LOCAL action advances a watermark, so the read-state
@@ -112,16 +127,63 @@ export class DmUnreadStore {
   }
 
   init(owner: string | null): void {
-    if (this.owner !== owner) this.messages = [];
+    if (this.owner !== owner) {
+      // Account switch (or logout): nothing from the previous identity survives.
+      this.messages = [];
+      this.watermarks = {};
+      this.activity = { initialized: false, known: [], pending: [] };
+      this.loaded = false;
+    }
     this.owner = owner;
-    this.watermarks = owner ? (cacheGet<ReadWatermarks>(READ_KEY, owner)?.data ?? {}) : {};
-    this.activity = owner
-      ? (cacheGet<EncryptedActivity>(ACTIVITY_KEY, owner)?.data ?? {
-          initialized: false,
-          known: [],
-          pending: [],
-        })
-      : { initialized: false, known: [], pending: [] };
+    if (!owner) {
+      // Logged out: there is nothing to wait for and nothing to count.
+      this.loaded = true;
+      return;
+    }
+    this.adopt(owner);
+    if (this.loaded) return;
+    if (cacheIsReady()) {
+      this.loaded = true;
+      return;
+    }
+    void whenCacheReady().then(() => {
+      if (this.owner !== owner) return;
+      this.adopt(owner);
+      this.loaded = true;
+    });
+  }
+
+  /**
+   * Fold whatever the cache mirror currently holds into this store.
+   *
+   * MERGE, never assign. `init()` runs more than once per session — boot, the
+   * hydration bump, an account switch — and by the second call this store may
+   * hold reads that happened in between and exist nowhere else yet. Assigning
+   * the stored map would resurrect those threads as unread. The per-peer maximum
+   * makes every order converge on the union, so it cannot matter who wins the
+   * race.
+   */
+  private adopt(owner: string): void {
+    const stored = cacheGet<ReadWatermarks>(READ_KEY, owner)?.data;
+    if (stored) {
+      const merged = mergeWatermarks(this.watermarks, stored);
+      if (!sameWatermarks(merged, this.watermarks)) this.watermarks = merged;
+      // Heal the disk when this session had already written a cold-read map over
+      // it: the union is what should have been stored all along.
+      if (!sameWatermarks(merged, stored)) cacheSet(READ_KEY, merged, undefined, owner);
+    }
+    // The ciphertext-activity ledger has the same cold-read problem, but only one
+    // direction is safe to adopt: once this session has observed a wrap set, that
+    // observation is newer than the disk's and stands.
+    if (!this.activity.initialized) {
+      const activity = cacheGet<EncryptedActivity>(ACTIVITY_KEY, owner)?.data;
+      if (activity) this.activity = activity;
+    }
+  }
+
+  /** Whether the badge's inputs are known — see `loaded`. */
+  get ready(): boolean {
+    return this.loaded;
   }
 
   syncMessages(owner: string, messages: DmMessage[]): void {
@@ -130,12 +192,12 @@ export class DmUnreadStore {
   }
 
   threadCount(peer: string): number {
-    if (!this.owner) return 0;
+    if (!this.owner || !this.loaded) return 0;
     return incomingUnreadCount(this.messages, this.owner, peer, this.watermarks[peer]);
   }
 
   get confirmedCount(): number {
-    if (!this.owner) return 0;
+    if (!this.owner || !this.loaded) return 0;
     return Object.keys(
       this.messages.reduce<Record<string, true>>((peers, message) => {
         peers[message.peer] = true;
@@ -145,7 +207,7 @@ export class DmUnreadStore {
   }
 
   get hasEncryptedActivity(): boolean {
-    return this.activity.pending.length > 0;
+    return this.loaded && this.activity.pending.length > 0;
   }
 
   markThreadRead(peer: string, messages: DmMessage[] = this.messages): void {
@@ -196,6 +258,12 @@ export class DmUnreadStore {
 
   observeEncryptedWrapIds(owner: string, ids: Iterable<string>): void {
     if (this.owner !== owner) this.init(owner);
+    // The ledger's whole job is to tell a wrap it has seen before from one it
+    // hasn't, so it must not take a cold mirror's silence for "seen nothing":
+    // that makes this scan the baseline and writes it over the real ledger.
+    // `scanDmGiftWraps` already waits for the mirror, so by here it is warm —
+    // adopt what it holds before folding these ids in.
+    if (!this.loaded) this.adopt(owner);
     const known = new Set(this.activity.known);
     const pending = new Set(this.activity.pending);
     for (const id of ids) {
