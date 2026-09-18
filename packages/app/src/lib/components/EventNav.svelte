@@ -18,11 +18,13 @@
   let { naddr }: { naddr: string } = $props();
 
   const route = $derived(router.route);
-  // New-matches-since-last-visit badge (spec §13). Pure read of cache +
-  // watermark — matchBadge never writes $state, so this derived cannot throw
-  // state_unsafe_mutation / effect_update_depth_exceeded (the previous
-  // refreshMatches write path did both, depending on where it ran).
-  const newMatches = $derived(whatsNew.matchBadge(eventShell.ctx?.coordinate));
+  // New-since-last-visit badge (spec §13): new matches AND new people on the
+  // roster, as one number. Pure read of cache + watermark — peopleBadge never
+  // writes $state, so this derived cannot throw state_unsafe_mutation /
+  // effect_update_depth_exceeded (the previous refreshMatches write path did
+  // both, depending on where it ran). The People list marks the same set on the
+  // rows themselves, so the badge says how many and the list says which.
+  const newPeople = $derived(whatsNew.peopleBadge(eventShell.ctx?.coordinate));
   function active(...names: string[]): boolean {
     return names.includes(route.name);
   }
@@ -71,12 +73,12 @@
     >
       <span class="ico">
         <Icon name="people" size={24} />
-        {#if newMatches > 0 && !active("attendees", "attendee")}
-          <span class="badge-count" aria-hidden="true">{newMatches > 9 ? "9+" : newMatches}</span>
+        {#if newPeople > 0 && !active("attendees", "attendee")}
+          <span class="badge-count" aria-hidden="true">{newPeople > 9 ? "9+" : newPeople}</span>
         {/if}
       </span><span class="lbl"
-        >{t("nav.people")}{#if newMatches > 0 && !active("attendees", "attendee")}<span class="visually-hidden"
-            >{tp("nav.matches.new", newMatches)}</span
+        >{t("nav.people")}{#if newPeople > 0 && !active("attendees", "attendee")}<span class="visually-hidden"
+            >{tp("nav.people.new", newPeople)}</span
           >{/if}</span
       >
     </button>

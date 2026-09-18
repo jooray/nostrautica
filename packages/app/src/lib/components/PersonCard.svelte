@@ -14,6 +14,7 @@
   // Want to meet, UX feedback 2026-07-16) — nested buttons are invalid HTML.
   import type { Snippet } from "svelte";
   import Avatar from "./Avatar.svelte";
+  import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
     pubkey,
@@ -23,6 +24,7 @@
     onOpen,
     trailing,
     actions,
+    isNew = false,
     last = false,
     selected = false,
   }: {
@@ -33,6 +35,14 @@
     onOpen: () => void;
     trailing?: Snippet;
     actions?: Snippet;
+    /**
+     * Arrived since this list was last open (spec §13 watermark). On the NAME's
+     * line, unlike `trailing` — this is the thing you scan a list of forty rows
+     * for, and it has to be findable without reading each bio. It is the same
+     * marker MatchEntry uses, for the same reason and in the same words, so one
+     * list reads as one list.
+     */
+    isNew?: boolean;
     /** True for the true last row of the list (audit UX-30: with a virtualized
      *  roster the DOM's last child isn't necessarily the list's last item, so
      *  `:last-child` can no longer decide this — the caller knows). */
@@ -46,7 +56,10 @@
   <button class="open" onclick={onOpen} aria-current={selected ? "true" : undefined}>
     <Avatar {pubkey} {name} {picture} size={40} />
     <span class="meta">
-      <span class="name">{name}</span>
+      <span class="nameline">
+        <span class="name">{name}</span>
+        {#if isNew}<span class="new">{t("matches.new")}</span>{/if}
+      </span>
       {#if line || trailing}
         <span class="sub">
           {#if trailing}<span class="trailing">{@render trailing()}</span>{/if}
@@ -110,6 +123,12 @@
     flex-direction: column;
     gap: 0.05rem;
   }
+  .nameline {
+    display: flex;
+    align-items: baseline;
+    gap: 0.4rem;
+    min-width: 0;
+  }
   .name {
     font-weight: 600;
     font-size: 0.95rem;
@@ -117,6 +136,17 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  /* Not a coloured dot: "new" has to survive forced-colors and greyscale, so it
+     is a word — matching MatchEntry's marker exactly. `flex: none` keeps it out
+     of the name's ellipsis budget. */
+  .new {
+    flex: none;
+    font-size: 0.62rem;
+    font-weight: 700;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--accent);
   }
   .sub {
     display: flex;

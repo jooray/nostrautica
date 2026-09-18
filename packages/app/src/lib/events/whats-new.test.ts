@@ -3,7 +3,14 @@
  * approval-since-last-visit signal.
  */
 import { describe, it, expect } from "vitest";
-import { newMatchPubkeys, newMatchCount, approvalIsNew, type Watermark } from "./whats-new.js";
+import {
+  newMatchPubkeys,
+  newMatchCount,
+  newPeoplePubkeys,
+  newSincePubkeys,
+  approvalIsNew,
+  type Watermark,
+} from "./whats-new.js";
 import type { MatchListContent } from "@nostrautica/protocol";
 
 const A = "a".repeat(64);
@@ -34,6 +41,41 @@ describe("newMatchPubkeys / newMatchCount", () => {
   });
   it("undefined match list yields no new matches", () => {
     expect(newMatchCount(undefined, wm())).toBe(0);
+  });
+});
+
+describe("newPeoplePubkeys", () => {
+  const roster = [{ pubkey: A }, { pubkey: B }, { pubkey: C }];
+
+  it("is empty on a first visit, when there is no baseline to compare against", () => {
+    // Otherwise opening People for the first time marks all 200 attendees NEW,
+    // which tells the user nothing about any of them.
+    expect(newPeoplePubkeys(roster, undefined)).toEqual([]);
+    expect(newPeoplePubkeys(roster, wm().seenPeople)).toEqual([]);
+  });
+
+  it("an EMPTY baseline is a real one: everyone who turned up since is new", () => {
+    expect(newPeoplePubkeys(roster, [])).toEqual([A, B, C]);
+  });
+
+  it("lists only arrivals since the recorded roster", () => {
+    expect(newPeoplePubkeys(roster, [A])).toEqual([B, C]);
+    expect(newPeoplePubkeys(roster, [A, B, C])).toEqual([]);
+  });
+});
+
+describe("newSincePubkeys", () => {
+  it("unions matches and arrivals, counting a person who is both exactly once", () => {
+    // The badge counts this set and the list marks it; a double count would put
+    // "2" on the tab over a single marked row.
+    expect(
+      newSincePubkeys(matches(A), [{ pubkey: A }, { pubkey: B }], wm({ seenPeople: [] })),
+    ).toEqual([A, B]);
+  });
+
+  it("keeps the matches rule even when the roster has no baseline yet", () => {
+    // A match list arriving for the first time IS the news; a roster is not.
+    expect(newSincePubkeys(matches(A), [{ pubkey: A }, { pubkey: B }], wm())).toEqual([A]);
   });
 });
 
