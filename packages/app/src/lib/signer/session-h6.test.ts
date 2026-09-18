@@ -64,7 +64,12 @@ vi.mock("$lib/chat/identity.js", () => ({
   unlockChatIdentityForLogin: vi.fn(async () => {}),
 }));
 vi.mock("$lib/stores/recent-events.svelte.js", () => ({
-  recentEvents: { clear: vi.fn(), setOwner: vi.fn() },
+  recentEvents: {
+    clear: vi.fn(),
+    setOwner: vi.fn(),
+    awaitIdentity: vi.fn(),
+    identitySettled: vi.fn(),
+  },
 }));
 vi.mock("$lib/stores/join-sent.svelte.js", () => ({
   clearAllJoinSent: vi.fn(),
