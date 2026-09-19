@@ -8,7 +8,7 @@
     cachedEventContext,
     type EventContext,
   } from "$lib/events/event-context.js";
-  import { sendJoinRequest, joinPollGapMs } from "$lib/events/join.js";
+  import { sendJoinRequest, joinPollGapMs, joinLanding } from "$lib/events/join.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
@@ -249,12 +249,18 @@
       // recorded a join marker for this event and aren't approved yet, show the
       // waiting screen instead of a pristine form. If approval already landed,
       // the marker is stale — clear it and fall through to the "You're in" state.
+      // An unused invite code in hand outranks the marker — see joinLanding.
       await grantsScan;
       approved = await isApproved(ctx.coordinate);
-      if (approved) {
+      const landing = joinLanding({
+        approved,
+        joinSent: joinSentAt(ctx.coordinate) !== undefined,
+        hasInvite: !!code,
+      });
+      if (landing === "approved") {
         clearJoinSent(ctx.coordinate);
         void checkIntro();
-      } else if (joinSentAt(ctx.coordinate) !== undefined) {
+      } else if (landing === "waiting") {
         sent = true;
         void pollForGrant();
       }
