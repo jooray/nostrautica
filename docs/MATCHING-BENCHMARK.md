@@ -191,6 +191,127 @@ That needs the human labels `evaluate.mjs --labels` was written to collect.
 
 *Cost: $0.06 across 156 calls.*
 
+## A decision model instead of a chat model: Jev (2026-09-19)
+
+Venice now lists `jev-latest` (TypeSafe AI's "System One" model, `type:
+decision`) behind its own endpoint, `POST /decisions`. It takes a `state` and a
+map of typed questions and returns probabilities: a `score` question over an
+ordered rubric comes back as a probability-weighted level with the full
+distribution. No prose. Input tokens only are billed ($0.042/Mtok, output $0),
+the state is billed once per request however many questions ride on it, and a
+call returns in under a second. The API notes are in the operator's
+`server-documentation/experiments/jev.md`; this section is what it did on the
+fixture. Harness: `benchmarks/matching/jev-run.mjs`, results score through the
+unchanged `evaluate.mjs`.
+
+BP3 cannot be used as a prompt, so its five score anchors became a five-level
+rubric (`score / 4` → 0..1), with `similarity` and `complementarity` rubrics
+and a `noul` (yes/no probability) "should the target make a point of meeting
+this candidate" on the same request. Two shapes: **pair**, one request per
+directed pair with the EVENT/TARGET/CANDIDATE text block BP3 sees (380
+requests); **batch K=10**, a JSON state `{event, target, candidates[]}` with a
+`score` and `noul` question per candidate (40 requests). The deployed model was
+re-run with a second seed today so stability could be compared like for like.
+
+| scorer | shape | recall@1 | recall@3 | sep S−W | posBias | p50 | $ (380 edges) |
+|---|---|---|---|---|---|---|---|
+| deepseek-v4-flash-0731 BP3 | K=10 seed 1 / 2 | 0.65 / 0.70 | 0.85 / 0.85 | 0.55 / 0.51 | 0.11 / 0.08 | 28.9 s / 18.1 s | $0.0267 |
+| jev, score rubric | pair seed 1 / 2 | 0.70 / 0.70 | 0.90 / 0.90 | 0.52 / 0.52 | 0.00 | 0.56 s | $0.0162 |
+| jev, score rubric | K=10 seed 1 / 2 | 0.70 / 0.75 | 0.85 / 0.85 | 0.51 / 0.52 | 0.08 / 0.03 | 0.73 s | $0.0074 |
+| jev, score rubric | K=5 seed 1 | 0.75 | 0.85 | 0.51 | 0.00 | 0.59 s | $0.0084 |
+| jev, noul | pair / K=10 | 0.75 / 0.70–0.75 | 0.85 / 0.85–0.90 | 0.46 / 0.54 | 0.00 | same calls | same calls |
+
+Eval subset: jev K=10 recall@1 0.75, recall@3 0.95 on both seeds, the same as
+0731's best subset row, at $0.0025 against $0.0098.
+
+**On ranking quality it is a tie.** Every difference above is one or two targets
+out of twenty and flips between seeds. Both scorers miss the same three gold
+pairs (Yusuf↔Elena, Aleksy↔Priya, Mara↔Nadia) and put about the same number of
+unplanned pairs into a top three (jev 30–33 of 60, DeepSeek 35–36).
+
+**On stability it is not.** The rerank study above found the deployed scorer's
+top-of-list order barely reproduces; the same measurement on this fixture:
+
+| two runs, same configuration | top-5 τ | top-10 τ | same #1 | mean \|Δscore\| per edge | tied #1s | distinct values | dirGap |
+|---|---|---|---|---|---|---|---|
+| deepseek-v4-flash-0731 K=10 | 0.571 | 0.506 | 16/20 | 0.109 (max 0.50) | 5 and 8 of 20 | 21 | 0.128–0.149 |
+| jev K=10 | 0.626 | 0.719 | 16/20 | – | 0 | 81–82 | 0.085–0.094 |
+| jev pair | **0.876** | **0.905** | **19/20** | **0.012** (max 0.08) | 0 | 86–88 | 0.083 |
+
+DeepSeek snaps to multiples of 0.05; a DeepSeek top five holds 3.4–3.8 distinct
+scores, jev's 4.95–5.00. This is the flat-top finding of 2026-09-12 addressed
+at the source rather than in the UI: the ties are not there to begin with.
+
+Two caveats the numbers carry. Jev pair and jev K=10 agree with each other at
+τ 0.65, about as well as K=10 agrees with itself across seeds: **the other
+candidates in a batched state leak into a score** even though every question is
+evaluated in isolation, so this batch shape is cheaper and roughly a third less
+reproducible. The leak is specific to several items sharing a state: a sibling
+project measured fifteen questions over one item against one question per
+request at Spearman 0.999 the same day. The shape to try next is therefore the
+anchor alone in the state and each candidate's text inside its own question. And `score` vs `noul` is a wash on rank (noul slightly better at
+#1, worse on separation); keep `score` for its re-thresholdable distribution and
+add `noul` free on the same request.
+
+Operationally: 1,340 paid requests, zero non-200 after retry, zero missing
+answers. Venice allows 100 decisions/min per key and locks the key for 30 s after
+more than 50 non-success responses, so the runner paces itself rather than
+retrying; the long p95s in the logs are backoff from two other sessions sharing
+the key during the sweep. Position bias is 0.00–0.08 (0.15 on one 21-call
+subset seed).
+
+**What it does not give you.** No `reasoning_for_target`: a chat model still
+writes the sentence the attendee reads. Same `anonymized` tier as today, beta,
+and this is the synthetic fixture only: whether the continuous scores stay
+spread on a single-topic Czech roster, where the chat model rated the whole
+room 0.95, is exactly what `private/` exists to ask and has not been asked.
+
+**Cost per 100 attendees** (~4,000 directed scorings): jev K=10 ≈ **$0.07**,
+jev pair ≈ $0.17, deployed path ≈ $0.28 including prose. A hybrid, jev scoring
+everything and the chat model writing reasoning only for the ~2,000 edges shown
+(and, seeing the shortlist together, doing the top-5 rerank), lands near $0.21.
+The larger win is wall-clock: 400 batched requests clear in ~4 minutes against
+~30 for the same DeepSeek calls.
+
+
+### The same day on the real roster
+
+The synthetic fixture cannot show the flat top, so jev was then run on the Plan
+B roster through the private harness (`benchmarks/matching/private/jev-run.mjs`;
+the rows stay on the machine, only these aggregates leave it). Shape: target
+alone in the state, each candidate's profile inside its own `score` and `noul`
+question, all 38 in one request or ten per request. 39 requests, 27 seconds and
+$0.05 for a full run. The deployed prompt on `deepseek-v4-flash-0731` was
+re-run at two seeds the same day as the reference, beside the live scores.
+
+| Plan B, 1,482 directed scores | tied #1 | distinct in a top 5 | distinct values | cross-seed top-5 τ | same #1 across seeds | whole-list τ | dirGap |
+|---|---|---|---|---|---|---|---|
+| production (live) | 19/39 | 2.46 | 19 | – | – | – | 0.114 |
+| deepseek 0731, same day | 18 and 23 /39 | 2.6–2.8 | 18–23 | 0.34 | 14/39 | 0.73 | 0.159 |
+| jev, all candidates per request | **0/39** | **4.9** | **348** | **0.89** | **36/39** | **0.96** | **0.098** |
+| jev, ten per request | 0/39 | 4.9 | 347 | 0.86 | 37/39 | 0.96 | 0.098 |
+
+Re-run the deployed scorer and 25 of 39 attendees get a different #1; re-run
+jev and 3 do. Jev agrees with production on the #1 for 12/39 (top-5 Jaccard
+0.27), which is the same as the deployed model re-run today agrees with its own
+live output (11/39, 0.28), so the disagreement is the chat scorer's noise, not a
+jev divergence; whole-list Spearman against production is 0.60 for both. Two
+things to carry into any wiring change: jev's scale is lower (3% of pairs ≥ 0.8
+against 23–28%, no all-Strong top fives against 15/39), so the `confidence.ts`
+banding needs recalibrating; and jev hands its most popular attendee 13 first
+places against production's 8, which only a human can judge. The private
+directory holds a blind sheet (`labels-blind-top3.json`) with each attendee's
+top three from jev, DeepSeek and production in shuffled columns for exactly
+that. *Cost: $0.21 of jev across 390 requests, $0.35 of DeepSeek.*
+
+**Recommendation.** Build the hybrid: jev scores every pair (target in state,
+candidates in questions), the chat model writes reasoning for the shown edges
+and reranks the top five while it has them together. Ship the badge threshold
+change with it. Read the blind sheet before deciding whose picks are better;
+reproducible is not the same as right. Nothing in the coordinator was changed
+for this. *Cost: ≈ $0.075 of jev across 1,340 requests,
+plus $0.027 for the second DeepSeek seed.*
+
 ## Recommendation
 
 - **Winner: `deepseek-v4-flash` + BP3 prompt, batched K=10**: best recall@1 (0.75), best separation (0.59), judge 4.53, zero format failures/position bias, **$0.22 per 100 attendees** (≈45× cheaper than today's glm-5-2+P0 pairwise). ⚠ Not Venice private-tier: adopting it means relaxing `require_private` (an `e2ee-deepseek-v4-flash` private variant exists but lacks `response_schema` support, would need instructed-JSON parsing).
