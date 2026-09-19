@@ -50,13 +50,13 @@ describe("signerRelays (NIP-46 transport set)", () => {
     expect(NIP46_RELAYS).not.toContain("wss://relay.nsec.app");
   });
 
-  it("advertises four distinct signer relays, with the local strfry first", () => {
-    // Widened from three 2026-07-28 after the strfry cutover: the local relay
-    // is the preferred low-latency signer transport, while three independent
-    // public operators remain as ephemeral-reply redundancy.
-    expect(new Set(NIP46_RELAYS).size).toBe(4);
+  it("advertises three distinct signer relays, with the local strfry first", () => {
+    // Widened to four 2026-07-28 after the strfry cutover; back to three on
+    // 2026-09-19 when relay.nostr.net's Cloudflare front started answering
+    // WebSocket upgrades with HTTP 500/525 (see relays.ts).
+    expect(new Set(NIP46_RELAYS).size).toBe(3);
     expect(NIP46_RELAYS[0]).toBe("wss://nostr.cypherpunk.today");
-    expect(NIP46_RELAYS).toContain("wss://relay.nostr.net");
+    expect(NIP46_RELAYS).not.toContain("wss://relay.nostr.net");
   });
 });
 
