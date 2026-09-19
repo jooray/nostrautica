@@ -143,3 +143,85 @@ describe("parseEventLink: what it refuses, and how it says so", () => {
     });
   });
 });
+
+/**
+ * A link that did NOT arrive intact.
+ *
+ * Every case here used to resolve to the right EVENT with the invite code gone —
+ * no error, nothing on screen to notice, and a join that goes to the approval
+ * queue the code existed to skip. Traced from a real join on 2026-09-17: the
+ * coordinator logged `invite=no → manual queue (no invite proof)` while the
+ * shared door code that join should have carried was live, unexpired and 99 of
+ * its 100 uses unspent.
+ */
+describe("parseEventLink: links something en route has mangled", () => {
+  const nsec = "nsec1" + "q".repeat(58);
+  const invite = `${APP}#/e/${eventNaddr}/join?code=${nsec}&lang=sk`;
+  const joined = { name: "join", naddr: eventNaddr, code: nsec };
+
+  it("keeps the code when the whole URL was percent-encoded", () => {
+    expect(parseEventLink(encodeURIComponent(invite))).toMatchObject({
+      ok: true,
+      route: joined,
+    });
+  });
+
+  it("keeps the code when only the fragment marker was escaped", () => {
+    expect(parseEventLink(invite.replace("#", "%23"))).toMatchObject({
+      ok: true,
+      route: joined,
+    });
+  });
+
+  it("keeps the code through a click-tracking gateway's ?url= parameter", () => {
+    const wrapped = `https://gate.example/click?url=${encodeURIComponent(invite)}&id=7`;
+    expect(parseEventLink(wrapped)).toMatchObject({ ok: true, route: joined });
+  });
+
+  it("keeps the code when a client upper-cased the link", () => {
+    // Bech32 is case-insensitive; lowercase is the canonical spelling, and both
+    // the address and the code come back in it.
+    expect(parseEventLink(invite.toUpperCase())).toMatchObject({
+      ok: true,
+      route: joined,
+    });
+  });
+
+  it("re-attaches a code to an address only the bare-entity scan could recover", () => {
+    // The route is unreadable (no hash at all), but the code is right there.
+    expect(parseEventLink(`nostr:${eventNaddr} ?code=${nsec}`)).toMatchObject({
+      ok: true,
+      route: joined,
+    });
+  });
+
+  it("re-attaches a code to a raw coordinate too", () => {
+    expect(parseEventLink(`${EVENT_COORD} #code=${nsec}`)).toMatchObject({
+      ok: true,
+      route: { name: "join", naddr: eventNaddr, code: nsec },
+    });
+  });
+
+  it("never reads a bare nsec in pasted text as an invite code", () => {
+    // An nsec on its own is overwhelmingly likely to be somebody's ACCOUNT key.
+    // toEqual on the route, not toMatchObject: a leaked `code` must FAIL here.
+    const r = parseEventLink(`${eventNaddr} my key is ${nsec}`);
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.route).toEqual({ name: "event", naddr: eventNaddr });
+  });
+
+  it("leaves an intact link's own parse untouched", () => {
+    // The original spelling is always tried first, so nothing above can change
+    // the meaning of a link that arrived whole — including a case-sensitive `d`.
+    const r = parseEventLink(`${APP}#/e/${eventNaddr}/talks/My-Talk-01`);
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.route).toEqual({ name: "talk", naddr: eventNaddr, d: "My-Talk-01" });
+  });
+
+  it("still refuses text that carries a code but no address", () => {
+    expect(parseEventLink(`${APP}#/join?code=${nsec}`)).toEqual({
+      ok: false,
+      reason: "unrecognized",
+    });
+  });
+});

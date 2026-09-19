@@ -50,6 +50,48 @@ export function joinPollGapMs(check: number, fastChecks: number, waitedMs: numbe
   return waitedMs > POLL_RELAX_AFTER_MS ? 60_000 : 5_000;
 }
 
+/** Which of Join's three screens a freshly-loaded join page opens on. */
+export type JoinLanding = "approved" | "waiting" | "form";
+
+/**
+ * What the join screen shows once the event context and approval state are in.
+ *
+ * An ECK grant is the truth and outranks everything. Below that sits the local
+ * "you already asked" marker, which exists so a reload lands on the waiting
+ * screen rather than a pristine form (P2) — and which is where an invited join
+ * could dead-end.
+ *
+ * The marker lives in localStorage, owner-scoped: it survives a reload, a tab
+ * close, a reinstall of the shell. So somebody who sent one join request WITHOUT
+ * a code — the link they were given had none, or something en route ate it (see
+ * event-link.ts) — is marked pending for that event indefinitely. Paste the
+ * proper invite link afterwards and the marker won a race it had no business
+ * being in: the page went straight to the waiting screen, the form that is the
+ * ONLY caller of sendJoinRequest never rendered, and the code sat in memory
+ * unused while the screen said "waiting for auto-approval". Nothing carrying the
+ * invite was in flight, and nothing ever would be. The only way out was a muted
+ * "send again" link at the bottom of a screen that told the reader to wait.
+ *
+ * So a code in hand outranks the marker. It is strictly newer information — an
+ * unspent credential that arrived after the request was sent — and acting on it
+ * costs a duplicate join request at worst, which the coordinator absorbs: the
+ * attendee row is upserted, `claimInvite` is idempotent per redeemer pubkey, and
+ * entitlement can only ever promote pending → approved, never the other way.
+ *
+ * The marker itself is deliberately left alone. If they read the form and walk
+ * away without submitting, the pending request they really do have outstanding
+ * is still the truth for the next visit.
+ */
+export function joinLanding(state: {
+  approved: boolean;
+  joinSent: boolean;
+  hasInvite: boolean;
+}): JoinLanding {
+  if (state.approved) return "approved";
+  if (state.joinSent && !state.hasInvite) return "waiting";
+  return "form";
+}
+
 export interface JoinInput {
   name: string;
   message?: string;

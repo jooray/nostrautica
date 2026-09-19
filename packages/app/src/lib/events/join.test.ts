@@ -39,7 +39,7 @@ vi.mock("$lib/media/submit.js", () => ({
   cacheSelfCopy: (...args: unknown[]) => cacheSelfCopy(...(args as [])),
 }));
 
-import { sendJoinRequest, joinPollGapMs, POLL_RELAX_AFTER_MS } from "./join.js";
+import { sendJoinRequest, joinPollGapMs, joinLanding, POLL_RELAX_AFTER_MS } from "./join.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
 
@@ -135,5 +135,43 @@ describe("joinPollGapMs", () => {
   it("relaxes to a minute after three minutes of waiting", () => {
     expect(joinPollGapMs(50, 0, POLL_RELAX_AFTER_MS)).toBe(5_000);
     expect(joinPollGapMs(50, 0, POLL_RELAX_AFTER_MS + 1)).toBe(60_000);
+  });
+});
+
+/**
+ * Which screen a freshly-loaded join page opens on.
+ *
+ * The case that matters here is the last one. The "you already asked" marker is
+ * owner-scoped localStorage, so it outlives reloads, tab closes and a reinstall
+ * of the shell — and it used to win outright. Somebody who sent ONE join request
+ * without a code (the link they were given had none, or something en route ate
+ * it) was marked pending for that event forever; pasting the real invite link
+ * afterwards went straight to the waiting screen, so the form — the only caller
+ * of sendJoinRequest — never rendered and the code was never spent. The screen
+ * said "waiting for auto-approval" while nothing carrying the invite existed.
+ *
+ * Observed in production 2026-09-17: one join, `invite=no → manual queue`, and
+ * then nothing, because the second attempt produced no network traffic at all.
+ */
+describe("joinLanding", () => {
+  it("shows the form to somebody who has done nothing yet", () => {
+    expect(joinLanding({ approved: false, joinSent: false, hasInvite: false })).toBe("form");
+  });
+
+  it("shows the waiting screen after a request, so a reload isn't a blank form", () => {
+    expect(joinLanding({ approved: false, joinSent: true, hasInvite: false })).toBe("waiting");
+  });
+
+  it("lets an unused invite outrank the marker, so the code can still be spent", () => {
+    expect(joinLanding({ approved: false, joinSent: true, hasInvite: true })).toBe("form");
+  });
+
+  it("treats a grant as the truth whatever else is true", () => {
+    // Approval is an ECK grant; the marker and the code are both local guesses.
+    for (const joinSent of [false, true]) {
+      for (const hasInvite of [false, true]) {
+        expect(joinLanding({ approved: true, joinSent, hasInvite })).toBe("approved");
+      }
+    }
   });
 });
