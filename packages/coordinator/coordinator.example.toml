@@ -70,6 +70,44 @@ model = "deepseek-v4-flash-0731"  # successor to the matching-benchmark winner
 # ($0.32/100, softer separation).
 require_private = false
 
+# ── OPTIONAL: score pairs with a DECISION model ─────────────────────────────────
+# Commented out = today's behaviour: [models.match] produces the three numbers AND
+# the reasoning in one call. Uncomment and the numbers come from a decision model
+# (Venice `POST /decisions`) while [models.match] keeps writing the reasoning and
+# icebreakers for the same candidates.
+#
+# WHY. Measured on a real 39-attendee roster, 1482 directed scores
+# (docs/MATCHING-BENCHMARK.md, 2026-09-19). Ranking quality is a TIE — the two
+# scorers miss the same pairs and agree with production equally. Reproducibility is
+# not:
+#                                   deepseek-v4-flash-0731      jev-latest
+#   distinct score values                   19                     348
+#   attendees with a tied #1              19 of 39                0 of 39
+#   same #1 when simply re-run            14 of 39               36 of 39
+#   whole-list Kendall tau (2 seeds)        0.73                   0.96
+# It also costs ~$0.0002 and ~1 s per batch, so it is additive on top of the prose
+# call rather than a saving. You are buying a stable order, not a cheaper bill.
+#
+# BEFORE YOU ENABLE IT, three things change:
+#  1. PRIVACY. `jev-latest` is Venice `anonymized`, NOT `private` — unlike
+#     deepseek-v4-flash-0731. Attendee profile text leaves the private tier and the
+#     public 31611 announcement will advertise `match_score: non-private`. Startup
+#     FAILS unless you accept that with require_private = false below.
+#  2. RE-SCORING. Enabling this changes every pair's inputs hash, so the next
+#     recompute re-scores the whole event (and re-bills it). That is intended: old
+#     scores came from a different scorer and must not be mixed with new ones.
+#  3. BADGES. Its scale is lower — 3% of pairs clear 0.8 where the chat model put
+#     23-28% there. packages/app/src/lib/events/confidence.ts has a matching
+#     STRONG_FLOOR; an event scored by one scorer and banded for the other will
+#     show the wrong number of "Strong match" badges.
+#
+# It is BETA at Venice and rate-limited to 100 requests/minute per API key, shared
+# with everything else that key does.
+# [models.match_score]
+# provider = "venice"
+# model = "jev-latest"
+# require_private = false
+
 [models.embed]
 provider = "venice"
 model = "text-embedding-bge-m3"

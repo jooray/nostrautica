@@ -136,6 +136,10 @@ async function runDaemon(): Promise<void> {
   const referencedProviders = new Set(
     (["summary", "match", "embed", "translate"] as const).map((r) => config.models[r].provider),
   );
+  // Optional roles reference providers too; omitting them here would make
+  // `models.match_score` on an otherwise-unused provider fail startup with
+  // "provider not configured" rather than working.
+  if (config.models.match_score) referencedProviders.add(config.models.match_score.provider);
   const providers: Partial<Record<string, LlmProvider>> = {};
 
   if (referencedProviders.has("venice")) {
@@ -181,6 +185,13 @@ async function runDaemon(): Promise<void> {
   for (const role of ["summary", "match", "embed", "translate"] as const) {
     const rt = roles[role];
     console.log(`[coordinator] route ${role} → ${rt.provider} ${rt.model} (${rt.privacy})`);
+  }
+  if (roles.match_score) {
+    const rt = roles.match_score;
+    console.log(
+      `[coordinator] route match_score → ${rt.provider} ${rt.model} (${rt.privacy}) — pair SCORES come ` +
+        `from this decision model; ${roles.match.model} writes the reasoning and icebreakers`,
+    );
   }
 
   const stt: SttProvider =

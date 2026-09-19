@@ -93,6 +93,27 @@ export const configSchema = z.object({
       provider: "venice",
       model: "gemini-3-flash-preview",
     }),
+    /**
+     * OPTIONAL decision model that produces the three pair NUMBERS, leaving
+     * `models.match` to write the reasoning and icebreakers (docs/MATCHING-BENCHMARK.md,
+     * 2026-09-19). Omit it and matching behaves exactly as before — same calls,
+     * same cached pairs, no re-scoring on upgrade.
+     *
+     * Set it and every pair's inputs hash changes (the scoring model is folded in),
+     * so the next recompute re-scores the event with the decision model. What that
+     * buys, measured on a real 39-attendee roster: 348 distinct score values
+     * instead of 19, no attendee with a tied #1 (was 19 of 39), and a top match
+     * that survives a re-run for 36 of 39 attendees instead of 14.
+     *
+     * It must point at a provider that implements a decision endpoint (Venice
+     * `POST /decisions`; today that is `jev-latest`). Startup fails closed if it
+     * does not, rather than discovering it on the first scored pair.
+     *
+     * PRIVACY: `jev-latest` is Venice `anonymized`, not `private`, so this role
+     * needs an explicit `require_private = false` — attendee profile text leaves
+     * the private tier and the public 31611 announcement will say so.
+     */
+    match_score: modelRefSchema.optional(),
   }).strict(),
   matching: z
     .object({
@@ -446,15 +467,24 @@ export function veniceApiKey(config: CoordinatorConfig): string | undefined {
 }
 
 export type ModelRole = "summary" | "match" | "embed" | "translate";
+/**
+ * Roles that may be absent from config. Kept apart from {@link ModelRole}
+ * because every consumer of that type indexes `config.models[role]` and expects
+ * a value; an optional role has to be checked before it is used.
+ */
+export type OptionalModelRole = "match_score";
 
 /**
  * Effective privacy requirement for a model role: the per-role
  * `models.<role>.require_private` override when set, else the provider-level
  * `providers.venice.require_private` (default true — today's behavior).
  */
-export function roleRequiresPrivate(config: CoordinatorConfig, role: ModelRole): boolean {
+export function roleRequiresPrivate(
+  config: CoordinatorConfig,
+  role: ModelRole | OptionalModelRole,
+): boolean {
   return (
-    config.models[role].require_private ?? config.providers.venice?.require_private ?? true
+    config.models[role]?.require_private ?? config.providers.venice?.require_private ?? true
   );
 }
 

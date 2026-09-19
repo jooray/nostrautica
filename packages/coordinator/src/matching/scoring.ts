@@ -8,7 +8,8 @@
 import { z } from "zod";
 import { sha256Hex, utf8ToBytes, languageName, hasAiProfileContent } from "@nostrautica/protocol";
 import type { AiProfile } from "@nostrautica/protocol";
-import type { LlmProvider } from "../providers/types.js";
+import type { DecisionQuestion, LlmProvider } from "../providers/types.js";
+import { ProviderContractError } from "../providers/types.js";
 import { fenceUntrusted, fenceUntrustedList } from "../pipeline/fencing.js";
 import { promptRevision } from "../pipeline/prompt-revision.js";
 
@@ -1001,4 +1002,207 @@ export function cosine(a: number[], b: number[]): number {
   }
   const denom = Math.sqrt(na) * Math.sqrt(nb);
   return denom === 0 ? 0 : dot / denom;
+}
+
+// ── Decision-model scoring (Venice /decisions, `jev-latest`) ──────────────────
+// A decision model returns calibrated probabilities instead of text, so it can
+// produce the three NUMBERS but never the reasoning. It is therefore wired as a
+// scoring *override*: the chat model still writes `reasoning_for_target` and the
+// icebreakers, and these scores replace the ones it volunteered.
+//
+// Why bother, when the chat model already returns numbers: on the real Plan B
+// roster (39 attendees, 1482 directed scores) the deployed chat scorer produced
+// 19 distinct score values, gave 19 of 39 attendees a TIED #1, and changed 25 of
+// 39 attendees' top match when simply re-run. The decision model produced 348
+// distinct values, no tied #1 at all, and changed 3. Ranking quality is a tie;
+// reproducibility is not. docs/MATCHING-BENCHMARK.md has the tables.
+//
+// Shape: the anchor person alone in the `state`, every other person's profile
+// inside their OWN question. That placement is the measured one — several
+// questions over one state agree with one-question-per-request at Spearman
+// 0.999, while several PEOPLE inside one state leak into each other's scores
+// (cross-seed top-5 tau 0.63 vs 0.88 for the same model on the same fixture).
+
+/**
+ * Ordered rubric levels, lowest → highest. These are the BP3 score anchors the
+ * chat prompt states as prose (see {@link BATCH_SYSTEM_PROMPT}), restated as
+ * discrete levels because that is the only thing a `score` question takes.
+ *
+ * Kept deliberately drab: MATCHING-BENCHMARK.md records rubric wording leaking
+ * verbatim into user-facing text, and although nothing user-facing comes out of
+ * THIS call, the same wording is what the model is asked to reason against.
+ */
+export const DECISION_SCORE_LEVELS = [
+  "No real reason to meet",
+  "Weak: only vague topical overlap",
+  "Plausible: some overlap but no sharp need met",
+  "Strong one-directional or clearly useful fit",
+  "Near-perfect mutual fit: each solves the other's stated need",
+] as const;
+export const DECISION_SIMILARITY_LEVELS = [
+  "Nothing in common",
+  "Slight overlap",
+  "Moderate overlap",
+  "Strong overlap of interests, background or goals",
+  "Near-identical",
+] as const;
+export const DECISION_COMPLEMENTARITY_LEVELS = [
+  "Not at all",
+  "Slightly",
+  "Moderately",
+  "Strongly: one has much of what the other needs",
+  "Perfectly: each has exactly what the other seeks",
+] as const;
+
+/** Level index → the 0..1 the rest of the pipeline stores and publishes. */
+function levelToUnit(level: number, levels: readonly string[]): number {
+  return normalizeScore(level, levels.length - 1);
+}
+
+/**
+ * Fingerprint of the decision-scoring request shape. Folded into the pair inputs
+ * hash ONLY when a decision role is configured (see `Coordinator.matchModelKey`),
+ * so editing a rubric re-scores the events that use it while a deployment
+ * without one keeps every cached pair it already paid for.
+ */
+let decisionRevision: string | undefined;
+export function decisionPromptRevision(): string {
+  decisionRevision ??= promptRevision(
+    DECISION_SCORE_LEVELS.join("|"),
+    DECISION_SIMILARITY_LEVELS.join("|"),
+    DECISION_COMPLEMENTARITY_LEVELS.join("|"),
+    DECISION_QUESTION_REVISION_MARKER,
+  );
+  return decisionRevision;
+}
+/** Bumped by hand when the question WORDING below changes but no rubric does. */
+const DECISION_QUESTION_REVISION_MARKER = "decision-anchor-v1";
+
+/** Numbers only: a decision model writes no prose, by construction. */
+export type DecisionTriple = Pick<DirectedScore, "score" | "similarity" | "complementarity">;
+
+export interface DecisionBatchResult {
+  /** Keyed by the OTHER person's id, in the same direction the caller asked for. */
+  scores: Map<string, DecisionTriple>;
+  /** Ids with no usable answer; the caller retries these rather than guessing. */
+  missing: string[];
+}
+
+/**
+ * Score one anchor against ≤K others in a single decision request.
+ *
+ * `mode` picks which way round the judgement runs, mirroring the two batch
+ * shapes the matcher already has:
+ *  - `"forward"` — anchor is the TARGET, others are candidates. Each score is
+ *    "how valuable for the anchor to meet this person".
+ *  - `"reverse"` — anchor is the shared CANDIDATE, others are targets. Each
+ *    score is "how valuable for this person to meet the anchor".
+ *
+ * Both directions of a pair are scored independently, exactly as today; nothing
+ * here assumes symmetry.
+ */
+export async function scoreDecisionBatch(
+  llm: LlmProvider,
+  model: string,
+  event: EventContextForScoring,
+  anchor: AiProfile,
+  anchorName: string | undefined,
+  others: readonly BatchCandidate[],
+  mode: "forward" | "reverse",
+  signal?: AbortSignal,
+): Promise<DecisionBatchResult> {
+  const scores = new Map<string, DecisionTriple>();
+  if (others.length === 0) return { scores, missing: [] };
+  if (!llm.decide) {
+    throw new ProviderContractError(
+      llm.id,
+      "decisions",
+      model,
+      "provider has no decision endpoint (decide() not implemented)",
+    );
+  }
+
+  const anchorLabel = anchorName ? fenceUntrusted(anchorName) : "the other attendee";
+  const state = {
+    event: {
+      title: fenceUntrusted(event.title),
+      about: fenceUntrusted(event.summary),
+      topics: fenceUntrustedList(event.hashtags),
+    },
+    // Named by ROLE, so the question text below can point at it unambiguously.
+    // Profiles go through the same fencing as the chat path (audit SEC-15): a bio
+    // is attendee-authored and must not be able to forge structure around itself.
+    anchor: { role: mode === "forward" ? "target" : "candidate", profile: profileText(anchor, anchorName) },
+  };
+
+  // Ids are ours and are never shown to the model, so index them positionally.
+  const questions: Record<string, DecisionQuestion> = {};
+  others.forEach((o, i) => {
+    const who = o.name ? fenceUntrusted(o.name) : `person ${i + 1}`;
+    const profile = profileText(o.profile, o.name);
+    // Who benefits is what differs between the two modes; everything else is
+    // identical, so the wording is shared rather than duplicated per mode.
+    const beneficiary = mode === "forward" ? `\`anchor\` (${anchorLabel})` : `this person (${who})`;
+    const counterpart = mode === "forward" ? `this person (${who})` : `\`anchor\` (${anchorLabel})`;
+    const common =
+      `Judge only this person against \`anchor\`; ignore every other question. ` +
+      `Use only the profile text given here and in \`anchor\`; never invent skills, goals or facts.`;
+    questions[`s${i}`] = {
+      type: "score",
+      instructions: {
+        question:
+          `How valuable would it be for ${beneficiary} to meet ${counterpart} at \`event\`? ` +
+          `A meeting is high-value when one person's SEEKS is met by the other's OFFERS or skills, ` +
+          `in either direction. ${common}`,
+        person: profile,
+      },
+      criteria: DECISION_SCORE_LEVELS,
+    };
+    questions[`m${i}`] = {
+      type: "score",
+      instructions: {
+        question: `How much do ${beneficiary} and ${counterpart} share interests, background, or goals? ${common}`,
+        person: profile,
+      },
+      criteria: DECISION_SIMILARITY_LEVELS,
+    };
+    questions[`c${i}`] = {
+      type: "score",
+      instructions: {
+        question:
+          `How much do the skills and roles of ${beneficiary} and ${counterpart} COMPLETE each other ` +
+          `for this event — one has what the other needs? ${common}`,
+        person: profile,
+      },
+      criteria: DECISION_COMPLEMENTARITY_LEVELS,
+    };
+  });
+
+  const { answers } = await llm.decide({ state, questions, model, signal });
+
+  /** A usable `score` answer, or undefined — an unusable one leaves the person missing. */
+  const level = (id: string, levels: readonly string[]): number | undefined => {
+    const a = answers[id] as { type?: string; score?: unknown } | undefined;
+    if (!a || a.type !== "score" || typeof a.score !== "number" || !Number.isFinite(a.score)) return undefined;
+    // Out of range means the answer is not about the rubric we sent.
+    if (a.score < 0 || a.score > levels.length - 1) return undefined;
+    return a.score;
+  };
+
+  others.forEach((o, i) => {
+    const s = level(`s${i}`, DECISION_SCORE_LEVELS);
+    const sim = level(`m${i}`, DECISION_SIMILARITY_LEVELS);
+    const comp = level(`c${i}`, DECISION_COMPLEMENTARITY_LEVELS);
+    // All three or nothing: a pair row carries all three numbers and the app
+    // tie-breaks on complementarity, so a half-answered person is not a usable
+    // row — it is a retry.
+    if (s === undefined || sim === undefined || comp === undefined) return;
+    scores.set(o.id, {
+      score: levelToUnit(s, DECISION_SCORE_LEVELS),
+      similarity: levelToUnit(sim, DECISION_SIMILARITY_LEVELS),
+      complementarity: levelToUnit(comp, DECISION_COMPLEMENTARITY_LEVELS),
+    });
+  });
+
+  return { scores, missing: others.filter((o) => !scores.has(o.id)).map((o) => o.id) };
 }

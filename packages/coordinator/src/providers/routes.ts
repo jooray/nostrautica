@@ -14,11 +14,13 @@
  * whose resolved model is not a private-tier model in the provider's own catalogue
  * (unless the operator sets `security.allow_unverified_model_privacy`).
  */
-import type { CoordinatorConfig, ModelRole } from "../config.js";
+import type { CoordinatorConfig, ModelRole, OptionalModelRole } from "../config.js";
 import { roleRequiresPrivate } from "../config.js";
 import type { LlmProvider, ModelInfo, RoleRoute, RoleRoutes } from "./types.js";
 
 const ROLES: ModelRole[] = ["summary", "match", "embed", "translate"];
+/** Roles that may be absent. Resolved like the rest when configured. */
+const OPTIONAL_ROLES: OptionalModelRole[] = ["match_score"];
 
 export interface ResolveRoutesDeps {
   /** Provider instances the daemon was able to construct, keyed by provider id
@@ -45,6 +47,10 @@ export async function resolveRoleRoutes(
   // fails closed (unless allowUnverified) while a non-private role just warns.
   const catalogues = new Map<string, Map<string, ModelInfo> | null>();
   const referenced = new Set(ROLES.map((r) => config.models[r].provider));
+  for (const role of OPTIONAL_ROLES) {
+    const ref = config.models[role];
+    if (ref) referenced.add(ref.provider);
+  }
   for (const providerId of referenced) {
     const instance = deps.providers[providerId];
     if (!instance) continue; // reported per-role below with a targeted message
@@ -59,8 +65,11 @@ export async function resolveRoleRoutes(
   }
 
   const routes = {} as RoleRoutes;
-  for (const role of ROLES) {
+  for (const role of [...ROLES, ...OPTIONAL_ROLES]) {
     const ref = config.models[role];
+    // An optional role that isn't configured is simply absent from `routes`; the
+    // pipeline checks for it rather than being handed a placeholder.
+    if (!ref) continue;
     const instance = deps.providers[ref.provider];
     if (!instance) {
       throw new Error(
@@ -89,6 +98,9 @@ export async function resolveRoleRoutes(
       if (!info) {
         // Embedding models are catalogued on a separate endpoint that models()
         // doesn't return, so a valid embed model is expectedly absent — not fatal.
+        // Decision models ARE catalogued (VeniceLlm.models() reads the decision
+        // page too), so one that is missing here is a real misconfiguration and
+        // warns like any other role.
         if (role !== "embed") {
           logger.warn(
             `[coordinator] models.${role} "${ref.model}" not found in ${ref.provider} catalogue — cannot verify privacy tier`,
@@ -109,6 +121,16 @@ export async function resolveRoleRoutes(
         );
         privacy = "non-private";
       }
+    }
+    // A decision role is useless on a provider without a decision endpoint, and
+    // the failure would otherwise surface as a poisoned scoring job per batch
+    // rather than as a refusal to boot.
+    if (role === "match_score" && typeof instance.decide !== "function") {
+      throw new Error(
+        `models.match_score routes to provider "${ref.provider}", which has no decision endpoint. ` +
+          `Point it at a provider that implements one (Venice), or remove models.match_score to ` +
+          `score with models.match alone.`,
+      );
     }
     routes[role] = { llm: instance, model: ref.model, provider: ref.provider, requirePrivate, privacy };
   }
@@ -153,5 +175,11 @@ export interface SttDisclosure {
 export function disclosureFromRoutes(routes: RoleRoutes, stt?: SttDisclosure): Record<string, string> {
   const privacy: Record<string, string> = { stt: stt?.privacy ?? "unverified" };
   for (const role of ROLES) privacy[role] = routes[role].privacy;
+  // Only announced when configured: a role that does not exist has no tier, and
+  // publishing one for it would be a claim about a data flow that never happens.
+  for (const role of OPTIONAL_ROLES) {
+    const r = routes[role];
+    if (r) privacy[role] = r.privacy;
+  }
   return privacy;
 }

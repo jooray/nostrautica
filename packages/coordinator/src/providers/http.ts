@@ -39,6 +39,16 @@ export const PROVIDER_TIMEOUTS = {
   completion: 120_000,
   /** Embeddings — batched but bounded. */
   embedding: 60_000,
+  /**
+   * Decision models (`POST /decisions`). Deliberately far below
+   * {@link PROVIDER_TIMEOUTS.completion}: a decision call returns in well under a
+   * second because nothing is generated — measured p50 0.7–1.2 s for a request
+   * carrying 38 candidates and 76 questions, p95 2.2 s uncontended. 60 s is ~25×
+   * the slowest honest call and still leaves room for the provider's own 429
+   * backoff, so a hung connection unwinds in a minute rather than parking a
+   * serial job slot for two.
+   */
+  decision: 60_000,
   /** Speech-to-text — larger multipart upload + decode. */
   stt: 180_000,
   /**
