@@ -297,6 +297,24 @@ describe("startNostrConnect settles on our terms, not the library's", () => {
     await expect(handle.connected).rejects.toThrow(/subscription closed/);
     expect(FakePool.last().destroyed).toBe(1);
   });
+
+  it("names the relays that refused the socket when fromURI gives up on its own", async () => {
+    // The library's own message for this ("subscription closed before
+    // connection was established.") names nobody and reads like a bug in the
+    // app. It fires after 3 s of socket timeouts, long before our 120 s budget,
+    // so the relay-naming message must be attached HERE, not only to the timer.
+    fromURI.mockImplementation(() => {
+      const pool = FakePool.last();
+      pool.relayFailed("wss://nos.lol");
+      pool.relayFailed("wss://relay.example");
+      return Promise.reject(new Error("subscription closed before connection was established."));
+    });
+    const handle = Nip46Signer.startNostrConnect(["wss://nos.lol", "wss://relay.example"]);
+    const err = await handle.connected.catch((e: Error) => e);
+    expect((err as Error).message).toContain("nos.lol");
+    expect((err as Error).message).toContain("relay.example");
+    expect((err as Error).message).not.toContain("subscription closed");
+  });
 });
 
 describe("fromBunkerUri unions the pointer's relays with our own", () => {

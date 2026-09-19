@@ -966,11 +966,24 @@ export class Nip46Signer implements AppSigner {
       },
       (e: unknown) => {
         // fromURI failed on its own (e.g. every relay closed) — same teardown.
-        if (outcome === "pending") {
+        const own = outcome === "pending";
+        // Read relay health BEFORE teardown. `release(true)` destroys the pool,
+        // and a destroyed pool reports an empty connection map, which the
+        // health poll reads as "every relay dropped" — naming relays that were
+        // fine and drowning out the one that actually refused.
+        const down = own ? health.unreachable() : [];
+        if (own) {
           outcome = "abandoned";
           release(true);
         }
-        throw e instanceof Error ? e : new Error(String(e));
+        const err = e instanceof Error ? e : new Error(String(e));
+        // nostr-tools gives up on its own when every advertised relay closes,
+        // and its message ("subscription closed before connection was
+        // established.") names nobody and says nothing a user can act on — 3 s
+        // of socket timeouts and then it, while OUR relay-naming message only
+        // arrived after the 120 s budget. Same cause, same words now: when
+        // sockets actually failed during this wait, say which.
+        throw down.length ? new Error(timeoutMessage(() => down)) : err;
       },
     );
     return { uri, connected, cancel };
