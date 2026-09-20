@@ -58,3 +58,27 @@ test("a DM read survives real IndexedDB persistence and reload without a signer 
   await expect(page.getByRole("heading", { name: "Meet the right people" })).toBeVisible();
   await expect(page.locator(".badge-count")).toHaveCount(0);
 });
+
+test("cached event cards render while the remote signer is still reconnecting", async ({ page }) => {
+  const owner = getPublicKey(generateSecretKey());
+  const eid = getPublicKey(generateSecretKey());
+  const naddr = nip19.naddrEncode({ kind: 31612, pubkey: eid, identifier: "cached-community" });
+  await page.routeWebSocket(/.*/, () => { /* a signer that never answers */ });
+  await page.goto("/#/");
+  await expect(page.getByText("Meet the right people")).toBeVisible();
+  await putEntries(page, "nostrautica", "keystore", [
+    ["login-method", "nip46"],
+    ["nip46-session", {
+      clientSkHex: "11".repeat(32), userPubkey: owner,
+      bunker: { pubkey: getPublicKey(generateSecretKey()), relays: ["wss://signer.example"] },
+    }],
+  ]);
+  await page.evaluate(({ owner, eid, naddr }) => {
+    localStorage.setItem(`nostrautica:recent-events:${owner}`, JSON.stringify([
+      { coordinate: `31612:${eid}:cached-community`, naddr, title: "My cached community", role: "organizer", at: 1 },
+    ]));
+  }, { owner, eid, naddr });
+  await page.reload();
+  await expect(page.getByText("My cached community", { exact: true })).toBeVisible({ timeout: 3000 });
+  await expect(page.getByText("Reconnecting your signer…", { exact: true })).toBeVisible();
+});

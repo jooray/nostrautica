@@ -175,10 +175,10 @@ class RecentEvents {
    * reload. Records made in that window went to the unscoped key too, where
    * their owner never saw them again.
    *
-   * So the window is made explicit: show nothing, and hold writes until we know
-   * who they belong to. Everything here is local and synchronous, so nobody
-   * waits on it for longer than the restore itself — during which Home already
-   * says "restoring your session".
+   * Hold writes until the identity is verified. A persisted NIP-46 session also
+   * carries its previously verified user pubkey: use it to PREVIEW that owner's
+   * navigation cards immediately, without setting the active cache/key owner or
+   * treating the signer as connected. Rendering these local cards needs no RPC.
    */
   private pendingIdentity = $state(false);
   private queued: Array<{ evt: Omit<RecentEvent, "at"> & { at?: number }; authoritative: boolean }> =
@@ -196,8 +196,13 @@ class RecentEvents {
     this.list = cleaned;
   }
 
-  /** A restore has started: stop answering for an identity we don't have yet. */
-  awaitIdentity(): void {
+  /** A read-only preview; the hint never authorizes writes or key access. */
+  awaitIdentity(expectedOwner?: string): void {
+    if (expectedOwner && /^[0-9a-f]{64}$/.test(expectedOwner)) {
+      this.pendingIdentity = true;
+      this.list = load(expectedOwner);
+      return;
+    }
     if (this.pendingIdentity) return;
     this.pendingIdentity = true;
     this.list = [];

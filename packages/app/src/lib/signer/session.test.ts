@@ -384,6 +384,31 @@ describe("a failed session restore is visible and retryable", () => {
     }
   });
 
+  it("previews cached event cards before a bunker answers and keeps them through a transient failure", async () => {
+    const pubkey = "cd".repeat(32);
+    keystore.loadLoginMethod.mockResolvedValue("nip46");
+    keystore.loadNip46Session.mockResolvedValue({ userPubkey: pubkey });
+    let fail!: (error: Error) => void;
+    const fromPersisted = vi.spyOn(Nip46Signer, "fromPersisted").mockImplementation(
+      () => new Promise((_resolve, reject) => { fail = reject; }),
+    );
+    recentEventsAwaitIdentity.mockClear();
+    recentEventsIdentitySettled.mockClear();
+    try {
+      const restoring = session.restore();
+      await vi.waitFor(() => expect(recentEventsAwaitIdentity).toHaveBeenCalledWith(pubkey));
+      expect(session.loggedIn).toBe(false);
+      expect(session.pubkey).toBeNull();
+      expect(session.restoring).toBe(true);
+      fail(new Error("signer offline"));
+      expect(await restoring).toBe(false);
+      expect(recentEventsIdentitySettled).not.toHaveBeenCalled();
+      expect(session.restoreError).toBe(true);
+    } finally {
+      fromPersisted.mockRestore();
+    }
+  });
+
   it("retryRestore re-attempts the SAME persisted session and can succeed", async () => {
     keystore.loadLoginMethod.mockResolvedValue("nip46");
     keystore.loadNip46Session.mockResolvedValue({
