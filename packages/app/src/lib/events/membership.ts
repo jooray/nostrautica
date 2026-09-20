@@ -105,7 +105,7 @@ export async function discoverJoinedSpaces(
   opts: { budget?: ScanBudget; onOutcome?: (outcome: ScanOutcome) => void } = {},
 ): Promise<DiscoveredMembership[]> {
   const pubkey = await signer.getPublicKey();
-  const budget = opts.budget ?? startScanBudget();
+  const budget = (opts.budget ?? startScanBudget()).fork();
   const outcome = emptyOutcome();
   const memo = loadMemo();
   let memoDirty = false;

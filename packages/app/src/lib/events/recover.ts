@@ -156,7 +156,7 @@ export async function recoverEventKeys(
   const pubkey = await signer.getPublicKey();
   if (!opts.force && recovered.has(pubkey)) return [];
 
-  const budget = opts.budget ?? startScanBudget();
+  const budget = (opts.budget ?? startScanBudget()).fork();
   const outcome = emptyOutcome();
   // The memo is a PROMPT saver, never a correctness input, so it is trusted only
   // when skipping a backup cannot cost anything. An empty keystore means this

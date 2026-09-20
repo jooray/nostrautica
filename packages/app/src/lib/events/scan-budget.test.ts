@@ -43,6 +43,19 @@ describe("startScanBudget", () => {
     expect(budget.take()).toBe(false); // A again — the pair is done
   });
 
+  it("gives delayed scanners their own clock without replenishing the shared call cap", () => {
+    let clock = 0;
+    const shared = startScanBudget({ budgetMs: 100, maxCalls: 3, reserve: 1, now: () => clock });
+    const membership = shared.fork();
+    const grants = shared.fork();
+    expect(membership.take("low")).toBe(true);
+    clock = 16_000;
+    expect(membership.take("low")).toBe(false);
+    expect(grants.take()).toBe(true);
+    expect(grants.take()).toBe(true);
+    expect(shared.fork().take()).toBe(false);
+  });
+
   it("defaults sit below Home's 12s spinner backstop", () => {
     expect(SCAN_BUDGET_MS).toBeLessThan(12_000);
     expect(MAX_SIGNER_CALLS).toBeGreaterThan(0);

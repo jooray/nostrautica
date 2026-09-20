@@ -15,16 +15,11 @@
  */
 
 /**
- * Wall-clock budget for one scan round, measured from the moment the scan
- * starts so the relay read counts against it too.
- *
- * Chosen from what the code already uses: the relay reads inside a pass cap at
- * 8s (`streamEvents`' default `timeoutMs`, and the explicit 8000 in
- * `social.ts` / `coordinators.ts`), and Home's spinner backstop is 12s. 10s
- * sits between them, so after even a worst-case relay read there is room for a
- * signer round trip or two, and the scan reports "partial, retry" on its own
- * before Home's backstop fires — the backstop stays a backstop rather than
- * becoming the normal exit.
+ * Time allowed to START more decrypts, from a scanner's first claim. Relay
+ * discovery has its own bounds: two sequential eight-second reads used to
+ * exhaust this ten-second budget before any grant could be opened, every retry.
+ * Sibling scanners share the call cap but each starts its own clock when ready,
+ * so a fast membership lookup cannot consume the grant scanner's time allowance.
  */
 export const SCAN_BUDGET_MS = 10_000;
 
@@ -83,6 +78,8 @@ export interface ScanBudget {
    * recover a key.
    */
   take(priority?: ScanPriority): boolean;
+  /** Independent lazy clock for one scanner, sharing the same call allowance. */
+  fork(): ScanBudget;
 }
 
 /**
@@ -104,17 +101,23 @@ export function startScanBudget(
   // budget that does no low-priority work at all, not for one that wraps around.
   const reserve = Math.max(0, Math.min(opts.reserve ?? LOW_PRIORITY_RESERVE, maxCalls));
   const now = opts.now ?? (() => Date.now());
-  const startedAt = now();
   let spent = 0;
-  return {
-    take(priority: ScanPriority = "normal") {
-      const cap = priority === "low" ? maxCalls - reserve : maxCalls;
-      if (spent >= cap) return false;
-      if (now() - startedAt >= budgetMs) return false;
-      spent++;
-      return true;
-    },
+  const fork = (): ScanBudget => {
+    let startedAt: number | undefined;
+    return {
+      fork,
+      take(priority: ScanPriority = "normal") {
+        const cap = priority === "low" ? maxCalls - reserve : maxCalls;
+        if (spent >= cap) return false;
+        const at = now();
+        startedAt ??= at;
+        if (at - startedAt >= budgetMs) return false;
+        spent++;
+        return true;
+      },
+    };
   };
+  return fork();
 }
 
 /** What one scan pass can say about itself afterwards. */
