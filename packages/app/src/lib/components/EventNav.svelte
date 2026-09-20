@@ -6,12 +6,10 @@
   // verbatim: aria-current="page", aria-hidden icons, a non-colour ::before
   // marker (forced-colors safe), 48px targets, safe-area padding.
   import { router } from "$lib/router/router.svelte.js";
-  import { session } from "$lib/signer/session.svelte.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
-  import Avatar from "$lib/components/Avatar.svelte";
   import EventSwitcher from "$lib/components/EventSwitcher.svelte";
   import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
 
@@ -119,13 +117,7 @@
     class:active={active("eventMore")}
     onclick={() => router.go({ name: "eventMore", naddr })}
   >
-    <span class="ico">
-      {#if session.loggedIn && session.pubkey}
-        <Avatar pubkey={session.pubkey} size={22} />
-      {:else}
-        <Icon name="person" size={24} />
-      {/if}
-    </span><span class="lbl">{t("nav.more")}</span>
+    <span class="ico"><Icon name="ellipsis" size={24} /></span><span class="lbl">{t("nav.more")}</span>
   </button>
 </nav>
 
