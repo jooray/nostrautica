@@ -15,11 +15,24 @@
  */
 
 /**
- * Time allowed to START more decrypts, from a scanner's first claim. Relay
- * discovery has its own bounds: two sequential eight-second reads used to
- * exhaust this ten-second budget before any grant could be opened, every retry.
- * Sibling scanners share the call cap but each starts its own clock when ready,
- * so a fast membership lookup cannot consume the grant scanner's time allowance.
+ * Time allowed to START more decrypts, measured from a scanner's FIRST claim
+ * rather than from the moment the round began.
+ *
+ * It used to run from the round's start, so the relay reads counted against it —
+ * which is how a scan could spend the whole allowance without opening a single
+ * grant. `receiveGrants` does a kind-10050 inbox lookup and then a paginated wrap
+ * read back to back, each bounded at 8s (`streamEvents`' default `timeoutMs`), so
+ * on a contended relay set `budget.take()` refused the very first unwrap, on
+ * every retry, forever. Sibling scanners still share the CALL cap, but each
+ * starts its own clock when it is ready, so a fast membership sweep cannot eat
+ * the grant scan's time.
+ *
+ * What that costs, stated plainly because it undoes an invariant this constant
+ * used to carry: a round is no longer guaranteed to finish inside Home's 12s
+ * spinner backstop (`SCAN_GUARD_MS`), so a slow-relay boot can show "this is
+ * taking longer than expected" and then clear itself when the scan lands. That
+ * is the right way round — a transient banner costs a glance, an unwrap that is
+ * never attempted costs the user the only copy of their key.
  */
 export const SCAN_BUDGET_MS = 10_000;
 

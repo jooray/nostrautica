@@ -306,9 +306,18 @@ function markGrantsBackfilled(pubkey: string, at: number = Date.now()): void {
 /** Cap on the persisted grant-wrap memo (audit App-7), mirroring the DM memo. */
 export const MAX_GRANT_WRAPS = 5000;
 
-// v1 stored only true, including for accepted grants. It could not distinguish
-// "not a grant" from "key saved then lost", so it permanently skipped recovery
-// after a partial storage wipe. Re-read legacy entries once into this ledger.
+// v1 stored only `true`, including for accepted grants. It could not distinguish
+// "not a grant" from "this grant was accepted once and its key is gone now", so
+// it permanently skipped recovery after a partial storage wipe — and a build
+// older than 2026-09-14 (2155a24), which rejected every 31612 community grant as
+// forged, wrote exactly that entry, burning the wrap for good on any device that
+// scanned before the fix shipped.
+//
+// The legacy `grantwraps` ledger is deliberately NOT migrated into this one: a
+// bare `true` cannot say which of those two things it meant, so inheriting it
+// would carry the burn forward. The cost of starting clean is one re-unwrap pass
+// per device — bounded by the scan budget's call cap, and memoized under this key
+// as it goes — and the old entry ages out with the rest of the cache.
 export const GRANT_MEMO_KEY = "grantwraps-v2";
 type GrantMemoEntry = true | { coordinate: string; versions: number[]; organizer: boolean };
 
