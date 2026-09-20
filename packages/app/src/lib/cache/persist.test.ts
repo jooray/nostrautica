@@ -122,6 +122,13 @@ describe("persist latest-wins", () => {
     cacheSet("k", "vEq", 200); // equal at — allowed (>=)
     expect(cacheGet<string>("k")?.data).toBe("vEq");
   });
+
+  it("detaches a stored snapshot from subsequent caller mutations", () => {
+    const value = { threads: { peer: { at: 10, id: "read" } } };
+    cacheSet("snapshot", value);
+    value.threads.peer.at = 20;
+    expect(cacheGet<typeof value>("snapshot")?.data.threads.peer.at).toBe(10);
+  });
 });
 
 describe("persist logout wipe + delete", () => {

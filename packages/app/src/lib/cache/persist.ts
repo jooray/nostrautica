@@ -33,6 +33,7 @@
  */
 
 import { cacheHydration } from "./hydration.svelte.js";
+import { cacheSnapshot } from "./snapshot.svelte.js";
 
 /**
  * A stored value carrying TWO independent clocks, which is the whole point:
@@ -561,7 +562,7 @@ export function cacheSet<T>(
   const stamp = at ?? Math.floor(Date.now() / 1000);
   const existing = mirror.get(ck);
   if (existing && existing.at > stamp) return; // never overwrite newer with older
-  const entry: CacheEntry<T> = { at: stamp, touchedAt: nowSec(), data };
+  const entry: CacheEntry<T> = { at: stamp, touchedAt: nowSec(), data: cacheSnapshot(data) };
   mirror.set(ck, entry);
   mirrorBytes += approxBytes(entry) - (existing ? approxBytes(existing) : 0);
   if (mirror.size > MAX_CACHE_ENTRIES || mirrorBytes > MAX_CACHE_BYTES) scheduleBudgetCheck();
