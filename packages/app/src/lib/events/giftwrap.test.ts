@@ -242,14 +242,29 @@ describe("wrap timestamps are randomized from a CSPRNG", () => {
     }
   });
 
-  it("still lands within the NIP-59 two-day window, in the past", async () => {
+  it("still lands within the NIP-59 two-day window, in the past", async ({ onTestFinished }) => {
     const sender = LocalSigner.generate();
     const me = await LocalSigner.generate().getPublicKey();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    onTestFinished(() => clock.mockRestore());
     const now = Math.floor(Date.now() / 1000);
-    for (let i = 0; i < 30; i++) {
+    const random = crypto.getRandomValues.bind(crypto);
+    let draw = 0;
+    const rng = vi.spyOn(crypto, "getRandomValues").mockImplementation((array) => {
+      // Only control the timestamp draw; real keys/nonces keep real randomness.
+      if (array instanceof Uint32Array && array.length === 1) {
+        array[0] = draw;
+        return array;
+      }
+      return random(array);
+    });
+    onTestFinished(() => rng.mockRestore());
+    // Exercise both endpoints instead of paying for thirty random crypto wraps
+    // that almost never hit either boundary and time out under suite contention.
+    for (const [input, offset] of [[0, 0], [0xffffffff, 2 * 24 * 60 * 60 - 1]]) {
+      draw = input;
       const wrap = await signerWrap(sender, me, { kind: KIND_JOIN_REQUEST, content: payload, tags: [] });
-      expect(wrap.created_at).toBeLessThanOrEqual(now + 1);
-      expect(wrap.created_at).toBeGreaterThan(now - 2 * 24 * 60 * 60 - 1);
+      expect(wrap.created_at).toBe(now - offset);
     }
   });
 });

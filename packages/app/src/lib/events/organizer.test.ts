@@ -622,12 +622,15 @@ describe("roster read-modify-write safety", () => {
       // Grow to the point where one more entry needs another page: page 0's
       // `pages` count moves, so it is republished too — two publishes, not N.
       let n = 600;
-      // Bounded for the same reason as roster.test.ts's boundary search: without
-      // it, a splitRoster that stops paginating hangs the suite instead of
-      // failing it.
-      while (splitRoster(bigRoster(n + 1)).length === splitRoster(bigRoster(n)).length) {
-        n++;
-        if (n > 1000) throw new Error("never found a page boundary — splitRoster stopped paginating");
+      let high = 1000;
+      const count = splitRoster(bigRoster(n)).length;
+      expect(splitRoster(bigRoster(high)).length).toBeGreaterThan(count);
+      // Binary search the same boundary. The linear search repeatedly packed
+      // hundreds of full rosters and exceeded the test deadline under load.
+      while (high - n > 1) {
+        const mid = Math.floor((n + high) / 2);
+        if (splitRoster(bigRoster(mid)).length === count) n = mid;
+        else high = mid;
       }
       const pages = pageEvents(bigRoster(n));
       serve(pages);
