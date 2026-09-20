@@ -20,6 +20,7 @@
   import { loadEventKeys, currentEck, type EventKeys } from "$lib/events/keystore.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
+  import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { joinSentAt, clearJoinSent } from "$lib/stores/join-sent.svelte.js";
   import { install } from "$lib/stores/install.svelte.js";
   import {
@@ -190,11 +191,14 @@
    * directory read is strictly cheaper than the thing they were already doing.
    */
   let refreshingReadiness = false;
+  let destroyed = false;
+  onDestroy(() => { destroyed = true; });
   async function refreshReadiness(force = false) {
     const c = ctx;
     const signer = session.signer;
     if (!c || !signer || refreshingReadiness) return;
     refreshingReadiness = true;
+    const hadEck = approved;
     try {
       // The 21606 "your pipeline failed / recovered" notices arrive as gift wraps,
       // so without this the journey would re-derive from the same stale statuses.
@@ -208,6 +212,18 @@
       // one had not. Coming back to the tab is not the same statement, and a
       // full-history sweep every 60s of tab-flipping is not what that costs.
       await receiveGrants(signer, { force }).catch(() => {});
+      if (destroyed || ctx !== c || session.signer !== signer) return;
+      // A newly received grant changes the whole page, not only the journey.
+      // Previously Check again could advance the stepper while leaving Pending
+      // on the hero and all member tabs hidden until a later poll/navigation.
+      await syncIdentity(c, signer, Promise.resolve(), false);
+      if (destroyed || session.signer !== signer) return;
+      if (approved) {
+        clearInterval(grantPoll);
+        grantPoll = undefined;
+      }
+      void eventShell.sync(c.naddr).catch(() => {});
+      if (approved && !hadEck) await refetchAfterEck(c);
       await readinessStore.load(c, signer);
     } finally {
       refreshingReadiness = false;
@@ -244,6 +260,11 @@
         requestPending = false;
         clearJoinSent(ctx.coordinate);
         checkApprovalBanner(ctx.coordinate);
+        recentEvents.record({
+          coordinate: ctx.coordinate, naddr: ctx.naddr, title: ctx.title,
+          icon: ctx.icon, role: "attendee", pendingKey: false,
+        });
+        void eventShell.sync(ctx.naddr).catch(() => {});
         // The ECK just landed: the public pass ran keyless — re-fetch so
         // members-only page sections and posts decrypt, and warm the tabs.
         const [pageRes, postsRes] = await Promise.allSettled([
@@ -313,11 +334,13 @@
     c: EventContext,
     signer: AppSigner | null,
     grants: Promise<unknown>,
+    refineReadiness = true,
   ): Promise<EventKeys | undefined> {
     await grants;
     approved = await isApproved(c.coordinate);
     // The join-sent marker outlives a reload; approval supersedes it (P2).
     if (approved) {
+      requestPending = false;
       clearJoinSent(c.coordinate);
       checkApprovalBanner(c.coordinate);
     }
@@ -374,7 +397,7 @@
     }
     // Readiness journey (§4.1): derived from real state, one primary CTA. This
     // refines the local paint above with the network-only steps.
-    void readinessStore.load(c, signer, { anonymous: !signer });
+    if (refineReadiness) void readinessStore.load(c, signer, { anonymous: !signer });
     // Background-warm what the user opens next: the Attendees tab (directory
     // decrypt is signer-free), the attendee-posts feed (so Updates opens warm),
     // and — for a local key with no custody record yet — the organizer key
