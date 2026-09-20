@@ -13,8 +13,7 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
-  import type { IconName } from "$lib/components/icons/paths.js";
-  import type { Route } from "$lib/router/routes.js";
+  import { moreRows } from "$lib/components/more-rows.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -41,27 +40,16 @@
     }
   }
 
-  type Row = { icon: IconName; label: string; go: Route };
-  const rows = $derived.by(() => {
-    const list: Row[] = [];
-    if (eventShell.isMember) {
-      list.push({ icon: "person", label: t("profile.mine.title"), go: { name: "myProfile", naddr } });
-    }
-    if (session.loggedIn) {
-      // "Messages", not "Chat": this row opens DIRECT messages, while the nav
-      // bar's Chat tab opens the event GROUP chat. Both rendered t("nav.chat"),
-      // so the app showed one label pointing at two different destinations —
-      // and the participant guide calls this one Messages anyway.
-      list.push({ icon: "chat", label: t("nav.messages"), go: { name: "dm" } });
-    }
-    if (eventShell.isOrganizer) {
-      list.push({ icon: "sliders", label: t("more.manageEvent"), go: { name: "admin", naddr } });
-    }
-    list.push({ icon: "star", label: t("more.allEvents"), go: { name: "home" } });
-    list.push({ icon: "plus", label: t("more.createEvent"), go: { name: "create" } });
-    list.push({ icon: "sliders", label: t("nav.settings"), go: { name: "settings" } });
-    return list;
-  });
+  // The same list the desktop rail renders inline — on a phone there is no room
+  // for it beside the content, so it lives behind the More tab instead.
+  const rows = $derived(
+    moreRows({
+      naddr,
+      isMember: eventShell.isMember,
+      isOrganizer: eventShell.isOrganizer,
+      loggedIn: session.loggedIn,
+    }),
+  );
 </script>
 
 <h1>{t("nav.more")}</h1>

@@ -11,6 +11,8 @@ import type {
   ModelInfo,
   PaymentStrategy,
   TokenUsage,
+  DecisionAnswer,
+  DecisionQuestion,
 } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
@@ -172,6 +174,20 @@ function readUsage(raw: unknown): TokenUsage {
   };
 }
 
+/**
+ * `POST /decisions` reports `{input_tokens, output_tokens}`, not the chat
+ * endpoint's `{prompt_tokens, completion_tokens}` — feeding it to
+ * {@link readUsage} yields a silent, plausible zero, which is how a stage comes
+ * to look free. Output tokens are REPORTED here but priced at $0; they are
+ * carried through unchanged so the cost table, not the adapter, decides that.
+ */
+function readDecisionUsage(raw: unknown): TokenUsage {
+  const u = (raw ?? {}) as Record<string, any>;
+  const promptTokens = nonNegative(u.input_tokens);
+  const completionTokens = nonNegative(u.output_tokens);
+  return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens, reasoningTokens: 0 };
+}
+
 /** Sum two usage records; a retry's cost is the sum of every attempt, not the last. */
 function addUsage(a: TokenUsage, b: TokenUsage): TokenUsage {
   return {
@@ -283,23 +299,39 @@ export class VeniceLlm implements LlmProvider {
     return { "Content-Type": "application/json", ...paid };
   }
 
-  async models(): Promise<ModelInfo[]> {
+  /** One `GET /models` page, by Venice model `type`. */
+  private async modelPage(type?: string): Promise<any[]> {
     const headers = await this.headers();
-    const body = await withProviderTimeout(
-      "Venice GET /models",
-      PROVIDER_TIMEOUTS.metadata,
-      (signal) =>
-        guardedProviderFetch(
-          `${this.base}/models`,
-          { headers, signal },
-          this.opts.net ?? {},
-          async (res) => {
-            if (!res.ok) throw await httpError(res, "Venice GET /models");
-            return await readJsonCapped<{ data?: any[] }>(res, "Venice GET /models");
-          },
-        ),
+    const label = `Venice GET /models${type ? `?type=${type}` : ""}`;
+    const url = `${this.base}/models${type ? `?type=${encodeURIComponent(type)}` : ""}`;
+    const body = await withProviderTimeout(label, PROVIDER_TIMEOUTS.metadata, (signal) =>
+      guardedProviderFetch(url, { headers, signal }, this.opts.net ?? {}, async (res) => {
+        if (!res.ok) throw await httpError(res, label);
+        return await readJsonCapped<{ data?: any[] }>(res, label);
+      }),
     );
-    const models = (body.data ?? []).map((m) => {
+    return body.data ?? [];
+  }
+
+  async models(): Promise<ModelInfo[]> {
+    // Two pages, because Venice's catalogue is typed and the default page is the
+    // TEXT one. A decision model (`jev-latest`, type `decision`) is invisible
+    // there, and an invisible model is an UNVERIFIABLE one: `resolveRoleRoutes`
+    // would fall back to trusting the operator's `require_private` intent for a
+    // role whose real tier is `anonymized`, i.e. quietly publish a privacy claim
+    // nothing checked. A decision page that 404s on an older gateway is not an
+    // error — it just means this deployment has no decision models.
+    const [text, decision] = await Promise.all([
+      this.modelPage(),
+      this.modelPage("decision").catch(() => [] as any[]),
+    ]);
+    const seen = new Set<string>();
+    const raw = [...text, ...decision].filter((m) => {
+      if (!m?.id || seen.has(m.id)) return false;
+      seen.add(m.id);
+      return true;
+    });
+    const models = raw.map((m) => {
       const spec = m.model_spec ?? m.spec ?? {};
       const caps = spec.capabilities ?? m.capabilities ?? {};
       return {
@@ -537,6 +569,62 @@ export class VeniceLlm implements LlmProvider {
       ),
       usage,
     };
+  }
+
+  /**
+   * Evaluate a state against typed questions on a decision model
+   * (`POST /decisions`; also mounted at `/systemone`). Nothing is generated, so
+   * there is no schema, no temperature, no `max_tokens` and no thinking to
+   * disable — every knob `chat()` negotiates is absent here, which is why this
+   * is a sibling of it rather than a branch inside it.
+   *
+   * Rate limit worth knowing: Venice allows 100 decision requests per minute per
+   * key, and after more than 50 non-success responses it locks the key for 30 s
+   * (`429 Too many failed attempts (> 50)`). This adapter therefore does NOT
+   * retry internally — a 429 surfaces as a {@link ProviderHttpError} and the job
+   * runner's backoff handles it, because a tight retry loop here is precisely
+   * what trips the lockout and turns a busy minute into a hard outage.
+   */
+  async decide(req: {
+    state: unknown;
+    questions: Record<string, DecisionQuestion>;
+    model: string;
+    validate?: (raw: unknown) => unknown;
+    signal?: AbortSignal;
+  }): Promise<{ answers: Record<string, DecisionAnswer>; usage: TokenUsage }> {
+    const headers = await this.headers();
+    const body = await withProviderTimeout(
+      "Venice decisions",
+      PROVIDER_TIMEOUTS.decision,
+      (signal) =>
+        guardedProviderFetch(
+          `${this.base}/decisions`,
+          {
+            method: "POST",
+            headers,
+            signal,
+            body: JSON.stringify({
+              model: req.model,
+              state: req.state,
+              questions: req.questions,
+            }),
+          },
+          this.opts.net ?? {},
+          async (res) => {
+            if (!res.ok) throw await httpError(res, "Venice decisions");
+            const parsed = await readJsonCapped<any>(res, "Venice decisions");
+            await this.opts.payment.settle(res.headers);
+            return parsed;
+          },
+        ),
+      req.signal,
+    );
+    const answers = body?.answers;
+    if (!answers || typeof answers !== "object" || Array.isArray(answers)) {
+      throw new ProviderContractError(this.id, "decisions", req.model, "no answers object");
+    }
+    validateProviderValue(answers, { provider: this.id, schemaName: "decisions", model: req.model }, req.validate);
+    return { answers: answers as Record<string, DecisionAnswer>, usage: readDecisionUsage(body?.usage) };
   }
 
   async embed(texts: string[], model?: string, callerSignal?: AbortSignal): Promise<number[][]> {

@@ -42,6 +42,12 @@ export const ICONS = {
   pennant: '<path d="M7 3v18"/><path d="M7 5l11 3.5L7 12z" fill="currentColor" fill-opacity="0.25"/>',
   lock: '<rect x="5" y="10.5" width="14" height="9.5" rx="2.2"/><path d="M8 10.5V8a4 4 0 0 1 8 0v2.5"/>',
   // Actions + affordances
+  // The universal "there is more behind this" mark, for the More tab. That tab
+  // used to draw the signed-in avatar, which — with no kind-0 fetched in the nav
+  // — rendered as two characters of the npub ("M2"), a label that means nothing
+  // to the person reading it (user feedback 2026-09-20).
+  ellipsis:
+    '<circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/>',
   search: '<circle cx="11" cy="11" r="7"/><path d="M21 21l-4-4"/>',
   check: '<path d="M20 6L9 17l-5-5"/>',
   chevronDown: '<path d="M6 9l6 6 6-6"/>',

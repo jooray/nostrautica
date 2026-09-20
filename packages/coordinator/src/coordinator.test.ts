@@ -373,6 +373,14 @@ async function setup(
      *  ("provA") and match+embed to another ("provB"), exposed as h.llmA/h.llmB. */
     splitProviders?: boolean;
     /**
+     * Route pair SCORES to a decision model (`models.match_score`), exposed as
+     * h.decisionLlm. The number is the rubric LEVEL (0..4) every question is
+     * answered at, so every published score becomes level/4 — deliberately a
+     * value the chat mock never produces, which is what makes "the numbers came
+     * from the decision model and the prose did not" assertable.
+     */
+    decisionLevel?: number;
+    /**
      * Which of the two space kinds this space is published under (PROTOCOL-NIP.md
      * §1.1): 31923 (dated NIP-52 event, the default) or 31612 (standing community).
      * Drives BOTH the coordinate's kind and the kind of the seeded metadata record,
@@ -442,14 +450,52 @@ async function setup(
   // land on its own instance — the routing can then be asserted call-by-call.
   const llmA = opts.splitProviders ? makeLlm(counters) : undefined;
   const llmB = opts.splitProviders ? makeLlm(counters) : undefined;
+  const decisionLlm =
+    opts.decisionLevel === undefined
+      ? undefined
+      : new MockLlm(() => ({}), {
+          id: "mock-decide",
+          decide: ({ questions }) => {
+            const answers: Record<string, any> = {};
+            for (const [id, q] of Object.entries(questions)) {
+              const levels = (q as { criteria: readonly string[] }).criteria;
+              answers[id] = {
+                type: "score",
+                score: opts.decisionLevel,
+                legend: Object.fromEntries(levels.map((c, i) => [String(i), c])),
+                probabilities: Object.fromEntries(levels.map((_, i) => [String(i), i === opts.decisionLevel ? 1 : 0])),
+                confidence: 1,
+              };
+            }
+            return answers;
+          },
+        });
+  const decisionRole = decisionLlm
+    ? {
+        llm: decisionLlm,
+        model: "jev-mock",
+        provider: "mock-decide",
+        requirePrivate: false,
+        privacy: "non-private" as const,
+      }
+    : undefined;
   const roles: RoleRoutes | undefined = opts.splitProviders
     ? {
         summary: { llm: llmA!, model: "mock-cheap", provider: "provA", requirePrivate: true, privacy: "private" },
         translate: { llm: llmA!, model: "mock-cheap", provider: "provA", requirePrivate: true, privacy: "private" },
         match: { llm: llmB!, model: "mock-strong", provider: "provB", requirePrivate: false, privacy: "non-private" },
         embed: { llm: llmB!, model: "mock-embed", provider: "provB", requirePrivate: false, privacy: "non-private" },
+        ...(decisionRole ? { match_score: decisionRole } : {}),
       }
-    : undefined;
+    : decisionRole
+      ? {
+          summary: { llm, model: "mock-cheap", provider: "mock", requirePrivate: true, privacy: "private" },
+          translate: { llm, model: "mock-cheap", provider: "mock", requirePrivate: true, privacy: "private" },
+          match: { llm, model: "mock-strong", provider: "mock", requirePrivate: false, privacy: "non-private" },
+          embed: { llm, model: "mock-embed", provider: "mock", requirePrivate: false, privacy: "non-private" },
+          match_score: decisionRole,
+        }
+      : undefined;
   const stt = new MockStt({
     [String(blobSize("crypto"))]: FIXTURES.crypto.transcript,
     [String(blobSize("design"))]: FIXTURES.design.transcript,
@@ -509,7 +555,7 @@ async function setup(
     });
   }
 
-  return { coordinator, transport, store, llm, llmA, llmB, stt, counters, coordSk, eidSk, einboxSk, coordinate, spaceKind, eck, invites, nextInvite: 0, clock };
+  return { coordinator, transport, store, llm, llmA, llmB, decisionLlm, stt, counters, coordSk, eidSk, einboxSk, coordinate, spaceKind, eck, invites, nextInvite: 0, clock };
 }
 
 async function join(h: Harness, attendeeSk: Uint8Array, fixture: FixtureKey): Promise<string> {
@@ -6419,5 +6465,84 @@ describe("chat enrolment is re-checked for a bounded window after the grant", ()
     }
     expect(h.transport.fetches.filter((f: any) => f.kinds?.includes(30443)).length).toBe(kpReadsAfterEnrolment);
     expect(h.store.pendingJobCount()).toBe(0);
+  });
+});
+
+describe("models.match_score — pair numbers from a decision model (2026-09-19)", () => {
+  /** The attendee's own newest 31605 list, decrypted with their key. */
+  function matchesOf(h: Harness, sk: Uint8Array, pubkey: string) {
+    const d = blindedD(h.eck, h.coordinate, pubkey);
+    const lists = h.transport.published.filter(
+      (e) => e.kind === KIND_MATCH_LIST && e.tags.find((t) => t[0] === "d")?.[1] === d,
+    );
+    if (lists.length === 0) return undefined;
+    return lists
+      .map((e) => matchListContentSchema.parse(JSON.parse(nip44Decrypt(sk, getPublicKey(h.coordSk), e.content))))
+      .sort((a, b) => b.matches.length - a.matches.length)[0]!;
+  }
+
+  it("scores come from the decision model; reasoning and icebreakers still come from the chat model", async () => {
+    // Level 4 of a 5-level rubric → 4/4 = 1.0, a value the chat mock never emits
+    // (its scoreEntry tops out at 0.9), so this cannot pass by coincidence.
+    const h = await setup(0, { decisionLevel: 4 });
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+
+    const list = matchesOf(h, cryptoSk, cryptoPk);
+    expect(list).toBeDefined();
+    expect(list!.matches.length).toBeGreaterThan(0);
+    for (const m of list!.matches) {
+      expect(m.score).toBe(1);
+      expect(m.similarity).toBe(1);
+      expect(m.complementarity).toBe(1);
+      // The prose is the chat model's, untouched — this is the whole point of
+      // the hybrid: a decision model cannot write it.
+      expect(m.reasoning.length).toBeGreaterThan(0);
+    }
+    expect(h.decisionLlm!.decideCalls).toBeGreaterThan(0);
+    // The forward direction went through the decision model (anchor = target).
+    const modes = h.decisionLlm!.decisions.map((dcn) => JSON.stringify(dcn.state));
+    expect(modes.some((m) => m.includes('"role":"target"'))).toBe(true);
+  });
+
+  it("a mid rubric level lands mid-scale end to end", async () => {
+    const h = await setup(0, { decisionLevel: 2 });
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    expect(matchesOf(h, cryptoSk, cryptoPk)!.matches.every((m) => m.score === 0.5)).toBe(true);
+  });
+
+  it("without the role, nothing changes: no decision provider and the chat model's own scores stand", async () => {
+    const h = await setup(0);
+    const cryptoSk = generateSecretKey();
+    const cryptoPk = await join(h, cryptoSk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const list = matchesOf(h, cryptoSk, cryptoPk);
+    expect(list!.matches.length).toBeGreaterThan(0);
+    expect(list!.matches.every((m) => m.score === 1)).toBe(false);
+    expect(h.decisionLlm).toBeUndefined();
+  });
+
+  it("enabling it changes the pair inputs hash, so a recompute re-scores rather than reusing old numbers", async () => {
+    // Same roster, same profiles, same chat model: only the decision role differs.
+    // If the key did not move, a daemon that switched scorers would serve the old
+    // scorer's cached numbers and the switch would appear to do nothing (PIPE-3).
+    async function hashOf(opts: { decisionLevel?: number }) {
+      const h = await setup(0, opts);
+      const a = await join(h, generateSecretKey(), "crypto");
+      const b = await join(h, generateSecretKey(), "design");
+      await h.coordinator.jobs.drain();
+      return h.store.getPairDirection(h.coordinate, a, b)?.inputs_hash;
+    }
+    const plain = await hashOf({});
+    const decided = await hashOf({ decisionLevel: 4 });
+    expect(plain).toBeTruthy();
+    expect(decided).toBeTruthy();
+    expect(decided).not.toBe(plain);
   });
 });

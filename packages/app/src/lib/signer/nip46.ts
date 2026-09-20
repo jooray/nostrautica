@@ -21,7 +21,7 @@ import {
   type BunkerPointer,
 } from "nostr-tools/nip46";
 import { SimplePool } from "nostr-tools/pool";
-import { bytesToHex, hexToBytes } from "@nostrautica/protocol";
+import { bytesToHex, hexToBytes, sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
 import { signerRelays } from "$lib/nostr/relays.js";
 import type { AppSigner } from "./types.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
@@ -399,6 +399,11 @@ function withForegroundDeadline<T>(
   absoluteMs = ms * 8,
 ): Promise<T> {
   if (typeof document === "undefined") return withTimeout(promise, ms, undefined, message);
+  // The document this wrapper registers on is the one it must unregister from,
+  // whenever that turns out to be — a reply can settle after the environment
+  // that created the request is gone (tests swap the global; a page teardown
+  // is the production shape of the same thing).
+  const doc = document;
   return new Promise<T>((resolve, reject) => {
     let remaining = ms;
     let startedAt = 0;
@@ -416,7 +421,7 @@ function withForegroundDeadline<T>(
       done = true;
       pause();
       clearTimeout(ceiling);
-      document.removeEventListener("visibilitychange", onVisibility);
+      doc.removeEventListener("visibilitychange", onVisibility);
       fn();
     };
     const resume = () => {
@@ -425,11 +430,11 @@ function withForegroundDeadline<T>(
       timer = setTimeout(() => finish(() => reject(new Error(message()))), remaining);
     };
     const onVisibility = () => {
-      if (document.visibilityState === "visible") resume();
+      if (doc.visibilityState === "visible") resume();
       else pause();
     };
-    document.addEventListener("visibilitychange", onVisibility);
-    if (document.visibilityState === "visible") resume();
+    doc.addEventListener("visibilitychange", onVisibility);
+    if (doc.visibilityState === "visible") resume();
     promise.then(
       (v) => finish(() => resolve(v)),
       (e) => finish(() => reject(e)),
@@ -471,6 +476,24 @@ const RESUMED = Symbol("nip46-resumed");
  * request to the signer, so it is bounded rather than unlimited.
  */
 const MAX_RPC_RESUMES = 3;
+
+/**
+ * How long a reply that arrived AFTER its request was given up on stays
+ * claimable by an identical re-request (see `Nip46Signer.rpc`). Generous: it
+ * exists for a human on another device who took minutes, not seconds, to
+ * approve. Bounded so a session never accumulates every reply it ever got.
+ */
+const LATE_REPLY_TTL_MS = 15 * 60_000;
+const MAX_LATE_REPLIES = 64;
+
+/**
+ * Identity of a request for coalescing and late-reply matching: the method and
+ * its exact arguments. Hashed so a map key is never a 100 KB ciphertext, and
+ * length-prefixed so two argument lists can't collide by concatenation.
+ */
+function rpcFingerprint(method: string, args: string[]): string {
+  return sha256Hex(utf8ToBytes([method, ...args].map((a) => `${a.length}:${a}`).join("|")));
+}
 
 /**
  * `connect` with lost-ack recovery. If the tab was backgrounded (user approving
@@ -664,6 +687,14 @@ const NO_SWITCH_RELAYS = { skipSwitchRelays: true } as const;
 export class Nip46Signer implements AppSigner {
   readonly method = "nip46" as const;
   private pk: string | null = null;
+
+  /**
+   * Requests in flight, by fingerprint, and replies that landed after their
+   * request had already been given up on. Together they make "the user approved
+   * it late" a success instead of a permanent failure — see `rpc()`.
+   */
+  private readonly inflight = new Map<string, { promise: Promise<unknown>; late: (v: unknown) => void }>();
+  private readonly lateReplies = new Map<string, { value: unknown; at: number }>();
 
   private constructor(
     private readonly bunker: BunkerSigner,
@@ -935,11 +966,24 @@ export class Nip46Signer implements AppSigner {
       },
       (e: unknown) => {
         // fromURI failed on its own (e.g. every relay closed) — same teardown.
-        if (outcome === "pending") {
+        const own = outcome === "pending";
+        // Read relay health BEFORE teardown. `release(true)` destroys the pool,
+        // and a destroyed pool reports an empty connection map, which the
+        // health poll reads as "every relay dropped" — naming relays that were
+        // fine and drowning out the one that actually refused.
+        const down = own ? health.unreachable() : [];
+        if (own) {
           outcome = "abandoned";
           release(true);
         }
-        throw e instanceof Error ? e : new Error(String(e));
+        const err = e instanceof Error ? e : new Error(String(e));
+        // nostr-tools gives up on its own when every advertised relay closes,
+        // and its message ("subscription closed before connection was
+        // established.") names nobody and says nothing a user can act on — 3 s
+        // of socket timeouts and then it, while OUR relay-naming message only
+        // arrived after the 120 s budget. Same cause, same words now: when
+        // sockets actually failed during this wait, say which.
+        throw down.length ? new Error(timeoutMessage(() => down)) : err;
       },
     );
     return { uri, connected, cancel };
@@ -1161,6 +1205,76 @@ export class Nip46Signer implements AppSigner {
     }
   }
 
+  /**
+   * One RPC, identified by what it asks for rather than by request id.
+   *
+   * A signer that queues approvals — Clave on iOS, Amber with the permission not
+   * pre-granted — sends NO reply until the human taps Approve; per NIP-46 an
+   * early `error` would be terminal, so silence is the only "pending" it has.
+   * `rpcWithForegroundRetry` gives up after RPC_TIMEOUT_MS of foreground time,
+   * which is fine on the phone that is also running the signer (the tab is
+   * hidden while the user approves, the clock is paused) and wrong on a desktop:
+   * the phone is in a pocket, the tab stays visible, the deadline runs out, and
+   * when the user does approve, nostr-tools delivers the reply to a promise
+   * nobody is waiting on. Meanwhile every poll that re-asks (a grant scan every
+   * 20 s, a join poll every few seconds) sent the SAME question again under a
+   * fresh id, so the phone filled up with approval prompts of which each tap
+   * satisfied one already-abandoned request. That is the 2026-09-19 report:
+   * approved on the phone, "waiting for approval" forever on the Mac.
+   *
+   * Two mechanisms, both keyed by fingerprint (method + exact arguments):
+   *   - coalescing: an identical request already in flight is joined, not
+   *     re-sent, so overlapping polls cost one prompt rather than one each;
+   *   - late replies: the underlying promise stays observed after the deadline
+   *     rejects. When its reply finally arrives it is recorded, any request for
+   *     the same fingerprint that is in flight at that moment is resolved with
+   *     it, and an identical request made within LATE_REPLY_TTL_MS is answered
+   *     from the record without asking the signer again.
+   * Every fingerprinted method is idempotent in the sense that matters: a
+   * signature or a ciphertext produced for these exact inputs, whenever it
+   * arrives, is a correct answer to these exact inputs.
+   */
+  private rpc<T>(fingerprint: string, operation: () => Promise<T>): Promise<T> {
+    const late = this.lateReplies.get(fingerprint);
+    if (late) {
+      if (Date.now() - late.at < LATE_REPLY_TTL_MS) return Promise.resolve(late.value as T);
+      this.lateReplies.delete(fingerprint);
+    }
+    const running = this.inflight.get(fingerprint);
+    if (running) return running.promise as Promise<T>;
+
+    let resolveLate!: (v: T) => void;
+    const fromLate = new Promise<T>((r) => (resolveLate = r));
+    const entry = { promise: undefined as unknown as Promise<T>, late: (v: unknown) => resolveLate(v as T) };
+    // Each attempt's raw promise is observed for as long as it lives — that is
+    // what turns a reply after the deadline into a recorded one.
+    const observed = () =>
+      operation().then((value) => {
+        this.recordReply(fingerprint, value);
+        return value;
+      });
+    const main = this.rpcWithForegroundRetry(observed);
+    // If a late reply wins, `main` may still reject later (its own deadline);
+    // that rejection is already accounted for and must not surface as unhandled.
+    void main.catch(() => {});
+    entry.promise = Promise.race([main, fromLate]).finally(() => {
+      if (this.inflight.get(fingerprint) === entry) this.inflight.delete(fingerprint);
+    });
+    this.inflight.set(fingerprint, entry);
+    return entry.promise;
+  }
+
+  private recordReply(fingerprint: string, value: unknown): void {
+    this.lateReplies.delete(fingerprint); // re-insert so the map stays in insertion order
+    this.lateReplies.set(fingerprint, { value, at: Date.now() });
+    while (this.lateReplies.size > MAX_LATE_REPLIES) {
+      const oldest = this.lateReplies.keys().next().value;
+      if (oldest === undefined) break;
+      this.lateReplies.delete(oldest);
+    }
+    this.inflight.get(fingerprint)?.late(value);
+  }
+
   async signEvent(template: EventTemplate): Promise<VerifiedEvent> {
     const pubkey = await this.getPublicKey();
     const requested = {
@@ -1169,7 +1283,15 @@ export class Nip46Signer implements AppSigner {
       content: template.content,
       tags: JSON.stringify(template.tags),
     };
-    const signed = await this.rpcWithForegroundRetry(() => this.bunker.signEvent(template));
+    const signed = await this.rpc(
+      rpcFingerprint("sign_event", [
+        String(template.kind),
+        String(template.created_at),
+        template.content,
+        requested.tags,
+      ]),
+      () => this.bunker.signEvent(template),
+    );
     if (
       signed.pubkey !== pubkey ||
       signed.kind !== requested.kind ||
@@ -1183,13 +1305,13 @@ export class Nip46Signer implements AppSigner {
   }
 
   async nip44Encrypt(recipientPubkey: string, plaintext: string): Promise<string> {
-    return this.rpcWithForegroundRetry(() =>
+    return this.rpc(rpcFingerprint("nip44_encrypt", [recipientPubkey, plaintext]), () =>
       this.bunker.nip44Encrypt(recipientPubkey, plaintext),
     );
   }
 
   async nip44Decrypt(counterpartyPubkey: string, ciphertext: string): Promise<string> {
-    return this.rpcWithForegroundRetry(() =>
+    return this.rpc(rpcFingerprint("nip44_decrypt", [counterpartyPubkey, ciphertext]), () =>
       this.bunker.nip44Decrypt(counterpartyPubkey, ciphertext),
     );
   }

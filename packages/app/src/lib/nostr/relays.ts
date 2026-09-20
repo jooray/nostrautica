@@ -27,12 +27,17 @@ const ENV_BLOSSOM = (import.meta.env?.VITE_NOSTRAUTICA_BLOSSOM as string | undef
  * outage left effectively one relay carrying the app — so the set is wider now
  * and deliberately spread across operators. Anything requiring payment or auth
  * is excluded: attendees must be able to publish without an account somewhere.
+ *
+ * `relay.nostr.net` was dropped 2026-09-19: its Cloudflare front has answered
+ * the WebSocket upgrade with HTTP 500/525 since 2026-09-14 (coordinator log
+ * first failure 12:42 that day; Node probe closed 1006, Chromium 525 then 500,
+ * WebKit 500). Every operation that dialled it paid its connect timeout for
+ * nothing.
  */
 export const DEFAULT_RELAYS = ENV_RELAYS ?? [
   "wss://nostr.cypherpunk.today",
   "wss://nos.lol",
   "wss://relay.primal.net",
-  "wss://relay.nostr.net",
   "wss://nostr.mom",
   "wss://nostr.oxtr.dev",
 ];
@@ -115,15 +120,20 @@ export function chatInteropRelays(eventRelays: string[]): string[] {
  * with this list, so a pointer that knows only relay.nsec.app is degraded rather
  * than instantly fatal.
  *
- * Widened from two to FOUR relays over 2026-07-28. The whole redundancy argument
- * is "the signer publishes its ephemeral reply to ALL of these, any one open
- * socket is enough" — but kind-24133 replies are not replayable, so the reply
- * only lands if a socket we share with the signer is open in the exact window it
- * publishes. With only two relays a single operator outage halves those odds
- * during the login-critical wait. `nos.lol` and `relay.nostr.net` are the third
- * and fourth independent, open-write operators, both already trusted in
- * `DEFAULT_RELAYS` (probed 2026-07-21), so each costs one more warm mobile
- * socket for a materially wider reply surface.
+ * `relay.nostr.net` got the same treatment on 2026-09-19: its Cloudflare front
+ * answered the WebSocket upgrade with HTTP 500/525 on every probe (Node `1006`,
+ * Chromium `500`, WebKit `500`; coordinator log failing since 2026-09-14
+ * 12:42). Same rule as relay.nsec.app — accepted from a pointer, never
+ * advertised.
+ *
+ * Widened from two to FOUR relays over 2026-07-28; back to THREE with the
+ * nostr.net removal. The whole redundancy argument is "the signer publishes its
+ * ephemeral reply to ALL of these, any one open socket is enough" — but
+ * kind-24133 replies are not replayable, so the reply only lands if a socket we
+ * share with the signer is open in the exact window it publishes. With only two
+ * relays a single operator outage halves those odds during the login-critical
+ * wait; three independent operators keep that floor. A replacement for
+ * nostr.net should be probed (connect + open write) before it is added back.
  *
  * (This paragraph said "two to three" against a four-entry list until
  * 2026-09-04 — a fourth relay was added without the comment following it. Count
@@ -133,7 +143,6 @@ export const NIP46_RELAYS = ENV_RELAYS ?? [
   "wss://nostr.cypherpunk.today",
   "wss://relay.primal.net",
   "wss://nos.lol",
-  "wss://relay.nostr.net",
 ];
 
 /**
@@ -182,7 +191,9 @@ export const DEFAULT_BLOSSOM_SERVERS = ENV_BLOSSOM ?? [
  * gift-wrapped DMs (and future group chat) reliably reach the user in other
  * clients. These are inboxes where the user agrees to receive kind-1059 wraps —
  * a small set of widely-reachable write relays. Honors VITE_NOSTRAUTICA_RELAYS
- * so local e2e keeps working.
+ * so local e2e keeps working. `relay.nostr.net` dropped 2026-09-19 (see
+ * `DEFAULT_RELAYS`): an inbox nobody can deliver to is worse than a shorter
+ * list.
  */
 export const DM_RELAY_LIST: string[] =
   ENV_RELAYS ??
@@ -190,10 +201,14 @@ export const DM_RELAY_LIST: string[] =
     "wss://nostr.cypherpunk.today",
     "wss://relay.primal.net",
     "wss://nos.lol",
-    "wss://relay.nostr.net",
   ];
 
-/** NIP-65 relay-list defaults published for new users (spec §5.4 item 2). */
+/**
+ * NIP-65 relay-list defaults published for new users (spec §5.4 item 2).
+ * `relay.nostr.net` dropped 2026-09-19 (see `DEFAULT_RELAYS`) — this list is
+ * written to a brand-new user's kind 10002, so a dead relay here would follow
+ * them into every other client too.
+ */
 export const ONBOARDING_RELAY_LIST: { url: string; read: boolean; write: boolean }[] =
   ENV_RELAYS
     ? ENV_RELAYS.map((url) => ({ url, read: true, write: true }))
@@ -201,7 +216,6 @@ export const ONBOARDING_RELAY_LIST: { url: string; read: boolean; write: boolean
         { url: "wss://nostr.cypherpunk.today", read: true, write: true },
         { url: "wss://nos.lol", read: true, write: true },
         { url: "wss://relay.primal.net", read: true, write: true },
-        { url: "wss://relay.nostr.net", read: true, write: true },
         { url: "wss://nostr.mom", read: true, write: true },
         { url: "wss://nostr.oxtr.dev", read: true, write: false },
       ];

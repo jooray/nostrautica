@@ -41,7 +41,30 @@
  */
 export type ConfidenceBand = "strong" | "good" | "hello";
 
-/** A match is never "strong" below this, however well it ranks for this attendee. */
+/**
+ * A match is never "strong" below this, however well it ranks for this attendee.
+ *
+ * UNCHANGED for the decision scorer (`models.match_score`, 2026-09-19), and that
+ * is a deliberate decision rather than an oversight. A decision model's score is
+ * `level / 4` over a five-level rubric, so unlike the chat model's free-running
+ * 0..1 these numbers have fixed meanings: 0.75 IS "strong one-directional or
+ * clearly useful fit", 0.5 is "plausible, some overlap but no sharp need met".
+ * The floor therefore lands exactly on the rubric level the badge claims, which
+ * is a better justification than the one a quantile match would give.
+ *
+ * It does make the badge rarer. On the Plan B roster, banded under this floor:
+ * the chat scorer called 20% of shown matches strong and left 1 attendee of 39
+ * with none; the decision scorer calls 9% strong and leaves 10 of 39 with none.
+ * Some of that gap is honest — a single-topic room where nobody is a sharp fit
+ * for you is exactly the case this floor exists to report — and some of it may
+ * be the rubric being stricter than the product wants. Which, is a question
+ * about whether the matches are GOOD, and no metric in the benchmark can answer
+ * it; `benchmarks/matching/private/labels-blind-top3.json` was written for a
+ * human who can. Revisit this constant with those labels in hand, not before.
+ *
+ * Whatever it becomes, it is GLOBAL: an event still carrying scores from the
+ * other scorer is banded by the same number, so changing it re-bands history.
+ */
 export const STRONG_FLOOR = 0.75;
 /** …nor unless it is among this many best (ties at the cut included). */
 export const STRONG_RANK = 3;

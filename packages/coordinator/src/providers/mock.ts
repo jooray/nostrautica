@@ -8,6 +8,8 @@ import type {
   LlmProvider,
   ModelInfo,
   TokenUsage,
+  DecisionAnswer,
+  DecisionQuestion,
 } from "./types.js";
 import { validateProviderValue } from "./types.js";
 
@@ -37,16 +39,66 @@ export class MockLlm implements LlmProvider {
   readonly id: string;
   completeCalls = 0;
   embedCalls = 0;
+  decideCalls = 0;
+  /** Present only when the fake was given a decision handler (see constructor). */
+  decide?: (req: {
+    state: unknown;
+    questions: Record<string, DecisionQuestion>;
+    model: string;
+  }) => Promise<{ answers: Record<string, DecisionAnswer>; usage: TokenUsage }>;
+  /** Every decide() request seen, for shape assertions in tests. */
+  decisions: { state: unknown; questions: Record<string, DecisionQuestion>; model: string }[] = [];
   /** Every completeStructured request seen, for prompt assertions in tests. */
   requests: { system: string; user: string; schemaName: string }[] = [];
   private readonly catalogue: ModelInfo[];
   private readonly modelsError?: () => never;
+  private readonly decider?: (req: {
+    state: unknown;
+    questions: Record<string, DecisionQuestion>;
+    model: string;
+  }) => Record<string, DecisionAnswer>;
   constructor(
     private readonly handler: (req: { system: string; user: string; schemaName: string }) => unknown,
     /** Per-role routing tests (audit H-1): give a fake a distinct id, catalogue, or
      *  a models() that throws (to simulate a one-provider outage). */
-    opts: { id?: string; models?: ModelInfo[]; modelsThrows?: boolean } = {},
+    opts: {
+      id?: string;
+      models?: ModelInfo[];
+      modelsThrows?: boolean;
+      /** Supply a decision handler to make this fake a DECISION provider too.
+       *  Absent, `decide` is undefined — which is what `resolveRoleRoutes` checks
+       *  when it refuses to route models.match_score at a provider without one. */
+      decide?: (req: {
+        state: unknown;
+        questions: Record<string, DecisionQuestion>;
+        model: string;
+      }) => Record<string, DecisionAnswer>;
+    } = {},
   ) {
+    this.decider = opts.decide;
+    // Attached as an OWN property only when a decider was supplied, never as a
+    // class method: `decide` is OPTIONAL on LlmProvider and `typeof llm.decide
+    // === "function"` is the production capability probe. A prototype method
+    // would answer that probe on every fake — including the ones written to
+    // prove startup fails closed on a provider that has no decision endpoint,
+    // which is precisely the check that would then be testing nothing. (A
+    // `delete this.decide` does not help: it removes an own property, and a
+    // class method is not one.)
+    if (opts.decide) {
+      this.decide = async (req: {
+        state: unknown;
+        questions: Record<string, DecisionQuestion>;
+        model: string;
+      }): Promise<{ answers: Record<string, DecisionAnswer>; usage: TokenUsage }> => {
+        this.decideCalls++;
+        this.decisions.push({ state: req.state, questions: req.questions, model: req.model });
+        return {
+          answers: this.decider!(req),
+          // Input-only billing, as on Venice: output tokens are reported and free.
+          usage: { promptTokens: 100, completionTokens: 20, totalTokens: 120 },
+        };
+      };
+    }
     this.id = opts.id ?? "mock";
     this.catalogue = opts.models ?? [
       { id: "mock-strong", supportsResponseSchema: true, private: true },

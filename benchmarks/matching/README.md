@@ -831,3 +831,40 @@ The latency arm was understating this too — it sent `maxTokens: 4000` while
 calling itself "the same K=10 shape production uses", so it timed a shorter
 answer than the daemon ever receives (GLM: 16.1s there, 70.6s on the real
 shape). It now sends `batchMaxTokens(10)`.
+
+## Jev: a decision model instead of a chat model (experiment, 2026-09-19)
+
+Venice lists `jev-latest` (TypeSafe AI's "System One" model, `type: decision`)
+behind a separate endpoint, `POST /decisions`: a `state` plus a map of typed
+questions (`noul` = P(yes), `choice`, `score` = probability-weighted rubric
+level), no prose. Input tokens only are billed ($0.042/Mtok, output $0), the
+state is billed once per request however many questions ride on it, and a call
+returns in well under a second. It cannot write `reasoning_for_target`, so it
+can only ever replace the *scoring* half of a batch. The API notes live in
+`~/projects/server-documentation/experiments/jev.md`; the findings are in
+`docs/MATCHING-BENCHMARK.md`.
+
+```sh
+node jev-run.mjs --shape pair  --seed 1              # one request per directed pair (380 full)
+node jev-run.mjs --shape batch --k 10 --seed 1       # one request per (target, 10 candidates)
+node jev-run.mjs --shape pair  --seed 1 --subset     # eval subset, free after a full run
+node evaluate.mjs                                    # jev rows sort in beside every other model
+node jev-compare.mjs results/A.json results/B.json --top 5   # cross-seed top-N tau, same #1, ties
+```
+
+Each run writes two result files from the same calls: `JEVPAIR-score` ranks by
+the 5-level rubric score (`score / 4`), `JEVPAIR-noul` by the yes/no probability
+(`JEVBATCH-K10-*` likewise; K is in the label because a K=5 run once overwrote the K=10 file). `reasoning` is `""` on every edge, so `empty` in the
+evaluate table equals the edge count by construction.
+
+Two operational facts the runner encodes, both learned the expensive way:
+
+- **100 requests per minute per key, and past 50 non-success responses the key
+  is locked for 30 s** (`429 Too many failed attempts (> 50)`). Retrying 429s
+  is what trips the lockout, so `jev-run.mjs` paces itself to one request start
+  per `PACE_MS` (620) instead. `CONC` only changes how many are in flight.
+- **Do not `import` from `run.mjs`.** It calls `main()` at module load, so an
+  import runs a phantom scoring sweep with `--model undefined`. The subset
+  builder is inlined in `jev-run.mjs` for that reason.
+
+Raw responses (with the full `probabilities` object) are cached in `cache/jev/`.

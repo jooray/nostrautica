@@ -297,6 +297,24 @@ describe("startNostrConnect settles on our terms, not the library's", () => {
     await expect(handle.connected).rejects.toThrow(/subscription closed/);
     expect(FakePool.last().destroyed).toBe(1);
   });
+
+  it("names the relays that refused the socket when fromURI gives up on its own", async () => {
+    // The library's own message for this ("subscription closed before
+    // connection was established.") names nobody and reads like a bug in the
+    // app. It fires after 3 s of socket timeouts, long before our 120 s budget,
+    // so the relay-naming message must be attached HERE, not only to the timer.
+    fromURI.mockImplementation(() => {
+      const pool = FakePool.last();
+      pool.relayFailed("wss://nos.lol");
+      pool.relayFailed("wss://relay.example");
+      return Promise.reject(new Error("subscription closed before connection was established."));
+    });
+    const handle = Nip46Signer.startNostrConnect(["wss://nos.lol", "wss://relay.example"]);
+    const err = await handle.connected.catch((e: Error) => e);
+    expect((err as Error).message).toContain("nos.lol");
+    expect((err as Error).message).toContain("relay.example");
+    expect((err as Error).message).not.toContain("subscription closed");
+  });
 });
 
 describe("fromBunkerUri unions the pointer's relays with our own", () => {
@@ -907,5 +925,136 @@ describe("the foreground deadline still has a wall-clock ceiling", () => {
       vi.useRealTimers();
       vi.unstubAllGlobals();
     }
+  });
+});
+
+/**
+ * A signer that queues approvals (Clave, Amber without a pre-granted
+ * permission) answers with silence until the human taps Approve. On a desktop
+ * the tab never hides, so the foreground deadline runs out while the phone is
+ * still in a pocket — and the reply, when it comes, used to land on a promise
+ * nobody awaited, while each poll re-asked under a fresh id and stacked another
+ * prompt on the phone. Prod report 2026-09-19: approved on the phone, "waiting
+ * for approval" forever on the Mac.
+ */
+describe("identical RPCs are coalesced and a late reply is not thrown away", () => {
+  async function signerWith(bunker = fakeBunker()) {
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["wss://relay.example"],
+      secret: null,
+    });
+    fromBunker.mockReturnValue(bunker);
+    return {
+      signer: await Nip46Signer.fromBunkerUri(`bunker://${PUBKEY}?relay=wss%3A%2F%2Frelay.example`),
+      bunker,
+    };
+  }
+
+  it("joins an identical request already in flight instead of asking the signer again", async () => {
+    const { signer, bunker } = await signerWith();
+    let resolveFirst!: (v: string) => void;
+    bunker.nip44Decrypt.mockReturnValueOnce(new Promise<string>((r) => (resolveFirst = r)));
+    const a = signer.nip44Decrypt(PUBKEY, "ciphertext");
+    const b = signer.nip44Decrypt(PUBKEY, "ciphertext"); // the next poll, same wrap
+    resolveFirst("plaintext");
+    expect(await a).toBe("plaintext");
+    expect(await b).toBe("plaintext");
+    expect(bunker.nip44Decrypt).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not coalesce requests that differ in their arguments", async () => {
+    const { signer, bunker } = await signerWith();
+    bunker.nip44Decrypt.mockResolvedValueOnce("one").mockResolvedValueOnce("two");
+    const [a, b] = await Promise.all([
+      signer.nip44Decrypt(PUBKEY, "ciphertext-1"),
+      signer.nip44Decrypt(PUBKEY, "ciphertext-2"),
+    ]);
+    expect([a, b]).toEqual(["one", "two"]);
+    expect(bunker.nip44Decrypt).toHaveBeenCalledTimes(2);
+  });
+
+  it("answers a repeat of a timed-out request from the reply that arrived late", async () => {
+    const { signer, bunker } = await signerWith();
+    vi.useFakeTimers();
+    try {
+      let resolveFirst!: (v: string) => void;
+      bunker.nip44Decrypt.mockReturnValueOnce(new Promise<string>((r) => (resolveFirst = r)));
+      const first = signer.nip44Decrypt(PUBKEY, "ciphertext").then(
+        () => "resolved",
+        () => "rejected",
+      );
+      await vi.advanceTimersByTimeAsync(61_000); // the foreground deadline
+      expect(await first).toBe("rejected");
+      // The user taps Approve on the phone two minutes later.
+      await vi.advanceTimersByTimeAsync(120_000);
+      resolveFirst("plaintext");
+      await vi.advanceTimersByTimeAsync(0);
+      // The next poll asks the same question: answered from the record, no prompt.
+      expect(await signer.nip44Decrypt(PUBKEY, "ciphertext")).toBe("plaintext");
+      expect(bunker.nip44Decrypt).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("resolves an in-flight repeat the moment the earlier attempt's reply lands", async () => {
+    // Attempt 1 timed out, attempt 2 (the next poll) is pending on a fresh id, and
+    // the user approves the FIRST prompt on their phone. That reply must satisfy
+    // attempt 2 — it answers the identical question — rather than being recorded
+    // and left for a third attempt that may never come.
+    const { signer, bunker } = await signerWith();
+    vi.useFakeTimers();
+    try {
+      let resolveFirst!: (v: string) => void;
+      bunker.nip44Decrypt
+        .mockReturnValueOnce(new Promise<string>((r) => (resolveFirst = r)))
+        .mockReturnValueOnce(new Promise<string>(() => {})); // attempt 2: prompt never tapped
+      const first = signer.nip44Decrypt(PUBKEY, "ciphertext").catch(() => "rejected");
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(await first).toBe("rejected");
+      const second = signer.nip44Decrypt(PUBKEY, "ciphertext");
+      await vi.advanceTimersByTimeAsync(0); // the attempt reaches the bunker on a microtask
+      expect(bunker.nip44Decrypt).toHaveBeenCalledTimes(2);
+      await vi.advanceTimersByTimeAsync(5_000);
+      resolveFirst("plaintext"); // the late reply to attempt 1
+      expect(await second).toBe("plaintext");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("forgets a late reply once it is stale", async () => {
+    const { signer, bunker } = await signerWith();
+    vi.useFakeTimers();
+    try {
+      let resolveFirst!: (v: string) => void;
+      bunker.nip44Decrypt
+        .mockReturnValueOnce(new Promise<string>((r) => (resolveFirst = r)))
+        .mockResolvedValueOnce("fresh");
+      const first = signer.nip44Decrypt(PUBKEY, "ciphertext").catch(() => "rejected");
+      await vi.advanceTimersByTimeAsync(61_000);
+      expect(await first).toBe("rejected");
+      resolveFirst("plaintext");
+      await vi.advanceTimersByTimeAsync(16 * 60_000); // past LATE_REPLY_TTL_MS
+      expect(await signer.nip44Decrypt(PUBKEY, "ciphertext")).toBe("fresh");
+      expect(bunker.nip44Decrypt).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("applies the same to sign_event, keyed by the exact template", async () => {
+    const { signer, bunker } = await signerWith();
+    const template = { kind: 13, created_at: 123, content: "sealed", tags: [] as string[][] };
+    const signed = { ...template, pubkey: PUBKEY, id: "00".repeat(32), sig: "00".repeat(64) };
+    let resolveFirst!: (v: typeof signed) => void;
+    bunker.signEvent.mockReturnValueOnce(new Promise<typeof signed>((r) => (resolveFirst = r)));
+    const a = signer.signEvent(template);
+    const b = signer.signEvent({ ...template });
+    resolveFirst(signed);
+    expect(await a).toEqual(signed);
+    expect(await b).toEqual(signed);
+    expect(bunker.signEvent).toHaveBeenCalledTimes(1);
   });
 });

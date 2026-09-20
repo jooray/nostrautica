@@ -1,5 +1,6 @@
 <script lang="ts">
-  // Event-scoped bottom nav (redesign §6.2): Overview · People · Updates · More.
+  // Event-scoped nav (redesign §6.2). On a phone it is a bottom bar —
+  // Overview · People · Updates · More; on a desktop it is a left rail.
   // People is gated by role + config so a tab never dead-ends at "join first".
   // Matches merged INTO People (2026-09-13) — one list, matched people first —
   // so the new-matches badge now rides the People tab. Replicates BottomNav's shipped a11y pattern
@@ -10,10 +11,14 @@
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
   import { whatsNew } from "$lib/stores/whats-new.svelte.js";
+  import { viewport } from "$lib/stores/viewport.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
   import EventSwitcher from "$lib/components/EventSwitcher.svelte";
   import { dmUnread } from "$lib/stores/dm-unread.svelte.js";
+  import { moreRows } from "$lib/components/more-rows.js";
+  import { cachedProfiles, fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+  import { connectivity } from "$lib/stores/connectivity.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -28,11 +33,78 @@
   function active(...names: string[]): boolean {
     return names.includes(route.name);
   }
+
+  // ── Phone bar vs desktop rail ────────────────────────────────────────────
   // The bar holds Overview · People · Chat · Updates · More — five at most, one
   // fewer than before the People/Matches merge. That is what let Updates come
   // back out of the More menu: it used to collapse there whenever Matches AND
   // Chat were both visible (MARMOT-GROUP-CHAT §7) because six tabs squeezed the
   // labels to the point of truncating ("Overvi…"). Five fit.
+  //
+  // The rail has no such shortage: it is as tall as the window and the items
+  // are one per line, so the whole More menu is rendered inline and the More
+  // tab does not exist up there at all (user feedback 2026-09-20 — "there's
+  // plenty of space"). A tab that means "the rest of the navigation is behind
+  // here" only earns its slot where slots are scarce.
+  //
+  // Rendered by a media-query RUNE rather than shown/hidden in CSS, because the
+  // difference is structural: the same destination must not be in the DOM twice
+  // (Messages as a rail row and as a More row), and Chat's active range differs
+  // between the two — see chatHere.
+  const rail = $derived(viewport.wide);
+  const rows = $derived(
+    rail
+      ? moreRows({
+          naddr,
+          isMember: eventShell.isMember,
+          isOrganizer: eventShell.isOrganizer,
+          loggedIn: session.loggedIn,
+        })
+      : [],
+  );
+  // On the phone, a DM opened from inside an event keeps the Chat tab lit so the
+  // user still reads as "in this event" while messaging (Bug 1). In the rail
+  // that would light two items at once, because Messages is a row of its own.
+  const chatHere = $derived(rail ? ["chat"] : ["chat", "dm", "dmPeer"]);
+  // Overview + Updates + More, plus whatever else this event turns on. Counted
+  // here rather than in CSS: see the .tight note in the stylesheet.
+  const tabCount = $derived(
+    3 +
+      (eventShell.showTalks ? 1 : 0) +
+      (eventShell.showPeople ? 1 : 0) +
+      (eventShell.showChat ? 1 : 0),
+  );
+
+  // The rail's account row shows the real photo and display name. The More tab
+  // it replaces passed neither to Avatar, which is why it drew two characters of
+  // the npub.
+  //
+  // Two rules, both learned the hard way in a desktop e2e run where the row sat
+  // on "Your identity" forever with the kind-0 sitting on the relay all along:
+  //
+  //  - Paint from the cache first, with no network at all. A returning user's
+  //    own profile is already there and the row should never flash a placeholder.
+  //  - Ask relays only once one is actually CONNECTED. The rail mounts with the
+  //    event page, which is early enough that connectNdk() has resolved but no
+  //    socket is open yet; the stream then EOSEs empty off the local cache — and
+  //    fetchProfiles stamps every pubkey it asked about, so that empty answer
+  //    would stick for the next ten minutes. `force` is for the same reason:
+  //    some earlier caller's equally early attempt may already have stamped it.
+  let me = $state<ProfileMeta | undefined>(undefined);
+  let asked = "";
+  $effect(() => {
+    const pk = session.pubkey;
+    const connected = connectivity.relay === "connected";
+    if (!rail || !pk) return;
+    const cached = cachedProfiles([pk]).get(pk);
+    if (cached) me = cached;
+    if (!connected || asked === pk) return;
+    asked = pk;
+    void (async () => {
+      const found = (await fetchProfiles([pk], { force: true }).catch(() => new Map())).get(pk);
+      if (found) me = found;
+    })();
+  });
 </script>
 
 {#snippet talksTab()}
@@ -45,7 +117,7 @@
   </button>
 {/snippet}
 
-<nav class="event-nav" aria-label={t("nav.eventPrimary")}>
+<nav class="event-nav" class:tight={tabCount >= 6} aria-label={t("nav.eventPrimary")}>
   <!-- Which event you are in, said once and permanently, and the way out to
        another one. On the phone this lives in the strip above the content and
        the bar has no room for it; in the rail it is the one thing that should
@@ -87,12 +159,9 @@
   {#if eventShell.showTalks && !eventShell.talksFirst}{@render talksTab()}{/if}
 
   {#if eventShell.showChat}
-    <!-- Active on the event group chat AND the global chat list / DM threads
-         reached from inside this event (Bug 1): the Chat tab stays lit so the
-         user still reads as "in this event" while messaging. -->
     <button
-      aria-current={active("chat", "dm", "dmPeer") ? "page" : undefined}
-      class:active={active("chat", "dm", "dmPeer")}
+      aria-current={active(...chatHere) ? "page" : undefined}
+      class:active={active(...chatHere)}
       onclick={() => router.go({ name: "chat", naddr })}
     >
       <span class="ico">
@@ -114,19 +183,48 @@
     <span class="ico"><Icon name="horn" size={24} /></span><span class="lbl">{t("nav.updates")}</span>
   </button>
 
-  <button
-    aria-current={active("eventMore") ? "page" : undefined}
-    class:active={active("eventMore")}
-    onclick={() => router.go({ name: "eventMore", naddr })}
-  >
-    <span class="ico">
-      {#if session.loggedIn && session.pubkey}
-        <Avatar pubkey={session.pubkey} size={22} />
-      {:else}
-        <Icon name="person" size={24} />
-      {/if}
-    </span><span class="lbl">{t("nav.more")}</span>
-  </button>
+  {#if !rail}
+    <button
+      aria-current={active("eventMore") ? "page" : undefined}
+      class:active={active("eventMore")}
+      onclick={() => router.go({ name: "eventMore", naddr })}
+    >
+      <span class="ico"><Icon name="ellipsis" size={24} /></span><span class="lbl">{t("nav.more")}</span>
+    </button>
+  {:else}
+    <!-- The More menu, inline. Same rows, same order, same gating as the More
+         page renders on a phone — one list, two surfaces (components/more-rows). -->
+    <div class="rail-rule" aria-hidden="true"></div>
+    {#each rows as r (r.go.name)}
+      <button
+        aria-current={active(...r.here) ? "page" : undefined}
+        class:active={active(...r.here)}
+        onclick={() => router.go(r.go)}
+      >
+        <span class="ico"><Icon name={r.icon} size={24} /></span><span class="lbl">{r.label}</span>
+      </button>
+    {/each}
+
+    <!-- Who you are signed in as, at the foot of the rail: the one part of the
+         More page that is an identity rather than a destination. It hands off to
+         the same global profile page the card on that page does. -->
+    <div class="rail-rule foot" aria-hidden="true"></div>
+    {#if session.loggedIn && session.pubkey}
+      <button
+        class="account"
+        aria-current={active("me") ? "page" : undefined}
+        class:active={active("me")}
+        onclick={() => router.go({ name: "me" })}
+      >
+        <span class="ico"><Avatar pubkey={session.pubkey} name={me?.name} picture={me?.picture} size={24} /></span
+        ><span class="lbl">{me?.name || t("more.identity")}</span>
+      </button>
+    {:else}
+      <button class="account" onclick={() => router.go({ name: "login" })}>
+        <span class="ico"><Icon name="person" size={24} /></span><span class="lbl">{t("nav.login")}</span>
+      </button>
+    {/if}
+  {/if}
 </nav>
 
 <style>
@@ -221,14 +319,18 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+  /* Rail-only elements; they are never rendered in the bar. */
+  .rail-rule {
+    display: none;
+  }
 
   /* ── Desktop: the bar becomes a left rail ──────────────────────────────
      A bottom bar is where a thumb already is, which is why it is right on a
      phone and wrong on a monitor: it puts the navigation as far from the
      cursor as the window allows, and stretches five items across a width twice
      that of the content they lead to. Same markup, same order, same badges —
-     the axis changes and the labels stop competing for room, which is also what
-     retires the 6-tab ellipsis rule above. */
+     the axis changes, the labels stop competing for room, and the More menu
+     unfolds into the space that buys. */
   @media (min-width: 1000px) {
     .event-nav {
       top: 0;
@@ -285,6 +387,35 @@
     .lbl {
       font-size: 0.92rem;
       font-weight: 600;
+      /* Beside an icon rather than under it, a label has to be allowed to
+         shrink or a long display name widens the rail's scroll box. */
+      min-width: 0;
+      /* …and then to WRAP rather than be cut off. The bar truncates because a
+         tab is one slot wide and nothing can be done about it; the rail has a
+         whole line per item and 232px of it, which "Create an event or
+         community" (and its German translation, half again as long) does not
+         fit on. A second line costs 20px and says the whole thing. */
+      white-space: normal;
+      overflow: visible;
+      overflow-wrap: anywhere;
+      line-height: 1.25;
+      text-align: left;
+    }
+    /* Primary destinations, then the menu, then who you are. Two hairlines
+       instead of one because the account row is not a third group of links —
+       it is the end of the rail. */
+    .rail-rule {
+      display: block;
+      flex: none;
+      height: 1px;
+      margin: 0.6rem 0.2rem;
+      background: var(--border);
+    }
+    /* Sinks the account row to the foot of the window when the rail is shorter
+       than the viewport; when it is taller, an auto margin resolves to zero and
+       the row simply follows the list. */
+    .rail-rule.foot {
+      margin-top: auto;
     }
   }
 
@@ -298,14 +429,18 @@
       padding: 0.25rem 0.1rem;
     }
   }
-  /* Six tabs is the fullest the bar gets (Overview · Talks · People · Chat ·
+  /* Six tabs is the fullest the BAR gets (Overview · Talks · People · Chat ·
      Updates · More). At that count the widest label runs past the ellipsis at
      390px, which is the common phone width AND the one the docs screenshots are
-     taken at, so "Overview" shipped as "Overvi…". The rule above never caught it
-     because it triggers on a width below 360px, and the cause is not width: five
-     tabs fit at 390px perfectly well. Count the tabs instead of guessing at the
-     viewport. */
-  .event-nav:has(> button:nth-child(6)) .lbl {
-    font-size: 0.68rem;
+     taken at, so "Overview" shipped as "Overvi…". The rule that preceded this
+     one counted tabs in CSS — `:has(> button:nth-child(6))` — and got it wrong
+     twice over: the event switcher is a child too, so it fired at five tabs,
+     and being more specific than the rail's own .lbl rule it shrank the DESKTOP
+     labels as well. Count the tabs in script, and confine the result to the
+     viewport where the bar actually exists. */
+  @media (max-width: 999px) {
+    .event-nav.tight .lbl {
+      font-size: 0.68rem;
+    }
   }
 </style>

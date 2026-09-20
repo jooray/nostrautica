@@ -195,3 +195,83 @@ describe("disclosureFromRoutes — the STT tier is not asserted for free (2026-0
     expect(privacy.stt).toBe("unverified");
   });
 });
+
+describe("models.match_score — the optional decision role (2026-09-19)", () => {
+  const base = {
+    summary: { provider: "venice", model: "v-summary" },
+    match: { provider: "venice", model: "v-match" },
+    embed: { provider: "venice", model: "v-embed" },
+    translate: { provider: "venice", model: "v-translate" },
+  };
+  const catalogue: ModelInfo[] = [
+    { id: "v-summary", private: true },
+    { id: "v-match", private: true },
+    { id: "v-embed", private: true },
+    { id: "v-translate", private: true },
+    { id: "jev-latest", private: false }, // Venice `anonymized`, like the real one
+  ];
+  const decider = () => new MockLlm(() => ({}), {
+    id: "venice",
+    models: catalogue,
+    decide: () => ({}),
+  });
+
+  it("is absent from the routes when it is not configured", async () => {
+    const venice = decider();
+    const routes = await resolveRoleRoutes(config(base), { providers: { venice }, logger: silent });
+    expect(routes.match_score).toBeUndefined();
+    // …and absent from the announcement: a role that does not exist has no tier.
+    expect(disclosureFromRoutes(routes).match_score).toBeUndefined();
+  });
+
+  it("resolves and announces its VERIFIED tier when configured", async () => {
+    const venice = decider();
+    const cfg = config({
+      ...base,
+      match_score: { provider: "venice", model: "jev-latest", require_private: false },
+    });
+    const routes = await resolveRoleRoutes(cfg, { providers: { venice }, logger: silent });
+    expect(routes.match_score?.model).toBe("jev-latest");
+    expect(routes.match_score?.privacy).toBe("non-private");
+    expect(disclosureFromRoutes(routes).match_score).toBe("non-private");
+  });
+
+  it("FAILS startup when the operator has not accepted the privacy downgrade", async () => {
+    // jev-latest is `anonymized`. Without an explicit require_private = false the
+    // daemon must refuse to boot rather than quietly ship attendee profiles to a
+    // non-private tier and announce a tier nobody chose.
+    const venice = decider();
+    const cfg = config({ ...base, match_score: { provider: "venice", model: "jev-latest" } });
+    await expect(
+      resolveRoleRoutes(cfg, { providers: { venice }, logger: silent }),
+    ).rejects.toThrow(/not a private\/TEE-tier/);
+  });
+
+  it("FAILS startup when the provider has no decision endpoint", async () => {
+    // Otherwise this surfaces as a poisoned scoring job per batch, at run time,
+    // on a live event — instead of a refusal to boot.
+    const venice = new MockLlm(() => ({}), { id: "venice", models: catalogue }); // no decide
+    const cfg = config({
+      ...base,
+      match_score: { provider: "venice", model: "jev-latest", require_private: false },
+    });
+    await expect(
+      resolveRoleRoutes(cfg, { providers: { venice }, logger: silent }),
+    ).rejects.toThrow(/no decision endpoint/);
+  });
+
+  it("pulls in a provider referenced ONLY by the decision role", async () => {
+    const venice = new MockLlm(() => ({}), { id: "venice", models: catalogue });
+    const other = new MockLlm(() => ({}), {
+      id: "routstr",
+      models: [{ id: "jev-latest", private: false }],
+      decide: () => ({}),
+    });
+    const cfg = config({
+      ...base,
+      match_score: { provider: "routstr", model: "jev-latest", require_private: false },
+    });
+    const routes = await resolveRoleRoutes(cfg, { providers: { venice, routstr: other }, logger: silent });
+    expect(routes.match_score?.llm).toBe(other);
+  });
+});

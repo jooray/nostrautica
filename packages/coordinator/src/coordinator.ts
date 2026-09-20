@@ -112,6 +112,9 @@ import {
   pairInputsHash,
   scoreBatch,
   scoreReverseBatch,
+  scoreDecisionBatch,
+  decisionPromptRevision,
+  type DecisionTriple,
   type BatchCandidate,
   type EventContextForScoring,
 } from "./matching/scoring.js";
@@ -3931,16 +3934,38 @@ export class Coordinator {
     }
     if (candidates.length === 0) return { scored: [], missing: 0 };
 
+    // Numbers first (decision role, when configured), prose second — and prose
+    // only for the people who got numbers. `undefined` means no decision role:
+    // the chat model's own scores stand, exactly as before.
+    const targetName = this.loadDisplayName(coordinate, target);
+    const decided = await this.decideScores(coordinate, targetProfile, targetName, candidates, "forward", signal);
+    const narratable = decided ? candidates.filter((c) => decided.has(c.id)) : candidates;
+    const unscored = candidates.length - narratable.length;
+    if (narratable.length === 0) return { scored: [], missing: candidates.length };
+
     const { scores, missing, misattributed } = await scoreBatch(
       this.roles.match.llm,
       this.roles.match.model,
       state.scoringCtx,
       targetProfile,
-      candidates,
+      narratable,
       this.matchRng,
-      this.loadDisplayName(coordinate, target),
+      targetName,
       signal,
     );
+    // The decision model's numbers REPLACE the ones the chat model volunteered.
+    // Both were paid for; only one of them is the scorer this event is ranked by,
+    // and mixing the two within an event would destroy the comparability that is
+    // the whole reason for the second call.
+    if (decided) {
+      for (const [id, ds] of scores) {
+        const triple = decided.get(id);
+        if (!triple) continue;
+        ds.score = triple.score;
+        ds.similarity = triple.similarity;
+        ds.complementarity = triple.complementarity;
+      }
+    }
     // Loud on purpose: an entry whose echoed name disagreed with its number means
     // the model handed one attendee's match text to another, which is invisible in
     // the "K scored, 0 unparsed" line and is what made the 2026-07-31 report so
@@ -3972,7 +3997,10 @@ export class Coordinator {
     if (missing.length) {
       log(`[match] ${short(target)} batch: ${missing.length} candidate(s) unparsed`);
     }
-    return { scored, missing: missing.length };
+    // Someone the decision role could not score is pending too, not finished:
+    // counted here so the caller's retry re-selects them (both calls) instead of
+    // silently shortening the target's list by a candidate nobody scored.
+    return { scored, missing: missing.length + unscored };
   }
 
   /**
@@ -4008,16 +4036,34 @@ export class Coordinator {
     }
     if (targets.length === 0) return { scored: [], missing: 0 };
 
+    // Mirror of the forward path: the SHARED candidate is the anchor in the
+    // state and each target rides in its own question, so every score is still
+    // "how valuable for THIS target to meet the shared person".
+    const sharedName = this.loadDisplayName(coordinate, shared);
+    const decided = await this.decideScores(coordinate, sharedProfile, sharedName, targets, "reverse", signal);
+    const narratable = decided ? targets.filter((t) => decided.has(t.id)) : targets;
+    const unscored = targets.length - narratable.length;
+    if (narratable.length === 0) return { scored: [], missing: targets.length };
+
     const { scores, missing, misattributed } = await scoreReverseBatch(
       this.roles.match.llm,
       this.roles.match.model,
       state.scoringCtx,
       sharedProfile,
-      targets,
+      narratable,
       this.matchRng,
-      this.loadDisplayName(coordinate, shared),
+      sharedName,
       signal,
     );
+    if (decided) {
+      for (const [id, ds] of scores) {
+        const triple = decided.get(id);
+        if (!triple) continue;
+        ds.score = triple.score;
+        ds.similarity = triple.similarity;
+        ds.complementarity = triple.complementarity;
+      }
+    }
     for (const note of misattributed ?? []) {
       log(`[match] MISATTRIBUTED reverse batch for ${short(shared)}: ${note}`);
     }
@@ -4043,7 +4089,7 @@ export class Coordinator {
     if (missing.length) {
       log(`[match] reverse batch for ${short(shared)}: ${missing.length} target(s) unparsed`);
     }
-    return { scored, missing: missing.length };
+    return { scored, missing: missing.length + unscored };
   }
 
   /**
@@ -4101,9 +4147,69 @@ export class Coordinator {
   }
 
   /** The `match` role's provider+model, folded into every pair's inputs hash so a
-   *  model switch re-scores instead of silently reusing the old model's answers. */
+   *  model switch re-scores instead of silently reusing the old model's answers.
+   *
+   *  The decision role joins it only when configured, together with a fingerprint
+   *  of the rubric it sends. Appending unconditionally would change the key for
+   *  every deployment on upgrade and re-score events that are not using a
+   *  decision model at all; this way enabling, disabling or re-wording it
+   *  invalidates exactly the pairs whose scores it would change. */
   private matchModelKey(): string {
-    return `${this.roles.match.provider}:${this.roles.match.model}`;
+    const base = `${this.roles.match.provider}:${this.roles.match.model}`;
+    const scorer = this.roles.match_score;
+    return scorer
+      ? `${base}|score:${scorer.provider}:${scorer.model}:${decisionPromptRevision()}`
+      : base;
+  }
+
+
+  /**
+   * Pair NUMBERS from the decision role, when one is configured.
+   *
+   * Returns `undefined` when no decision role exists, which is the signal to the
+   * caller that the chat model's own scores stand — that is the pre-2026-09-19
+   * behaviour and stays byte-identical.
+   *
+   * Runs BEFORE the prose call on purpose. The decision call costs a fraction of
+   * a cent and a second; the prose call is the expensive one. Scoring first means
+   * a decision-provider outage costs nothing, and means prose is only ever bought
+   * for people who actually have a score — a half-answered batch retries as a
+   * unit instead of leaving paid-for sentences beside numbers we rejected.
+   *
+   * Budgets are unchanged and deliberately so: `assertSpendAllowed` accounts one
+   * spend ATTEMPT per job, not per HTTP request, and this call rides inside a job
+   * that has already been counted. Two requests per batch therefore still bill as
+   * one against `per_event_calls`. That stays honest because the decision request
+   * is ~$0.0002 against a prose call three orders of magnitude dearer; if a
+   * decision model ever became the expensive half, the accounting would have to
+   * move from jobs to requests rather than gain a second increment here.
+   */
+  private async decideScores(
+    coordinate: string,
+    anchorProfile: AiProfile,
+    anchorName: string | undefined,
+    others: BatchCandidate[],
+    mode: "forward" | "reverse",
+    signal?: AbortSignal,
+  ): Promise<Map<string, DecisionTriple> | undefined> {
+    const role = this.roles.match_score;
+    if (!role) return undefined;
+    const state = this.events.get(coordinate);
+    if (!state) return undefined;
+    const { scores, missing } = await scoreDecisionBatch(
+      role.llm,
+      role.model,
+      state.scoringCtx,
+      anchorProfile,
+      anchorName,
+      others,
+      mode,
+      signal,
+    );
+    if (missing.length) {
+      log(`[match] decision scorer returned no usable answer for ${missing.length} person(s); they retry unscored`);
+    }
+    return scores;
   }
 
   /** Display name from the join request (B1), for name-aware match reasoning. */
