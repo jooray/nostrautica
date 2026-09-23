@@ -203,14 +203,20 @@
     white-space: nowrap;
   }
   /* Not a coloured dot: "new" has to survive forced-colors and greyscale, so it
-     is a word. Tiny, uppercase, in the accent — the only accent in the entry. */
+     is a word. The same solid pill as PersonCard's — see the reasoning there. */
   .new {
     flex: none;
-    font-size: 0.62rem;
+    align-self: center;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: 0.66rem;
     font-weight: 700;
+    line-height: 1.3;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--accent);
+    background: var(--accent-bg);
+    color: var(--accent-contrast);
   }
   .sub {
     color: var(--text-dim);

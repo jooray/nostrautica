@@ -270,6 +270,7 @@ class Session {
     // dropped rather than clobbering the newer session or undoing the logout.
     const tok = this.nextOp();
     this.restoring = true;
+    let previewingPersistedIdentity = false;
     // "My events" is per-identity, and until `adopt()` runs we do not have one.
     // Hold it — see `RecentEvents.pendingIdentity` for what rendering the
     // logged-out list in this window looked like from the outside.
@@ -281,11 +282,11 @@ class Session {
       const method = await loadLoginMethod();
       if (method === "local") {
         const sk = await loadLocalKey();
-        if (sk) return this.adopt(new LocalSigner(sk), tok);
+        if (sk) return await this.adopt(new LocalSigner(sk), tok);
       }
       // NIP-07 can be re-established silently if the extension is present.
       if (method === "nip07") {
-        if (hasNip07()) return this.adopt(new Nip07Signer(), tok);
+        if (hasNip07()) return await this.adopt(new Nip07Signer(), tok);
         // Not injected. Extensions inject `window.nostr` at document_start, but a
         // cold profile, a slow extension host or a disabled/removed extension all
         // land here — and falling through silently tells a logged-in user they are
@@ -301,7 +302,15 @@ class Session {
       // NIP-46 (Amber): reconnect the persisted bunker session (spec §5.3).
       if (method === "nip46") {
         const persisted = await loadNip46Session<Nip46Session>();
+        if (tok !== this.opToken) return false;
         if (persisted) {
+          // The previous verified identity is already on disk. Paint its local
+          // navigation cards before any relay/RPC/custody wait, but leave signer,
+          // pubkey and private store ownership unset until adopt verifies it.
+          if (persisted.userPubkey && /^[0-9a-f]{64}$/.test(persisted.userPubkey)) {
+            recentEvents.awaitIdentity(persisted.userPubkey);
+            previewingPersistedIdentity = true;
+          }
           try {
             const signer = await Nip46Signer.fromPersisted(persisted);
             // If a newer op superseded us, adopt() dropped + closed the signer;
@@ -312,10 +321,12 @@ class Session {
             await saveNip46Session(signer.serialize());
             return true;
           } catch (e) {
+            if (tok !== this.opToken) return false;
             // A bunker answering for a DIFFERENT user is invalid for good —
             // clear it so it is never retried. Transient failures (signer
             // offline) keep the session for the next boot.
             if (e instanceof Nip46IdentityMismatchError) {
+              previewingPersistedIdentity = false;
               await clearKeystore().catch(() => {});
               console.warn("[session] persisted bunker answered for a different user; cleared", e);
               return false;
@@ -342,7 +353,9 @@ class Session {
         // Whatever the outcome — adopted, failed, no stored session — the answer
         // is now in. `adopt()` already settled this via `setOwner`; this is the
         // path where there was nobody to adopt, and it is idempotent.
-        recentEvents.identitySettled();
+        // An offline signer does not invalidate the cached navigation list.
+        // Keep it read-only while Retry is offered; login/logout settles it.
+        if (!previewingPersistedIdentity || !this.restoreError) recentEvents.identitySettled();
       }
     }
   }

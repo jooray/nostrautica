@@ -163,6 +163,7 @@
   import { readinessStore } from "$lib/events/readiness.svelte.js";
   import { bandAtCut, byMatchRank, strongCutFor, type ConfidenceBand } from "$lib/events/confidence.js";
   import PersonCard from "$lib/components/PersonCard.svelte";
+  import Avatar from "$lib/components/Avatar.svelte";
   import MatchEntry from "$lib/components/MatchEntry.svelte";
   import ConfidenceBadge from "$lib/components/ConfidenceBadge.svelte";
   import FollowButton from "$lib/components/FollowButton.svelte";
@@ -635,13 +636,57 @@
    * a search because they were already on screen above is how you make a search
    * box untrustworthy.
    */
-  const visible = $derived(
-    searchRank(
+  const visible = $derived.by(() => {
+    const rows = searchRank(
       byName.filter((e) => passesFilter(e.pubkey) && (hasFilters || !featuredPubkeys.has(e.pubkey))),
       query,
       (e) => directoryEntryFields(e, nameOf(e.pubkey, e.profile.about), i18n.locale),
+    );
+    // Unfiltered, whoever is new since the last visit leads the directory
+    // (2026-09-23). Alphabetical placement put the one person the banner above
+    // announced somewhere in the middle of forty rows, a screen below it. A
+    // search keeps its relevance order: there you asked for someone specific.
+    if (hasFilters || newPubkeys.size === 0) return rows;
+    return [...rows.filter((e) => newPubkeys.has(e.pubkey)), ...rows.filter((e) => !newPubkeys.has(e.pubkey))];
+  });
+
+  /**
+   * The people the "since you were last here" line is about, in the order they
+   * appear on the page, and only those actually rendered — a new arrival you
+   * have since muted is not on the page to jump to, so it is not named either.
+   */
+  const newcomers = $derived(
+    [...featured.flatMap((s) => s.items.map((m) => m.pubkey)), ...visible.map((e) => e.pubkey)].filter((p) =>
+      newPubkeys.has(p),
     ),
   );
+  /** Named in the banner; the rest are "+N more" (and lead the directory anyway). */
+  const NEWCOMERS_NAMED = 3;
+
+  /**
+   * Scroll a row into view and flash it: the banner names a person, and a name
+   * you then have to go and find in the list is only half an answer.
+   *
+   * Focus moves to the row's own open-button too, so a keyboard or screen-reader
+   * user lands where a sighted one is looking. Cleared and re-set across a frame
+   * so a second click on the same name replays the flash.
+   */
+  let flashPubkey = $state<string | undefined>(undefined);
+  let flashTimer: ReturnType<typeof setTimeout> | undefined;
+  function jumpTo(pubkey: string) {
+    const row = document.querySelector<HTMLElement>(`[data-row="${pubkey}"]`);
+    if (!row) return;
+    const still = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    row.querySelector<HTMLElement>("button")?.focus({ preventScroll: true });
+    row.scrollIntoView({ block: "center", behavior: still ? "auto" : "smooth" });
+    flashPubkey = undefined;
+    clearTimeout(flashTimer);
+    requestAnimationFrame(() => {
+      flashPubkey = pubkey;
+      flashTimer = setTimeout(() => (flashPubkey = undefined), 2000);
+    });
+  }
+  onDestroy(() => clearTimeout(flashTimer));
 
   function clearFilters() {
     query = "";
@@ -795,7 +840,26 @@
            A community has no date, so what arrived since you last looked IS the
            reason you are here, and it says so at the top of the list rather than
            as a number on an icon. -->
-      <p class="returned">{tp("attendees.sinceLastVisit", newPubkeys.size)}</p>
+      <div class="returned">
+        <p>{tp("attendees.sinceLastVisit", newPubkeys.size)}</p>
+        {#if newcomers.length > 0}
+          <!-- Who, not just how many (2026-09-23): the count alone sent people
+               hunting for a small badge a screen further down. Each name jumps
+               to its row. -->
+          <p class="newcomers">
+            {#each newcomers.slice(0, NEWCOMERS_NAMED) as pk (pk)}
+              {@const name = nameOf(pk)}
+              <button class="newcomer" onclick={() => jumpTo(pk)}>
+                <Avatar pubkey={pk} {name} picture={profiles.get(pk)?.picture} size={22} />
+                <span class="newcomer-name">{name}</span>
+              </button>
+            {/each}
+            {#if newcomers.length > NEWCOMERS_NAMED}
+              <span class="muted">{t("attendees.newcomersMore", { n: newcomers.length - NEWCOMERS_NAMED })}</span>
+            {/if}
+          </p>
+        {/if}
+      </div>
     {/if}
     {#if noStrong}
       <p class="lead">{t("matches.noStrong")}</p>
@@ -809,7 +873,7 @@
       <ul class="entries">
         {#each section.items as m (m.pubkey)}
           {@const name = nameOf(m.pubkey)}
-          <li>
+          <li data-row={m.pubkey} class:flash={flashPubkey === m.pubkey}>
             <MatchEntry
               match={m}
               {name}
@@ -912,7 +976,7 @@
       <ul class="roster-list" aria-label={tc("attendees.rosterLabel", eventShell.isCommunity)}>
         {#each visible as e (e.pubkey)}
           {@const name = nameOf(e.pubkey, e.profile.about)}
-          <li>
+          <li data-row={e.pubkey} class:flash={flashPubkey === e.pubkey}>
             <PersonCard
               pubkey={e.pubkey}
               {name}
@@ -969,10 +1033,67 @@
      thing on the page, in the reading serif, not a muted aside. */
   .returned {
     margin: 0.9rem 0 0;
+    max-width: 60ch;
+  }
+  .returned > p:first-child {
+    margin: 0;
     font-family: var(--font-display);
     font-size: 1.05rem;
     line-height: 1.45;
-    max-width: 60ch;
+  }
+  .newcomers {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    margin: 0.5rem 0 0;
+    font-size: 0.85rem;
+  }
+  .newcomer {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    max-width: 14rem;
+    padding: 0.2rem 0.7rem 0.2rem 0.2rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-elev);
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  .newcomer:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+  .newcomer-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  /* Where a banner name landed you. The fade is the point — a tint that stayed
+     would read as "selected", which is the detail pane's job. */
+  li.flash {
+    border-radius: var(--radius-sm);
+    animation: row-flash 2s ease-out;
+  }
+  @keyframes row-flash {
+    0%,
+    35% {
+      background: var(--accent-soft);
+      box-shadow: 0 0 0 2px var(--accent);
+    }
+    100% {
+      background: transparent;
+      box-shadow: 0 0 0 2px transparent;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    li.flash {
+      animation: none;
+      background: var(--accent-soft);
+    }
   }
   .lead {
     color: var(--text-dim);

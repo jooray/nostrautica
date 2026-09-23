@@ -43,7 +43,25 @@ describe("startScanBudget", () => {
     expect(budget.take()).toBe(false); // A again — the pair is done
   });
 
-  it("defaults sit below Home's 12s spinner backstop", () => {
+  it("gives delayed scanners their own clock without replenishing the shared call cap", () => {
+    let clock = 0;
+    const shared = startScanBudget({ budgetMs: 100, maxCalls: 3, reserve: 1, now: () => clock });
+    const membership = shared.fork();
+    const grants = shared.fork();
+    expect(membership.take("low")).toBe(true);
+    clock = 16_000;
+    expect(membership.take("low")).toBe(false);
+    expect(grants.take()).toBe(true);
+    expect(grants.take()).toBe(true);
+    expect(shared.fork().take()).toBe(false);
+  });
+
+  it("keeps ONE scanner's decrypt window under Home's 12s spinner backstop", () => {
+    // Deliberately no longer a claim about the whole ROUND: the clock starts at a
+    // scanner's first claim, so relay reads ahead of it push the round past the
+    // guard (see SCAN_BUDGET_MS). What survives is the part that still holds — a
+    // scanner that gets going promptly reports "partial, retry" on its own rather
+    // than being cut off mid-decrypt by the backstop.
     expect(SCAN_BUDGET_MS).toBeLessThan(12_000);
     expect(MAX_SIGNER_CALLS).toBeGreaterThan(0);
   });

@@ -5,6 +5,7 @@ import {
   __setPersistBackend,
   cacheGet,
   hydrateAppCache,
+  type CacheEntry,
 } from "$lib/cache/persist.js";
 import {
   DmUnreadStore,
@@ -76,6 +77,47 @@ describe("DM unread positions", () => {
 });
 
 describe("DmUnreadStore", () => {
+  it("persists reads and encrypted activity through the IndexedDB clone boundary and a cold boot", async () => {
+    const disk = new Map<string, CacheEntry>();
+    const failures: unknown[] = [];
+    __resetPersistForTests();
+    __setPersistBackend({
+      getAll: async () => structuredClone([...disk.entries()]),
+      put: async (key, entry) => {
+        try {
+          disk.set(key, structuredClone(entry));
+        } catch (error) {
+          failures.push(error);
+          throw error;
+        }
+      },
+      delete: async () => {},
+    });
+    await hydrateAppCache();
+    const first = new DmUnreadStore();
+    first.init(OWNER_A);
+    first.syncMessages(OWNER_A, [message("one", 1)]);
+    first.markThreadRead(PEER);
+    first.observeEncryptedWrapIds(OWNER_A, ["wrap-1"]);
+    first.observeEncryptedWrapIds(OWNER_A, ["wrap-1", "wrap-2"]);
+    first.acknowledgeEncryptedActivity();
+    await Promise.resolve();
+    expect(failures).toEqual([]);
+
+    // Discard the mirror as a real reload does. Reading the same in-memory map
+    // with a second store never tested whether IndexedDB accepted the write.
+    __resetPersistForTests();
+    await hydrateAppCache();
+    const restored = new DmUnreadStore();
+    restored.init(OWNER_A);
+    restored.syncMessages(OWNER_A, [message("one", 1), message("two", 2)]);
+    expect(restored.threadCount(PEER)).toBe(1);
+    restored.observeEncryptedWrapIds(OWNER_A, ["wrap-1", "wrap-2"]);
+    expect(restored.hasEncryptedActivity).toBe(false);
+    restored.observeEncryptedWrapIds(OWNER_A, ["wrap-1", "wrap-2", "wrap-3"]);
+    expect(restored.hasEncryptedActivity).toBe(true);
+  });
+
   it("persists thread watermarks under the owner and isolates accounts", () => {
     const first = new DmUnreadStore();
     first.init(OWNER_A);

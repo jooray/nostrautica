@@ -31,6 +31,7 @@ import {
   cachedMatches,
   receiveGrants,
   MAX_GRANT_WRAPS,
+  GRANT_MEMO_KEY,
   GRANT_BACKFILL_TTL_MS,
   GRANT_SCAN_LOOKBACK_SEC,
   GRANT_PAGE_SIZE,
@@ -458,7 +459,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
   }
 
   const memoHas = (wrapId: string) =>
-    cacheGet<Record<string, true>>("grantwraps")?.data?.[wrapId] === true;
+    !!cacheGet<Record<string, unknown>>(GRANT_MEMO_KEY)?.data?.[wrapId];
 
   beforeEach(async () => {
     attendeePk = await attendee.getPublicKey();
@@ -487,6 +488,54 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     expect(await receiveGrants(attendee)).toEqual([coordinate]);
     expect((await loadEventKeys(coordinate))?.eck.map((v) => v.id)).toEqual([1]);
     expect(memoHas(wrap.id)).toBe(true);
+  });
+
+  it("can recover a grant after relay discovery has already taken longer than the signer budget", async () => {
+    const wrap = await keyGrantWrap();
+    let clock = 0;
+    const budget = startScanBudget({ now: () => clock });
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    fetchEventsRelayOnly.mockImplementation(async () => {
+      clock += 16_000; // inbox relay lookup + wrap read can each take eight seconds
+      return [wrap];
+    });
+    expect(await receiveGrants(attendee, { budget })).toEqual([coordinate]);
+    expect((await loadEventKeys(coordinate))?.eck).toHaveLength(1);
+  });
+
+  it("a forced recovery reprocesses a memoized grant when custody is missing", async () => {
+    const wrap = await keyGrantWrap();
+    fetchEventsRelayOnly.mockResolvedValue([wrap]);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    // Independent browser databases: losing one custody record does not clear
+    // the app-cache ledger. Another held event must not hide the missing one.
+    __setKeystoreBackend(memKeystore());
+    await saveEventKeys({ coordinate: makeCoordinate(eid, "another-event"), role: "attendee", eck: [] });
+    expect(await receiveGrants(attendee, { force: true })).toEqual([coordinate]);
+    expect((await loadEventKeys(coordinate))?.eck).toHaveLength(1);
+  });
+
+  it("bounded forced retries advance rather than reprocessing the same grants forever", async () => {
+    const wraps = [await keyGrantWrap(1), await keyGrantWrap(2)];
+    // A pre-upgrade ledger cannot prove either granted key is still held.
+    cacheSet("grantwraps", Object.fromEntries(wraps.map((wrap) => [wrap.id, true])));
+    fetchEventsRelayOnly.mockResolvedValue(wraps);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    const scan = () => receiveGrants(attendee, {
+      force: true, budget: startScanBudget({ maxCalls: 1, now: () => 0 }),
+    });
+    await scan();
+    expect((await loadEventKeys(coordinate))?.eck.map((v) => v.id)).toEqual([1]);
+    await scan();
+    expect((await loadEventKeys(coordinate))?.eck.map((v) => v.id)).toEqual([1, 2]);
+    const decrypt = vi.spyOn(attendee, "nip44Decrypt");
+    try {
+      await scan();
+      expect(decrypt).not.toHaveBeenCalled();
+    } finally {
+      decrypt.mockRestore();
+    }
   });
 
   it("a forged grant WITH a fetchable config is a definitive negative — memoized", async () => {
@@ -692,7 +741,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     // Seed the memo above the cap with synthetic, insertion-ordered old entries.
     const seeded: Record<string, true> = {};
     for (let i = 0; i < MAX_GRANT_WRAPS + 50; i++) seeded[`old${i}`] = true;
-    cacheSet("grantwraps", seeded, 1); // owner-scoped to the active owner (attendeePk)
+    cacheSet(GRANT_MEMO_KEY, seeded, 1); // owner-scoped to the active owner (attendeePk)
 
     // A fresh non-grant wrap that unwraps successfully gets memoized (line ~323),
     // making the write dirty and triggering the cap.
@@ -705,7 +754,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
 
     await receiveGrants(attendee);
 
-    const memo = cacheGet<Record<string, true>>("grantwraps")!.data;
+    const memo = cacheGet<Record<string, true>>(GRANT_MEMO_KEY)!.data;
     const keys = Object.keys(memo);
     expect(keys.length).toBe(MAX_GRANT_WRAPS); // pre-fix: MAX_GRANT_WRAPS + 51 (unbounded)
     expect(memo[other.id]).toBe(true); // newest entry retained
@@ -978,7 +1027,7 @@ describe("grant backfill window", () => {
 
     expect(await receiveGrants(attendee)).toEqual([]);
     expect(await loadEventKeys(coordinate)).toBeUndefined();
-    expect(cacheGet<Record<string, true>>("grantwraps")?.data?.[future.id]).toBeUndefined();
+    expect(cacheGet<Record<string, true>>(GRANT_MEMO_KEY)?.data?.[future.id]).toBeUndefined();
 
     // A genuinely malformed grant at the CURRENT version stays memoized — the
     // exemption is for "from the future", not for "unparseable".
@@ -988,7 +1037,7 @@ describe("grant backfill window", () => {
     });
     fetchEventsRelayOnly.mockResolvedValue([junk]);
     await receiveGrants(attendee);
-    expect(cacheGet<Record<string, true>>("grantwraps")?.data?.[junk.id]).toBe(true);
+    expect(cacheGet<Record<string, true>>(GRANT_MEMO_KEY)?.data?.[junk.id]).toBe(true);
   });
 
   it("counts a grant whose event config is unreachable instead of dropping it silently", async () => {

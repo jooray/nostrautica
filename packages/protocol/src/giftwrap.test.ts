@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "nostr-tools/pure";
 import { nip44Encrypt } from "./crypto.js";
 import {
@@ -415,7 +415,11 @@ describe("rumor created_at clamping (PROTO-8)", () => {
 });
 
 describe("unwrap envelope preserves authenticated fields (audit R19)", () => {
-  it("returns the untouched rumor (created_at hashes to id) + a separate effectiveCreatedAt", () => {
+  it("returns the untouched rumor (created_at hashes to id) + a separate effectiveCreatedAt", ({ onTestFinished }) => {
+    // Both unwraps must see the same clock: real crypto can cross a second
+    // boundary, which legitimately changes the clamp without changing the rumor.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    onTestFinished(() => clock.mockRestore());
     const inboxSk = generateSecretKey();
     const sender = generateSecretKey();
     const now = Math.floor(Date.now() / 1000);

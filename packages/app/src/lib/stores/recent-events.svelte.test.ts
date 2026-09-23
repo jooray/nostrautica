@@ -208,6 +208,22 @@ describe("recentEvents pending-key state", () => {
 });
 
 describe("identity is pending, not absent, while a session restores", () => {
+  it("previews the persisted owner's cards immediately without adopting that owner or writing", () => {
+    store.set(`${KEY}:${OWNER_A}`, JSON.stringify([
+      { coordinate: COORD, naddr: NADDR, title: "Cached community", role: "organizer", at: 5 },
+    ]));
+    recentEvents.awaitIdentity();
+    recentEvents.awaitIdentity(OWNER_A);
+    expect(recentEvents.list.map((e) => e.title)).toEqual(["Cached community"]);
+    expect(recentEvents.owner).toBeNull();
+    expect(recentEvents.identityPending).toBe(true);
+    recentEvents.reconcile({ coordinate: COORD, naddr: NADDR, title: "Visitor lookup", role: "visitor" });
+    expect(JSON.parse(store.get(`${KEY}:${OWNER_A}`)!)[0].role).toBe("organizer");
+    // A different verified account must replace the preview, never inherit it.
+    recentEvents.setOwner(OWNER_B);
+    expect(recentEvents.list.some((e) => e.title === "Cached community")).toBe(false);
+  });
+
   it("shows no list, and never the logged-out one, until the owner is known", () => {
     // User report 2026-09-18: "I see two events, then the load displays them all,
     // but next refresh shows only two." A NIP-46 restore is deliberately not

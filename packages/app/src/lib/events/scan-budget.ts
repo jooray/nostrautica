@@ -15,16 +15,24 @@
  */
 
 /**
- * Wall-clock budget for one scan round, measured from the moment the scan
- * starts so the relay read counts against it too.
+ * Time allowed to START more decrypts, measured from a scanner's FIRST claim
+ * rather than from the moment the round began.
  *
- * Chosen from what the code already uses: the relay reads inside a pass cap at
- * 8s (`streamEvents`' default `timeoutMs`, and the explicit 8000 in
- * `social.ts` / `coordinators.ts`), and Home's spinner backstop is 12s. 10s
- * sits between them, so after even a worst-case relay read there is room for a
- * signer round trip or two, and the scan reports "partial, retry" on its own
- * before Home's backstop fires — the backstop stays a backstop rather than
- * becoming the normal exit.
+ * It used to run from the round's start, so the relay reads counted against it —
+ * which is how a scan could spend the whole allowance without opening a single
+ * grant. `receiveGrants` does a kind-10050 inbox lookup and then a paginated wrap
+ * read back to back, each bounded at 8s (`streamEvents`' default `timeoutMs`), so
+ * on a contended relay set `budget.take()` refused the very first unwrap, on
+ * every retry, forever. Sibling scanners still share the CALL cap, but each
+ * starts its own clock when it is ready, so a fast membership sweep cannot eat
+ * the grant scan's time.
+ *
+ * What that costs, stated plainly because it undoes an invariant this constant
+ * used to carry: a round is no longer guaranteed to finish inside Home's 12s
+ * spinner backstop (`SCAN_GUARD_MS`), so a slow-relay boot can show "this is
+ * taking longer than expected" and then clear itself when the scan lands. That
+ * is the right way round — a transient banner costs a glance, an unwrap that is
+ * never attempted costs the user the only copy of their key.
  */
 export const SCAN_BUDGET_MS = 10_000;
 
@@ -83,6 +91,8 @@ export interface ScanBudget {
    * recover a key.
    */
   take(priority?: ScanPriority): boolean;
+  /** Independent lazy clock for one scanner, sharing the same call allowance. */
+  fork(): ScanBudget;
 }
 
 /**
@@ -104,17 +114,23 @@ export function startScanBudget(
   // budget that does no low-priority work at all, not for one that wraps around.
   const reserve = Math.max(0, Math.min(opts.reserve ?? LOW_PRIORITY_RESERVE, maxCalls));
   const now = opts.now ?? (() => Date.now());
-  const startedAt = now();
   let spent = 0;
-  return {
-    take(priority: ScanPriority = "normal") {
-      const cap = priority === "low" ? maxCalls - reserve : maxCalls;
-      if (spent >= cap) return false;
-      if (now() - startedAt >= budgetMs) return false;
-      spent++;
-      return true;
-    },
+  const fork = (): ScanBudget => {
+    let startedAt: number | undefined;
+    return {
+      fork,
+      take(priority: ScanPriority = "normal") {
+        const cap = priority === "low" ? maxCalls - reserve : maxCalls;
+        if (spent >= cap) return false;
+        const at = now();
+        startedAt ??= at;
+        if (at - startedAt >= budgetMs) return false;
+        spent++;
+        return true;
+      },
+    };
   };
+  return fork();
 }
 
 /** What one scan pass can say about itself afterwards. */

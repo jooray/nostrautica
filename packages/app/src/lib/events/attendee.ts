@@ -306,6 +306,29 @@ function markGrantsBackfilled(pubkey: string, at: number = Date.now()): void {
 /** Cap on the persisted grant-wrap memo (audit App-7), mirroring the DM memo. */
 export const MAX_GRANT_WRAPS = 5000;
 
+// v1 stored only `true`, including for accepted grants. It could not distinguish
+// "not a grant" from "this grant was accepted once and its key is gone now", so
+// it permanently skipped recovery after a partial storage wipe — and a build
+// older than 2026-09-14 (2155a24), which rejected every 31612 community grant as
+// forged, wrote exactly that entry, burning the wrap for good on any device that
+// scanned before the fix shipped.
+//
+// The legacy `grantwraps` ledger is deliberately NOT migrated into this one: a
+// bare `true` cannot say which of those two things it meant, so inheriting it
+// would carry the burn forward. The cost of starting clean is one re-unwrap pass
+// per device — bounded by the scan budget's call cap, and memoized under this key
+// as it goes — and the old entry ages out with the rest of the cache.
+export const GRANT_MEMO_KEY = "grantwraps-v2";
+type GrantMemoEntry = true | { coordinate: string; versions: number[]; organizer: boolean };
+
+function grantMemoSatisfied(entry: GrantMemoEntry | undefined, held: EventKeys[]): boolean {
+  if (entry === true) return true; // definitively not an accepted grant
+  if (!entry) return false;
+  const keys = held.find((k) => k.coordinate === entry.coordinate);
+  return !!keys && entry.versions.every((id) => keys.eck.some((v) => v.id === id)) &&
+    (!entry.organizer || (keys.role === "organizer" && !!keys.eidNsecHex && !!keys.einboxNsecHex));
+}
+
 /**
  * Page size for the wrap read, and the cap on how many pages one sweep walks.
  *
@@ -484,7 +507,7 @@ export async function receiveGrants(
   // full-history backfill of them unbounded is the prompt storm behind the
   // 2026-07-28 "my events vanished" report. A truncated pass is reported rather
   // than swallowed, so the caller can distinguish it from an empty inbox.
-  const budget = opts.budget ?? startScanBudget();
+  const budget = (opts.budget ?? startScanBudget()).fork();
   const outcome = emptyOutcome();
   // What this device already holds for this identity. Two jobs: it widens the
   // relay set (an event's own relays may have taken the grant), and an EMPTY
@@ -533,7 +556,7 @@ export async function receiveGrants(
   // boot re-unwraps every gift wrap the user has ever received. That is the
   // Amber prompt storm this memo exists to prevent.
   await whenCacheReady();
-  const memo: Record<string, true> = { ...(cacheGet<Record<string, true>>("grantwraps")?.data ?? {}) };
+  const memo = { ...(cacheGet<Record<string, GrantMemoEntry>>(GRANT_MEMO_KEY, pubkey)?.data ?? {}) };
   let memoDirty = false;
   // Cache the (network-fetched) signed 31600 per coordinate so multiple grants
   // for one event only cost a single config lookup.
@@ -560,7 +583,7 @@ export async function receiveGrants(
     if (!wrap.tags.some((tg) => tg[0] === "p" && tg[1] === pubkey)) continue;
     // Already definitively processed in a prior scan/session — skip the signer
     // round-trip.
-    if (memo[wrap.id]) continue;
+    if (grantMemoSatisfied(memo[wrap.id], held)) continue;
     // Out of time or out of prompts: stop rather than start another two-round-
     // trip unwrap. Everything decided so far is already memoized and the
     // full-history latch below is withheld, so the next scan resumes where this
@@ -631,7 +654,7 @@ export async function receiveGrants(
         einboxNsecHex: grant.einbox_nsec,
       });
       coordinates.add(grant.a);
-      memo[wrap.id] = true;
+      memo[wrap.id] = { coordinate: grant.a, versions: grant.eck.map((v) => v.id), organizer: true };
       memoDirty = true;
       continue;
     }
@@ -701,7 +724,7 @@ export async function receiveGrants(
         grant.role === "organizer" ? "organizer" : "attendee",
       );
       coordinates.add(grant.a);
-      memo[wrap.id] = true;
+      memo[wrap.id] = { coordinate: grant.a, versions: grant.eck.map((v) => v.id), organizer: false };
       memoDirty = true;
       continue;
     }
@@ -771,7 +794,7 @@ export async function receiveGrants(
       const keep = new Set(keys.slice(-MAX_GRANT_WRAPS));
       for (const k of keys) if (!keep.has(k)) delete memo[k];
     }
-    cacheSet("grantwraps", memo, Math.floor(Date.now() / 1000));
+    cacheSet(GRANT_MEMO_KEY, memo, Math.floor(Date.now() / 1000), pubkey);
   }
   // Report only on the success path: a throw above reaches the caller as a
   // rejection, which is a strictly more specific signal than this outcome.
