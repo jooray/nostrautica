@@ -139,14 +139,26 @@
   }
   /* Not a coloured dot: "new" has to survive forced-colors and greyscale, so it
      is a word — matching MatchEntry's marker exactly. `flex: none` keeps it out
-     of the name's ellipsis budget. */
+     of the name's ellipsis budget.
+
+     A SOLID pill, not accent-coloured text (2026-09-23): as bare 0.62rem text
+     it sat beside a row of soft-accent "Match" chips and read as one of them —
+     "I don't see any New" was the report. Solid fill is the one treatment no
+     other roster chip uses; the border is what survives forced-colors, where
+     the fill is discarded. */
   .new {
     flex: none;
-    font-size: 0.62rem;
+    align-self: center;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    font-size: 0.66rem;
     font-weight: 700;
+    line-height: 1.3;
     letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--accent);
+    background: var(--accent-bg);
+    color: var(--accent-contrast);
   }
   .sub {
     display: flex;
