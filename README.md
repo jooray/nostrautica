@@ -6,6 +6,22 @@ transcribes them, enriches them with each person's existing Nostr content, and
 tells every attendee **who they should meet and why** — scoring pairs on
 similarity *and* complementarity of skills, with plain-language reasoning.
 
+<!-- jooray-links:start -->
+### More from me
+
+**Related projects**
+
+- [nostr-emanator](https://github.com/jooray/nostr-emanator): schedule Nostr posts, paired over NIP-46 and Amber
+- [nsite-clay](https://github.com/jooray/nsite-clay): a self-editable site on Nostr, all in one HTML file
+- [oracolo](https://github.com/jooray/oracolo): a Nostr blog in a single HTML file
+- [anonmicroblog](https://github.com/jooray/anonmicroblog): anonymous microblogs on Nostr
+- [lievik](https://github.com/jooray/lievik): Nostr-first content curation for creators with several audiences
+
+**Full project showcase:** [Nostrautica in my project showcase](https://juraj.bednar.io/showcase/#MSG-01), or [all my projects](https://juraj.bednar.io/showcase/).
+
+I write about building things on [my blog](https://juraj.bednar.io/en/blog-en/). I also wrote a cypherpunk novel, [Tamers of Entropy](https://tamersofentropy.net/), and there is a [trailer](https://tamersofentropy.net/#trailer).
+<!-- jooray-links:end -->
+
 **Try it live:** [nostrautica.cypherpunk.today](https://nostrautica.cypherpunk.today) —
 the app is at `/app`, docs at `/docs`. Nothing to install; it's a static PWA that talks
 only to Nostr relays and Blossom servers.
