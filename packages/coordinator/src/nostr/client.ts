@@ -143,6 +143,12 @@ export class NostrClient {
           if (seen.seenBefore(e.id)) return;
           onEvent(e);
         },
+        // EOSE is the relay answering this subscription, so the backoff ladder
+        // starts over. Without it `attempt` only ever grew, and after a day of
+        // uptime every blip on a relay waited the full 300 s ceiling.
+        oneose: () => {
+          attempt = 0;
+        },
         onclose: (reasons: string[]) => {
           if (closingDeliberately) return;
           const why = reasons.filter(Boolean).join("; ") || "no reason given";

@@ -266,7 +266,7 @@ describe("NostrClient.publish outcomes", () => {
 describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
   interface FakeSub {
     url: string;
-    params: { onevent: (e: NostrEvent) => void; onclose: (r: string[]) => void };
+    params: { onevent: (e: NostrEvent) => void; oneose?: () => void; onclose: (r: string[]) => void };
     closed: boolean;
   }
   /** A pool that records each per-relay subscribe and lets the test drive closes. */
@@ -320,6 +320,33 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
       close();
       await vi.advanceTimersByTimeAsync(600_000);
       expect(subs).toHaveLength(4); // a deliberate close stops the retry loop
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("starts the backoff over once a resubscription reaches EOSE", async () => {
+    // Without the reset the attempt count only ever grew: after a day of uptime
+    // every blip on a relay cost the full 300 s ceiling before the next try.
+    vi.useFakeTimers();
+    try {
+      const client = new NostrClient([]);
+      const subs = fakePool(client);
+      client.subscribe({ kinds: [1059] }, () => {}, ["wss://flaky"]);
+
+      // Climb the ladder: 5 s, 15 s, 60 s, 300 s.
+      for (const wait of [5_000, 15_000, 60_000, 300_000]) {
+        subs.at(-1)!.params.onclose(["connection failed"]);
+        await vi.advanceTimersByTimeAsync(wait);
+      }
+      expect(subs).toHaveLength(5);
+
+      // The relay is back and answers the subscription...
+      subs.at(-1)!.params.oneose?.();
+      // ...then drops again: the retry comes after 5 s, not 300 s.
+      subs.at(-1)!.params.onclose(["relay connection closed"]);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(subs).toHaveLength(6);
     } finally {
       vi.useRealTimers();
     }
