@@ -78,6 +78,15 @@ export function makeGuardedLookup(
  * lookup (audit C4). nostr-tools constructs `new WebSocket(url)`; injecting `lookup`
  * here makes the SSRF check run at the actual connect, covering DNS rebinding and
  * mixed-answer hosts that the syntactic sanitizer cannot see.
+ *
+ * It also keeps a permanent no-op `error` listener. `ws` reports a handshake it
+ * aborts on the NEXT tick, while nostr-tools (>= 2.24) calls `close()` on a
+ * connecting socket and then detaches `onerror` in the same tick: on a connect
+ * timeout, and whenever a connecting relay is closed. The error then has no
+ * listener, EventEmitter throws it, and lifecycle.ts treats the uncaught exception
+ * as fatal, so every slow relay would kill the daemon. nostr-tools still sees
+ * every error that arrives while its own `onerror` is attached; the ones this
+ * listener swallows belong to sockets it has already let go of.
  */
 export class GuardedWebSocket extends WS {
   constructor(address: string | URL, protocols?: any, options?: any) {
@@ -85,5 +94,6 @@ export class GuardedWebSocket extends WS {
       ...(options ?? {}),
       lookup: makeGuardedLookup(dnsLookup as unknown as LookupFn, allowInsecureRelays),
     });
+    this.on("error", () => {});
   }
 }
