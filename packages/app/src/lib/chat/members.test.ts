@@ -129,6 +129,18 @@ describe("devicesForAccount", () => {
     ]);
   });
 
+  it("carries the external flag of a linked White Noise key (NIP §10.5)", () => {
+    const withExternal: RosterContent = {
+      ...roster,
+      attendees: [
+        { pubkey: alice, d: "d", role: "attendee", chat_keys: [{ pubkey: aPhone, label: "White Noise", added_at: 5, external: true }] },
+      ],
+    };
+    expect(devicesForAccount(withExternal, alice)).toEqual([
+      { pubkey: aPhone, label: "White Noise", added_at: 5, external: true },
+    ]);
+  });
+
   it("is empty for an account with no devices or an absent roster", () => {
     expect(devicesForAccount(roster, "c".repeat(64))).toEqual([]);
     expect(devicesForAccount(undefined, alice)).toEqual([]);

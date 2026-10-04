@@ -135,7 +135,13 @@ export function chatMembers(
 export function devicesForAccount(
   roster: RosterContent | undefined,
   account: string,
-): { pubkey: string; label?: string; added_at: number }[] {
+): { pubkey: string; label?: string; added_at: number; external?: boolean }[] {
   const entry = roster?.attendees.find((a) => a.pubkey === account);
-  return (entry?.chat_keys ?? []).map((k) => ({ pubkey: k.pubkey, label: k.label, added_at: k.added_at }));
+  return (entry?.chat_keys ?? []).map((k) => ({
+    pubkey: k.pubkey,
+    label: k.label,
+    added_at: k.added_at,
+    // A linked external Marmot client (NIP §10.5), e.g. White Noise.
+    ...(k.external ? { external: true } : {}),
+  }));
 }
