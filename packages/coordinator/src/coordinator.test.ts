@@ -3364,6 +3364,8 @@ class StubMls implements ChatMls {
   async setAdmins(_g: string, adminPubkeys: string[]) {
     this.admins = adminPubkeys;
   }
+  async sendText() {}
+  async destroyGroup() {}
 }
 
 describe("audit COORD-9 — MLS membership runs through the durable job runner", () => {
@@ -4404,6 +4406,28 @@ describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
     expect(device.added_at).toBe(1_760_000_000);
     // Sanity: it lands in this decade, not the year 58545.
     expect(new Date(device.added_at * 1000).getUTCFullYear()).toBe(2025);
+  });
+
+  it("flags a linked external Marmot client's key as external:true in chat_keys (NIP §10.5)", async () => {
+    const h = await setup(0, { chat: true });
+    const pubkey = await join(h, generateSecretKey(), "crypto");
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pubkey, chatPubkey: "d".repeat(64), label: "Chrome", now: 1 });
+    h.store.upsertChatKey({
+      coordinate: h.coordinate,
+      accountPubkey: pubkey,
+      chatPubkey: "e".repeat(64),
+      label: "White Noise",
+      external: true,
+      now: 2,
+    });
+    await admin(h, "approve", { pubkey });
+
+    const rosters = h.transport.published.filter((e) => e.kind === 31604);
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, rosters[rosters.length - 1]!.content)));
+    const keys = roster.attendees.find((a) => a.pubkey === pubkey)!.chat_keys!;
+    expect(keys.find((k) => k.pubkey === "e".repeat(64))?.external).toBe(true);
+    // An ordinary device carries no flag at all (absent, never false).
+    expect("external" in keys.find((k) => k.pubkey === "d".repeat(64))!).toBe(false);
   });
 
   it("omits the id for a FROZEN group — members must no longer route there (§9 Q4)", async () => {
