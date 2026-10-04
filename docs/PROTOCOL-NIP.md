@@ -495,8 +495,9 @@ silently drop them.
         d: string ≤200,               // that attendee's blinded 31603 d
         role: "attendee" | "organizer",
         chat_keys?: [
-          { pubkey: hex32, label?: string ≤60, added_at: int }  // added_at: unix SECONDS
-        ] ≤5                         // per-device chat keys attested for this account
+          { pubkey: hex32, label?: string ≤60, added_at: int,  // added_at: unix SECONDS
+            external?: true }        // a linked external Marmot client's key (§10.5)
+        ] ≤10                        // per-device chat keys (MAX_CHAT_KEYS_PER_ACCOUNT)
       }
     ] ≤700                           // per PAGE; ≤2000 across the whole roster
   }
@@ -922,16 +923,20 @@ relay-visible event on its own.
   {
     v: 2,
     a: <coordinate>,
-    op: "add" | "revoke",
+    op: "add" | "revoke" | "link" | "link_confirm",
     chat_pubkey: hex32,
-    label?: string ≤60,       // required when op:"add" ("Chrome on laptop")
+    label?: string ≤60,       // required when op:"add" ("Chrome on laptop") or op:"link"
     client_id?: string ≤120,  // stable per-device kind-30443 key-package slot id
-    proof?: schnorr-sig-hex   // required when op:"add"
+    proof?: schnorr-sig-hex,  // required when op:"add"; forbidden on link/link_confirm
+    code?: string ≤32         // required when op:"link_confirm"; forbidden otherwise
   }
   ```
   `proof` is a BIP-340 signature by the **chat device key** over
   `sha256(utf8(JSON.stringify(["nostrautica-chat-device-v2", <coordinate>,
   <account-pubkey>, <chat_pubkey>, <rumor created_at>])))`. Full mechanics are §10.2.
+  `link`/`link_confirm` bind an external Marmot client's key (§10.5). They were added
+  after v2 froze, additively: every `add`/`revoke` rumor is unchanged, and a coordinator
+  that predates them rejects such a rumor at its strict parse.
 
 #### `21608`: Profile Correction
 
@@ -1122,7 +1127,9 @@ members**: the coordinator authorizes exactly the active attested device keys an
 else: the attendee/organizer **account pubkey is never an implicit chat identity**. A
 local-key account is no exception; it mints and attests its own per-device chat key like
 any other account type (§10.1), and that attested device (not the raw account key) is
-what participates. `op:"revoke"` needs no proof (the account is evicting a key it already
+what participates. (The one way an account key can become a chat member is an explicit
+§10.5 link of that key, which makes it an attested, roster-visible, cap-counted,
+revocable device like any other.) `op:"revoke"` needs no proof (the account is evicting a key it already
 named; possession is irrelevant to that decision). Bindings
 are per (coordinate, account); a chat pubkey **MUST NOT** be bindable to two different
 accounts; rebinding it to the same account (e.g. re-add after revoke) mints a fresh
@@ -1159,6 +1166,69 @@ relays):
 - The coordinator **SHOULD** additionally include the event coordinate in the Marmot
   group's name/description metadata as defense in depth; clients treat it as a hint, not
   authority.
+
+### 10.5 Linking an external Marmot client
+
+An approved attendee MAY link the identity of an external Marmot client (e.g. a White
+Noise npub, `W`) to their account for one event, so that the coordinator adds `W` to the
+event's group and the attendee can also chat from that client. `W` may equal the
+account key or be unrelated to it. The external client cannot produce a §10.2 proof (it
+never sees the challenge), so possession is proven differently, and the coordinator,
+never the attendee, adds `W`: it holds the account⇄key binding and removes the key again
+on revoke or withdrawal.
+
+1. **Request.** The account seals a 21607 `{op:"link", chat_pubkey: W, label}` (no
+   `proof`, no `code`). The coordinator **MUST** reject it unless the sealer is an
+   approved attendee of an event with an active group, and **MUST** apply the same
+   rules as `op:"add"`: `W` bound to another account is refused (first binder wins),
+   and `W` counts toward `MAX_CHAT_KEYS_PER_ACCOUNT`. A `W` already actively bound to
+   this account needs no new proof; the coordinator just re-syncs it.
+2. **Self-link** (`W` = the sealing account key): the seal proves possession. The
+   coordinator binds `W` immediately and adds it.
+3. **Any other `W`: confirmation code.** The coordinator:
+   - keeps at most **one pending link per (coordinate, account)**; a newer request
+     supersedes the older one, whose code stops working;
+   - **SHOULD** rate-limit requests per (coordinate, account) (reference: 5 per hour),
+     since each one makes it invite a key the requester chose;
+   - discovers `W`'s kind-30443 key package (event relays first, then `W`'s own
+     kind-10002 relays) and resolves `W`'s kind-10050 inbox relays the same broad way
+     (default relays plus the chat interop relays, then `W`'s kind-10002 relays);
+   - creates a fresh two-member Marmot group (coordinator as sole admin, plus `W`)
+     named **"Nostrautica: confirm White Noise link"**, gift-wraps the Welcome to `W`'s
+     inbox relays, and posts **one** kind-9 application message carrying a one-time code
+     and an instruction to type it into Nostrautica and not to share it;
+   - generates the code with a CSPRNG: `CHAT_LINK_CODE_LENGTH = 8` characters from
+     `CHAT_LINK_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ"` (no 0/O, 1/I/L),
+     displayed as `XXXX-XXXX`; stores **only a hash** of it, bound to (coordinate,
+     account, `W`); expires it after **30 minutes**; and kills it after **5** wrong
+     attempts.
+4. **Confirm.** The attendee accepts the invite in the external client, reads the code,
+   and types it into Nostrautica, which seals `{op:"link_confirm", chat_pubkey: W,
+   code}`. Both sides compare codes after `normalizeChatLinkCode` (uppercase; spaces,
+   dots and dashes removed). On a match the coordinator binds `W` to the account as an
+   **active** chat key flagged external, adds it to the event group through the normal
+   member-sync path, and then removes `W` from the confirmation group and discards that
+   group (best effort). The coordinator **SHOULD NOT** invite `W` to the event group
+   with the key package the confirmation group consumed while a rotated one may still
+   appear (reference grace: 90 s); after that it MAY use it, which is correct for a
+   last-resort key package.
+5. **Afterwards** `W` is an ordinary attested device: it is listed in the roster's
+   `chat_keys` with `external: true` (so Nostrautica clients can label it), counts toward
+   the cap, and is removed with the existing `op:"revoke"` (a real MLS Remove). A linked
+   external key is **never** promoted to MLS co-admin, even for an organizer. Like any
+   new member it sees messages from its join epoch forward only.
+6. **Feedback.** Outcomes reach the account as 21606 notices with `stage: "chat_link"`:
+   `state: "cleared"` when the code has been posted or the key linked, and
+   `state: "poison"` with one of these `error_category` values on refusal:
+   `chat_link_unavailable`, `chat_link_rate_limited`, `chat_link_no_key_package`,
+   `chat_link_failed`, `chat_link_no_pending`, `chat_link_expired`,
+   `chat_link_code_wrong`, `chat_link_too_many_attempts`, `chat_device_cap_reached`,
+   `chat_key_bound_to_other_account`, `chat_key_package_ineligible`. Clients treat an
+   unknown category as a generic failure.
+
+The code proves that whoever typed it could read a group only `W`'s holder can decrypt.
+It does not stop `W`'s holder from deliberately handing the code to someone else, which
+is equivalent to them consenting to the link.
 
 ## 11. Talks
 
@@ -1232,7 +1302,12 @@ Wire-normative bounds (`packages/protocol/src/schemas.ts`, `crypto.ts`, `giftwra
   100000, `MAX_NOTES` 2000, `MAX_NOTE` 5000, `MAX_LANG` 35, `MAX_TRANSCRIPT_TEXT`
   100000, `MAX_INTRO_TEXT` 2000, `MAX_LIBRARY_TEXTS` 20, `MAX_TALK_TITLE` 200,
   `MAX_TALK_DESC` 2000, `talk_d` length 1..64, `MAX_CHAT_KEY_LABEL` 60,
-  `MAX_CHAT_KEY_CLIENT_ID` 120, `MAX_CHAT_KEYS_PER_ACCOUNT` 10.
+  `MAX_CHAT_KEY_CLIENT_ID` 120, `MAX_CHAT_KEYS_PER_ACCOUNT` 10,
+  `MAX_CHAT_LINK_CODE_INPUT` 32, `CHAT_LINK_CODE_LENGTH` 8 (alphabet
+  `CHAT_LINK_CODE_ALPHABET`, §10.5).
+- External-client link (§10.5, coordinator reference values): code lifetime 30 min,
+  5 wrong attempts, 5 link requests per account per event per hour, 90 s grace before
+  reusing the key package the confirmation group consumed.
 - Icebreakers (31605, §6.2): ≤ 3 per match entry, ≤ 280 chars each.
 - Members-only post markdown editor cap: 60,000 UTF-8 bytes
   (`MAX_MEMBERS_POST_MARKDOWN_BYTES`). Theme CSS: 32,768 bytes (`MAX_THEME_CSS_BYTES`).

@@ -871,18 +871,73 @@ export const MAX_CHAT_KEY_CLIENT_ID = 120;
  */
 export const MAX_CHAT_KEYS_PER_ACCOUNT = 10;
 
+// ── External Marmot client link (NIP §10.5) ─────────────────────────────────
+// `op:"link"` asks the coordinator to bind an EXTERNAL Marmot client's identity
+// (e.g. a White Noise npub) to the sealing account as a chat device. The external
+// client cannot produce the §10.2 proof (it never sees the challenge), so
+// possession is proven differently: when the linked key IS the sealing account
+// key, the seal itself proves it; otherwise the coordinator invites the key into a
+// throwaway 2-member Marmot group, posts a one-time code there, and binds only
+// after `op:"link_confirm"` echoes that code back. Both ops are additive: a
+// coordinator that predates them rejects the rumor at its strict parse.
+
+/** Characters a link code is drawn from: no 0/O, 1/I/L — read off one screen, typed into another. */
+export const CHAT_LINK_CODE_ALPHABET = "23456789ABCDEFGHJKMNPQRSTUVWXYZ";
+/** Significant characters in a link code (displayed as two groups of four). */
+export const CHAT_LINK_CODE_LENGTH = 8;
+/** Upper bound on the raw `code` string, which may carry the user's spaces/dashes. */
+export const MAX_CHAT_LINK_CODE_INPUT = 32;
+
+/**
+ * Canonical form of a typed link code: uppercase, separators (space, dash, dot)
+ * removed. Both sides normalize, so "abcd-efgh", "ABCD EFGH" and "abcdefgh" are
+ * the same code. Does not validate the alphabet — a wrong character is simply a
+ * wrong code, counted as an attempt like any other.
+ */
+export function normalizeChatLinkCode(input: string): string {
+  return input.toUpperCase().replace(/[\s.-]/g, "");
+}
+
 export const chatKeyAttestationContentSchema = z
   .object({
     v: version,
     a: z.string(), // coordinate this attestation applies to
-    op: z.enum(["add", "revoke"]),
+    op: z.enum(["add", "revoke", "link", "link_confirm"]),
     chat_pubkey: hex32, // the per-device chat key (MLS account identity for this device)
-    label: z.string().max(MAX_CHAT_KEY_LABEL).optional(), // required on add (see refine)
+    label: z.string().max(MAX_CHAT_KEY_LABEL).optional(), // required on add/link (see refine)
     client_id: z.string().max(MAX_CHAT_KEY_CLIENT_ID).optional(), // stable 30443 slot id
     proof: z.string().regex(/^[0-9a-f]{128}$/, "expected 128-hex schnorr sig").optional(),
+    // The one-time code shown inside the external client (op:"link_confirm" only).
+    code: z.string().min(1).max(MAX_CHAT_LINK_CODE_INPUT).optional(),
   })
   .strict()
   .superRefine((val, ctx) => {
+    if (val.code !== undefined && val.op !== "link_confirm") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["code"],
+        message: "code is only valid on op:'link_confirm'",
+      });
+    }
+    if (val.op === "link" || val.op === "link_confirm") {
+      // Possession of an external key is proven by the seal (self-link) or by the
+      // confirmation code, never by a §10.2 proof the external client can't make.
+      // Rejecting one here keeps the two mechanisms from being mixed up.
+      if (val.proof !== undefined) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["proof"],
+          message: `proof is not used on op:'${val.op}'`,
+        });
+      }
+      if (val.op === "link" && val.label === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["label"], message: "label is required for op:'link'" });
+      }
+      if (val.op === "link_confirm" && val.code === undefined) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["code"], message: "code is required for op:'link_confirm'" });
+      }
+      return;
+    }
     if (val.op !== "add") return;
     // Proof of possession is REQUIRED on add — a device without one can't be bound
     // (the coordinator additionally re-verifies the signature). Label is required so
@@ -923,6 +978,9 @@ export const rosterChatKeySchema = z.object({
   pubkey: hex32, // the per-device chat key
   label: z.string().max(MAX_CHAT_KEY_LABEL).optional(),
   added_at: z.number().int(),
+  // Linked from an external Marmot client via 21607 op:"link" (NIP §10.5), not a
+  // Nostrautica device. Absent (never `false`) for ordinary devices.
+  external: z.literal(true).optional(),
 });
 export type RosterChatKey = z.infer<typeof rosterChatKeySchema>;
 
