@@ -57,6 +57,46 @@ group via the roster's `nostr_group_id`, and reads live kind-445 traffic forward
 from its own join epoch. A device that loses its chat key mints a new one and
 re-attests; the old leaf is removed on revoke.
 
+## Also chatting from White Noise (external Marmot clients)
+
+An approved attendee can link the identity of an external Marmot client, typically a
+White Noise npub, to their account for one event. The coordinator then adds that key
+to the event's group like any other device. The normative flow is NIP §10.5; in short:
+
+- **UI:** "Also chat from White Noise" sits under the chat's **Chat devices** list
+  (`WhiteNoiseLinkCard.svelte`, logic in `chat/external-link.ts`). It takes an npub,
+  nprofile or hex key, or fills in the account npub with one tap.
+- **Same key as the account:** a 21607 `op:"link"` is sealed by that key, which proves
+  possession, so the coordinator binds and invites it at once.
+- **A different key:** the coordinator invites it into a throwaway two-member group
+  ("Nostrautica: confirm White Noise link") and posts one message with an 8-character
+  code. The user accepts the invite in White Noise and types the code into Nostrautica
+  (`op:"link_confirm"`). The coordinator stores only a hash of the code; it expires
+  after 30 minutes and dies after 5 wrong tries. On a match the key is bound, added
+  through the normal `syncMember` path, and the confirmation group is torn down.
+- **Afterwards** the key is a device: listed in the roster's `chat_keys` with
+  `external: true` (the device list badges it), counted against the device cap,
+  removable with the ordinary revoke. It is never promoted to MLS co-admin, even for
+  an organizer. It reads from its join epoch forward, like every device.
+- **Feedback** arrives as 21606 notices on stage `chat_link` (refusals as `poison` with
+  a category, progress as `cleared`), kept apart from the `chat_attestation` setup
+  banner.
+- **Delivery to the external client:** its key package is found via its NIP-65 relays
+  (`key-package-discovery.ts`), and its kind-10050 inbox via the default and chat
+  interop relays and then its NIP-65 relays (`network.ts`), so the Welcome lands where
+  White Noise reads.
+- **Key-package reuse:** the confirmation group consumes one of the external client's
+  key packages. The event-group add prefers a rotated one, holds off up to 90 s when
+  only the spent one is visible, then uses it (correct for last-resort key packages).
+
+**Known limitation.** The vendored marmot-ts 0.6.0 still writes the legacy `0xF2F1`
+identity proof. Current White Noise clients cannot join a group the coordinator
+creates until marmot-ts is upgraded (planned separately, blocked on upstream). Until
+then a link attempt is expected to end in a "key package ineligible" or "setup failed"
+refusal. All marmot-specific calls go through the `ChatMls` port (`chat/mls.ts`), so
+the upgrade does not touch the link logic. The flow is covered by unit tests and a
+real-engine round trip between two vendored clients, not by a live White Noise test.
+
 ## Rejoining a device that fell out of the group
 
 A device can be a listed, active chat device of an approved attendee (it appears

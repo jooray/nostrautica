@@ -340,6 +340,20 @@ and joining the group can take a little while, or occasionally need a retry,
 before messages start flowing. If the tab is stuck on "setting up," give it a
 few minutes and reopen it.
 
+**Also chat from White Noise.** Under **Chat devices** you can link a White
+Noise account, so you can read and answer the room from the White Noise app
+on your phone. Enter its npub, or tap **Use my account npub** if White Noise
+runs on the same key you signed in with here. For your own npub that's the
+whole job. For any other npub, White Noise receives an invite called
+"Nostrautica: confirm White Noise link" with a short code in it. Accept it,
+type the code into Nostrautica within 30 minutes, and don't share it with
+anyone. After that the organizer's service invites your White Noise account
+into the event chat. It shows up in your device list and you remove it like
+any other device. Like any new device, it only sees messages sent after it
+joined. Until the chat library behind Nostrautica is updated for current
+White Noise versions, the link may be refused with a note that your White
+Noise version is newer than the coordinator supports.
+
 ## 6. Your event report
 
 Any time before, during, or after the event, open **Event report** from
