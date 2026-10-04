@@ -266,7 +266,7 @@ describe("NostrClient.publish outcomes", () => {
 describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
   interface FakeSub {
     url: string;
-    params: { onevent: (e: NostrEvent) => void; oneose?: () => void; onclose: (r: string[]) => void };
+    params: { onevent: (e: NostrEvent) => void; oneose?: () => void; onclose: (r: { url: string; reason: string }[]) => void };
     closed: boolean;
   }
   /** A pool that records each per-relay subscribe and lets the test drive closes. */
@@ -304,13 +304,13 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
       expect(subs).toHaveLength(2);
 
       // The unreachable relay's subscribe fails: nostr-tools calls onclose for it.
-      subs[0]!.params.onclose(["connection failed"]);
+      subs[0]!.params.onclose([{ url: "", reason: "connection failed" }]);
       await vi.advanceTimersByTimeAsync(5_000);
       expect(subs).toHaveLength(3);
       expect(subs[2]!.url).toBe("wss://down");
 
       // Still down: it keeps trying, with a longer gap each time.
-      subs[2]!.params.onclose(["connection failed"]);
+      subs[2]!.params.onclose([{ url: "", reason: "connection failed" }]);
       await vi.advanceTimersByTimeAsync(5_000);
       expect(subs).toHaveLength(3); // 15s backoff, not yet
       await vi.advanceTimersByTimeAsync(10_000);
@@ -336,7 +336,7 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
 
       // Climb the ladder: 5 s, 15 s, 60 s, 300 s.
       for (const wait of [5_000, 15_000, 60_000, 300_000]) {
-        subs.at(-1)!.params.onclose(["connection failed"]);
+        subs.at(-1)!.params.onclose([{ url: "", reason: "connection failed" }]);
         await vi.advanceTimersByTimeAsync(wait);
       }
       expect(subs).toHaveLength(5);
@@ -344,7 +344,7 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
       // The relay is back and answers the subscription...
       subs.at(-1)!.params.oneose?.();
       // ...then drops again: the retry comes after 5 s, not 300 s.
-      subs.at(-1)!.params.onclose(["relay connection closed"]);
+      subs.at(-1)!.params.onclose([{ url: "", reason: "relay connection closed" }]);
       await vi.advanceTimersByTimeAsync(5_000);
       expect(subs).toHaveLength(6);
     } finally {
