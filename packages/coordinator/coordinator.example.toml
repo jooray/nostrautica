@@ -13,6 +13,11 @@ ncryptsec_file = "coordinator.ncryptsec"
 # clients' 30443 key packages are found even when an event's own relay list
 # doesn't include them (fallback tier — see key-package-discovery.ts).
 default = ["wss://nostr.cypherpunk.today", "wss://relay.primal.net", "wss://nos.lol", "wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"]
+# Relays never dialled, even when an event's own relay set lists them. The default
+# is ["wss://relay.nostr.net"] (auth-required since its outage); setting this key
+# replaces the default, and `exclude = []` turns exclusion off. If every relay of an
+# event is excluded, the coordinator uses them anyway rather than go deaf to it.
+# exclude = ["wss://relay.nostr.net"]
 
 [providers.venice]
 api_key_env = "VENICE_API_KEY"

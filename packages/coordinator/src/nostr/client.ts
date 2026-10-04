@@ -5,8 +5,9 @@
  *
  * Node needs a WebSocket implementation injected into nostr-tools.
  */
-import { SimplePool } from "nostr-tools/pool";
+import { SimplePool, useWebSocketImplementation as usePoolWebSocketImplementation } from "nostr-tools/pool";
 import { useWebSocketImplementation } from "nostr-tools/relay";
+import { normalizeURL } from "nostr-tools/utils";
 import type { Event as NostrEvent } from "nostr-tools/core";
 import { GuardedWebSocket } from "../net/relay-guard.js";
 
@@ -14,6 +15,12 @@ import { GuardedWebSocket } from "../net/relay-guard.js";
 // C4): every relay connection is pinned to a public-address-only lookup, so a relay
 // host that resolves to a private/loopback address (or rebinds) is refused at connect.
 useWebSocketImplementation(GuardedWebSocket as unknown as typeof globalThis.WebSocket);
+// ...and separately for the pool. nostr-tools' pool module keeps its own WebSocket
+// reference (>= 2.24), so the call above does not reach it, and SimplePool would
+// quietly fall back to Node's global undici WebSocket. That skips the guard, and
+// undici re-dispatches `error` synchronously from close(), which recurses through
+// nostr-tools' onerror until the stack overflows: 0.8.1 crash-looped on exactly that.
+usePoolWebSocketImplementation(GuardedWebSocket as unknown as typeof globalThis.WebSocket);
 
 export interface Filter {
   ids?: string[];
@@ -88,6 +95,54 @@ class BoundedSeenIds {
   }
 }
 
+/**
+ * SimplePool that never lets a relay object outlive its place in the pool.
+ *
+ * nostr-tools keys the pool by URL but hands each relay an `onclose` that deletes
+ * the URL — not that relay. And when `ensureRelay` fails it drops the relay from
+ * the map without closing it, so a relay that was mid-reconnect, or whose socket
+ * finished a slow handshake after the 3 s timeout, carries on outside the pool:
+ * connected, pinged every 29 s, and invisible to `close()`. When that orphan later
+ * hard-closes, its `onclose` evicts whichever relay now holds the URL, subscriptions
+ * and all, and makes another orphan. And `reconnect()` overwrites its timer handle
+ * without clearing the old timer, so `close()` alone does not stop a relay that
+ * dropped and then timed out. In production this left ~113 connected
+ * relay.damus.io orphans and ~4,000 sockets after a day, until the daemon hit its
+ * memory cap and aborted. 2.25 closes the timed-out socket; none of the three
+ * problems above is fixed upstream.
+ *
+ * So: a relay may only remove its OWN map entry, and a relay that `ensureRelay`
+ * gave up on is closed. Closing it fires its subscriptions' `onclose`, which hands
+ * them back to {@link NostrClient.subscribe}'s per-relay retry loop.
+ */
+export class OrphanSafePool extends SimplePool {
+  override ensureRelay(url: string, params?: Parameters<SimplePool["ensureRelay"]>[1]) {
+    const key = normalizeURL(url);
+    // super's body runs synchronously up to its first await, so the relay it
+    // creates or reuses is already in the map when this returns.
+    const pending = super.ensureRelay(url, params);
+    const relay = this.relays.get(key);
+    if (relay) {
+      relay.onclose = () => {
+        if (this.relays.get(key) === relay) this.relays.delete(key);
+      };
+    }
+    return pending.catch((err: unknown) => {
+      if (relay && this.relays.get(key) !== relay) {
+        relay.onclose = null;
+        relay.close();
+        // close() cancels only the reconnect timer the relay still holds a handle
+        // to. `reconnect()` overwrites that handle without clearing the old timer,
+        // so a relay that dropped and then timed out has an earlier timer still
+        // armed, and it would call connect() and revive this relay outside the
+        // pool. Make that call fail; the timer's own try/catch swallows it.
+        relay.connect = () => Promise.reject(new Error(`relay ${key} was retired by the pool`));
+      }
+      throw err;
+    });
+  }
+}
+
 export class NostrClient {
   // Reconnect and keepalive are BOTH off by default in nostr-tools
   // (`AbstractSimplePool`: `enableReconnect = opts.enableReconnect || false`, and
@@ -101,9 +156,49 @@ export class NostrClient {
   // goes permanently deaf to it, nothing is logged, and only a restart recovers —
   // which is why deploys masked it. The app has always set both explicitly
   // (`packages/app/src/lib/signer/nip46.ts`); the daemon was the outlier.
-  private pool = new SimplePool({ enableReconnect: true, enablePing: true });
+  // OrphanSafePool, not SimplePool: see its doc comment for what reconnect does to
+  // relay objects that fall out of the pool.
+  private pool = new OrphanSafePool({ enableReconnect: true, enablePing: true });
 
-  constructor(private readonly defaultRelays: string[]) {}
+  /** Normalized URLs from `relays.exclude`: never dialled (see {@link usable}). */
+  private readonly excluded: Set<string>;
+  /** Excluded URLs already reported once, so the log names each one a single time. */
+  private readonly reportedExcluded = new Set<string>();
+
+  constructor(
+    private readonly defaultRelays: string[],
+    opts: { exclude?: string[] } = {},
+  ) {
+    this.excluded = new Set((opts.exclude ?? []).map((u) => normalizeURL(u)));
+  }
+
+  /**
+   * `relays` minus the excluded ones. Every dial goes through here, because relay
+   * sets arrive from places the operator does not control: an event's
+   * organizer-signed config, a grant, an attendee's inbox list.
+   *
+   * If exclusion would leave nothing, the original set is kept. An event whose
+   * only relays are excluded would otherwise be one the coordinator can never
+   * hear, which is worse than paying for a bad relay.
+   */
+  private usable(relays: string[]): string[] {
+    if (this.excluded.size === 0) return relays;
+    const kept: string[] = [];
+    for (const url of relays) {
+      const key = normalizeURL(url);
+      if (!this.excluded.has(key)) {
+        kept.push(url);
+      } else if (!this.reportedExcluded.has(key)) {
+        this.reportedExcluded.add(key);
+        relayLog(`[relay] not dialling ${key}: listed in relays.exclude`);
+      }
+    }
+    if (kept.length === 0 && relays.length > 0) {
+      relayLog(`[relay] every relay in [${relays.join(", ")}] is excluded — using them anyway rather than none`);
+      return relays;
+    }
+    return kept;
+  }
 
   /**
    * Long-lived subscription; returns a closer.
@@ -143,9 +238,20 @@ export class NostrClient {
           if (seen.seenBefore(e.id)) return;
           onEvent(e);
         },
-        onclose: (reasons: string[]) => {
+        // EOSE is the relay answering this subscription, so the backoff ladder
+        // starts over. Without it `attempt` only ever grew, and after a day of
+        // uptime every blip on a relay waited the full 300 s ceiling.
+        oneose: () => {
+          attempt = 0;
+        },
+        // nostr-tools >= 2.24 reports `{ url, reason }` per relay, not a bare string.
+        onclose: (reasons: { url: string; reason: string }[]) => {
           if (closingDeliberately) return;
-          const why = reasons.filter(Boolean).join("; ") || "no reason given";
+          const why =
+            reasons
+              .map((r) => r?.reason)
+              .filter(Boolean)
+              .join("; ") || "no reason given";
           const delay = RESUBSCRIBE_BACKOFF_MS[Math.min(attempt, RESUBSCRIBE_BACKOFF_MS.length - 1)]!;
           // Never silent: an operator diagnosing a stuck event has to be able to see
           // that this relay went away and that we are still trying.
@@ -161,7 +267,7 @@ export class NostrClient {
       open.set(url, sub);
     };
 
-    for (const url of new Set(relays)) subscribeOne(url, 0);
+    for (const url of new Set(this.usable(relays))) subscribeOne(url, 0);
 
     return () => {
       closingDeliberately = true;
@@ -268,7 +374,7 @@ export class NostrClient {
         }
         resolve(events);
       };
-      const sub = this.pool.subscribe(relays, filter as any, {
+      const sub = this.pool.subscribe(this.usable(relays), filter as any, {
         onevent: (e: NostrEvent) => {
           if (!seen.has(e.id)) {
             seen.add(e.id);
@@ -292,7 +398,10 @@ export class NostrClient {
    * therefore never replaces a healthy subscription — the caller keeps the
    * last-known-good relays live until this returns true.
    */
-  probe(relays: string[], timeoutMs = 5000): Promise<boolean> {
+  probe(candidates: string[], timeoutMs = 5000): Promise<boolean> {
+    // Strict here, unlike usable(): a candidate set that is excluded in full is
+    // not one to hand over to, so it never "proves" itself usable.
+    const relays = candidates.filter((u) => !this.excluded.has(normalizeURL(u)));
     if (relays.length === 0) return Promise.resolve(false);
     return new Promise((resolve) => {
       let settled = false;
@@ -348,7 +457,8 @@ export class NostrClient {
    * that relay, so the next publish to the same coordinate hits "replaced" again,
    * this time with a fair chance of being the first outcome seen.
    */
-  async publish(event: NostrEvent, relays: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
+  async publish(event: NostrEvent, requested: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
+    const relays = this.usable(requested);
     type Outcome = { url: string; ok: boolean; replaced: boolean; reason: string };
     let settledCount = 0;
     let resolvedToCaller = false;
