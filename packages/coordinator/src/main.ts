@@ -212,7 +212,7 @@ async function runDaemon(): Promise<void> {
     allowInsecure: config.security.allow_insecure_urls,
   };
 
-  const client = new NostrClient(config.relays.default);
+  const client = new NostrClient(config.relays.default, { exclude: config.relays.exclude });
 
   // Marmot group-chat admin bot (§4): a MarmotClient run off coordSk with its MLS
   // state in encrypted SQLite. Constructed unconditionally, but wholly inert on

@@ -363,3 +363,61 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
     expect(got).toEqual(["w1", "w2"]);
   });
 });
+
+describe("NostrClient relays.exclude", () => {
+  /** Records every relay set the client hands the pool, per call. */
+  function recordingPool(client: NostrClient) {
+    const dialled: string[][] = [];
+    (client as any).pool = {
+      subscribe(relays: string[], _f: unknown, params: { oneose?: () => void }) {
+        dialled.push(relays);
+        queueMicrotask(() => params.oneose?.());
+        return { close() {} };
+      },
+      publish(relays: string[]) {
+        dialled.push(relays);
+        return relays.map(() => Promise.resolve("ok"));
+      },
+      close() {},
+    };
+    return dialled;
+  }
+  const EXCLUDE = { exclude: ["wss://relay.nostr.net"] };
+  const ev = { id: "e".repeat(64), kind: 1, pubkey: "a".repeat(64), created_at: 1, tags: [], content: "", sig: "s" } as unknown as NostrEvent;
+
+  it("never subscribes to an excluded relay, however the URL is spelled", () => {
+    const client = new NostrClient([], EXCLUDE);
+    const dialled = recordingPool(client);
+    client.subscribe({ kinds: [1059] }, () => {}, ["wss://nos.lol", "wss://relay.nostr.net/", "wss://Relay.Nostr.Net"]);
+    expect(dialled).toEqual([["wss://nos.lol"]]);
+  });
+
+  it("drops excluded relays from fetch and publish", async () => {
+    const client = new NostrClient([], EXCLUDE);
+    const dialled = recordingPool(client);
+    await client.fetch({ kinds: [1] }, ["wss://relay.nostr.net", "wss://nos.lol"]);
+    await client.publish(ev, ["wss://relay.nostr.net", "wss://nos.lol"]);
+    expect(dialled).toEqual([["wss://nos.lol"], ["wss://nos.lol"]]);
+  });
+
+  it("keeps the original set when every relay in it is excluded, rather than going deaf", () => {
+    const client = new NostrClient([], EXCLUDE);
+    const dialled = recordingPool(client);
+    client.subscribe({ kinds: [1059] }, () => {}, ["wss://relay.nostr.net"]);
+    expect(dialled).toEqual([["wss://relay.nostr.net"]]);
+  });
+
+  it("never lets an all-excluded candidate set pass a handover probe", async () => {
+    const client = new NostrClient([], EXCLUDE);
+    const dialled = recordingPool(client);
+    await expect(client.probe(["wss://relay.nostr.net"], 50)).resolves.toBe(false);
+    expect(dialled).toEqual([]);
+  });
+
+  it("excludes nothing when constructed without the option", () => {
+    const client = new NostrClient([]);
+    const dialled = recordingPool(client);
+    client.subscribe({ kinds: [1059] }, () => {}, ["wss://relay.nostr.net"]);
+    expect(dialled).toEqual([["wss://relay.nostr.net"]]);
+  });
+});

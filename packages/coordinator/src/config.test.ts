@@ -60,6 +60,12 @@ describe("loadConfig URL validation (audit O4)", () => {
     const cfg = loadConfig(writeConfig(BASE));
     expect(cfg.relays.default).toEqual(["wss://relay.example/"]);
   });
+  it("excludes relay.nostr.net unless relays.exclude says otherwise", () => {
+    expect(loadConfig(writeConfig(BASE)).relays.exclude).toEqual(["wss://relay.nostr.net/"]);
+    const body = BASE.replace(/(\[relays\]\n)/, "$1exclude = []\n");
+    expect(body).not.toBe(BASE);
+    expect(loadConfig(writeConfig(body)).relays.exclude).toEqual([]);
+  });
   it("rejects an http Venice base_url", () => {
     const body = BASE + `\n[providers.venice]\nbase_url = "http://api.venice.ai/api/v1"\n`;
     expect(() => loadConfig(writeConfig(body))).toThrow(/providers.venice.base_url.*must be https:/s);

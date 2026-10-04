@@ -160,7 +160,45 @@ export class NostrClient {
   // relay objects that fall out of the pool.
   private pool = new OrphanSafePool({ enableReconnect: true, enablePing: true });
 
-  constructor(private readonly defaultRelays: string[]) {}
+  /** Normalized URLs from `relays.exclude`: never dialled (see {@link usable}). */
+  private readonly excluded: Set<string>;
+  /** Excluded URLs already reported once, so the log names each one a single time. */
+  private readonly reportedExcluded = new Set<string>();
+
+  constructor(
+    private readonly defaultRelays: string[],
+    opts: { exclude?: string[] } = {},
+  ) {
+    this.excluded = new Set((opts.exclude ?? []).map((u) => normalizeURL(u)));
+  }
+
+  /**
+   * `relays` minus the excluded ones. Every dial goes through here, because relay
+   * sets arrive from places the operator does not control: an event's
+   * organizer-signed config, a grant, an attendee's inbox list.
+   *
+   * If exclusion would leave nothing, the original set is kept. An event whose
+   * only relays are excluded would otherwise be one the coordinator can never
+   * hear, which is worse than paying for a bad relay.
+   */
+  private usable(relays: string[]): string[] {
+    if (this.excluded.size === 0) return relays;
+    const kept: string[] = [];
+    for (const url of relays) {
+      const key = normalizeURL(url);
+      if (!this.excluded.has(key)) {
+        kept.push(url);
+      } else if (!this.reportedExcluded.has(key)) {
+        this.reportedExcluded.add(key);
+        relayLog(`[relay] not dialling ${key}: listed in relays.exclude`);
+      }
+    }
+    if (kept.length === 0 && relays.length > 0) {
+      relayLog(`[relay] every relay in [${relays.join(", ")}] is excluded — using them anyway rather than none`);
+      return relays;
+    }
+    return kept;
+  }
 
   /**
    * Long-lived subscription; returns a closer.
@@ -229,7 +267,7 @@ export class NostrClient {
       open.set(url, sub);
     };
 
-    for (const url of new Set(relays)) subscribeOne(url, 0);
+    for (const url of new Set(this.usable(relays))) subscribeOne(url, 0);
 
     return () => {
       closingDeliberately = true;
@@ -336,7 +374,7 @@ export class NostrClient {
         }
         resolve(events);
       };
-      const sub = this.pool.subscribe(relays, filter as any, {
+      const sub = this.pool.subscribe(this.usable(relays), filter as any, {
         onevent: (e: NostrEvent) => {
           if (!seen.has(e.id)) {
             seen.add(e.id);
@@ -360,7 +398,10 @@ export class NostrClient {
    * therefore never replaces a healthy subscription — the caller keeps the
    * last-known-good relays live until this returns true.
    */
-  probe(relays: string[], timeoutMs = 5000): Promise<boolean> {
+  probe(candidates: string[], timeoutMs = 5000): Promise<boolean> {
+    // Strict here, unlike usable(): a candidate set that is excluded in full is
+    // not one to hand over to, so it never "proves" itself usable.
+    const relays = candidates.filter((u) => !this.excluded.has(normalizeURL(u)));
     if (relays.length === 0) return Promise.resolve(false);
     return new Promise((resolve) => {
       let settled = false;
@@ -416,7 +457,8 @@ export class NostrClient {
    * that relay, so the next publish to the same coordinate hits "replaced" again,
    * this time with a fair chance of being the first outcome seen.
    */
-  async publish(event: NostrEvent, relays: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
+  async publish(event: NostrEvent, requested: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
+    const relays = this.usable(requested);
     type Outcome = { url: string; ok: boolean; replaced: boolean; reason: string };
     let settledCount = 0;
     let resolvedToCaller = false;

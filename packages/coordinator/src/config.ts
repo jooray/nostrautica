@@ -52,7 +52,20 @@ export const configSchema = z.object({
     })
     .strict()
     .default({}),
-  relays: z.object({ default: z.array(z.string()).min(1) }).strict(),
+  relays: z
+    .object({
+      default: z.array(z.string()).min(1),
+      // Relays the daemon never dials, wherever they come from: this default list,
+      // an event's organizer-signed relay set, a grant or an inbox list. Setting the
+      // key replaces the default; `exclude = []` turns exclusion off.
+      // relay.nostr.net: its Cloudflare front answered every WebSocket upgrade with
+      // HTTP 500/525, and since it came back it refuses the coordinator's filters with
+      // `auth-required` (NIP-42). Attendees must be able to publish without an account,
+      // so an auth-gated relay is no use to an event. The app dropped it from its
+      // defaults for the same reason, but events created before that still list it.
+      exclude: z.array(z.string()).default(["wss://relay.nostr.net"]),
+    })
+    .strict(),
   providers: z
     .object({
       venice: z
@@ -346,6 +359,7 @@ function validateConfigUrls(config: CoordinatorConfig): void {
     config.pricing.checkout_url = http(config.pricing.checkout_url, "pricing.checkout_url");
   }
   config.relays.default = config.relays.default.map((r, i) => ws(r, `relays.default[${i}]`));
+  config.relays.exclude = config.relays.exclude.map((r, i) => ws(r, `relays.exclude[${i}]`));
 }
 
 /** A config key the schema does not know, as `[section] key` for the operator. */
