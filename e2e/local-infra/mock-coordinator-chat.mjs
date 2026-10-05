@@ -19,6 +19,7 @@ const { Coordinator } = await import(new URL("coordinator.js", DIST));
 const { MockStt, MockLlm } = await import(new URL("providers/mock.js", DIST));
 const { makeChatNetwork } = await import(new URL("chat/network.js", DIST));
 const { createMarmotClientMls } = await import(new URL("chat/mls.js", DIST));
+const { retireStaleGroups } = await import(new URL("chat/retire.js", DIST));
 const { setRelayConnectPolicy } = await import(new URL("net/relay-guard.js", DIST));
 const { buildCoordinatorAnnounce } = await import(new URL("nostr/publisher.js", DIST));
 
@@ -106,7 +107,23 @@ const client = new NostrClient([RELAY]);
 
 const chatNetwork = makeChatNetwork({ transport: client, defaultRelays: [RELAY] });
 const { mls: chatMls } = createMarmotClientMls({ store, coordSk, network: chatNetwork });
+// Same startup order as main.ts: retire groups this library generation cannot run
+// (pre-0x8009) before anything loads them.
+await retireStaleGroups({ store, mls: chatMls, log: (m) => console.log(m) }).catch((e) =>
+  console.warn("[chat] retiring stale groups failed:", e),
+);
 await chatMls.loadAll().catch((e) => console.warn("[chat] loadAll failed:", e));
+
+// Interop testing only: extra relays baked into every new group's routing state,
+// e.g. MOCK_EXTRA_GROUP_RELAYS=ws://127.0.0.1:7777 so a White Noise CLI (which
+// cannot trust the stack's self-signed wss proxy) reaches the group's 445 traffic
+// on the plain nak relay behind it. Unset (the default) changes nothing.
+const EXTRA_GROUP_RELAYS = (process.env.MOCK_EXTRA_GROUP_RELAYS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+if (EXTRA_GROUP_RELAYS.length > 0) {
+  const create = chatMls.createGroup.bind(chatMls);
+  chatMls.createGroup = (opts) => create({ ...opts, relays: [...new Set([...opts.relays, ...EXTRA_GROUP_RELAYS])] });
+  console.log("[mock-coordinator-chat] extra group relays", EXTRA_GROUP_RELAYS.join(" "));
+}
 
 const coordinator = new Coordinator({
   store,
