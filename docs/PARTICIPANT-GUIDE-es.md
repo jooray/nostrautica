@@ -387,10 +387,9 @@ Acéptala, escribe el código en Nostrautica antes de 30 minutos y no se lo
 muestres a nadie. Después, el servicio del organizador invita a tu cuenta de
 White Noise al chat del evento. Aparece en tu lista de dispositivos y se quita
 como cualquier otro. Como todo dispositivo nuevo, solo ve los mensajes enviados
-después de unirse. Hasta que la biblioteca de chat de Nostrautica se actualice
-para las versiones actuales de White Noise, la vinculación puede rechazarse con
-un aviso de que tu versión de White Noise es más nueva de lo que admite el
-coordinador.
+después de unirse. White Noise tiene que estar en una versión actual. Si la
+vinculación se rechaza porque el coordinador no puede usar las claves de tu
+White Noise, actualiza White Noise, ábrelo una vez y vuelve a intentarlo.
 
 ## 6. Tu informe del evento
 

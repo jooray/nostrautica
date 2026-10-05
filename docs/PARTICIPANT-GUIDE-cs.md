@@ -375,9 +375,9 @@ White Noise link“ s krátkým kódem. Přijměte ji, do 30 minut zadejte kód 
 Nostrautiky a nikomu ho neukazujte. Potom služba organizátora pozve váš účet ve
 White Noise do chatu akce. Objeví se v seznamu zařízení a odebírá se jako každé
 jiné zařízení. Jako každé nové zařízení vidí jen zprávy odeslané po připojení.
-Dokud se chatová knihovna Nostrautiky neaktualizuje pro současné verze White
-Noise, může být propojení odmítnuto s poznámkou, že vaše verze White Noise je
-novější, než koordinátor podporuje.
+White Noise musí být v aktuální verzi. Pokud propojení odmítne s tím, že
+koordinátor neumí použít klíče vašeho White Noise, aktualizujte White Noise,
+jednou ho otevřete a zkuste to znovu.
 
 ## 6. Váš report z akce
 

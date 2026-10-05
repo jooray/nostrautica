@@ -132,8 +132,9 @@ export class MarmotChat {
   }
 
   /**
-   * Drop local MLS state this library generation cannot use (the 0x8009 flag day,
-   * MARMOT-GROUP-CHAT §2.1), so this device re-enrols through the ordinary path.
+   * Drop local MLS state this library generation cannot use (the 0x8009 flag
+   * day: MARMOT-GROUP-CHAT.md, "Library: vendored marmot-ts and the 0x8009 flag
+   * day"), so this device re-enrols through the ordinary path.
    *
    * - **Groups** outside the current account-identity-proof profile (built under
    *   the legacy 0xF2F1 proof by marmot-ts 0.6.0), or whose state no longer loads

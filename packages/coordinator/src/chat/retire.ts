@@ -1,6 +1,6 @@
 /**
- * Retire MLS groups this library generation can no longer run (MARMOT-GROUP-CHAT
- * §2.1, the 0x8009 flag day).
+ * Retire MLS groups this library generation can no longer run (the 0x8009 flag
+ * day: MARMOT-GROUP-CHAT.md, "Library: vendored marmot-ts and the 0x8009 flag day").
  *
  * marmot-ts 0.6.0 built groups under the legacy account-identity proof (component
  * 0xF2F1). The current library — and White Noise / MDK — only run groups whose

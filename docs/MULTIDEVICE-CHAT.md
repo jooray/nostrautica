@@ -42,6 +42,11 @@ the two nastiest chat-recovery bugs**. Per-device keys dissolve both.
 
 ## 2. Library-level feasibility (vendored marmot-ts 0.6.0 / ts-mls 2.0.0-rc.14)
 
+> Written against 0.6.0. Since the 0x8009 upgrade the leaf proof is
+> `marmot.member.account-identity-proof.v2`, a kind-450 signed by the member key
+> (see MARMOT-GROUP-CHAT.md, "Library: vendored marmot-ts and the 0x8009 flag day");
+> the conclusions below are unchanged.
+
 Facts verified in the vendored code:
 
 - The MLS credential holds **only a 32-byte x-only Nostr pubkey**

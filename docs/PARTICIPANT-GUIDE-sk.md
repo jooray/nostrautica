@@ -374,9 +374,9 @@ confirm White Noise link“ s krátkym kódom. Prijmite ju, do 30 minút zadajte
 do Nostrautiky a nikomu ho neukazujte. Potom služba organizátora pozve váš účet
 vo White Noise do chatu podujatia. Objaví sa v zozname zariadení a odstraňuje sa
 ako každé iné zariadenie. Ako každé nové zariadenie vidí iba správy poslané po
-pripojení. Kým sa chatová knižnica Nostrautiky neaktualizuje pre súčasné verzie
-White Noise, prepojenie môže byť odmietnuté s poznámkou, že vaša verzia White
-Noise je novšia, než koordinátor podporuje.
+pripojení. White Noise musí byť v aktuálnej verzii. Ak prepojenie odmietne s
+tým, že koordinátor nevie použiť kľúče vášho White Noise, aktualizujte White
+Noise, raz ho otvorte a skúste to znova.
 
 ## 6. Váš report z podujatia
 

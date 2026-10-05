@@ -5,7 +5,7 @@ from npm as-is. They exist so `pnpm install --frozen-lockfile` (used by the depl
 the app/coordinator builds work from the committed files alone — no git submodule init, no
 extra build step at install time.
 
-See `docs/MARMOT-GROUP-CHAT.md` §2.1 for the full decision record.
+See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 flag day".
 
 ## Packages
 
@@ -23,7 +23,7 @@ See `docs/MARMOT-GROUP-CHAT.md` §2.1 for the full decision record.
   the client's own `signEvent`), and groups are classified by that profile. That is what
   White Noise / MDK (0.11+) require, and it is NOT wire-compatible with the previous vendored
   0.6.0 (`2f60dbb`), which emitted the legacy 0xF2F1 proof. Groups and KeyPackages from that
-  generation are retired on upgrade — see MARMOT-GROUP-CHAT §2.1 "The 0x8009 flag day".
+  generation are retired on upgrade (see that MARMOT-GROUP-CHAT section).
 
   Upstream's build bundles its ts-mls fork (`hzrd149/ts-mls`, a git submodule) into
   `lib/vendor/ts-mls` with specifiers rewritten, so there is no separate ts-mls package any

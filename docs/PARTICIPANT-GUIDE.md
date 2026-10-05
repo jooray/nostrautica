@@ -350,9 +350,9 @@ type the code into Nostrautica within 30 minutes, and don't share it with
 anyone. After that the organizer's service invites your White Noise account
 into the event chat. It shows up in your device list and you remove it like
 any other device. Like any new device, it only sees messages sent after it
-joined. Until the chat library behind Nostrautica is updated for current
-White Noise versions, the link may be refused with a note that your White
-Noise version is newer than the coordinator supports.
+joined. White Noise has to be a current version. If the link is refused
+because the coordinator can't use your White Noise keys, update White Noise,
+open it once, and try again.
 
 ## 6. Your event report
 

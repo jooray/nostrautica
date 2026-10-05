@@ -410,10 +410,10 @@ innerhalb von 30 Minuten in Nostrautica ein und zeig ihn niemandem. Danach lädt
 der Dienst des Organisators dein White-Noise-Konto in den Event-Chat ein. Es
 erscheint in deiner Geräteliste und lässt sich wie jedes andere Gerät
 entfernen. Wie jedes neue Gerät sieht es nur Nachrichten, die nach dem Beitritt
-gesendet wurden. Bis die Chat-Bibliothek hinter Nostrautica für aktuelle
-White-Noise-Versionen aktualisiert ist, kann die Verknüpfung mit dem Hinweis
-abgelehnt werden, dass deine White-Noise-Version neuer ist, als der Koordinator
-unterstützt.
+gesendet wurden. White Noise muss in einer aktuellen Version laufen. Wird die
+Verknüpfung abgelehnt, weil der Koordinator die Schlüssel deines White Noise
+nicht verwenden kann, aktualisiere White Noise, öffne es einmal und versuche es
+erneut.
 
 ## 6. Dein Event-Bericht
 
