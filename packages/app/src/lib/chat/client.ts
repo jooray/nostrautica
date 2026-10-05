@@ -76,7 +76,7 @@ export class MarmotChat {
   private inviteSub?: { unsubscribe(): void };
   private onInviteDecrypted?: () => void;
   /** Serializes the startup join and every welcome-driven join so two runs don't race the same welcome. */
-  private joining?: Promise<void>;
+  private joining?: Promise<number>;
   private readonly boundGroups = new Set<string>();
   /** Event-coordinate → nostr_group_id bindings (APPK-3), per chat identity. */
   private readonly eventGroups: ReturnType<typeof makeMarmotStores>["eventGroupStore"];
@@ -438,17 +438,19 @@ export class MarmotChat {
    * join the same welcome; fires {@link onStateChange} when a new group appears so
    * the UI leaves its "setting up" state.
    */
-  private async joinPendingAndBind(): Promise<void> {
-    const prev = this.joining ?? Promise.resolve();
-    this.joining = prev
-      .catch(() => {})
+  private async joinPendingAndBind(): Promise<number> {
+    const prev = this.joining ?? Promise.resolve(0);
+    const run = prev
+      .catch(() => 0)
       .then(async () => {
         const before = this.boundGroups.size;
-        await this.joinPending();
+        const joined = await this.joinPending();
         await this.bindAllGroups();
-        if (this.boundGroups.size !== before) this.onStateChange?.();
+        if (joined > 0 || this.boundGroups.size !== before) this.onStateChange?.();
+        return joined;
       });
-    await this.joining;
+    this.joining = run;
+    return run;
   }
 
   /**
@@ -461,7 +463,8 @@ export class MarmotChat {
    * seal it as the event's coordinator. Non-matching invites stay unread — a
    * different event's session (same identity) may own them (APPK-3).
    */
-  async joinPending(): Promise<void> {
+  async joinPending(): Promise<number> {
+    let joinedCount = 0;
     // Move any received gift wraps to "unread" (idempotent), then join every
     // *unread* welcome we still hold the key package for. We iterate `getUnread()`
     // rather than trusting `decryptGiftWraps()`'s return value: a welcome the
@@ -528,10 +531,12 @@ export class MarmotChat {
           );
         }
         await this.client.invites.markAsRead(invite.id).catch(() => {});
+        joinedCount++;
       } catch (err) {
         console.warn("marmot: welcome join failed", err);
       }
     }
+    return joinedCount;
   }
 
   /**
@@ -596,6 +601,9 @@ export class MarmotChat {
 
       console.warn("marmot: discarding removed-member state to adopt the re-invite", mlsIdHex);
       await this.client.groups.destroy(mlsIdHex);
+      // The re-joined group is a NEW object under the same id. Forget the old
+      // binding, or bindAllGroups skips it and its messages never reach the UI.
+      this.boundGroups.delete(mlsIdHex);
       const joined = await this.client.joinGroupFromWelcome({ welcomeRumor: invite });
 
       for (const [key, value] of saved) await history.setItem(key, value).catch(() => undefined);
@@ -810,7 +818,20 @@ export class MarmotChat {
           console.warn("marmot: dropped malformed application message", err);
         }
       });
-      group.on("stateChanged", () => this.onStateChange?.());
+      group.on("stateChanged", () => {
+        this.onStateChange?.();
+        // Our leaf just disappeared. A re-add's Welcome can arrive BEFORE the
+        // commit that removed our old leaf is processed; joinPending then refuses
+        // it ("we still hold a leaf") and leaves it unread. Now that the removal
+        // has landed the corpse check passes, so try the waiting Welcome again.
+        // Without this the device sat on "You're no longer in this chat", and
+        // pressing Rejoin revoked the fresh leaf and repeated the race.
+        if (!groupHasMember(group, this.identity.pubkey)) {
+          void this.joinPendingAndBind().catch((err) =>
+            console.warn("marmot: join after removal failed", err),
+          );
+        }
+      });
       // Paint the durable history for this group immediately, so a re-open shows
       // the whole conversation (not just what arrives live after this mount). The
       // live `connectAll` backfill then adds anything sent while we were away; both
@@ -915,6 +936,11 @@ export class MarmotChat {
     // a client that never processed its own removal commit still believes it holds
     // a leaf, and refusing would strand exactly the person asking for help.
     if (!opts?.force && (await this.isEventGroupMember())) return;
+    // A re-add may already be waiting: the coordinator added a fresh leaf, but
+    // its Welcome reached us before our own removal did and was left unread.
+    // Join that instead of revoking: revoking would remove the very leaf the
+    // Welcome is for and start the race again.
+    if ((await this.joinPendingAndBind().catch(() => 0)) > 0) return;
     // A previous fail-closed refusal may have memoized "the roster advertises no
     // group id" for the life of this client (see currentEventGroups). Drop it, or
     // the rejoin below succeeds and routing still refuses afterwards.

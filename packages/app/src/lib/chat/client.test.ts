@@ -1033,6 +1033,77 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
     });
   });
 
+  // Prod 2026-10-05: "Rejoin" sends revoke and then add, so the coordinator
+  // publishes our Remove and right after it an Add + Welcome. When the Welcome
+  // was handled first, we still held our old leaf, so the corpse check refused
+  // it and left it unread. The Remove landed a moment later ("You're no longer
+  // in this chat") and nothing retried the waiting Welcome. Pressing Rejoin
+  // again revoked the fresh leaf and the race repeated.
+  it("joins a re-add Welcome that arrived before its own removal, once the removal lands", async () => {
+    const MLS_ID = "0011223344556677";
+    const identity = "c".repeat(64);
+    const listeners = new Map<string, (() => void)[]>();
+    const live = {
+      idStr: MLS_ID,
+      id: new Uint8Array([3]),
+      state: { members: [COORD, identity], nostrGroupId: "gid-race" },
+      on: (event: string, cb: () => void) => {
+        listeners.set(event, [...(listeners.get(event) ?? []), cb]);
+      },
+    };
+    shared.groups = [live];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-race", attendees: [] });
+
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    await vi.waitFor(() => expect(listeners.get("stateChanged")?.length).toBe(1));
+
+    // The Welcome first: we still hold a leaf, so it is refused and kept.
+    lastClient.invites.deliver({
+      id: "welcome-early",
+      mlsId: MLS_ID,
+      nostrGroupId: "gid-race",
+      members: [COORD, identity],
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(lastClient.joinedFrom).toEqual([]);
+    expect(lastClient.invites.unread.map((u) => u.id)).toContain("welcome-early");
+
+    // Then our removal is processed.
+    live.state.members = [COORD];
+    for (const cb of listeners.get("stateChanged") ?? []) cb();
+
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-early"]));
+    expect(lastClient.invites.unread.map((u) => u.id)).not.toContain("welcome-early");
+    expect(await chat.nostrGroupId()).toBe("gid-race");
+    await chat.send("still here");
+    expect(lastClient.groups.send).toHaveBeenCalledOnce();
+  });
+
+  it("rejoin uses a waiting re-add Welcome instead of revoking again", async () => {
+    const MLS_ID = "8899aabbccddeeff";
+    const identity = "c".repeat(64);
+    // Our removal already landed (corpse), and a re-add Welcome is waiting.
+    shared.groups = [
+      { idStr: MLS_ID, id: new Uint8Array([4]), state: { members: [COORD], nostrGroupId: "gid-wait" }, on: () => {} },
+    ];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-wait", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    lastClient.invites.unread.push({
+      id: "welcome-waiting",
+      pubkey: COORD,
+      mlsId: MLS_ID,
+      nostrGroupId: "gid-wait",
+      members: [COORD, identity],
+    } as never);
+    shared.calls.length = 0;
+
+    await chat.rejoin({ force: true });
+
+    expect(lastClient.joinedFrom).toEqual(["welcome-waiting"]);
+    expect(shared.calls.filter((c) => c.startsWith("attest:revoke"))).toEqual([]);
+  });
+
   it("never discards a group we still hold a leaf in", async () => {
     // Same collision, but we are a LIVE member — a duplicate/replayed welcome for
     // a working room must not destroy it. The error propagates as before.
