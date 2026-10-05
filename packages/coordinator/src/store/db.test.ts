@@ -532,6 +532,44 @@ describe("schema migrations (audit O3)", () => {
     store.close();
   });
 
+  it("adds the external flag to existing chat-key bindings without a schema bump (NIP §10.5)", async () => {
+    const path = tmpDb();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec(
+      `CREATE TABLE marmot_chat_keys (coordinate TEXT NOT NULL, account_pubkey TEXT NOT NULL,
+         chat_pubkey TEXT NOT NULL, client_id TEXT, label TEXT, status TEXT NOT NULL DEFAULT 'active',
+         updated_at INTEGER NOT NULL, PRIMARY KEY (coordinate, chat_pubkey))`,
+    );
+    raw.exec("INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, updated_at) VALUES ('c', 'acct', 'dev', 1)");
+    raw.close();
+
+    const store = new Store(path);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    // The existing device stays an ordinary one…
+    expect(store.getChatKey("c", "dev")?.external).toBe(0);
+    // …a linked key records the flag, and a later plain re-attestation keeps it.
+    store.upsertChatKey({ coordinate: "c", accountPubkey: "acct", chatPubkey: "wn", external: true, now: 2 });
+    store.upsertChatKey({ coordinate: "c", accountPubkey: "acct", chatPubkey: "wn", label: "WN", now: 3 });
+    expect(store.getChatKey("c", "wn")).toMatchObject({ external: 1, label: "WN" });
+    // The link table exists and a withdrawal purges it with the bindings.
+    store.putPendingChatLink({
+      coordinate: "c",
+      accountPubkey: "acct",
+      chatPubkey: "wn",
+      label: null,
+      codeHash: "h",
+      expiresAt: 10,
+      confirmGroupId: "g",
+      confirmKpId: "k",
+      windowStartedAt: 1,
+      windowCount: 1,
+      now: 1,
+    });
+    expect(store.expiredPendingChatLinks(10).map((l) => l.account_pubkey)).toEqual(["acct"]);
+    store.close();
+  });
+
   it("re-keys invite_usage per redeemer, keeping the codes already spent (v5)", async () => {
     const path = tmpDb();
     // A pre-v5 database: one row per CODE, so it cannot represent two redeemers.

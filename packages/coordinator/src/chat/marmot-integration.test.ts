@@ -9,7 +9,11 @@
 import { describe, it, expect } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { MarmotClient } from "@internet-privacy/marmot-ts/client";
-import { getEpoch } from "@internet-privacy/marmot-ts/core";
+import {
+  getEpoch,
+  getNostrGroupIdHex,
+  deserializeApplicationData,
+} from "@internet-privacy/marmot-ts/core";
 import type {
   NostrNetworkInterface,
   PublishResponse,
@@ -123,6 +127,57 @@ describe("marmot-ts real round-trip (coordinator admin bot)", () => {
       // Remove them (real MLS Remove via the flatten workaround).
       await mls.removePubkeys(ids.mlsGroupIdHex, [memberPub]);
       expect(await mls.isMember(ids.mlsGroupIdHex, memberPub)).toBe(false);
+    },
+    30_000,
+  );
+
+  // NIP §10.5: the external-client link confirmation group, through the real
+  // engine. The external key joins from the coordinator's Welcome and decrypts the
+  // one kind-9 message carrying the code — the whole proof of possession rests on
+  // that message being readable by the invited key and nobody else.
+  it(
+    "link confirmation group: the invited key joins and reads the coordinator's code message; destroyGroup drops it",
+    async () => {
+      const network = new FakeNetwork();
+      const coordSk = generateSecretKey();
+      const coordStore = new Store(":memory:", coordSk);
+      const { mls } = createMarmotClientMls({ store: coordStore, coordSk, network });
+
+      const wSk = generateSecretKey();
+      const wPub = getPublicKey(wSk);
+      const external = makeMemberClient(wSk, network);
+      await external.keyPackages.ensurePublished({ relays: RELAYS });
+      const [kp] = await network.request(RELAYS, { kinds: [30443], authors: [wPub] });
+
+      const ids = await mls.createGroup({
+        name: "Nostrautica: confirm White Noise link",
+        description: "one-time code",
+        relays: RELAYS,
+        adminPubkeys: [getPublicKey(coordSk)],
+      });
+      await mls.invite(ids.mlsGroupIdHex, kp as never);
+      await mls.sendText(ids.mlsGroupIdHex, "Your Nostrautica link code: ABCD-EFGH");
+
+      // The external client picks up its gift-wrapped Welcome and joins.
+      await external.invites.ingestEvents(network.events.filter((e) => e.kind === 1059) as never);
+      await external.invites.decryptGiftWraps();
+      const [invite] = await external.invites.getUnread();
+      expect(invite).toBeDefined();
+      const { group } = await external.joinGroupFromWelcome({ welcomeRumor: invite! });
+      const texts: string[] = [];
+      group.on("applicationMessage", (bytes: Uint8Array) => {
+        texts.push((deserializeApplicationData(bytes) as { content: string }).content);
+      });
+      const routed = network.events.filter(
+        (e) => e.kind === 445 && e.tags.some((t) => t[0] === "h" && t[1] === getNostrGroupIdHex(group.state)),
+      );
+      for await (const _ of group.ingest(routed as never)) void _;
+      expect(texts).toContain("Your Nostrautica link code: ABCD-EFGH");
+
+      // Teardown: remove W, then the coordinator forgets the group entirely.
+      await mls.removePubkeys(ids.mlsGroupIdHex, [wPub]);
+      await mls.destroyGroup(ids.mlsGroupIdHex);
+      expect(coordStore.marmotKvKeys("group-state")).toEqual([]);
     },
     30_000,
   );

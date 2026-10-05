@@ -10,7 +10,11 @@
  * array-action result must be resolved and flattened by hand before commit) — is
  * isolated here.
  */
-import { MarmotClient } from "@internet-privacy/marmot-ts/client";
+import {
+  MarmotClient,
+  createChatRumor,
+  createApplicationMessageIntent,
+} from "@internet-privacy/marmot-ts/client";
 import {
   getNostrGroupIdHex,
   getPubkeyLeafNodes,
@@ -21,6 +25,7 @@ import {
 import { proposeRemoveUser } from "@internet-privacy/marmot-ts/lib/client/group/proposals/remove-member.js";
 import { proposeUpdateMetadata } from "@internet-privacy/marmot-ts/lib/client/group/proposals/update-metadata.js";
 import type { NostrNetworkInterface } from "@internet-privacy/marmot-ts/client";
+import { getPublicKey } from "nostr-tools/pure";
 import type { Store } from "../store/db.js";
 import { makeMarmotStores } from "./stores.js";
 import {
@@ -76,6 +81,14 @@ export interface ChatMls {
    * the coordinator out of admin commits.
    */
   setAdmins(mlsGroupIdHex: string, adminPubkeys: string[]): Promise<void>;
+  /**
+   * Post one kind-9 chat message, authored by the coordinator, to a group. Used
+   * only for the external-client link confirmation group (NIP §10.5), whose one
+   * message carries the one-time code. Convergence-gated like any send.
+   */
+  sendText(mlsGroupIdHex: string, content: string): Promise<void>;
+  /** Drop a group's local state for good (the confirmation group, after use). */
+  destroyGroup(mlsGroupIdHex: string): Promise<void>;
 }
 
 /** Build a real `MarmotClient`-backed {@link ChatMls} off the coordinator key. */
@@ -97,11 +110,15 @@ export function createMarmotClientMls(deps: {
     rewindStore: stores.rewindStore,
     clientId: deps.clientId ?? "nostrautica-coordinator",
   });
-  return { mls: new MarmotClientMls(client), client };
+  return { mls: new MarmotClientMls(client, getPublicKey(deps.coordSk)), client };
 }
 
 export class MarmotClientMls implements ChatMls {
-  constructor(private readonly client: MarmotClient) {}
+  constructor(
+    private readonly client: MarmotClient,
+    /** The coordinator's pubkey: the author of the rumors {@link sendText} posts. */
+    private readonly selfPubkey?: string,
+  ) {}
 
   /**
    * Per-group serialization of every STATE-MUTATING MLS op (invite / remove /
@@ -272,6 +289,23 @@ export class MarmotClientMls implements ChatMls {
       const ctx = group.session.proposalContext();
       const proposals = await proposeUpdateMetadata({ adminPubkeys: want })(ctx);
       await this.client.groups.commit(mlsGroupIdHex, { extraProposals: proposals });
+    });
+  }
+
+  async sendText(mlsGroupIdHex: string, content: string): Promise<void> {
+    const author = this.selfPubkey;
+    if (!author) throw new Error("sendText needs the coordinator pubkey");
+    // Serialized with the group's commits: the message must be encrypted under the
+    // epoch the preceding invite produced, not race it.
+    await this.serialize(mlsGroupIdHex, async () => {
+      const rumor = createChatRumor({ pubkey: author, content });
+      await this.client.groups.send(mlsGroupIdHex, createApplicationMessageIntent(rumor));
+    });
+  }
+
+  async destroyGroup(mlsGroupIdHex: string): Promise<void> {
+    await this.serialize(mlsGroupIdHex, async () => {
+      await this.client.groups.destroy(mlsGroupIdHex);
     });
   }
 }

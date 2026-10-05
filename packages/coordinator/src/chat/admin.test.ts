@@ -36,8 +36,9 @@ class FakeMls implements ChatMls {
   created = 0;
   throwOnInvite = new Set<string>();
 
-  async createGroup(opts?: { adminPubkeys?: string[] }): Promise<{ mlsGroupIdHex: string; nostrGroupIdHex: string }> {
+  async createGroup(opts?: { name?: string; adminPubkeys?: string[] }): Promise<{ mlsGroupIdHex: string; nostrGroupIdHex: string }> {
     this.created++;
+    this.createdNames.push(opts?.name ?? "");
     this.createdWithAdmins = opts?.adminPubkeys;
     const id = "mls-" + this.created;
     if (opts?.adminPubkeys) this.admins.set(id, opts.adminPubkeys);
@@ -104,6 +105,17 @@ class FakeMls implements ChatMls {
   }
   async setAdmins(group: string, adminPubkeys: string[]): Promise<void> {
     this.admins.set(group, [...adminPubkeys]);
+  }
+  /** Every sendText, in order: the link-confirmation code message lands here. */
+  sent: { group: string; content: string }[] = [];
+  destroyed: string[] = [];
+  createdNames: string[] = [];
+  async sendText(group: string, content: string): Promise<void> {
+    this.sent.push({ group, content });
+  }
+  async destroyGroup(group: string): Promise<void> {
+    this.destroyed.push(group);
+    this.members.delete(group);
   }
 }
 
@@ -1629,5 +1641,254 @@ describe("the chat roster backfill reads key packages once for the whole roster"
     // device the batch could not have covered.
     expect(calls).toEqual([[early], [late]]);
     expect([...mls.invited].sort()).toEqual([early, late].sort());
+  });
+});
+
+// ── External Marmot client link (21607 op:"link"/"link_confirm", NIP §10.5) ──
+describe("MarmotAdmin — linking an external Marmot client (White Noise)", () => {
+  const W = getPublicKey(generateSecretKey()); // the White Noise npub, ≠ ACCOUNT
+  const EVENT_GROUP = "mls-1";
+
+  function kpAt(pubkey: string, id: string, created_at: number): AnyEvent {
+    return { ...kpEvent(pubkey, id), created_at } as AnyEvent;
+  }
+  function linkReq(chatPubkey = W, label = "White Noise"): ChatKeyAttestationContent {
+    return { v: 2, a: COORD, op: "link", chat_pubkey: chatPubkey, label };
+  }
+  function linkConfirm(code: string, chatPubkey = W): ChatKeyAttestationContent {
+    return { v: 2, a: COORD, op: "link_confirm", chat_pubkey: chatPubkey, code };
+  }
+  /** The code the coordinator posted in the confirmation group (the latest one). */
+  function postedCode(mls: FakeMls): string {
+    const last = mls.sent[mls.sent.length - 1];
+    const m = /code: ([A-Z0-9]{4}-[A-Z0-9]{4})/.exec(last?.content ?? "");
+    if (!m) throw new Error("no code posted");
+    return m[1]!;
+  }
+
+  async function setup(opts: { kps?: AnyEvent[]; role?: "attendee" | "organizer" } = {}) {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const clock = { t: 1_000_000 };
+    const notices: CoordinatorStatusContent[] = [];
+    const queued: string[] = [];
+    const rosterChanges: string[] = [];
+    const admin = makeAdmin(store, mls, opts.kps ?? [kpAt(W, "kpW1", 10)], undefined, {
+      now: () => clock.t,
+      notifyAttendee: (_c, _p, content) => notices.push(content),
+      enqueueSync: (_c, pubkey) => queued.push(pubkey),
+      onRosterChanged: (c) => rosterChanges.push(c),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: ["wss://chat.example"] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1, ...(opts.role ? { role: opts.role } : {}) });
+    const lastCategory = () => notices[notices.length - 1]?.error_category;
+    return { store, mls, clock, notices, queued, rosterChanges, admin, lastCategory };
+  }
+
+  it("self-link (W = the account key): the seal is the proof — bound and invited at once, no code", async () => {
+    const h = await setup({ kps: [kpAt(ACCOUNT, "kpA", 10)] });
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(ACCOUNT), CREATED_AT)).toBe(true);
+    const row = h.store.getChatKey(COORD, ACCOUNT)!;
+    expect(row).toMatchObject({ account_pubkey: ACCOUNT, status: "active", external: 1, label: "White Noise" });
+    expect(h.mls.created).toBe(1); // only the event group — no confirmation group
+    expect(h.mls.sent).toEqual([]);
+    expect(await h.mls.isMember(EVENT_GROUP, ACCOUNT)).toBe(true);
+    expect(h.rosterChanges).toContain(COORD);
+    expect(h.notices.at(-1)).toMatchObject({ stage: "chat_link", state: "cleared" });
+  });
+
+  it("a different key: confirmation group with the code, then link_confirm binds W and adds it to the room", async () => {
+    // Two key packages: the confirmation group spends the newest, the event group
+    // must use the other one (a Welcome to a spent init key is undecryptable).
+    const h = await setup({ kps: [kpAt(W, "kpW-old", 5), kpAt(W, "kpW-new", 10)] });
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT)).toBe(true);
+
+    // A 2-member confirmation group, named so White Noise shows what it is for.
+    expect(h.mls.created).toBe(2);
+    expect(h.mls.createdNames[1]).toBe("Nostrautica: confirm White Noise link");
+    expect(h.mls.admins.get("mls-2")).toEqual([COORDINATOR]);
+    expect(await h.mls.isMember("mls-2", W)).toBe(true);
+    expect(h.mls.sent).toHaveLength(1);
+    expect(h.mls.sent[0]!.group).toBe("mls-2");
+    expect(h.mls.sent[0]!.content).toMatch(/Don't share it/);
+    // Not bound, not in the room, and the code is not stored in the clear.
+    expect(h.store.getChatKey(COORD, W)).toBeUndefined();
+    expect(await h.mls.isMember(EVENT_GROUP, W)).toBe(false);
+    const code = postedCode(h.mls);
+    const link = h.store.getChatLink(COORD, ACCOUNT)!;
+    expect(link.status).toBe("pending");
+    expect(link.code_hash).not.toContain(code.replace("-", ""));
+    expect(link.confirm_kp_id).toBe("kpW-new");
+
+    // Typed sloppily: lower case with a space instead of the dash.
+    const typed = code.toLowerCase().replace("-", " ");
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm(typed), CREATED_AT)).toBe(true);
+    expect(h.store.getChatKey(COORD, W)).toMatchObject({ account_pubkey: ACCOUNT, status: "active", external: 1 });
+    expect(await h.mls.isMember(EVENT_GROUP, W)).toBe(true);
+    expect(h.mls.invited.at(-1)).toBe(W);
+    // The confirmation group is left behind: W removed, local state destroyed.
+    expect(h.mls.removed).toContainEqual([W]);
+    expect(h.mls.destroyed).toEqual(["mls-2"]);
+    expect(h.store.getChatLink(COORD, ACCOUNT)!.status).toBe("linked");
+    expect(h.queued).toEqual([]); // the rotated key package was there: no retry needed
+    expect(h.notices.at(-1)).toMatchObject({ stage: "chat_link", state: "cleared" });
+  });
+
+  it("holds off on the key package the confirmation group spent, then uses it after the grace", async () => {
+    const h = await setup({ kps: [kpAt(W, "kpOnly", 10)] });
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm(postedCode(h.mls)), CREATED_AT);
+    // Bound, but not invited with the spent key package — a durable retry is queued.
+    expect(h.store.getChatKey(COORD, W)?.status).toBe("active");
+    expect(await h.mls.isMember(EVENT_GROUP, W)).toBe(false);
+    expect(h.queued).toEqual([ACCOUNT]);
+    // Past the grace a last-resort (reusable) key package is used after all.
+    h.clock.t += 91_000;
+    expect(await h.admin.syncMember(COORD, ACCOUNT)).toBe(true);
+    expect(await h.mls.isMember(EVENT_GROUP, W)).toBe(true);
+  });
+
+  it("a wrong code counts an attempt; the fifth closes the link for good", async () => {
+    const h = await setup();
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    const code = postedCode(h.mls);
+    for (let i = 1; i <= 4; i++) {
+      expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm("ZZZZ-ZZZZ"), CREATED_AT)).toBe(false);
+      expect(h.lastCategory()).toBe("chat_link_code_wrong");
+      expect(h.store.getChatLink(COORD, ACCOUNT)!.attempts).toBe(i);
+    }
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm("ZZZZ-ZZZZ"), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_link_too_many_attempts");
+    expect(h.mls.destroyed).toEqual(["mls-2"]);
+    // The right code is now worthless: the request is gone.
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm(code), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_link_no_pending");
+    expect(h.store.getChatKey(COORD, W)).toBeUndefined();
+  });
+
+  it("an expired code is refused and its group torn down", async () => {
+    const h = await setup();
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    const code = postedCode(h.mls);
+    h.clock.t += 30 * 60_000;
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm(code), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_link_expired");
+    expect(h.mls.destroyed).toEqual(["mls-2"]);
+    expect(h.store.getChatKey(COORD, W)).toBeUndefined();
+  });
+
+  it("the expiry sweep tears down codes nobody confirmed", async () => {
+    const h = await setup();
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    expect(await h.admin.sweepExpiredLinks()).toBe(0);
+    h.clock.t += 30 * 60_000 + 1;
+    expect(await h.admin.sweepExpiredLinks()).toBe(1);
+    expect(h.mls.destroyed).toEqual(["mls-2"]);
+    expect(h.store.getChatLink(COORD, ACCOUNT)!.status).toBe("closed");
+  });
+
+  it("a code only confirms the key it was issued for", async () => {
+    const h = await setup();
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    const other = getPublicKey(generateSecretKey());
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm(postedCode(h.mls), other), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_link_no_pending");
+    expect(h.store.getChatKey(COORD, other)).toBeUndefined();
+  });
+
+  it("a new request supersedes the pending one: old group torn down, old code dead", async () => {
+    const h = await setup();
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    const first = postedCode(h.mls);
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    expect(h.mls.destroyed).toEqual(["mls-2"]);
+    const second = postedCode(h.mls);
+    if (first !== second) {
+      expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm(first), CREATED_AT)).toBe(false);
+    }
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkConfirm(second), CREATED_AT)).toBe(true);
+  });
+
+  it("refuses a key already bound to another account (first binder wins) — no group, no invite", async () => {
+    const h = await setup();
+    h.store.upsertChatKey({ coordinate: COORD, accountPubkey: "b".repeat(64), chatPubkey: W, now: 1 });
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_key_bound_to_other_account");
+    expect(h.mls.created).toBe(1);
+  });
+
+  it("W counts toward the device cap", async () => {
+    const h = await setup();
+    for (let i = 0; i < MAX_CHAT_KEYS_PER_ACCOUNT; i++) {
+      h.store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: i.toString(16).padStart(64, "0"), now: 1 });
+    }
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_device_cap_reached");
+    expect(h.mls.created).toBe(1);
+  });
+
+  it("no key package for W anywhere → a refusal the user can act on", async () => {
+    const h = await setup({ kps: [] });
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_link_no_key_package");
+    expect(h.mls.created).toBe(1);
+  });
+
+  it("an ineligible key package (e.g. an identity-proof version we can't read) is reported, group torn down", async () => {
+    const h = await setup();
+    h.mls.eligible = false;
+    h.mls.ineligibleReasons = ["unsupported identity proof"];
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_key_package_ineligible");
+    expect(h.mls.destroyed).toEqual(["mls-2"]);
+    expect(h.mls.sent).toEqual([]);
+  });
+
+  it("a failed invite (e.g. marmot can't decode the key package) is reported, not thrown", async () => {
+    const h = await setup();
+    h.mls.throwOnInvite.add(W);
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT)).toBe(false);
+    expect(h.lastCategory()).toBe("chat_link_failed");
+    expect(h.mls.destroyed).toEqual(["mls-2"]);
+    expect(h.store.getChatLink(COORD, ACCOUNT)!.status).toBe("closed");
+  });
+
+  it("rate-limits link requests per account", async () => {
+    const h = await setup({ kps: [] }); // each request is refused for want of a key package…
+    for (let i = 0; i < 5; i++) await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    expect(h.lastCategory()).toBe("chat_link_no_key_package");
+    // …but still counts, so the sixth inside the hour is refused before any work.
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    expect(h.lastCategory()).toBe("chat_link_rate_limited");
+    h.clock.t += 60 * 60_000;
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT);
+    expect(h.lastCategory()).toBe("chat_link_no_key_package");
+  });
+
+  it("a non-approved attendee gets nothing — no group, no notice", async () => {
+    const h = await setup();
+    h.store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "pending", now: 2 });
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(), CREATED_AT)).toBe(false);
+    expect(h.mls.created).toBe(1);
+    expect(h.notices).toEqual([]);
+  });
+
+  it("a linked key is revocable like any device (real MLS Remove from the event group)", async () => {
+    const h = await setup({ kps: [kpAt(ACCOUNT, "kpA", 10)] });
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(ACCOUNT), CREATED_AT);
+    expect(await h.mls.isMember(EVENT_GROUP, ACCOUNT)).toBe(true);
+    expect(await h.admin.handleAttestation(COORD, ACCOUNT, attest("revoke", ACCOUNT), CREATED_AT)).toBe(true);
+    expect(await h.mls.isMember(EVENT_GROUP, ACCOUNT)).toBe(false);
+    expect(h.store.getChatKey(COORD, ACCOUNT)?.status).toBe("revoked");
+  });
+
+  it("an organizer's linked external key is a member, never an MLS co-admin", async () => {
+    const h = await setup({ kps: [kpAt(ACCOUNT, "kpA", 10), kpEvent(CHATKEY, "kpDev")], role: "organizer" });
+    await h.admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    await h.admin.handleAttestation(COORD, ACCOUNT, linkReq(ACCOUNT), CREATED_AT);
+    const admins = h.admin.desiredAdminPubkeys(COORD);
+    expect(admins).toContain(CHATKEY);
+    expect(admins).not.toContain(ACCOUNT);
+    expect(await h.mls.isMember(EVENT_GROUP, ACCOUNT)).toBe(true);
   });
 });

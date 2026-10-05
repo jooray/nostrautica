@@ -3256,6 +3256,8 @@ export class Coordinator {
           .map((k) => ({
             pubkey: k.chat_pubkey,
             ...(k.label ? { label: k.label } : {}),
+            // A linked external Marmot client (NIP §10.5): the app labels it.
+            ...(k.external ? { external: true as const } : {}),
             // UNIX SECONDS, like every other timestamp on the wire. The store keeps
             // `updated_at` in ms (Date.now()); publishing it raw rendered every chat
             // device as "added 8/15/58545" in the device list.
@@ -3283,6 +3285,7 @@ export class Coordinator {
               pubkey: k.chat_pubkey,
               ...(k.label ? { label: k.label } : {}),
               added_at: Math.floor(k.updated_at / 1000),
+              ...(k.external ? { external: true as const } : {}),
             }));
           return keys.length > 0 ? { chat_keys: keys } : {};
         })(),
@@ -5326,6 +5329,16 @@ export class Coordinator {
     await boot.time("boot:relay-handovers", () =>
       this.retryRelayHandovers().catch((e) => log(`[relay] boot handover retry failed: ${e instanceof Error ? e.message : e}`)),
     );
+    // External-client link codes (NIP §10.5) expire after 30 minutes; their
+    // throwaway confirmation groups are torn down here when nobody confirmed.
+    // A link request also sweeps opportunistically, so this only bounds how long
+    // an abandoned group lingers on a quiet daemon.
+    if (this.marmot) {
+      const marmot = this.marmot;
+      const linkTimer = setInterval(() => void marmot.sweepExpiredLinks().catch(() => {}), 600_000);
+      if (typeof (linkTimer as any).unref === "function") (linkTimer as any).unref();
+      this.closers.push(() => clearInterval(linkTimer));
+    }
     const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
     if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
     this.closers.push(() => clearInterval(relayTimer));

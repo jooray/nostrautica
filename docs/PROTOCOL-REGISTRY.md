@@ -52,7 +52,7 @@ fits in one payload still carries `v: 2`.
 | 21604 | Admin Command | `E_id` → coordinator | Carries `expires` (required) and is ordered by a per-subject watermark, not arrival order (§3.4); includes the `detach` command. |
 | 21605 | Organizer Grant | `E_id` → co-organizer | Grants full, irrevocable `E_id`/`E_inbox`/ECK custody; no scoped roles. |
 | 21606 | Coordinator Status | Coordinator → organizer, and optionally the affected attendee | Poison/health status and/or a billing block; attendee-directed copies are scoped to that attendee's own items. |
-| 21607 | Chat Device Attestation | Attendee account → coordinator | `op:"add"` requires a proof of possession signed by the chat device key (§10.2). |
+| 21607 | Chat Device Attestation | Attendee account → coordinator | `op:"add"` requires a proof of possession signed by the chat device key (§10.2); `op:"link"`/`"link_confirm"` bind an external Marmot client's key, proven by the seal or a one-time code (§10.5). |
 | 21608 | Profile Correction | Attendee account → `E_inbox` | Carries `rev` (required); `overrides` bounded exactly like `ai_profile`. |
 | 21609 | Talk Submission | Attendee account → `E_inbox` | Carries `revision`; a resubmission at the stored revision with different content is rejected (§3.3). |
 | 21610 | Attendee Withdrawal | Attendee account → `E_inbox` | Attendee-initiated removal: the same effect chain as an organizer `revoke`, without organizer action. |

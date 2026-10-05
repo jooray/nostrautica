@@ -14,6 +14,7 @@ import type {
   Subscribable,
 } from "@internet-privacy/marmot-ts/client";
 import { INBOX_RELAY_LIST_KIND } from "@internet-privacy/marmot-ts/core";
+import { CHAT_INTEROP_RELAYS, KIND_RELAY_LIST } from "@nostrautica/protocol";
 import { sanitizeRelayUrls, type RelayPolicy } from "../net/relay-urls.js";
 
 /** Any Nostr event shape (structurally shared between nostr-tools and applesauce). */
@@ -43,6 +44,16 @@ export interface ChatNetworkOptions {
 
 function asArray<T>(x: T | T[]): T[] {
   return Array.isArray(x) ? x : [x];
+}
+
+/** Per-author cap on NIP-65 outbox relays consulted for a 10050 (as COORD-16). */
+const MAX_OUTBOX_RELAYS = 5;
+
+/** The newest event of `kind` by `pubkey` (relays return whatever they like). */
+function newestOfKind(events: AnyEvent[], kind: number, pubkey: string): AnyEvent | undefined {
+  return events
+    .filter((e) => e.kind === kind && e.pubkey === pubkey)
+    .sort((a, b) => Number(b.created_at ?? 0) - Number(a.created_at ?? 0))[0];
 }
 
 export function makeChatNetwork(opts: ChatNetworkOptions): NostrNetworkInterface {
@@ -95,13 +106,40 @@ export function makeChatNetwork(opts: ChatNetworkOptions): NostrNetworkInterface
     },
 
     async getUserInboxRelays(pubkey) {
-      const events = await transport.fetch(
-        { kinds: [INBOX_RELAY_LIST_KIND], authors: [pubkey] },
-        defaultRelays,
+      // Where a Welcome is gift-wrapped to. For our own app's devices the default
+      // relays were always enough; an EXTERNAL Marmot client (a White Noise key
+      // linked under NIP §10.5) publishes its kind-10050 wherever its own client
+      // puts things, so look as broadly as key-package discovery does for 10002:
+      // the defaults plus the chat interop relays, then the key's own NIP-65
+      // outbox relays. A Welcome sent to relays the recipient never reads is a
+      // silent no-show — the linked user would sit waiting for an invite forever.
+      const bootstrap = [...new Set([...defaultRelays, ...CHAT_INTEROP_RELAYS])];
+      let latest = newestOfKind(
+        await transport.fetch({ kinds: [INBOX_RELAY_LIST_KIND], authors: [pubkey] }, bootstrap),
+        INBOX_RELAY_LIST_KIND,
+        pubkey,
       );
-      const latest = events.sort(
-        (a, b) => Number(b.created_at ?? 0) - Number(a.created_at ?? 0),
-      )[0];
+      if (!latest) {
+        const relayList = newestOfKind(
+          await transport.fetch({ kinds: [KIND_RELAY_LIST], authors: [pubkey] }, bootstrap),
+          KIND_RELAY_LIST,
+          pubkey,
+        );
+        // Untrusted (COORD-16): wss-only, policy-filtered, and capped per author.
+        const outbox = relayList
+          ? sanitizeRelayUrls(
+              relayList.tags.filter((t) => t[0] === "r" && typeof t[1] === "string").map((t) => t[1]!),
+              { ...relayPolicy, cap: MAX_OUTBOX_RELAYS },
+            )
+          : [];
+        if (outbox.length) {
+          latest = newestOfKind(
+            await transport.fetch({ kinds: [INBOX_RELAY_LIST_KIND], authors: [pubkey] }, outbox),
+            INBOX_RELAY_LIST_KIND,
+            pubkey,
+          );
+        }
+      }
       if (!latest) return defaultRelays;
       // Untrusted input (audit COORD-16 + R20): wss-only, well-formed, deduped,
       // capped — AND filtered through the operator relay allowlist, so an approved
