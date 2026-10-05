@@ -9,4 +9,3 @@ export * from "./group-event.js";
 export * from "./group-message-classify.js";
 // Application payload (rumor) JSON serialization.
 export * from "./application-rumor.js";
-//# sourceMappingURL=group-message.js.map

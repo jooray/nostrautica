@@ -1,6 +1,15 @@
 /** @module @category Engine */
-import { type ClientState, type MlsMessage } from "ts-mls";
+import { type ClientState, type MlsMessage } from "../vendor/ts-mls/index.js";
 import { type ConvergencePolicy } from "../core/convergence.js";
+import type { OwnCommitConvergenceStamp } from "./own-commit-stamp.js";
+/** Parent-bound evidence for one already-applied canonical commit. */
+export interface RetainedAppliedLink {
+    parentState: ClientState;
+    message: MlsMessage;
+    resultingState: ClientState;
+    /** Present only for locally-authored commits confirmed by stamp-aware code. */
+    ownCommitStamp?: OwnCommitConvergenceStamp;
+}
 /**
  * The bounded convergence window — the recent canonical states + applied commits
  * the convergence hot path needs to rebuild candidate branches and recover from
@@ -37,6 +46,12 @@ export declare class RetainedHistoryStore {
      */
     appliedCommitsBetween(forkEpoch: number, tipEpoch: number): MlsMessage[];
     /**
+     * Parent-bound applied links on the current canonical branch. Unlike a
+     * digest plus later epoch lookups, each entry keeps the exact parent state
+     * (including proposal-reference evidence) beside its resulting state.
+     */
+    appliedLinksBetween(forkEpoch: number, tipEpoch: number): RetainedAppliedLink[];
+    /**
      * Records the retained parent state and the applied commit message after
      * advancing an epoch, then prunes retained material beyond the rollback
      * horizon (`retained-history.md`).
@@ -47,7 +62,7 @@ export declare class RetainedHistoryStore {
      * Recovering / Unrecoverable). The engine supplies them; e.g. the source epoch
      * of a staged local commit the canonical tip has since advanced past.
      */
-    record(parentState: ClientState, appliedMessage: MlsMessage, newState: ClientState, pinnedEpochs?: Iterable<number>): void;
+    record(parentState: ClientState, appliedMessage: MlsMessage, newState: ClientState, pinnedEpochs?: Iterable<number>, ownCommitStamp?: OwnCommitConvergenceStamp): void;
     /** The highest retained epoch (the canonical tip), or undefined if empty. */
     tipEpoch(): number | undefined;
 }

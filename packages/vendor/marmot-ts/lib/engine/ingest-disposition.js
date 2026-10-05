@@ -9,8 +9,18 @@ export function ingestResultDisposition(result) {
             return disposition.stale(inputCategories.authorizationFailed);
         case "deferred":
             return disposition.deferred(result.reason);
+        case "refused":
+            return disposition.deferred("capacity");
         case "invalidated":
             return disposition.invalidated();
+        case "stateInvalidated":
+            // A withdrawn group-state notification is the state-side counterpart of
+            // an invalidated app payload (convergence.md calls withdrawal the
+            // counterpart of app-payload invalidation).
+            return disposition.invalidated();
+        case "appliedNotifications":
+        case "stateRevalidated":
+            return disposition.accepted();
         case "autoCommit":
             // A locally-staged self_remove-only commit (B6) — an accepted local action,
             // not an inbound message disposition.
@@ -19,22 +29,33 @@ export function ingestResultDisposition(result) {
             // A valid commit that legitimately removed us — accepted inbound; terminal
             // for our membership (member-departure.md).
             return disposition.accepted();
-        case "skipped":
-            switch (result.reason) {
+        case "skipped": {
+            const reason = result.reason;
+            switch (reason) {
                 case "past-epoch":
                     return disposition.stale(inputCategories.alreadyApplied);
                 case "self-echo":
                     return disposition.stale(inputCategories.ownEcho);
+                case "duplicate":
+                    return disposition.stale(inputCategories.duplicate);
                 case "wrong-wireformat":
                 case "invalid-app-payload":
                     return disposition.stale(inputCategories.invalidEncoding);
                 case "beyond-anchor":
                 case "missing-retained-anchor":
                     return disposition.stale(inputCategories.missingHistory);
+                case "self-evicted":
+                case "group-disbanded":
+                    return disposition.stale(inputCategories.staleEpoch);
+                case "unsupported-profile":
+                    return disposition.stale(inputCategories.unsupportedRequiredFeature);
+                default: {
+                    const exhaustive = reason;
+                    return exhaustive;
+                }
             }
-        // eslint-disable-next-line no-fallthrough
+        }
         case "unreadable":
             return disposition.stale(inputCategories.invalidEncoding);
     }
 }
-//# sourceMappingURL=ingest-disposition.js.map

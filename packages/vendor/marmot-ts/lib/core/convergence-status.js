@@ -80,4 +80,3 @@ export function shouldQueueOutbound(status) {
 export function mayReleaseOutbound(status, lifecycle) {
     return status === convergenceStatuses.settled && lifecycle === S.stable;
 }
-//# sourceMappingURL=convergence-status.js.map

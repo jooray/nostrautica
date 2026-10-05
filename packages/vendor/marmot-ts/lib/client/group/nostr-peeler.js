@@ -23,4 +23,3 @@ export class NostrGroupPeeler {
         return envelope.id;
     }
 }
-//# sourceMappingURL=nostr-peeler.js.map

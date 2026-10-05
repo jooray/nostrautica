@@ -1,9 +1,17 @@
 /** @module @category Core - Key Package Event */
 import { NostrEvent } from "applesauce-core/helpers/event";
-import { CiphersuiteId, KeyPackage } from "ts-mls";
+import { CiphersuiteId, KeyPackage, Lifetime } from "../vendor/ts-mls/index.js";
 import { KeyPackageClient, MLS_VERSIONS } from "./protocol.js";
 /** Get the KeyPackage from a kind 30443 event */
 export declare function getKeyPackage(event: NostrEvent): KeyPackage;
+/**
+ * Reads the inbound MLS `Lifetime` ({@link Lifetime}) from a kind 30443
+ * event's decoded KeyPackage leaf node (WIRE-01 inbound read). Returns
+ * `undefined` when the event cannot be decoded as a KeyPackage — never
+ * throws, matching the project's typed-reject convention for boundary
+ * readers (D-08).
+ */
+export declare function getKeyPackageLifetime(event: NostrEvent): Lifetime | undefined;
 /** Gets the MLS protocol version from a kind 30443 event */
 export declare function getKeyPackageMLSVersion(event: NostrEvent): MLS_VERSIONS | undefined;
 /** Gets the MLS cipher suite from a kind 30443 event */
@@ -27,9 +35,9 @@ export declare function getKeyPackageIdentifier(event: NostrEvent): string | und
  */
 export declare function getKeyPackageNostrPubkey(event: NostrEvent): string;
 /**
- * Returns the KeyPackageRef (MIP-00 `i` tag value) from a kind 30443
+ * Returns the KeyPackageRef (the `i` tag value, `transports/nostr.md`) from a kind 30443
  * KeyPackage event.
  *
- * Per MIP-00, KeyPackage events MUST include this tag.
+ * Per `transports/nostr.md` (KeyPackage publication), KeyPackage events MUST include this tag.
  */
 export declare function getKeyPackageReference(event: NostrEvent): string | undefined;

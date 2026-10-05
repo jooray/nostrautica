@@ -21,7 +21,7 @@ import type {
 } from "@internet-privacy/marmot-ts/client";
 import { Store } from "../store/db.js";
 import { makeMarmotStores } from "./stores.js";
-import { makeCoordinatorSigner, makeCoordinatorProofSigner } from "./signer.js";
+import { makeCoordinatorSigner } from "./signer.js";
 import { createMarmotClientMls } from "./mls.js";
 
 type Ev = { id: string; pubkey: string; kind: number; created_at: number; tags: string[][]; content: string; [k: string]: unknown };
@@ -84,7 +84,6 @@ function makeMemberClient(sk: Uint8Array, network: NostrNetworkInterface): Marmo
   const stores = makeMarmotStores(store);
   return new MarmotClient({
     signer: makeCoordinatorSigner(sk) as never,
-    accountProofSigner: makeCoordinatorProofSigner(sk),
     network,
     groupStateStore: stores.groupStateStore,
     keyPackageStore: stores.keyPackageStore,

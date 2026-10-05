@@ -8,4 +8,11 @@ export function compareBytes(a, b) {
     }
     return a.length - b.length;
 }
-//# sourceMappingURL=bytes.js.map
+/** Equality for optional byte arrays; two absent values are equal. */
+export function bytesEqual(a, b) {
+    if (a === undefined && b === undefined)
+        return true;
+    if (a === undefined || b === undefined)
+        return false;
+    return compareBytes(a, b) === 0;
+}

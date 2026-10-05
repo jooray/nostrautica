@@ -1,7 +1,8 @@
 /** @module @category Client - Key Package Manager */
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { EventEmitter } from "eventemitter3";
-import { defaultCryptoProvider, } from "ts-mls";
+import { defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
+import { validateKeyPackageAccountIdentityProof } from "../core/components/account-identity-proof.js";
 import { getKeyPackage, getKeyPackageIdentifier, } from "../core/key-package-event.js";
 import { calculateKeyPackageRef } from "../core/key-package.js";
 import { logger } from "../utils/debug.js";
@@ -64,7 +65,7 @@ export class KeyPackageStore extends EventEmitter {
      */
     async addPublished(ref, event) {
         const key = this.#resolveKey(ref);
-        // MIP-00: the `i` tag IS the KeyPackageRef of the event body. Receivers MUST
+        // The `i` tag IS the KeyPackageRef of the event body. Receivers MUST
         // verify it against the decoded KeyPackage and reject on mismatch
         // (transports/nostr.md §KeyPackage publication) so a forged `i` tag cannot
         // make us index a package under a ref that is not its own. Decoding here
@@ -137,19 +138,33 @@ export class KeyPackageStore extends EventEmitter {
     /**
      * Lists all {@link LocalKeyPackage} entries (those with private material),
      * without the private package itself.
+     *
+     * Classifies each entry's `nonCurrent` flag by running
+     * `validateKeyPackageAccountIdentityProof` against its `publicPackage` — one BIP-340
+     * verify per stored package.
      */
     async list() {
         const allKeys = await this.#store.keys();
         const packages = await Promise.all(allKeys.map((key) => this.#store.getItem(key)));
         return packages
             .filter((pkg) => pkg !== null && pkg.privatePackage !== undefined)
-            .map(({ keyPackageRef, publicPackage, identifier, published, used }) => ({
-            keyPackageRef,
-            publicPackage,
-            ...(identifier !== undefined ? { identifier } : {}),
-            ...(published !== undefined ? { published } : {}),
-            ...(used !== undefined ? { used } : {}),
-        }));
+            .map(({ keyPackageRef, publicPackage, identifier, published, used }) => {
+            let nonCurrent = false;
+            try {
+                validateKeyPackageAccountIdentityProof(publicPackage);
+            }
+            catch {
+                nonCurrent = true;
+            }
+            return {
+                keyPackageRef,
+                publicPackage,
+                ...(identifier !== undefined ? { identifier } : {}),
+                ...(published !== undefined ? { published } : {}),
+                ...(used !== undefined ? { used } : {}),
+                ...(nonCurrent ? { nonCurrent: true } : {}),
+            };
+        });
     }
     /**
      * Lists all local key packages with their published events defaulted to an
@@ -212,4 +227,3 @@ export class KeyPackageStore extends EventEmitter {
         }
     }
 }
-//# sourceMappingURL=key-package-store.js.map

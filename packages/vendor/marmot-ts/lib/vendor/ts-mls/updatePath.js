@@ -1,0 +1,182 @@
+import { mapDecoders } from "./codec/tlsDecoder.js";
+import { contramapBufferEncoders, encode } from "./codec/tlsEncoder.js";
+import { varLenDataDecoder, varLenTypeDecoder, varLenDataEncoder, varLenTypeEncoder } from "./codec/variableLength.js";
+import { encryptWithLabel } from "./crypto/hpke.js";
+import { deriveSecret } from "./crypto/kdf.js";
+import { groupContextEncoder } from "./groupContext.js";
+import { leafNodeCommitDecoder, leafNodeEncoder, signLeafNodeCommit, } from "./leafNode.js";
+import { leafNodeSources } from "./leafNodeSource.js";
+import { calculateParentHash } from "./parentHash.js";
+import { filteredDirectPath, filteredDirectPathAndCopathResolution, getHpkePublicKey, } from "./ratchetTree.js";
+import { nodeTypes } from "./nodeType.js";
+import { treeHashRoot } from "./treeHash.js";
+import { directPath, isAncestor, leafToNodeIndex, leafWidth, toNodeIndex } from "./treemath.js";
+import { constantTimeEqual } from "./util/constantTimeCompare.js";
+import { bytesToBase64 } from "./util/byteArray.js";
+import { hpkeCiphertextDecoder, hpkeCiphertextEncoder } from "./hpkeCiphertext.js";
+import { InternalError, ValidationError } from "./mlsError.js";
+export const updatePathNodeEncoder = contramapBufferEncoders([varLenDataEncoder, varLenTypeEncoder(hpkeCiphertextEncoder)], (node) => [node.hpkePublicKey, node.encryptedPathSecret]);
+export const updatePathNodeDecoder = mapDecoders([varLenDataDecoder, varLenTypeDecoder(hpkeCiphertextDecoder)], (hpkePublicKey, encryptedPathSecret) => ({ hpkePublicKey, encryptedPathSecret }));
+export const updatePathEncoder = contramapBufferEncoders([leafNodeEncoder, varLenTypeEncoder(updatePathNodeEncoder)], (path) => [path.leafNode, path.nodes]);
+export const updatePathDecoder = mapDecoders([leafNodeCommitDecoder, varLenTypeDecoder(updatePathNodeDecoder)], (leafNode, nodes) => ({ leafNode, nodes }));
+export async function createUpdatePath(mutableTree, senderLeafIndex, groupContext, signaturePrivateKey, cs, mutableTreeHashCache, excludeNodes = []) {
+    const originalLeafNode = mutableTree[leafToNodeIndex(senderLeafIndex)];
+    if (originalLeafNode === undefined || originalLeafNode.nodeType === nodeTypes.parent)
+        throw new InternalError("Expected non-blank leaf node");
+    const pathSecret = cs.rng.randomBytes(cs.kdf.size);
+    const leafNodeSecret = await deriveSecret(pathSecret, "node", cs.kdf);
+    const leafKeypair = await cs.hpke.deriveKeyPair(leafNodeSecret);
+    const fdp = filteredDirectPathAndCopathResolution(senderLeafIndex, mutableTree);
+    blankStructuralDirectPath(mutableTree, senderLeafIndex);
+    const excludeSet = new Set(excludeNodes);
+    const ps = await applyInitialTreeUpdate(fdp, pathSecret, senderLeafIndex, mutableTree, cs, excludeSet);
+    await insertParentHashes(fdp, mutableTree, cs, mutableTreeHashCache);
+    const leafParentHash = await calculateParentHash(mutableTree, leafToNodeIndex(senderLeafIndex), cs.hash, mutableTreeHashCache);
+    const updatedLeafNodeTbs = {
+        leafNodeSource: leafNodeSources.commit,
+        hpkePublicKey: await cs.hpke.exportPublicKey(leafKeypair.publicKey),
+        extensions: originalLeafNode.leaf.extensions,
+        capabilities: originalLeafNode.leaf.capabilities,
+        credential: originalLeafNode.leaf.credential,
+        signaturePublicKey: originalLeafNode.leaf.signaturePublicKey,
+        parentHash: leafParentHash[0],
+        groupId: groupContext.groupId,
+        leafIndex: senderLeafIndex,
+    };
+    const updatedLeafNode = await signLeafNodeCommit(updatedLeafNodeTbs, signaturePrivateKey, cs.signature);
+    mutableTree[leafToNodeIndex(senderLeafIndex)] = {
+        nodeType: nodeTypes.leaf,
+        leaf: updatedLeafNode,
+    };
+    const updatedTreeHash = await treeHashRoot(mutableTree, cs.hash, mutableTreeHashCache);
+    const updatedGroupContext = {
+        ...groupContext,
+        treeHash: updatedTreeHash,
+        epoch: groupContext.epoch + 1n,
+    };
+    // we have to remove the leaf secret since we don't send it to anyone
+    const pathSecrets = ps.slice(0, ps.length - 1).reverse();
+    const encrypt = encryptSecretsForPath(mutableTree, updatedGroupContext, cs);
+    const updatePathNodes = await Promise.all(pathSecrets.map(encrypt));
+    const updatePath = { leafNode: updatedLeafNode, nodes: updatePathNodes };
+    return [mutableTree, updatePath, pathSecrets, leafKeypair.privateKey, updatedTreeHash];
+}
+const HPKE_ENCRYPT_BATCH_SIZE = 512;
+function encryptSecretsForPath(updatedTree, updatedGroupContext, cs) {
+    return async (pathSecret) => {
+        const key = getHpkePublicKey(updatedTree[pathSecret.nodeIndex]);
+        const encodedContext = encode(groupContextEncoder, updatedGroupContext);
+        const encryptedPathSecret = new Array(pathSecret.sendTo.length);
+        for (let start = 0; start < pathSecret.sendTo.length; start += HPKE_ENCRYPT_BATCH_SIZE) {
+            const end = Math.min(start + HPKE_ENCRYPT_BATCH_SIZE, pathSecret.sendTo.length);
+            const batch = await Promise.all(pathSecret.sendTo.slice(start, end).map(async (nodeIndex) => {
+                const { ct, enc } = await encryptWithLabel(await cs.hpke.importPublicKey(getHpkePublicKey(updatedTree[nodeIndex])), "UpdatePathNode", encodedContext, pathSecret.secret, cs.hpke);
+                return { ciphertext: ct, kemOutput: enc };
+            }));
+            for (let j = 0; j < batch.length; j++)
+                encryptedPathSecret[start + j] = batch[j];
+        }
+        return { hpkePublicKey: key, encryptedPathSecret };
+    };
+}
+function blankStructuralDirectPath(mutableTree, senderLeafIndex) {
+    const dp = directPath(leafToNodeIndex(senderLeafIndex), leafWidth(mutableTree.length));
+    for (const nodeIndex of dp) {
+        mutableTree[nodeIndex] = undefined;
+    }
+}
+async function insertParentHashes(fdp, mutableTree, cs, mutableTreeHashCache) {
+    for (let x = fdp.length - 1; x >= 0; x--) {
+        const { nodeIndex } = fdp[x];
+        const parentHash = await calculateParentHash(mutableTree, nodeIndex, cs.hash, mutableTreeHashCache);
+        const currentNode = mutableTree[nodeIndex];
+        if (currentNode === undefined || currentNode.nodeType === nodeTypes.leaf)
+            throw new InternalError("Expected non-blank parent node");
+        const updatedNode = {
+            nodeType: nodeTypes.parent,
+            parent: { ...currentNode.parent, parentHash: parentHash[0] },
+        };
+        mutableTree[nodeIndex] = updatedNode;
+    }
+}
+/**
+ * Inserts new public keys from a single secret in the update path and returns the resulting tree along with the secrets along the path
+ * Note that the path secrets are returned root to leaf
+ */
+async function applyInitialTreeUpdate(fdp, pathSecret, senderLeafIndex, mutableTree, cs, excludeNodes = new Set()) {
+    let lastPathSecret = { secret: pathSecret, nodeIndex: leafToNodeIndex(senderLeafIndex), sendTo: new Array() };
+    const pathSecrets = new Array(lastPathSecret);
+    for (const [_i, { nodeIndex, resolution }] of fdp.entries()) {
+        const nextPathSecret = await deriveSecret(lastPathSecret.secret, "path", cs.kdf);
+        const nextNodeSecret = await deriveSecret(nextPathSecret, "node", cs.kdf);
+        const { publicKey } = await cs.hpke.deriveKeyPair(nextNodeSecret);
+        mutableTree[nodeIndex] = {
+            nodeType: nodeTypes.parent,
+            parent: {
+                hpkePublicKey: await cs.hpke.exportPublicKey(publicKey),
+                parentHash: new Uint8Array(),
+                unmergedLeaves: [],
+            },
+        };
+        const sendTo = excludeNodes.size === 0 ? resolution : resolution.filter((i) => !excludeNodes.has(i));
+        lastPathSecret = { nodeIndex: toNodeIndex(nodeIndex), secret: nextPathSecret, sendTo };
+        pathSecrets.unshift(lastPathSecret);
+    }
+    return pathSecrets;
+}
+export async function applyUpdatePath(mutableTree, senderLeafIndex, path, h, mutableTreeHashCache, isExternal = false) {
+    // if this is an external commit, the leaf node did not exist prior
+    if (!isExternal) {
+        const leafToUpdate = mutableTree[leafToNodeIndex(senderLeafIndex)];
+        if (leafToUpdate === undefined || leafToUpdate.nodeType === nodeTypes.parent)
+            throw new InternalError("Leaf node not defined or is parent");
+        const leafNodePublicKeyNotNew = constantTimeEqual(leafToUpdate.leaf.hpkePublicKey, path.leafNode.hpkePublicKey);
+        if (leafNodePublicKeyNotNew)
+            throw new ValidationError("Public key in the LeafNode is the same as the committer's current leaf node");
+    }
+    const parentKeys = new Set();
+    for (const treeNode of mutableTree) {
+        if (treeNode?.nodeType === nodeTypes.parent) {
+            parentKeys.add(bytesToBase64(treeNode.parent.hpkePublicKey));
+        }
+    }
+    const pathNodePublicKeysExistInTree = path.nodes.some((node) => parentKeys.has(bytesToBase64(node.hpkePublicKey)));
+    if (pathNodePublicKeysExistInTree)
+        throw new ValidationError("Public keys in the UpdatePath may not appear in a node of the new ratchet tree");
+    const reverseFilteredDirectPath = filteredDirectPath(senderLeafIndex, mutableTree).reverse();
+    blankStructuralDirectPath(mutableTree, senderLeafIndex);
+    mutableTree[leafToNodeIndex(senderLeafIndex)] = { nodeType: nodeTypes.leaf, leaf: path.leafNode };
+    // need to call .slice here so as not to mutate the original
+    const reverseUpdatePath = path.nodes.slice().reverse();
+    if (reverseUpdatePath.length !== reverseFilteredDirectPath.length) {
+        throw new ValidationError("Invalid length of UpdatePath");
+    }
+    for (const [level, nodeIndex] of reverseFilteredDirectPath.entries()) {
+        const parentHash = await calculateParentHash(mutableTree, nodeIndex, h, mutableTreeHashCache);
+        mutableTree[nodeIndex] = {
+            nodeType: nodeTypes.parent,
+            parent: { hpkePublicKey: reverseUpdatePath[level].hpkePublicKey, unmergedLeaves: [], parentHash: parentHash[0] },
+        };
+    }
+    const leafParentHash = await calculateParentHash(mutableTree, leafToNodeIndex(senderLeafIndex), h, mutableTreeHashCache);
+    if (!constantTimeEqual(leafParentHash[0], path.leafNode.parentHash))
+        throw new ValidationError("Parent hash did not match the UpdatePath");
+}
+export function firstCommonAncestor(tree, leafIndex, senderLeafIndex) {
+    const fdp = filteredDirectPathAndCopathResolution(senderLeafIndex, tree);
+    for (const { nodeIndex } of fdp) {
+        if (isAncestor(leafToNodeIndex(leafIndex), nodeIndex, tree.length)) {
+            return nodeIndex;
+        }
+    }
+    throw new ValidationError("Could not find common ancestor");
+}
+export function firstMatchAncestor(tree, leafIndex, senderLeafIndex, path) {
+    const fdp = filteredDirectPathAndCopathResolution(senderLeafIndex, tree);
+    for (const [n, { nodeIndex, resolution }] of fdp.entries()) {
+        if (isAncestor(leafToNodeIndex(leafIndex), nodeIndex, tree.length)) {
+            return { nodeIndex, resolution, updateNode: path.nodes[n] };
+        }
+    }
+    throw new ValidationError("Could not find common ancestor");
+}

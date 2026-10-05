@@ -252,6 +252,10 @@ export class MarmotAdmin {
       now: this.now(),
     });
     this.log(`[chat] created MLS group for ${opts.coordinate} (nostr_group_id ${ids.nostrGroupIdHex.slice(0, 12)}…)`);
+    // The roster carries the room's nostr_group_id, and members bind to the group
+    // it names (NIP §10.4). A replacement group — one recreated after the old one
+    // was retired (see retire.ts) — is invisible to members until it is republished.
+    this.rosterChanged(opts.coordinate);
     return ids;
   }
 
@@ -754,6 +758,18 @@ export class MarmotAdmin {
     // rotated and burned another key package. The test suite did not catch it
     // because the fake MLS returned a fixed eligibility with no membership
     // awareness — it modelled a library that cannot exist.
+    // A KeyPackage from before the 0x8009 upgrade (an app tab that has not reloaded,
+    // an outdated White Noise). Not reported to the owner as a refusal: nothing is
+    // wrong with their device, it just has not published its current KeyPackage
+    // yet — and when it does, that is a new event id the watcher adds normally.
+    // Recorded as consumed so neither the watcher nor a reconcile re-decodes it.
+    if ("legacy" in evaluation && evaluation.legacy) {
+      this.store.markKpConsumed(coordinate, kp.id);
+      this.log(
+        `[chat] skipping 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} in ${coordinate}: ${evaluation.reasons.join(", ")} — waiting for a current one`,
+      );
+      return true;
+    }
     const onlyBecauseMember =
       evaluation.alreadyMember &&
       evaluation.reasons.every((r) => r.toLowerCase().includes("already a member"));

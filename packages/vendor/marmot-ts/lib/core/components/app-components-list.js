@@ -33,4 +33,3 @@ export function decodeComponentsList(data) {
     reader.end();
     return ids;
 }
-//# sourceMappingURL=app-components-list.js.map

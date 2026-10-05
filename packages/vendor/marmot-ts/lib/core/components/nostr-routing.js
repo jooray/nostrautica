@@ -90,4 +90,3 @@ export function decodeNostrRoutingV1(data) {
         validateRelay(relay);
     return { nostrGroupId, relays };
 }
-//# sourceMappingURL=nostr-routing.js.map

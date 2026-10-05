@@ -3615,6 +3615,15 @@ export class Store {
     return this.db.prepare("SELECT * FROM marmot_groups").all() as unknown as MarmotGroupRow[];
   }
 
+  /**
+   * Forget an event's MLS group row, so the next `ensureGroup` creates a fresh
+   * one. Only for a group whose state has been retired (chat/retire.ts); a live
+   * group is frozen, never deleted.
+   */
+  deleteMarmotGroup(coordinate: string): void {
+    this.db.prepare("DELETE FROM marmot_groups WHERE coordinate = ?").run(coordinate);
+  }
+
   setMarmotGroupStatus(coordinate: string, status: "active" | "frozen"): void {
     this.db.prepare("UPDATE marmot_groups SET status = ? WHERE coordinate = ?").run(status, coordinate);
   }

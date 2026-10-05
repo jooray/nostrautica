@@ -1,7 +1,7 @@
 /** @module @category Core - Credentials */
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { defaultCredentialTypes } from "ts-mls";
+import { defaultCredentialTypes } from "../vendor/ts-mls/index.js";
 export function isHexKey(str) {
     return /^[0-9a-fA-F]{64}$/.test(str);
 }
@@ -62,4 +62,3 @@ export function isSameCredential(a, b) {
     }
     return false;
 }
-//# sourceMappingURL=credential.js.map

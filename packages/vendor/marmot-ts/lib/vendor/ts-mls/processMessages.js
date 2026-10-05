@@ -1,0 +1,291 @@
+import { addHistoricalReceiverData, applyProposals, makePskIndex, nextEpochContext, processProposal, throwIfDefined, validateLeafNodeCredentialAndKeyUniqueness, validateLeafNodeUpdateOrCommit, } from "./clientState.js";
+import { applyUpdatePathSecret } from "./createCommit.js";
+import { deriveSecret } from "./crypto/kdf.js";
+import { verifyConfirmationTag } from "./framedContent.js";
+import { acceptAll } from "./incomingMessageAction.js";
+import { initializeEpoch } from "./keySchedule.js";
+import { unprotectPrivateMessage } from "./messageProtection.js";
+import { unprotectPublicMessage } from "./messageProtectionPublic.js";
+import { CryptoVerificationError, InternalError, ValidationError } from "./mlsError.js";
+import { pathToRoot } from "./pathSecrets.js";
+import { mergePrivateKeyPaths, toPrivateKeyPath } from "./privateKeyPath.js";
+import { findBlankLeafNodeIndex, addLeafNodeMutable } from "./ratchetTree.js";
+import { createSecretTree } from "./secretTree.js";
+import { getSenderLeafNodeIndex, senderTypes } from "./sender.js";
+import { treeHashRoot } from "./treeHash.js";
+import { deriveTreeHashCache } from "./createCommit.js";
+import { leafToNodeIndex, leafWidth, nodeToLeafIndex, root, toLeafIndex, toNodeIndex, } from "./treemath.js";
+import { applyUpdatePath } from "./updatePath.js";
+import { addToMap } from "./util/addToMap.js";
+import { wireformats } from "./wireformat.js";
+import { zeroOutUint8Array } from "./util/byteArray.js";
+import { contentTypes } from "./contentType.js";
+import { resolveClientConfig } from "./clientConfig.js";
+/**
+ * Process private message and apply proposal or commit and return the updated ClientState or return an application message
+ *
+ * @public
+ */
+export async function processPrivateMessage(params) {
+    const context = params.context;
+    const state = params.state;
+    const cipherSuite = context.cipherSuite;
+    const pskSearch = makePskIndex(state, context.externalPsks ?? {});
+    const auth = context.authService;
+    const cb = params.callback ?? acceptAll;
+    const clientConfig = resolveClientConfig(context.clientConfig);
+    const pm = params.privateMessage;
+    if (pm.epoch < state.groupContext.epoch) {
+        const receiverData = state.historicalReceiverData.get(pm.epoch);
+        if (receiverData !== undefined) {
+            const result = await unprotectPrivateMessage(receiverData.senderDataSecret, pm, receiverData.secretTree, receiverData.ratchetTree, receiverData.groupContext, clientConfig.keyRetentionConfig, cipherSuite);
+            const newHistoricalReceiverData = addToMap(state.historicalReceiverData, pm.epoch, {
+                ...receiverData,
+                secretTree: result.tree,
+            });
+            const newState = { ...state, historicalReceiverData: newHistoricalReceiverData };
+            if (result.content.content.contentType === contentTypes.application) {
+                return {
+                    kind: "applicationMessage",
+                    message: result.content.content.applicationData,
+                    newState,
+                    consumed: result.consumed,
+                    aad: result.content.content.authenticatedData,
+                    senderLeafIndex: getSenderLeafNodeIndex(result.content.content.sender),
+                };
+            }
+            else {
+                throw new ValidationError("Cannot process commit or proposal from former epoch");
+            }
+        }
+        else {
+            throw new ValidationError("Cannot process message, epoch too old");
+        }
+    }
+    const result = await unprotectPrivateMessage(state.keySchedule.senderDataSecret, pm, state.secretTree, state.ratchetTree, state.groupContext, clientConfig.keyRetentionConfig, cipherSuite);
+    const updatedState = { ...state, secretTree: result.tree };
+    if (result.content.content.contentType === contentTypes.application) {
+        return {
+            kind: "applicationMessage",
+            message: result.content.content.applicationData,
+            newState: updatedState,
+            consumed: result.consumed,
+            aad: result.content.content.authenticatedData,
+            senderLeafIndex: getSenderLeafNodeIndex(result.content.content.sender),
+        };
+    }
+    else if (result.content.content.contentType === contentTypes.commit) {
+        if (result.content.auth.contentType !== result.content.content.contentType)
+            throw new ValidationError("Received content as commit, but not auth");
+        const { newState, actionTaken, consumed } = await processCommit(updatedState, result.content.content, result.content.auth, "mls_private_message", pskSearch, cb, auth, clientConfig, cipherSuite);
+        return {
+            kind: "newState",
+            newState,
+            actionTaken,
+            consumed: [...result.consumed, ...consumed],
+            aad: result.content.content.authenticatedData,
+        };
+    }
+    else {
+        const action = cb({
+            kind: "proposal",
+            proposal: {
+                proposal: result.content.content.proposal,
+                senderLeafIndex: getSenderLeafNodeIndex(result.content.content.sender),
+            },
+        });
+        if (action === "reject")
+            return {
+                kind: "newState",
+                newState: updatedState,
+                actionTaken: action,
+                consumed: result.consumed,
+                aad: result.content.content.authenticatedData,
+            };
+        else
+            return {
+                kind: "newState",
+                newState: await processProposal(updatedState, result.content, result.content.content.proposal, cipherSuite.hash),
+                actionTaken: action,
+                consumed: result.consumed,
+                aad: result.content.content.authenticatedData,
+            };
+    }
+}
+/** @public */
+export async function processPublicMessage(params) {
+    const context = params.context;
+    const state = params.state;
+    const cipherSuite = context.cipherSuite;
+    const pskSearch = makePskIndex(state, context.externalPsks ?? {});
+    const auth = context.authService;
+    const clientConfig = resolveClientConfig(context.clientConfig);
+    const pm = params.publicMessage;
+    const callback = params.callback ?? acceptAll;
+    if (pm.content.epoch < state.groupContext.epoch)
+        throw new ValidationError("Cannot process message, epoch too old");
+    const content = await unprotectPublicMessage(state.keySchedule.membershipKey, state.groupContext, state.ratchetTree, pm, cipherSuite);
+    if (content.content.contentType === contentTypes.proposal) {
+        const action = callback({
+            kind: "proposal",
+            proposal: { proposal: content.content.proposal, senderLeafIndex: getSenderLeafNodeIndex(content.content.sender) },
+        });
+        if (action === "reject")
+            return {
+                newState: state,
+                actionTaken: action,
+                consumed: [],
+                aad: content.content.authenticatedData,
+            };
+        else
+            return {
+                newState: await processProposal(state, content, content.content.proposal, cipherSuite.hash),
+                actionTaken: action,
+                consumed: [],
+                aad: content.content.authenticatedData,
+            };
+    }
+    else {
+        if (content.auth.contentType !== content.content.contentType)
+            throw new ValidationError("Received content as commit, but not auth");
+        return processCommit(state, content.content, content.auth, "mls_public_message", pskSearch, callback, auth, clientConfig, cipherSuite);
+    }
+}
+async function processCommit(state, content, auth, wireformat, pskSearch, callback, authService, clientConfig, cs) {
+    if (content.epoch !== state.groupContext.epoch)
+        throw new ValidationError("Could not validate epoch");
+    const senderLeafIndex = content.sender.senderType === senderTypes.member ? toLeafIndex(content.sender.leafIndex) : undefined;
+    const mutableTree = state.ratchetTree.slice();
+    const result = await applyProposals(state, mutableTree, content.commit.proposals, senderLeafIndex, pskSearch, false, clientConfig, authService, cs);
+    const action = callback({ kind: "commit", senderLeafIndex, proposals: result.allProposals });
+    if (action === "reject") {
+        return { newState: state, actionTaken: action, consumed: [], aad: content.authenticatedData };
+    }
+    if (result.selfRemoved) {
+        return {
+            newState: {
+                ...state,
+                ratchetTree: mutableTree,
+                groupActiveState: { kind: "removedFromGroup" },
+                unappliedProposals: {},
+            },
+            actionTaken: action,
+            consumed: [],
+            aad: content.authenticatedData,
+        };
+    }
+    if (content.commit.path !== undefined) {
+        const committerLeafIndex = senderLeafIndex ??
+            (result.additionalResult.kind === "externalCommit" ? result.additionalResult.newMemberLeafIndex : undefined);
+        if (committerLeafIndex === undefined)
+            throw new ValidationError("Cannot verify commit leaf node because no commiter leaf index found");
+        throwIfDefined(await validateLeafNodeUpdateOrCommit(content.commit.path.leafNode, committerLeafIndex, state.groupContext, authService, cs.signature));
+        throwIfDefined(await validateLeafNodeCredentialAndKeyUniqueness(mutableTree, content.commit.path.leafNode, committerLeafIndex));
+    }
+    if (result.needsUpdatePath && content.commit.path === undefined)
+        throw new ValidationError("Update path is required");
+    const updatedExtensions = result.additionalResult.kind === "reinit" ? undefined : result.additionalResult.extensions;
+    const groupContextWithExtensions = updatedExtensions !== undefined ? { ...state.groupContext, extensions: updatedExtensions } : state.groupContext;
+    const proposalTouchedLeaves = [...result.updatedLeaves, ...result.removedLeaves];
+    const [pkp, commitSecret, newTreeHash, treeHashCache] = await applyTreeUpdate(content.commit.path, content.sender, mutableTree, cs, state, groupContextWithExtensions, result.additionalResult.kind === "memberCommit"
+        ? result.additionalResult.addedLeafNodes.map((l) => leafToNodeIndex(toLeafIndex(l[0])))
+        : [findBlankLeafNodeIndex(mutableTree) ?? toNodeIndex(mutableTree.length + 1)], cs.kdf, proposalTouchedLeaves);
+    const updatedGroupContext = await nextEpochContext(groupContextWithExtensions, wireformat, content, auth.signature, newTreeHash, state.confirmationTag, cs.hash);
+    const initSecret = result.additionalResult.kind === "externalCommit"
+        ? result.additionalResult.externalInitSecret
+        : state.keySchedule.initSecret;
+    const epochSecrets = await initializeEpoch(initSecret, commitSecret, updatedGroupContext, result.pskSecret, cs.kdf);
+    const confirmationTagValid = await verifyConfirmationTag(epochSecrets.keySchedule.confirmationKey, auth.confirmationTag, updatedGroupContext.confirmedTranscriptHash, cs.hash);
+    if (!confirmationTagValid)
+        throw new CryptoVerificationError("Could not verify confirmation tag");
+    const secretTree = createSecretTree(leafWidth(mutableTree.length), epochSecrets.encryptionSecret);
+    const suspendedPendingReinit = result.additionalResult.kind === "reinit" ? result.additionalResult.reinit : undefined;
+    const groupActiveState = suspendedPendingReinit !== undefined
+        ? { kind: "suspendedPendingReinit", reinit: suspendedPendingReinit }
+        : { kind: "active" };
+    const [historicalReceiverData, consumedEpochData] = addHistoricalReceiverData(state, clientConfig);
+    zeroOutUint8Array(commitSecret);
+    zeroOutUint8Array(epochSecrets.joinerSecret);
+    const consumed = [...consumedEpochData, initSecret];
+    return {
+        newState: {
+            ...state,
+            secretTree,
+            ratchetTree: mutableTree,
+            privatePath: pkp,
+            groupContext: updatedGroupContext,
+            keySchedule: epochSecrets.keySchedule,
+            confirmationTag: auth.confirmationTag,
+            historicalReceiverData,
+            unappliedProposals: {},
+            groupActiveState,
+            treeHashCache,
+        },
+        actionTaken: action,
+        consumed,
+        aad: content.authenticatedData,
+    };
+}
+async function applyTreeUpdate(path, sender, mutableTree, cs, state, groupContext, excludeNodes, kdf, proposalTouchedLeaves) {
+    if (path === undefined) {
+        const cache = deriveTreeHashCache(mutableTree.length, state.treeHashCache, proposalTouchedLeaves);
+        const treeHash = await treeHashRoot(mutableTree, cs.hash, cache);
+        return [state.privatePath, new Uint8Array(kdf.size), treeHash, cache];
+    }
+    if (sender.senderType === senderTypes.member) {
+        const touched = [...proposalTouchedLeaves, toLeafIndex(sender.leafIndex)];
+        const cache = deriveTreeHashCache(mutableTree.length, state.treeHashCache, touched);
+        await applyUpdatePath(mutableTree, toLeafIndex(sender.leafIndex), path, cs.hash, cache);
+        const newTreeHash = await treeHashRoot(mutableTree, cs.hash, cache);
+        const [pkp, commitSecret] = await updatePrivateKeyPath(mutableTree, state, toLeafIndex(sender.leafIndex), { ...groupContext, treeHash: newTreeHash, epoch: groupContext.epoch + 1n }, path, excludeNodes, cs);
+        return [pkp, commitSecret, newTreeHash, cache];
+    }
+    else {
+        const leafNodeIndex = addLeafNodeMutable(mutableTree, path.leafNode);
+        const senderLeafIndex = nodeToLeafIndex(leafNodeIndex);
+        const touched = [...proposalTouchedLeaves, senderLeafIndex];
+        const cache = deriveTreeHashCache(mutableTree.length, state.treeHashCache, touched);
+        await applyUpdatePath(mutableTree, senderLeafIndex, path, cs.hash, cache, true);
+        const newTreeHash = await treeHashRoot(mutableTree, cs.hash, cache);
+        const [pkp, commitSecret] = await updatePrivateKeyPath(mutableTree, state, senderLeafIndex, { ...groupContext, treeHash: newTreeHash, epoch: groupContext.epoch + 1n }, path, excludeNodes, cs);
+        return [pkp, commitSecret, newTreeHash, cache];
+    }
+}
+async function updatePrivateKeyPath(tree, state, leafNodeIndex, groupContext, path, excludeNodes, cs) {
+    const secret = await applyUpdatePathSecret(tree, state.privatePath, leafNodeIndex, groupContext, path, excludeNodes, cs);
+    const pathSecrets = await pathToRoot(tree, toNodeIndex(secret.nodeIndex), secret.pathSecret, cs.kdf);
+    const newPkp = mergePrivateKeyPaths(state.privatePath, await toPrivateKeyPath(pathSecrets, state.privatePath.leafIndex, cs));
+    const rootIndex = root(leafWidth(tree.length));
+    const rootSecret = pathSecrets[rootIndex];
+    if (rootSecret === undefined)
+        throw new InternalError("Could not find secret for root");
+    const commitSecret = await deriveSecret(rootSecret, "path", cs.kdf);
+    return [newPkp, commitSecret];
+}
+/** @public */
+export async function processMessage(params) {
+    const context = params.context;
+    const state = params.state;
+    const authService = context.authService;
+    const cs = context.cipherSuite;
+    const externalPsks = context.externalPsks ?? {};
+    const clientConfig = resolveClientConfig(context.clientConfig);
+    const message = params.message;
+    const action = params.callback ?? acceptAll;
+    if (message.wireformat === wireformats.mls_public_message) {
+        const result = await processPublicMessage({
+            context: { cipherSuite: cs, authService, externalPsks, clientConfig },
+            state,
+            publicMessage: message.publicMessage,
+            callback: action,
+        });
+        return { ...result, kind: "newState" };
+    }
+    else
+        return processPrivateMessage({
+            context: { cipherSuite: cs, authService, externalPsks, clientConfig },
+            state,
+            privateMessage: message.privateMessage,
+            callback: action,
+        });
+}

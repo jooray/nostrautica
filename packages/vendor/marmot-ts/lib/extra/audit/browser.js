@@ -94,4 +94,3 @@ async function openOpfsFile(options) {
 function supportsOpfs() {
     return typeof navigator !== "undefined" && !!navigator.storage?.getDirectory;
 }
-//# sourceMappingURL=browser.js.map

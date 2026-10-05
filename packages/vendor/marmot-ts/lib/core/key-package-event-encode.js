@@ -1,6 +1,6 @@
 /** @module @category Core - Key Package Event */
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { encode, mlsMessageEncoder, protocolVersions, wireformats, } from "ts-mls";
+import { encode, mlsMessageEncoder, protocolVersions, wireformats, } from "../vendor/ts-mls/index.js";
 import { encodeContent } from "../utils/encoding.js";
 import { unixNow } from "../utils/nostr.js";
 import { isValidRelayUrl, normalizeRelayUrl } from "../utils/relay-url.js";
@@ -43,7 +43,7 @@ async function createKeyPackageEventInternal(options) {
         return `0x${ext.extensionType.toString(16).padStart(4, "0")}`;
     });
     // Also include extensions from leaf node capabilities to signal support
-    // This ensures Marmot Group Data Extension (0xf2ee) is included in the event
+    // This ensures advertised capability extensions (e.g. app_data_dictionary) are included in the event
     if (keyPackage.leafNode.capabilities?.extensions) {
         for (const extType of keyPackage.leafNode.capabilities.extensions) {
             // Only add if not already present (avoid duplicates)
@@ -54,7 +54,7 @@ async function createKeyPackageEventInternal(options) {
         }
     }
     // Filter out GREASE values from the extension types
-    // We only want to include actual extensions (last_resort and Marmot Group Data Extension)
+    // We only want to include real extension ids (e.g. last_resort, app_data_dictionary), not GREASE
     const filteredExtensionTypes = extensionTypes.filter((hexValue) => {
         // Parse the hex value back to number to check if it's a GREASE value
         const extType = parseInt(hexValue);
@@ -64,7 +64,8 @@ async function createKeyPackageEventInternal(options) {
     // NIP tag expects a display string like "1.0".
     const versionName = Object.keys(protocolVersions).find((k) => protocolVersions[k] === keyPackage.version);
     const version = versionName === "mls10" ? "1.0" : String(keyPackage.version);
-    // Build tags
+    const keyPackageRef = await calculateKeyPackageRef(keyPackage);
+    // Build tags in the canonical MDK publisher order.
     const tags = [];
     // NIP-70: protected event — relay must not serve this event to non-authors.
     // NOTE: Optional/opt-in because many popular relays reject protected events.
@@ -81,10 +82,7 @@ async function createKeyPackageEventInternal(options) {
     const appComponentIds = SUPPORTED_APP_COMPONENT_IDS.map((id) => `0x${id.toString(16).padStart(4, "0")}`);
     // The spec forbids an `encoding` tag (transports/nostr.md "Transport byte
     // encoding"); content is always standard base64.
-    tags.push([KEY_PACKAGE_MLS_VERSION_TAG, version], [KEY_PACKAGE_CIPHER_SUITE_TAG, ciphersuiteHex], [KEY_PACKAGE_EXTENSIONS_TAG, ...filteredExtensionTypes], [KEY_PACKAGE_PROPOSALS_TAG, ...proposalTypes], [KEY_PACKAGE_APP_COMPONENTS_TAG, ...appComponentIds]);
-    // MIP-00: required KeyPackageRef tag ("i")
-    const keyPackageRef = await calculateKeyPackageRef(keyPackage);
-    tags.push(["i", bytesToHex(keyPackageRef)]);
+    tags.push([KEY_PACKAGE_MLS_VERSION_TAG, version], ["i", bytesToHex(keyPackageRef)], [KEY_PACKAGE_CIPHER_SUITE_TAG, ciphersuiteHex], [KEY_PACKAGE_EXTENSIONS_TAG, ...filteredExtensionTypes], [KEY_PACKAGE_PROPOSALS_TAG, ...proposalTypes], [KEY_PACKAGE_APP_COMPONENTS_TAG, ...appComponentIds]);
     // Add client tag if provided
     if (client)
         tags.push([KEY_PACKAGE_CLIENT_TAG, client]);
@@ -102,4 +100,3 @@ async function createKeyPackageEventInternal(options) {
         tags,
     };
 }
-//# sourceMappingURL=key-package-event-encode.js.map

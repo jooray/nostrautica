@@ -25,4 +25,3 @@ export const noopAuditSink = new NoopAuditSink();
 export function safeAuditSink(sink) {
     return sink ? new SafeAuditSink(sink) : noopAuditSink;
 }
-//# sourceMappingURL=sink.js.map

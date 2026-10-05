@@ -1,6 +1,6 @@
 /** @module @category Core - Group Messages */
 import { NostrEvent } from "applesauce-core/helpers/event";
-import { ClientState, CiphersuiteImpl, type MlsMessage } from "ts-mls";
+import { ClientState, CiphersuiteImpl, type MlsMessage } from "../vendor/ts-mls/index.js";
 export type CreateGroupEventOptions = {
     /** The serialized MLS message */
     message: MlsMessage;

@@ -1,5 +1,5 @@
 import { EventTemplate } from "applesauce-core/helpers/event";
-import { KeyPackage } from "ts-mls";
+import { KeyPackage } from "../vendor/ts-mls/index.js";
 export type CreateKeyPackageEventOptions = {
     keyPackage: KeyPackage;
     /**
@@ -14,8 +14,8 @@ export type CreateKeyPackageEventOptions = {
     /**
      * Whether to include the NIP-70 protected tag (["-"]).
      *
-     * Per MIP-00 this SHOULD be omitted by default because many relays reject
-     * protected events.
+     * The current kind-30443 tag set (`transports/nostr.md`, KeyPackage publication) does not
+     * include it, so it is omitted by default; many relays also reject protected events.
      */
     protected?: boolean;
 };

@@ -1,5 +1,5 @@
 /** @module @category Client - Proposals */
-import { ProposalSelfRemove } from "ts-mls";
+import { ProposalSelfRemove } from "../../../vendor/ts-mls/index.js";
 import { ProposalAction } from "../marmot-group.js";
 /**
  * Proposes the caller's own departure via an MLS `self_remove` proposal

@@ -16,6 +16,8 @@ export declare const groupLifecycleStates: {
     readonly merging: "Merging";
     /** A fork-shaped conflict was detected; selecting a safe retained branch. */
     readonly recovering: "Recovering";
+    /** A selected lifecycle-v1 disband Commit terminated this group forever. */
+    readonly disbanded: "Disbanded";
     /** No safe branch can be selected from retained local material (client-local). */
     readonly unrecoverable: "Unrecoverable";
 };

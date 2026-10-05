@@ -19,4 +19,3 @@ export const nostrTransportBinding = {
     giftWrapKind: GIFT_WRAP_KIND,
     groupIdTag: NOSTR_GROUP_ID_TAG,
 };
-//# sourceMappingURL=transport.js.map

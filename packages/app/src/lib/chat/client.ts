@@ -12,12 +12,9 @@
  * coordinator admin bot (Phase 3), which cannot run here. The integration is
  * written to the verified marmot-ts API surface; the final live pass verifies it.
  */
-import { MarmotClient } from "@internet-privacy/marmot-ts/client";
+import { MarmotClient, Proposals } from "@internet-privacy/marmot-ts/client";
 import type { GroupRumorHistory } from "@internet-privacy/marmot-ts/client";
 import { getNostrGroupIdHex, getPubkeyLeafNodes, getGroupMembers } from "@internet-privacy/marmot-ts/core";
-// `proposeRemoveUser` is not in marmot-ts's export map (UPSTREAM U7) — deep-import
-// it through the vendored package's `./lib/*` wildcard export.
-import { proposeRemoveUser } from "@internet-privacy/marmot-ts/lib/client/group/proposals/remove-member.js";
 import { KIND_DM_RELAY_LIST, KIND_RELAY_LIST } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
@@ -37,6 +34,7 @@ import {
   makeMarmotHistoryFactory,
   marmotKvBackend,
   namespacedStore,
+  purgeGroupLocalState,
   MARMOT_NAMESPACES,
   type MarmotKvBackend,
 } from "./stores.js";
@@ -104,13 +102,17 @@ export class MarmotChat {
     this.kvBackend = backend;
     this.client = new MarmotClient<GroupRumorHistory, undefined>({
       // Structural EventSigner (identity.ts) — checked structurally by marmot.
+      // It also signs the kind-450 account identity proof (0x8009) carried by
+      // every KeyPackage and leaf this client creates.
       signer: identity.eventSigner as unknown as MarmotClientCtorSigner,
-      accountProofSigner: identity.accountProofSigner,
       network: createMarmotNetwork() as unknown as MarmotClientCtorNetwork,
       groupStateStore: stores.groupStateStore,
       keyPackageStore: stores.keyPackageStore,
       inviteStore: stores.inviteStore,
       rewindStore: stores.rewindStore,
+      lifecycleStore: stores.lifecycleStore,
+      ingestStateStore: stores.ingestStateStore,
+      removedMarkerStore: stores.removedMarkerStore,
       // Durable decrypted-message history so past + while-offline messages survive
       // a navigation/reload (§5). marmot auto-saves every ingested/sent application
       // message here; we replay it on bind (see replayHistory).
@@ -121,7 +123,65 @@ export class MarmotChat {
 
   static async create(options: MarmotChatOptions): Promise<MarmotChat> {
     const identity = await resolveChatIdentity(options.accountSigner);
-    return new MarmotChat(identity, options.ctx, options.accountSigner);
+    const chat = new MarmotChat(identity, options.ctx, options.accountSigner);
+    // Before anything loads a group or looks at a key package.
+    await chat.retireLegacyState().catch((err) =>
+      console.warn("marmot: retiring pre-0x8009 chat state failed", err),
+    );
+    return chat;
+  }
+
+  /**
+   * Drop local MLS state this library generation cannot use (the 0x8009 flag day,
+   * MARMOT-GROUP-CHAT §2.1), so this device re-enrols through the ordinary path.
+   *
+   * - **Groups** outside the current account-identity-proof profile (built under
+   *   the legacy 0xF2F1 proof by marmot-ts 0.6.0), or whose state no longer loads
+   *   at all. The library still loads a legacy group but refuses every inbound
+   *   event for it, so it is a room nothing can be said in; the coordinator
+   *   retires its side too and creates a fresh one. Its history goes with it —
+   *   the owner's call: old chats are not migrated.
+   * - **Event bindings** (APPK-3) that point at a group discarded here, so the
+   *   join of the replacement binds cleanly instead of fighting a dead record.
+   *   (Only those: a binding whose group id we never learned self-heals against
+   *   the roster in `resolveEventGroups`, as it always has.)
+   * - **KeyPackages** marmot flags `nonCurrent` (legacy proof). Left in place they
+   *   still look "published" to `localKeyPackageEventIds`; purging them makes the
+   *   next `ensurePublished` create a current one in the same `d` slot, which
+   *   replaces the stale 30443 on the relays.
+   *
+   * Idempotent and cheap once done: on every later open it finds nothing.
+   */
+  async retireLegacyState(): Promise<void> {
+    const discardedNostrIds = new Set<string>();
+    for (const idBytes of await this.client.groups.listIds()) {
+      const id = toHex(idBytes);
+      let group: MarmotGroupLike | undefined;
+      try {
+        group = (await this.client.groups.get(idBytes)) as unknown as MarmotGroupLike;
+      } catch {
+        group = undefined;
+      }
+      if (group && (group.profileSupport?.kind ?? "supported") === "supported") continue;
+      const nostrId = group ? safeGroupIdHex(group) : undefined;
+      if (nostrId) discardedNostrIds.add(nostrId);
+      console.warn(
+        `marmot: discarding ${group ? "pre-0x8009" : "unreadable"} chat group ${id.slice(0, 12)}… — this device re-joins the event's new room`,
+      );
+      if (group) await this.client.groups.destroy(id).catch(() => undefined);
+      await purgeGroupLocalState(this.kvBackend, this.identity.pubkey, id);
+    }
+    for (const coordinate of await this.eventGroups.keys().catch(() => [] as string[])) {
+      const bound = await this.eventGroups.getItem(coordinate).catch(() => null);
+      if (bound && discardedNostrIds.has(bound)) await this.eventGroups.removeItem(coordinate).catch(() => {});
+    }
+    const stale = (await this.client.keyPackages.list().catch(() => []))
+      .filter((k) => k.nonCurrent)
+      .map((k) => k.keyPackageRef);
+    if (stale.length > 0) {
+      console.warn(`marmot: purging ${stale.length} pre-0x8009 key package(s)`);
+      await this.client.keyPackages.purge(stale).catch(() => undefined);
+    }
   }
 
   /**
@@ -632,7 +692,7 @@ export class MarmotChat {
 
   /** {@link currentEventGroups} without the own-leaf ordering (roster resolution only). */
   private async resolveEventGroups(): Promise<MarmotGroupLike[]> {
-    const all = (await this.client.groups.loadAll().catch(() => [])) as MarmotGroupLike[];
+    const all = await this.loadAllGroups();
     const recorded = await this.recordedEventGroupId();
     // Cheap, hot-path-safe: the roster is fetched+cached by the People/event
     // screens, so the send/bind path reads it without a network round-trip.
@@ -719,6 +779,20 @@ export class MarmotChat {
       );
     }
     return [];
+  }
+
+  /**
+   * Every group this identity holds, loaded one by one: the library's `loadAll` is
+   * a `Promise.all`, so a single state that fails to load would otherwise hide
+   * every other group (and with it this event's room).
+   */
+  private async loadAllGroups(): Promise<MarmotGroupLike[]> {
+    const out: MarmotGroupLike[] = [];
+    for (const id of await this.client.groups.listIds().catch(() => [] as Uint8Array[])) {
+      const group = await this.client.groups.get(id).catch(() => undefined);
+      if (group) out.push(group as unknown as MarmotGroupLike);
+    }
+    return out;
   }
 
   /** Attach message/state listeners to THIS EVENT's group(s) (idempotent). */
@@ -925,7 +999,7 @@ export async function resolveRemoveUserProposals(
   pubkey: string,
   context: unknown,
 ): Promise<unknown[]> {
-  const action = proposeRemoveUser(pubkey);
+  const action = Proposals.proposeRemoveUser(pubkey);
   const proposals = await action(context as Parameters<typeof action>[0]);
   // Spread the raw array so each ProposalRemove is a first-class extraProposal.
   return [...proposals];
@@ -941,7 +1015,15 @@ interface MarmotGroupLike {
   idStr: string;
   state: Parameters<typeof getNostrGroupIdHex>[0];
   history?: { queryRumors(filters: unknown): Promise<unknown[]> };
+  /** Absent on test fakes; a real group always reports it. */
+  profileSupport?: { kind: string };
   on: (event: string, fn: (...args: any[]) => void) => void;
+}
+
+function toHex(bytes: Uint8Array): string {
+  let out = "";
+  for (const b of bytes) out += b.toString(16).padStart(2, "0");
+  return out;
 }
 
 /** nostr_group_id hex for a group, or undefined when the state can't yield one. */

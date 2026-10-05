@@ -82,4 +82,3 @@ export function decodeGroupAvatarUrlV1(data) {
         thumbhash: decodeHintOrUndefined(thumbhashBytes),
     };
 }
-//# sourceMappingURL=avatar-url.js.map

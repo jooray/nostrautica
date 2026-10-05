@@ -357,4 +357,3 @@ export function encodeUtf8(text) {
 export function decodeUtf8(bytes) {
     return new TextDecoder("utf-8", { fatal: true }).decode(bytes);
 }
-//# sourceMappingURL=binary.js.map

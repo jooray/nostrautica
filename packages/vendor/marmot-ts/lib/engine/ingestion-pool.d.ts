@@ -5,8 +5,8 @@ export interface PooledEntry<TEnvelope> {
     id: string;
     /** The raw undecryptable envelope. */
     envelope: TEnvelope;
-    /** The canonical tip epoch when the envelope was first pooled. */
-    arrivalEpoch: number;
+    /** MLS-authenticated source epoch, when the wrapper has been peeled. */
+    sourceEpoch?: number;
     /**
      * History-tree node tags this entry has already been peeled against without
      * success, so the tree-targeted sweep tries each `(event, node)` pair once.
@@ -15,15 +15,17 @@ export interface PooledEntry<TEnvelope> {
 }
 /** Tuning for {@link IngestionPool}. */
 export interface IngestionPoolOptions {
-    /** Max entries; the oldest is evicted when the pool overflows. */
+    /** Max entries; new entries are refused while the pool is full. */
     maxSize?: number;
-    /**
-     * Max epochs an entry may linger: it is dropped once the canonical tip has
-     * advanced more than this many epochs past the entry's arrival without the
-     * entry becoming decryptable. Bounds undecryptable garbage.
-     */
-    maxEpochAge?: number;
+    /** Rollback horizon used for authenticated source-epoch expiry. */
+    maxRewindCommits?: number;
 }
+export type PoolAddResult = {
+    kind: "accepted";
+} | {
+    kind: "refused";
+    reason: "capacity";
+};
 /**
  * A persistent pool of incoming events that could not yet be decrypted against
  * any tried state (Marmot v2 `protocol-core/inbound-processing.md` "deferred").
@@ -44,21 +46,29 @@ export declare class IngestionPool<TEnvelope> {
     /** Whether an entry with this id is pooled. */
     has(id: string): boolean;
     /**
-     * Pools an envelope (keyed by id). A re-pooled entry keeps its original
-     * `arrivalEpoch` so eviction ages from first sighting. Evicts the oldest entry
-     * when over `maxSize`.
+     * Pools an envelope (keyed by id). A peeled Commit supplies its authenticated
+     * source epoch. Capacity refusal is retryable and never evicts accepted work.
      */
-    add(id: string, envelope: TEnvelope, arrivalEpoch: number): void;
+    add(id: string, envelope: TEnvelope, sourceEpoch?: number): PoolAddResult;
     /** Removes an entry (it was read, or is being given up). */
     remove(id: string): void;
+    /**
+     * Clears every entry's tried-tag memo so the next tree sweep re-peels all
+     * pooled events against all node states. Called after a convergence branch
+     * switch: the canonical path changed, so a fork message previously held on a
+     * losing branch may now decrypt on the canonical one and be delivered.
+     */
+    resetTried(): void;
     /** The pooled envelopes, oldest-first. */
     envelopes(): TEnvelope[];
     /** All pooled entries, oldest-first. */
     entries(): PooledEntry<TEnvelope>[];
     /**
-     * Drops and returns entries the tip has aged past `maxEpochAge` without
-     * resolving — they are unlikely to ever decrypt (foreign/garbage or an
-     * unreachably-far-future epoch), so they become terminally unreadable.
+     * Drops authenticated deferred commits only once their source epoch is
+     * strictly beyond the rollback horizon. Opaque wrappers have no trustworthy
+     * epoch and remain capacity-bounded until they authenticate or are removed.
      */
     evictStale(currentEpoch: number): PooledEntry<TEnvelope>[];
+    /** Authenticated source epochs whose parent states remain active dependencies. */
+    sourceEpochs(): number[];
 }

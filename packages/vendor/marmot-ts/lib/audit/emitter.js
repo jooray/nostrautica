@@ -28,4 +28,3 @@ export class AuditEmitter {
 export function createAuditEmitter(options) {
     return options ? new AuditEmitter(options) : undefined;
 }
-//# sourceMappingURL=emitter.js.map

@@ -34,4 +34,3 @@ export function createApplicationMessageIntent(rumor) {
         payload: serializeApplicationRumor(rumor),
     };
 }
-//# sourceMappingURL=application-message.js.map

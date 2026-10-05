@@ -36,6 +36,8 @@ export interface ConvergencePolicy {
      * state machine itself (B5) is not yet wired.
      */
     settlementQuiescenceMs: number;
+    /** Maximum duration (ms) of one immutable convergence collection window. */
+    maxConvergencePassMs: number;
     /** Distinct senders needed for one branch epoch to count toward witness quorum. */
     witnessQuorumSendersPerEpoch: number;
     /** Number of branch epochs that MUST meet sender quorum. */
@@ -48,6 +50,10 @@ export interface ConvergencePolicy {
  * Groups without explicit policy bytes MUST treat this as active.
  */
 export declare const DEFAULT_CONVERGENCE_POLICY: ConvergencePolicy;
+/** Input accepted from pre-bounded-pass callers that omit the v1 field. */
+export type CompatibleConvergencePolicy = Omit<ConvergencePolicy, "maxConvergencePassMs"> & Partial<Pick<ConvergencePolicy, "maxConvergencePassMs">>;
+/** Supplies the pinned v1 pass bound when decoding/configuring older policy input. */
+export declare function normalizeConvergencePolicy(policy: CompatibleConvergencePolicy): ConvergencePolicy;
 /**
  * Validates the witness-override invariant: a witness-quorum boost must never be
  * able to push a branch past the rollback horizon, so
@@ -83,6 +89,8 @@ export interface BranchCandidate {
     tipEpoch: number;
     /** SHA-256 (32 bytes) of the branch's tip commit MLS message bytes. */
     tipDigest: Uint8Array;
+    /** Authenticated account identity of the tip commit's member sender. */
+    tipCommitter?: Uint8Array;
     /** App-payload witnesses that decrypt on candidate states in the branch. */
     appWitnesses: AppWitness[];
 }
@@ -93,6 +101,7 @@ export interface BranchScore {
     witnessQuorumMet: boolean;
     appWitnessScore: number;
     tipDigest: Uint8Array;
+    tipCommitter: Uint8Array;
 }
 /** Computes the {@link BranchScore} for a candidate under a policy. */
 export declare function scoreBranch(branch: BranchCandidate, policy: ConvergencePolicy): BranchScore;
@@ -106,7 +115,21 @@ export declare function scoreBranch(branch: BranchCandidate, policy: Convergence
 export declare function compareBranchScores(a: BranchScore, b: BranchScore): number;
 /**
  * A branch is eligible only inside the rollback horizon:
- * `currentTipEpoch - forkEpoch <= maxRewindCommits`.
+ * `currentTipEpoch - forkEpoch <= maxRewindCommits` (`convergence.md`
+ * "Eligibility").
+ *
+ * This predicate is intentionally horizon-only and takes no retained anchor.
+ * `convergence.md` lists a second eligibility rule — "a branch that needs a
+ * retained state older than the retained anchor MUST NOT be selected" — but that
+ * guard is deliberately kept **separate** from this predicate, mirroring the
+ * reference engine's two-layer structure (`is_branch_eligible` is horizon-only;
+ * the anchor check lives in candidate admission + late-commit classification,
+ * always anchor-first). Keeping the anchor out of here lets the predicate be
+ * reused for horizon-only purposes (e.g. eligibility counts) and keeps it a pure
+ * function of policy + branch, with no dependency on retained-store state. The
+ * anchor guard is applied operationally: {@link classifyLateCommit} emits
+ * `beyond_anchor` for a sub-anchor commit (ingest), and fork recovery cannot
+ * build a branch whose `forkEpoch` state is no longer retained.
  */
 export declare function isBranchEligible(currentTipEpoch: number, branch: BranchCandidate, policy: ConvergencePolicy): boolean;
 /**

@@ -22,4 +22,3 @@ export class JsonlAuditRecorder {
         await this.writer.close?.();
     }
 }
-//# sourceMappingURL=recorder.js.map

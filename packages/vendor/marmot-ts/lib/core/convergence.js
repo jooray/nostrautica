@@ -11,10 +11,19 @@ export const DEFAULT_CONVERGENCE_POLICY = {
     maxRewindCommits: 5,
     appPayloadPastEpochLimit: 5,
     settlementQuiescenceMs: 1000,
+    maxConvergencePassMs: 5000,
     witnessQuorumSendersPerEpoch: 2,
     witnessQuorumEpochs: 1,
     maxWitnessOverrideDepth: 1,
 };
+/** Supplies the pinned v1 pass bound when decoding/configuring older policy input. */
+export function normalizeConvergencePolicy(policy) {
+    return {
+        ...policy,
+        maxConvergencePassMs: policy.maxConvergencePassMs ??
+            DEFAULT_CONVERGENCE_POLICY.maxConvergencePassMs,
+    };
+}
 /**
  * Validates the witness-override invariant: a witness-quorum boost must never be
  * able to push a branch past the rollback horizon, so
@@ -84,6 +93,7 @@ export function scoreBranch(branch, policy) {
         witnessQuorumMet: witnessQuorumMet(branch.appWitnesses, policy),
         appWitnessScore: appWitnessScore(branch.appWitnesses, policy),
         tipDigest: branch.tipDigest,
+        tipCommitter: branch.tipCommitter ?? new Uint8Array(),
     };
 }
 /** Lexicographic comparison over raw bytes (a<b → -1, a>b → 1, equal → 0). */
@@ -110,12 +120,28 @@ export function compareBranchScores(a, b) {
         cmpNum(Number(a.witnessQuorumMet), Number(b.witnessQuorumMet)) ||
         cmpNum(a.validCommitDepth, b.validCommitDepth) ||
         cmpNum(a.appWitnessScore, b.appWitnessScore) ||
+        // Lower authenticated account identity wins, matching MDK.
+        compareBytes(b.tipCommitter, a.tipCommitter) ||
         // Lower tip digest wins, so invert the byte comparison.
         compareBytes(b.tipDigest, a.tipDigest));
 }
 /**
  * A branch is eligible only inside the rollback horizon:
- * `currentTipEpoch - forkEpoch <= maxRewindCommits`.
+ * `currentTipEpoch - forkEpoch <= maxRewindCommits` (`convergence.md`
+ * "Eligibility").
+ *
+ * This predicate is intentionally horizon-only and takes no retained anchor.
+ * `convergence.md` lists a second eligibility rule — "a branch that needs a
+ * retained state older than the retained anchor MUST NOT be selected" — but that
+ * guard is deliberately kept **separate** from this predicate, mirroring the
+ * reference engine's two-layer structure (`is_branch_eligible` is horizon-only;
+ * the anchor check lives in candidate admission + late-commit classification,
+ * always anchor-first). Keeping the anchor out of here lets the predicate be
+ * reused for horizon-only purposes (e.g. eligibility counts) and keeps it a pure
+ * function of policy + branch, with no dependency on retained-store state. The
+ * anchor guard is applied operationally: {@link classifyLateCommit} emits
+ * `beyond_anchor` for a sub-anchor commit (ingest), and fork recovery cannot
+ * build a branch whose `forkEpoch` state is no longer retained.
  */
 export function isBranchEligible(currentTipEpoch, branch, policy) {
     return (Math.max(0, currentTipEpoch - branch.forkEpoch) <= policy.maxRewindCommits);
@@ -152,4 +178,3 @@ export function compareCommitOrderingKeys(a, b) {
     return (cmpNum(a.sourceEpoch, b.sourceEpoch) ||
         compareBytes(a.commitDigest, b.commitDigest));
 }
-//# sourceMappingURL=convergence.js.map

@@ -18,10 +18,7 @@ import {
   __setMarmotKvBackendForTests,
 } from "./stores.js";
 import type { AppSigner } from "$lib/signer/types.js";
-import {
-  signAccountIdentityProof,
-  accountIdentityProofSigningDigest,
-} from "@internet-privacy/marmot-ts/core";
+import { produceAccountIdentityProof } from "@internet-privacy/marmot-ts/core";
 
 describe("eventSignerFromKey", () => {
   const sk = generateSecretKey();
@@ -47,28 +44,17 @@ describe("eventSignerFromKey", () => {
   });
 });
 
-describe("account identity proof signer", () => {
-  const sk = generateSecretKey();
-  const request = {
-    accountIdentity: Uint8Array.from(Buffer.from(getPublicKey(sk), "hex")),
-    mlsSignaturePublicKey: new Uint8Array(32).fill(7),
-    ciphersuite: 1,
-    signatureScheme: 0x0807,
-  };
-
-  it("produces a 64-byte BIP-340 signature (schnorr aux-rand → non-deterministic)", () => {
-    const proofSigner = (req: Parameters<typeof signAccountIdentityProof>[0]) =>
-      signAccountIdentityProof(req, sk);
-    const sig = proofSigner(request);
-    expect(sig).toBeInstanceOf(Uint8Array);
-    expect(sig.length).toBe(64);
-  });
-
-  it("derives a stable 32-byte signing digest from the request", () => {
-    const d1 = accountIdentityProofSigningDigest(request);
-    const d2 = accountIdentityProofSigningDigest({ ...request });
-    expect(d1.length).toBe(32);
-    expect(Array.from(d1)).toEqual(Array.from(d2)); // digest is deterministic
+describe("account identity proof (0x8009) via the chat key's signEvent", () => {
+  it("produces the 104-byte component from a kind-450 signed by the device key", async () => {
+    const sk = generateSecretKey();
+    const proof = await produceAccountIdentityProof({
+      signer: eventSignerFromKey(sk) as never,
+      accountIdentity: Uint8Array.from(Buffer.from(getPublicKey(sk), "hex")),
+      mlsSignatureKey: new Uint8Array(32).fill(7),
+      ciphersuite: 1,
+    });
+    expect(proof).toBeInstanceOf(Uint8Array);
+    expect(proof.length).toBe(104);
   });
 });
 
@@ -80,7 +66,6 @@ describe("buildChatKeyProfile", () => {
       account: "a".repeat(64),
       isAccountKey: false,
       eventSigner: eventSignerFromKey(sk),
-      accountProofSigner: (req: Parameters<typeof signAccountIdentityProof>[0]) => signAccountIdentityProof(req, sk),
       clientId: "web-1",
       secretKey: sk,
     } satisfies ChatIdentity;
@@ -99,7 +84,6 @@ describe("buildChatKeyProfile", () => {
       account: "a".repeat(64),
       isAccountKey: false,
       eventSigner: eventSignerFromKey(sk),
-      accountProofSigner: (req: Parameters<typeof signAccountIdentityProof>[0]) => signAccountIdentityProof(req, sk),
       clientId: "web-1",
       secretKey: sk,
     } satisfies ChatIdentity;
@@ -115,7 +99,6 @@ describe("buildChatKeyProfile", () => {
       account: "a".repeat(64),
       isAccountKey: false,
       eventSigner: eventSignerFromKey(sk),
-      accountProofSigner: (req: Parameters<typeof signAccountIdentityProof>[0]) => signAccountIdentityProof(req, sk),
       clientId: "web-1",
       secretKey: sk,
     } satisfies ChatIdentity;
@@ -129,7 +112,6 @@ describe("buildChatKeyProfile", () => {
       account: "a".repeat(64),
       isAccountKey: false,
       eventSigner: eventSignerFromKey(sk),
-      accountProofSigner: (req: Parameters<typeof signAccountIdentityProof>[0]) => signAccountIdentityProof(req, sk),
       clientId: "web-1",
       secretKey: sk,
     } satisfies ChatIdentity;
@@ -144,7 +126,6 @@ describe("buildChatKeyProfile", () => {
       account: "a".repeat(64),
       isAccountKey: false,
       eventSigner: eventSignerFromKey(sk),
-      accountProofSigner: (req: Parameters<typeof signAccountIdentityProof>[0]) => signAccountIdentityProof(req, sk),
       clientId: "web-1",
       secretKey: sk,
     } satisfies ChatIdentity;

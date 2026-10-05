@@ -1,5 +1,5 @@
 /** @module @category Core - Constants */
-import { defaultExtensionTypes } from "ts-mls";
+import { defaultExtensionTypes } from "../vendor/ts-mls/index.js";
 /** The extension id for the last_resort extension for key packages */
 export const LAST_RESORT_EXTENSION_TYPE = 0x000a;
 /**
@@ -42,4 +42,3 @@ export const extendedExtensionTypes = {
 export const GROUP_EVENT_KIND = 445;
 /** Event kind for welcome events */
 export const WELCOME_EVENT_KIND = 444;
-//# sourceMappingURL=protocol.js.map

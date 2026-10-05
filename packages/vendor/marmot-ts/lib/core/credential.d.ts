@@ -1,4 +1,4 @@
-import { Credential, CredentialBasic } from "ts-mls";
+import { Credential, CredentialBasic } from "../vendor/ts-mls/index.js";
 export declare function isHexKey(str: string): boolean;
 /**
  * Whether `identity` is a valid Marmot account identity: exactly 32 bytes and a

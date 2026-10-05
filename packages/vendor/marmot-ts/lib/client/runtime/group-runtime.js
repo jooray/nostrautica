@@ -29,9 +29,46 @@ export class GroupRuntime {
     async publishEffects(effects) {
         const results = [];
         for (const work of effects.publish) {
-            results.push({ work, response: await this.publishWork(work) });
+            results.push(await this.#publishWorkResult(work));
         }
         return results;
+    }
+    async #publishWorkResult(work) {
+        switch (work.kind) {
+            case "applicationMessage":
+                return {
+                    work,
+                    response: await this.publishApplication(work.envelope),
+                    notifications: [],
+                    persistence: { kind: "notRequired" },
+                    welcomeDelivery: { kind: "notRequired" },
+                    retryPublication: false,
+                };
+            case "proposal":
+                return {
+                    work,
+                    ...(await this.#publishProposalResult(work.envelope, work.pending)),
+                    welcomeDelivery: { kind: "notRequired" },
+                };
+            case "selfUpdate": {
+                const result = await this.#publishSelfUpdateResult(work.envelope, work.pending);
+                return {
+                    work,
+                    ...result,
+                    welcomeDelivery: { kind: "notRequired" },
+                };
+            }
+            case "groupEvolution": {
+                const result = await this.#publishCommitResult({
+                    envelope: work.envelope,
+                    pending: work.pending,
+                    actorPubkey: work.actorPubkey,
+                    welcome: work.welcome,
+                    welcomeRecipients: work.welcomeRecipients,
+                });
+                return { work, ...result };
+            }
+        }
     }
     async publishWork(work) {
         switch (work.kind) {
@@ -55,18 +92,70 @@ export class GroupRuntime {
         return this.#publishToGroupRelays(envelope, "Failed to publish application message");
     }
     async publishProposal(envelope, pending) {
-        const response = await this.#publishToGroupRelays(envelope, "Failed to publish proposal event");
-        this.#confirmPublished(pending);
-        await this.#save();
-        return response;
+        return (await this.#publishProposalResult(envelope, pending)).response;
+    }
+    async #publishProposalResult(envelope, pending) {
+        let response;
+        try {
+            response = await this.#publishToGroupRelays(envelope, "Failed to publish proposal event");
+        }
+        catch (error) {
+            this.#publishFailed(pending);
+            throw error;
+        }
+        try {
+            this.#confirmPublished(pending);
+        }
+        catch (error) {
+            return {
+                response,
+                notifications: [],
+                persistence: { kind: "failed", error: errorDetail(error) },
+                retryPublication: false,
+            };
+        }
+        const persistence = await this.#persistConfirmedState();
+        return {
+            response,
+            notifications: [],
+            persistence,
+            retryPublication: false,
+        };
     }
     async publishSelfUpdate(envelope, pending) {
-        const response = await this.#publishToGroupRelays(envelope, "Failed to publish commit event");
-        this.#confirmPublished(pending);
-        await this.#save();
-        return response;
+        return (await this.#publishSelfUpdateResult(envelope, pending)).response;
+    }
+    async #publishSelfUpdateResult(envelope, pending) {
+        // A selfUpdate is a commit and now stages through `PendingPublish`
+        // (CR-09/WR-17), so a publish failure MUST roll the lifecycle back —
+        // otherwise the engine is stuck and can never prepare another commit.
+        let response;
+        try {
+            response = await this.#publishToGroupRelays(envelope, "Failed to publish commit event");
+        }
+        catch (err) {
+            this.#publishFailed(pending);
+            throw err;
+        }
+        let notifications;
+        try {
+            notifications = this.#confirmPublished(pending);
+        }
+        catch (error) {
+            return {
+                response,
+                notifications: [],
+                persistence: { kind: "failed", error: errorDetail(error) },
+                retryPublication: false,
+            };
+        }
+        const persistence = await this.#persistConfirmedState();
+        return { response, notifications, persistence, retryPublication: false };
     }
     async publishCommit(options) {
+        return (await this.#publishCommitResult(options)).response;
+    }
+    async #publishCommitResult(options) {
         let response;
         try {
             response = await this.#publishToGroupRelays(options.envelope, "Failed to publish commit");
@@ -75,13 +164,43 @@ export class GroupRuntime {
             this.#publishFailed(options.pending);
             throw err;
         }
-        this.#confirmPublished(options.pending);
-        await this.#save();
-        const innerWelcome = options.welcome?.welcome;
-        if (innerWelcome && options.welcomeRecipients?.length) {
-            await this.#deliverWelcomes(innerWelcome, options.actorPubkey, options.welcomeRecipients);
+        let notifications;
+        try {
+            notifications = this.#confirmPublished(options.pending);
         }
-        return response;
+        catch (error) {
+            return {
+                response,
+                notifications: [],
+                persistence: { kind: "failed", error: errorDetail(error) },
+                welcomeDelivery: { kind: "notRequired" },
+                retryPublication: false,
+            };
+        }
+        const persistence = await this.#persistConfirmedState();
+        const innerWelcome = options.welcome?.welcome;
+        let welcomeDelivery = {
+            kind: "notRequired",
+        };
+        if (innerWelcome && options.welcomeRecipients?.length) {
+            welcomeDelivery = await this.#deliverWelcomes(innerWelcome, options.actorPubkey, options.welcomeRecipients);
+        }
+        return {
+            response,
+            notifications,
+            persistence,
+            welcomeDelivery,
+            retryPublication: false,
+        };
+    }
+    async #persistConfirmedState() {
+        try {
+            await this.#save();
+            return { kind: "succeeded" };
+        }
+        catch (error) {
+            return { kind: "failed", error: errorDetail(error) };
+        }
     }
     async #publishToGroupRelays(envelope, failurePrefix) {
         const relays = this.#getRelays();
@@ -156,29 +275,53 @@ export class GroupRuntime {
     #groupRef() {
         return this.#getGroupRef();
     }
+    /**
+     * Delivers a Welcome to each recipient via the shared, non-throwing
+     * {@link NostrWelcomeDelivery.deliverMany} fanout (D-06/D-07) and reduces
+     * the result into {@link WelcomeFanoutOutcome}. This method itself must
+     * never throw: it runs after the commit has been confirmed and persisted,
+     * so a Welcome failure must never reject the publish (`publishFailed` is
+     * exclusive to pre-confirm relay failures — Phase 03.1-02).
+     */
     async #deliverWelcomes(welcome, actorPubkey, recipients) {
         const groupData = this.#getGroupData();
-        if (!groupData)
-            throw new Error("MarmotGroupData not found in ClientState.");
+        if (!groupData) {
+            const message = "MarmotGroupData not found in ClientState.";
+            return {
+                kind: "attempted",
+                outcomes: recipients.map((recipient) => ({
+                    kind: "failed",
+                    recipient,
+                    error: message,
+                })),
+            };
+        }
         this.#log?.("Sending Welcome messages to %d recipient(s)", recipients.length);
-        const welcomeResults = await Promise.allSettled(recipients.map((recipient) => this.welcomeDelivery.deliver({
-            welcome,
-            author: actorPubkey,
-            groupRelays: groupData.relays,
-            recipient,
-        })));
-        const failureDetails = welcomeResults
-            .map((result, i) => ({ result, recipient: recipients[i] }))
-            .filter((item) => item.result.status === "rejected")
-            .map((item) => {
-            const msg = item.result.reason instanceof Error
-                ? item.result.reason.message
-                : String(item.result.reason);
-            return `${item.recipient.pubkey.slice(0, 16)}...: ${msg}`;
-        });
-        if (failureDetails.length > 0) {
-            this.#log?.("%d/%d Welcome(s) failed to deliver: %O", failureDetails.length, recipients.length, failureDetails);
-            throw new Error(`Failed to deliver ${failureDetails.length}/${recipients.length} Welcome message(s): ${failureDetails.join("; ")}`);
+        try {
+            const outcomes = await this.welcomeDelivery.deliverMany({
+                welcome,
+                author: actorPubkey,
+                groupRelays: groupData.relays,
+                recipients,
+            });
+            const failed = outcomes.filter((outcome) => outcome.kind === "failed");
+            if (failed.length > 0) {
+                this.#log?.("%d/%d Welcome(s) failed to deliver: %O", failed.length, recipients.length, failed.map((outcome) => `${outcome.recipient.pubkey.slice(0, 16)}...: ${outcome.error}`));
+            }
+            return { kind: "attempted", outcomes };
+        }
+        catch (error) {
+            // deliverMany is contractually non-throwing, but this defensively
+            // covers an unexpected throw so it can never reject the publish.
+            const message = errorDetail(error);
+            return {
+                kind: "attempted",
+                outcomes: recipients.map((recipient) => ({
+                    kind: "failed",
+                    recipient,
+                    error: message,
+                })),
+            };
         }
     }
 }
@@ -202,4 +345,3 @@ function transportEnvelopeFromNostrEvent(event) {
         nostr_pubkey_hex: event.pubkey,
     };
 }
-//# sourceMappingURL=group-runtime.js.map

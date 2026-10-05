@@ -1,5 +1,5 @@
 /** @module @category Client - Proposals */
-import { type Proposal } from "ts-mls";
+import { type Proposal } from "../../../vendor/ts-mls/index.js";
 import { type EncryptedMediaPolicyV1 } from "../../../core/components/index.js";
 import type { ProposalAction } from "../marmot-group.js";
 /** A partial update to a group's app-component metadata. */

@@ -1,6 +1,5 @@
-import { decode, encode, mlsExporter, mlsMessageDecoder, mlsMessageEncoder, } from "ts-mls";
+import { decode, encode, mlsExporter, mlsMessageDecoder, mlsMessageEncoder, } from "../vendor/ts-mls/index.js";
 import { decodeContent, encodeContent } from "../utils/encoding.js";
-import { decryptLegacyGroupMessageEventContent } from "./group-message-legacy.js";
 import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { concatBytes, randomBytes } from "@noble/ciphers/utils.js";
 import { sha256 } from "@noble/hashes/sha2.js";
@@ -28,7 +27,7 @@ function epochOf(state) {
     }
 }
 /**
- * Derives the MIP-03 group-event encryption key for a group epoch.
+ * Derives the kind-445 group-event encryption key for a group epoch (`transports/nostr.md`).
  *
  * Uses the MLS Exporter (RFC 9420 §8.5) with label "marmot" and context
  * "group-event" to produce a 32-byte ChaCha20-Poly1305 key.
@@ -68,17 +67,12 @@ export async function decryptGroupMessageEvent(message, clientState, ciphersuite
         cryptoLog("decrypt kind-445 ok: localEpoch=%s wireformat=%s exporterKey=%s eventId=%s", epochOf(clientState), decoded.wireformat, keyFingerprint(key), message.id);
         return decoded;
     }
-    catch (primaryError) {
-        try {
-            return await decryptLegacyGroupMessageEventContent(message.content, clientState, ciphersuite);
-        }
-        catch (legacyError) {
-            throw new Error(`Failed to decrypt group message (new format and legacy fallback failed): ${formatError(primaryError)}; legacy: ${formatError(legacyError)}`);
-        }
+    catch (error) {
+        throw new Error(`Failed to decrypt group message: ${formatError(error)}`);
     }
 }
 /**
- * Encrypts the content of a group event using MIP-03.
+ * Encrypts the content of a kind-445 group event (`transports/nostr.md`).
  *
  * @returns The encrypted content
  */
@@ -137,4 +131,3 @@ function encodeBase64(value) {
 function formatError(error) {
     return error instanceof Error ? error.message : String(error);
 }
-//# sourceMappingURL=group-message-crypto.js.map

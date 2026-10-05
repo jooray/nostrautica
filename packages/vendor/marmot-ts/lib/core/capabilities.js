@@ -1,8 +1,8 @@
 /** @module @category Core - Capabilities */
-import { appDataDictionaryExtensionType, appDataUpdateProposalType, defaultExtensionTypes, selfRemoveProposalType, } from "ts-mls";
-import { ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE } from "./account-identity-proof.js";
+import { appDataDictionaryExtensionType, appDataUpdateProposalType, defaultExtensionTypes, selfRemoveProposalType, } from "../vendor/ts-mls/index.js";
 import { LAST_RESORT_EXTENSION_TYPE } from "./protocol.js";
 import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agent-text-stream.js";
+import { isGreaseValue } from "./grease.js";
 /**
  * Ensures a {@link Capabilities} object advertises the MLS code points a Marmot
  * v2 group relies on, so a LeafNode bearing these capabilities passes MLS
@@ -14,7 +14,9 @@ import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agen
  * Every member MUST advertise support for the extension and the proposal type.
  * `last_resort` (`0x000a` extension) is also advertised for key-package reuse,
  * and the `self_remove` proposal (`0x000a` proposal type) for member departure
- * (`protocol-core/member-departure.md`).
+ * (`protocol-core/member-departure.md`). The account identity proof (`0x8009`)
+ * is a required app component (see `DEFAULT_GROUP_COMPONENT_IDS`), not an MLS
+ * required capability, so it is not advertised here.
  *
  * The agent-text-stream-QUIC `receive` role capability (`0xf2d1`) is advertised
  * so a member can be invited into a group whose
@@ -31,19 +33,25 @@ import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agen
  * is not portably available in browsers/Node/Bun), so it never advertises
  * `send` (`0xf2d2`) or `fanout` (`0xf2d4`), which would claim the ability to
  * originate or relay live QUIC streams it cannot fulfill.
+ *
+ * GREASE values are dropped from `proposals` (they stay in the other fields).
+ * The kind-30443 `mls_proposals` tag never carries GREASE, and MDK requires
+ * that tag to equal the decoded LeafNode proposal capabilities exactly: it
+ * strips GREASE from extensions before comparing but not from proposals
+ * (`cgka-engine/src/capabilities.rs`, `advertised_capabilities_from_caps`).
+ * ts-mls GREASEs each list at random, so most KeyPackages would otherwise be
+ * rejected by MDK with "mls_proposals tag does not exactly match decoded
+ * KeyPackage metadata". MDK does not GREASE proposals either.
  */
 export function ensureMarmotCapabilities(capabilities) {
     const extensions = Array.from(capabilities.extensions);
-    const proposals = Array.from(capabilities.proposals);
+    const proposals = Array.from(capabilities.proposals).filter((p) => !isGreaseValue(p));
     // app_data_dictionary extension carrying the group's app components.
     if (!extensions.includes(appDataDictionaryExtensionType))
         extensions.push(appDataDictionaryExtensionType);
     // last_resort extension for reusable key packages.
     if (!extensions.includes(LAST_RESORT_EXTENSION_TYPE))
         extensions.push(LAST_RESORT_EXTENSION_TYPE);
-    // account identity proof carried on the LeafNode binding the Nostr account.
-    if (!extensions.includes(ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE))
-        extensions.push(ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE);
     // agent-text-stream-QUIC `receive` role capability so a group that requires it
     // (e.g. darkmatter's default group) can invite this member. `receive` is an
     // honest marker for a non-QUIC client (it reads the final MLS message); `send`
@@ -53,7 +61,7 @@ export function ensureMarmotCapabilities(capabilities) {
     // app_data_update proposal that mutates the dictionary inside a commit.
     if (!proposals.includes(appDataUpdateProposalType))
         proposals.push(appDataUpdateProposalType);
-    // self_remove proposal for member departure (MIP-03).
+    // self_remove proposal for member departure (`protocol-core/member-departure.md`).
     if (!proposals.includes(selfRemoveProposalType))
         proposals.push(selfRemoveProposalType);
     return {
@@ -69,19 +77,20 @@ export function ensureMarmotCapabilities(capabilities) {
  * member whose LeafNode does not cover them (capability-negotiation.md §5.2
  * "enforce on add").
  *
- * The baseline is fixed, not member-derived: the `app_data_dictionary`
- * extension (`0x0006`) and account-identity-proof extension (`0xF2F1`) plus the
- * `app_data_update` (`0x0008`) and `self_remove` (`0x000a`) proposals. The
- * `self_remove` requirement matches a darkmatter MIP-03 client (which registers
- * the self-remove feature as Required, advertising proposal type 10 in both leaf
- * and required capabilities). Lists are sorted ascending to mirror the Rust
- * `BTreeSet` ordering; `credentialTypes` is empty.
+ * The required GroupContext extension baseline is `0x0006`
+ * (`app_data_dictionary`) only, matching MDK's
+ * `CURRENT_PROFILE_REQUIRED_GROUP_CONTEXT_EXTENSIONS`. The account identity
+ * proof (`0x8009`) is a required app component (see
+ * `DEFAULT_GROUP_COMPONENT_IDS`), not an MLS required capability — it is
+ * never listed here. Required proposals are `app_data_update` (`0x0008`) and
+ * `self_remove` (`0x000a`); the `self_remove` requirement matches a
+ * darkmatter client (`protocol-core/member-departure.md`; it registers the self-remove feature as
+ * Required, advertising proposal type 10 in both leaf and required
+ * capabilities). Lists are sorted ascending to mirror the Rust `BTreeSet`
+ * ordering; `credentialTypes` is empty.
  */
 export function marmotRequiredCapabilitiesExtension() {
-    const extensionTypes = [
-        appDataDictionaryExtensionType,
-        ACCOUNT_IDENTITY_PROOF_EXTENSION_TYPE,
-    ].sort((a, b) => a - b);
+    const extensionTypes = [appDataDictionaryExtensionType].sort((a, b) => a - b);
     const proposalTypes = [
         appDataUpdateProposalType,
         selfRemoveProposalType,
@@ -95,4 +104,3 @@ export function marmotRequiredCapabilitiesExtension() {
         },
     };
 }
-//# sourceMappingURL=capabilities.js.map

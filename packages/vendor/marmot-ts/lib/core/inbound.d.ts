@@ -74,6 +74,17 @@ export declare const deferredReasons: {
     readonly missingParent: "missing_parent";
     /** Input received while the group is in PendingPublish or Merging. */
     readonly groupBusy: "group_busy";
+    /** Local admission capacity is full; retry without transport redelivery. */
+    readonly capacity: "capacity";
+    /**
+     * A commit's changed leaves could not be attributed to its proposals or
+     * committer, so account-identity authorization cannot be evaluated against
+     * this candidate parent yet (Phase 9, D-03/D-04). Per
+     * `refs/marmot/foundation/errors.md` (lines 63-68), a Commit whose
+     * authorization cannot be evaluated against a candidate parent remains
+     * deferred; only failed authorization is terminal.
+     */
+    readonly unjudgeableIdentity: "unjudgeable_identity";
 };
 /** A deferred-input reason. */
 export type DeferredReason = (typeof deferredReasons)[keyof typeof deferredReasons];
@@ -86,6 +97,8 @@ export declare const convergenceOutcomeToCategory: {
     readonly BeyondAnchor: "missing_history";
     /** The required retained anchor is missing — needs history we dropped. */
     readonly MissingRetainedAnchor: "missing_history";
+    /** Input for a group this client has been removed from — classified by its group, never decrypted. */
+    readonly SelfEvicted: "stale_epoch";
 };
 /** A convergence outcome name (`PascalCase`). */
 export type ConvergenceOutcome = keyof typeof convergenceOutcomeToCategory;

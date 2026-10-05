@@ -95,9 +95,6 @@ importers:
       svelte-check:
         specifier: ^4.1.1
         version: 4.7.2(picomatch@4.0.5)(svelte@5.56.4(@typescript-eslint/types@8.63.0))(typescript@5.9.3)
-      ts-mls:
-        specifier: workspace:*
-        version: link:../vendor/ts-mls
       typescript:
         specifier: ^5.7.2
         version: 5.9.3
@@ -178,41 +175,11 @@ importers:
 
   packages/vendor/marmot-ts:
     dependencies:
-      '@noble/ciphers':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/curves':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@noble/hashes':
-        specifier: ^2.2.0
-        version: 2.2.0
-      '@scure/base':
-        specifier: ^2.2.0
-        version: 2.2.0
-      applesauce-common:
-        specifier: 0.0.0-next-20260620175751
-        version: 0.0.0-next-20260620175751(supports-color@7.2.0)(typescript@5.9.3)
-      applesauce-core:
-        specifier: 0.0.0-next-20260620175751
-        version: 0.0.0-next-20260620175751(supports-color@7.2.0)(typescript@5.9.3)
-      debug:
-        specifier: ^4.4.3
-        version: 4.4.3(supports-color@7.2.0)
-      eventemitter3:
-        specifier: ^5.0.4
-        version: 5.0.4
-      ts-mls:
-        specifier: workspace:*
-        version: link:../ts-mls
-
-  packages/vendor/ts-mls:
-    dependencies:
       '@hpke/chacha20poly1305':
         specifier: 1.8.0
         version: 1.8.0
       '@hpke/core':
-        specifier: ^1.9.0
+        specifier: 1.9.0
         version: 1.9.0
       '@hpke/dhkem-x25519':
         specifier: 1.8.0
@@ -238,6 +205,21 @@ importers:
       '@noble/post-quantum':
         specifier: 0.6.1
         version: 0.6.1
+      '@scure/base':
+        specifier: ^2.2.0
+        version: 2.2.0
+      applesauce-common:
+        specifier: ^6.2.0
+        version: 6.2.0(supports-color@7.2.0)(typescript@5.9.3)
+      applesauce-core:
+        specifier: ^6.2.0
+        version: 6.2.0(supports-color@7.2.0)(typescript@5.9.3)
+      debug:
+        specifier: ^4.4.3
+        version: 4.4.3(supports-color@7.2.0)
+      eventemitter3:
+        specifier: ^5.0.4
+        version: 5.0.4
 
 packages:
 
@@ -1555,11 +1537,11 @@ packages:
     resolution: {integrity: sha512-zbB9rCJAT1rbjiVDb2hqKFHNYLxgtk8NURxZ3IZwD3F6NtxbXZQCnnSi1Lkx+IDohdPlFp222wVALIheZJQSEg==}
     engines: {node: '>=8'}
 
-  applesauce-common@0.0.0-next-20260620175751:
-    resolution: {integrity: sha512-z59X0XF0bfR8yH0gicDGk6UezoDAWuDw1oQcJm6u24QsTqyRJHCaNVqHGoxz6zNuI3+of48Nj8Gn9er9jPOQ/Q==}
+  applesauce-common@6.2.0:
+    resolution: {integrity: sha512-meXbDCdqA1LKy1tr04BW7wMfnBBkHetLv+wlXYjAj5iR4Sji5KMxLFdAjUe6cSvrxrk9LxFcP+0P9BcZQxjpaA==}
 
-  applesauce-core@0.0.0-next-20260620175751:
-    resolution: {integrity: sha512-WNaznDfUOW6bVi0EIL5p5qD+r0aIkuE4ricIxrp6MV4hTC4cLEyqQszx2DahbmchhD7Oz20buqqjsVC3Xw/XfA==}
+  applesauce-core@6.2.0:
+    resolution: {integrity: sha512-O6AlVyzqcuIhTOIuexm6UWmx7mRIa2D98gJP7K7vFGf90YdtvSH78AsKQWZXJ0Pk/K14at+9zkwfCkFr7ghgNw==}
 
   argparse@2.0.1:
     resolution: {integrity: sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==}
@@ -4676,10 +4658,10 @@ snapshots:
     dependencies:
       color-convert: 2.0.1
 
-  applesauce-common@0.0.0-next-20260620175751(supports-color@7.2.0)(typescript@5.9.3):
+  applesauce-common@6.2.0(supports-color@7.2.0)(typescript@5.9.3):
     dependencies:
-      '@scure/base': 1.2.6
-      applesauce-core: 0.0.0-next-20260620175751(supports-color@7.2.0)(typescript@5.9.3)
+      '@scure/base': 2.2.0
+      applesauce-core: 6.2.0(supports-color@7.2.0)(typescript@5.9.3)
       hash-sum: 2.0.0
       light-bolt11-decoder: 3.2.0
       nanoid: 5.1.16
@@ -4688,7 +4670,7 @@ snapshots:
       - supports-color
       - typescript
 
-  applesauce-core@0.0.0-next-20260620175751(supports-color@7.2.0)(typescript@5.9.3):
+  applesauce-core@6.2.0(supports-color@7.2.0)(typescript@5.9.3):
     dependencies:
       debug: 4.4.3(supports-color@7.2.0)
       fast-deep-equal: 3.1.3

@@ -21,7 +21,7 @@ export class RetainedHistoryStore {
     /** Canonical state at each retained epoch. Holds the state *at* that epoch. */
     #states = new Map();
     /** Commit applied to advance *from* each source epoch on our branch. */
-    #appliedCommits = new Map();
+    #appliedLinks = new Map();
     #policy;
     constructor(init, policy = DEFAULT_CONVERGENCE_POLICY) {
         this.#policy = policy;
@@ -56,11 +56,19 @@ export class RetainedHistoryStore {
      * (inclusive) up to but not including `tipEpoch`, in epoch order.
      */
     appliedCommitsBetween(forkEpoch, tipEpoch) {
+        return this.appliedLinksBetween(forkEpoch, tipEpoch).map((link) => link.message);
+    }
+    /**
+     * Parent-bound applied links on the current canonical branch. Unlike a
+     * digest plus later epoch lookups, each entry keeps the exact parent state
+     * (including proposal-reference evidence) beside its resulting state.
+     */
+    appliedLinksBetween(forkEpoch, tipEpoch) {
         const out = [];
         for (let e = forkEpoch; e < tipEpoch; e++) {
-            const msg = this.#appliedCommits.get(e);
-            if (msg)
-                out.push(msg);
+            const link = this.#appliedLinks.get(e);
+            if (link)
+                out.push(link);
         }
         return out;
     }
@@ -75,18 +83,26 @@ export class RetainedHistoryStore {
      * Recovering / Unrecoverable). The engine supplies them; e.g. the source epoch
      * of a staged local commit the canonical tip has since advanced past.
      */
-    record(parentState, appliedMessage, newState, pinnedEpochs = []) {
+    record(parentState, appliedMessage, newState, pinnedEpochs = [], ownCommitStamp) {
         const parentEpoch = Number(parentState.groupContext.epoch);
         const newEpoch = Number(newState.groupContext.epoch);
+        const preceding = this.#appliedLinks.get(parentEpoch - 1);
+        if (preceding)
+            preceding.resultingState = parentState;
         this.#states.set(parentEpoch, parentState);
         this.#states.set(newEpoch, newState);
-        this.#appliedCommits.set(parentEpoch, appliedMessage);
+        this.#appliedLinks.set(parentEpoch, {
+            parentState,
+            message: appliedMessage,
+            resultingState: newState,
+            ownCommitStamp,
+        });
         const max = this.#policy.maxRewindCommits;
         const pins = new Set(pinnedEpochs);
         for (const epoch of prunableRetainedEpochs(this.#states.keys(), newEpoch, max, pins))
             this.#states.delete(epoch);
-        for (const epoch of prunableRetainedEpochs(this.#appliedCommits.keys(), newEpoch, max, pins))
-            this.#appliedCommits.delete(epoch);
+        for (const epoch of prunableRetainedEpochs(this.#appliedLinks.keys(), newEpoch, max, pins))
+            this.#appliedLinks.delete(epoch);
     }
     /** The highest retained epoch (the canonical tip), or undefined if empty. */
     tipEpoch() {
@@ -97,4 +113,3 @@ export class RetainedHistoryStore {
         return max;
     }
 }
-//# sourceMappingURL=retained-store.js.map

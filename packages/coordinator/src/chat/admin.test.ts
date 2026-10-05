@@ -46,6 +46,8 @@ class FakeMls implements ChatMls {
   }
   /** Reasons the library would give for a refusal; drives the ineligible log line. */
   ineligibleReasons: string[] = [];
+  /** Key-package event ids that are pre-0x8009 (legacy proof) — see keyPackageProfile. */
+  legacyKps = new Set<string>();
   async isEligible(): Promise<boolean> {
     return this.eligible;
   }
@@ -65,7 +67,10 @@ class FakeMls implements ChatMls {
   async evaluateKeyPackage(
     group: string,
     kp: AnyEvent,
-  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean }> {
+  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean; legacy?: boolean }> {
+    if (this.legacyKps.has(kp.id)) {
+      return { eligible: false, reasons: ["not a current (0x8009) KeyPackage: legacy-extension-present"], alreadyMember: false, legacy: true };
+    }
     const alreadyMember = this.members.get(group)?.has(kp.pubkey) ?? false;
     const reasons = [
       ...(alreadyMember ? ["already a member"] : []),
@@ -976,6 +981,31 @@ describe("MarmotAdmin — a failed Add asks for a durable retry (audit B-5)", ()
     expect(refusals).toContain("chat_key_package_ineligible");
   });
 
+  it("a PRE-0x8009 key package is skipped quietly — consumed, not reported, not retried", async () => {
+    // After the marmot-ts upgrade every device still advertises its old 0xF2F1
+    // KeyPackage until it next runs current code. That is not a refusal to report:
+    // the owner did nothing wrong and the device fixes it by itself.
+    const store = freshStore();
+    const mls = new FakeMls();
+    const kp = kpFor(CHATKEY, "kp-legacy");
+    mls.legacyKps.add(kp.id);
+    const retries: string[] = [];
+    const refusals: string[] = [];
+    const admin = makeAdmin(store, mls, [kp], undefined, {
+      enqueueSync: (_c, pubkey) => retries.push(pubkey),
+      notifyAttendee: (_c, _pk, content) => refusals.push(content.error_category ?? ""),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    expect(await admin.syncMember(COORD, ACCOUNT)).toBe(true);
+    expect(retries).toEqual([]);
+    expect(refusals).toEqual([]);
+    expect(store.isKpConsumed(COORD, kp.id)).toBe(true);
+    expect(await mls.isMember(store.getMarmotGroup(COORD)!.mls_group_id, CHATKEY)).toBe(false);
+  });
+
   it("the startup backfill queues a retry for a member it could not add", async () => {
     const store = freshStore();
     const mls = new FakeMls();
@@ -1306,9 +1336,20 @@ describe("MarmotAdmin — roster republish on every chat_keys change", () => {
     return { published, store, mls, admin };
   }
 
+  it("republishes when the group is CREATED — a replacement group is invisible until then", async () => {
+    const { published, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    expect(published).toEqual([COORD]);
+    // Re-ensuring an existing group is not a change.
+    published.length = 0;
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    expect(published).toEqual([]);
+  });
+
   it("republishes when a device binds (op:add)", async () => {
     const { published, store, admin } = setup();
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    published.length = 0; // creating the group republishes too (its own test below)
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
 
     expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
@@ -1319,6 +1360,7 @@ describe("MarmotAdmin — roster republish on every chat_keys change", () => {
   it("republishes for a still-PENDING attendee too — the roster is how the device list renders", async () => {
     const { published, store, admin } = setup();
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    published.length = 0; // creating the group republishes too (its own test below)
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "pending", now: 1 });
 
     expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
@@ -1329,6 +1371,7 @@ describe("MarmotAdmin — roster republish on every chat_keys change", () => {
   it("republishes when a device is revoked (op:revoke)", async () => {
     const { published, store, admin } = setup();
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    published.length = 0; // creating the group republishes too (its own test below)
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
     await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
     published.length = 0;
@@ -1341,6 +1384,7 @@ describe("MarmotAdmin — roster republish on every chat_keys change", () => {
   it("republishes when an attendee is removed from the chat entirely", async () => {
     const { published, store, admin } = setup();
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    published.length = 0; // creating the group republishes too (its own test below)
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
     await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
     published.length = 0;
@@ -1353,6 +1397,7 @@ describe("MarmotAdmin — roster republish on every chat_keys change", () => {
   it("does NOT republish for a rejected attestation — nothing changed", async () => {
     const { published, store, admin } = setup();
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    published.length = 0; // creating the group republishes too (its own test below)
     // A stranger: no attendee row at all.
     expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(false);
     expect(published).toEqual([]);

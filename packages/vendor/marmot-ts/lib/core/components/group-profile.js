@@ -33,4 +33,3 @@ export function decodeGroupProfileV1(data) {
     reader.end();
     return { name, description };
 }
-//# sourceMappingURL=group-profile.js.map

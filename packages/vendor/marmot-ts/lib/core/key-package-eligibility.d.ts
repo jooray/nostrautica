@@ -1,6 +1,6 @@
 /** @module @category Core - Key Package */
 import type { NostrEvent } from "applesauce-core/helpers/event";
-import type { ClientState, GroupInfo } from "ts-mls";
+import type { ClientState, GroupInfo } from "../vendor/ts-mls/index.js";
 /** The outcome of evaluating a KeyPackage against a group's add requirements. */
 export interface KeyPackageEligibility {
     /** True when the KeyPackage satisfies every add requirement (no reasons). */

@@ -107,4 +107,3 @@ export function verifyApplicationRumorAuthorship(data, senderPubkeyHex) {
 }
 /** @deprecated Kept for internal compatibility. Prefer `deserializeApplicationData`. */
 export const deserializeApplicationRumor = deserializeApplicationData;
-//# sourceMappingURL=application-rumor.js.map

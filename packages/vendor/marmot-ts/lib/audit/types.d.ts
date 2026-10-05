@@ -1,7 +1,7 @@
 /** @module @category Audit */
 export declare const MARMOT_AUDIT_SCHEMA_VERSION = "marmot-forensics-audit/v2";
 export type AuditDataMode = "obfuscated_sensitive_data" | "full_data";
-export type AuditEpochState = "stable" | "pending_publish" | "merging" | "recovering" | "unrecoverable";
+export type AuditEpochState = "stable" | "pending_publish" | "merging" | "recovering" | "unrecoverable" | "disbanded";
 export type AuditMessageArtifactKind = "application_message" | "commit" | "proposal" | "welcome" | "group_info" | "unknown";
 export type AuditTransportWireEnvelope = {
     transport?: string;
@@ -230,6 +230,11 @@ export type AuditEventKind = {
     selected_branch_id?: string;
     selected_fork_epoch?: number;
     selected_tip_epoch?: number;
+    selected_tip_digest?: string;
+    selected_tip_committer?: string;
+    decisive_rule?: string;
+    witness_quorum_met?: boolean;
+    app_witness_score?: number;
     losing_branch_ids?: string[];
     error_kinds?: string[];
 } | {

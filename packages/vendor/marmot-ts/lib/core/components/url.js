@@ -42,4 +42,3 @@ export function validateAndNormalizeHttpsUrl(raw, opts) {
 function utf8Len(s) {
     return new TextEncoder().encode(s).length;
 }
-//# sourceMappingURL=url.js.map

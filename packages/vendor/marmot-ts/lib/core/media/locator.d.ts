@@ -1,18 +1,27 @@
 /** @module @category Core - Encrypted Media */
 import type { EncryptedMediaPolicyV1 } from "../components/encrypted-media.js";
+import type { EncryptedMediaPolicyV2 } from "../components/encrypted-media-v2.js";
 import { type MediaAttachment } from "./types.js";
 /** Locator kinds this client knows how to fetch. */
 export declare const SUPPORTED_LOCATOR_KINDS: readonly string[];
+/** A group media policy of either version (same shape). */
+export type EncryptedMediaPolicy = EncryptedMediaPolicyV1 | EncryptedMediaPolicyV2;
 export type FetchableLocatorOptions = {
     /**
-     * The group's `allowed_locator_kinds` (`marmot.group.encrypted-media.v1`). A
-     * locator whose kind is not allowed is unfetchable and skipped — but it does
-     * NOT invalidate the attachment or drop the message. When omitted, the policy
-     * gate is not applied (all structurally-valid locators are considered).
+     * The group's `allowed_locator_kinds`. A locator whose kind is not allowed is
+     * unfetchable and skipped — but it does NOT invalidate the attachment or drop
+     * the message. When omitted, the policy gate is not applied (all
+     * structurally-valid locators are considered).
      */
     allowedLocatorKinds?: readonly string[];
     /** Locator kinds the client supports; defaults to {@link SUPPORTED_LOCATOR_KINDS}. */
     supportedLocatorKinds?: readonly string[];
+    /**
+     * v2 only: allow cleartext `http` fetch candidates on a loopback host (local
+     * dev/test Blossom servers). Off by default, like MDK's
+     * `allow_loopback_blob_endpoints`.
+     */
+    allowLoopbackHttp?: boolean;
 };
 /**
  * Returns the attachment's locators that are fetchable right now: their kind is
@@ -25,20 +34,53 @@ export type FetchableLocatorOptions = {
  */
 export declare function selectFetchableLocators(attachment: MediaAttachment, opts?: FetchableLocatorOptions): MediaAttachment["locators"];
 /**
+ * The Blossom fallback fetch URL for a blob (`features/encrypted-media.md` —
+ * Locator Kinds): `server_root || "/" || hash_hex`, where `server_root` is the
+ * endpoint base URL with every trailing `/` removed. No extension, query, or
+ * fragment is added.
+ */
+export declare function buildBlossomBlobUrl(baseUrl: string, hashHex: string): string;
+/** The Blossom BUD-02 upload URL for an endpoint: `server_root || "/upload"`. */
+export declare function buildBlossomUploadUrl(baseUrl: string): string;
+/**
+ * Extracts the content hash a Blossom URL commits to: the last 64-character
+ * hex run in its path, lowercased (MDK `blossom_content_hash_from_url`).
+ * Returns `undefined` when the URL does not parse or carries no such run.
+ */
+export declare function blossomContentHashFromUrl(url: string): string | undefined;
+/**
+ * Client destination policy for a Blossom fetch URL (MDK
+ * `validate_blossom_fetch_url`): `https` to a public host, or `http` to a
+ * loopback host when `allowLoopbackHttp` is set; no credentials or fragment.
+ * A failing URL is skipped, never dialled — it does not invalidate the
+ * reference that named it.
+ */
+export declare function isSafeBlossomFetchUrl(url: string, opts?: {
+    allowLoopbackHttp?: boolean;
+}): boolean;
+/**
  * Builds backend-specific fallback fetch URLs from the policy's ordered
  * `default_blob_endpoints` and the attachment's `ciphertextSha256`
  * (`features/encrypted-media.md` — Locator Kinds). Endpoint order is the
  * fallback priority and is preserved.
  *
  * Only `blossom-v1` endpoints produce a URL (Blossom `GET /<sha256>`); other
- * kinds need backend-specific rules and are skipped. Whether to actually fetch
- * a loopback-`http` endpoint is a separate local dev/test decision.
+ * kinds need backend-specific rules and are skipped. v2 attachments use the
+ * spec's `server_root || "/" || hash` construction ({@link buildBlossomBlobUrl});
+ * v1 attachments keep the frozen relative resolution against the base URL.
  */
-export declare function buildFallbackFetchUrls(attachment: MediaAttachment, policy: EncryptedMediaPolicyV1, opts?: FetchableLocatorOptions): string[];
+export declare function buildFallbackFetchUrls(attachment: MediaAttachment, policy: EncryptedMediaPolicy | undefined, opts?: FetchableLocatorOptions): string[];
 /**
  * Resolves the ordered list of candidate fetch URLs for an attachment: explicit
  * supported+allowed `blossom-v1` locator URLs first, then policy fallback URLs.
  * Deduplicates while preserving order. A client tries them in order until one
  * yields bytes matching `ciphertextSha256`.
+ *
+ * For `encrypted-media-v2` attachments this also applies MDK's fetch-time
+ * rules: when the group policy does not allow `blossom-v1` nothing is
+ * fetchable; candidates that fail {@link isSafeBlossomFetchUrl} are skipped;
+ * and a candidate whose URL does not commit to `ciphertextSha256`
+ * ({@link blossomContentHashFromUrl}) is skipped as unfetchable. With no policy
+ * (no encrypted-media component) `blossom-v1` is the allowed default.
  */
-export declare function resolveMediaFetchUrls(attachment: MediaAttachment, policy: EncryptedMediaPolicyV1, opts?: FetchableLocatorOptions): string[];
+export declare function resolveMediaFetchUrls(attachment: MediaAttachment, policy: EncryptedMediaPolicy | undefined, opts?: FetchableLocatorOptions): string[];

@@ -1,5 +1,6 @@
-import { ClientConfig, ClientState, GroupInfo } from "ts-mls";
-import { type EncryptedMediaPolicyV1 } from "./components/index.js";
+import { ClientConfig, ClientState, GroupInfo } from "../vendor/ts-mls/index.js";
+import { type EncryptedMediaPolicyV1, type EncryptedMediaPolicyV2 } from "./components/index.js";
+import type { GroupProtocolLifecycleValue } from "./components/index.js";
 /** Default ClientConfig for Marmot. */
 export declare const defaultMarmotClientConfig: ClientConfig;
 /**
@@ -8,6 +9,8 @@ export declare const defaultMarmotClientConfig: ClientConfig;
  * the v2 replacement for the legacy `MarmotGroupData` monolith.
  */
 export interface MarmotGroupView {
+    /** Authenticated group protocol lifecycle, if the component is enabled. */
+    protocolLifecycle?: GroupProtocolLifecycleValue;
     /** Public 32-byte nostr group id (from nostr routing), if routing is set. */
     nostrGroupId?: Uint8Array;
     /** Group display name (from the profile component). */
@@ -25,6 +28,12 @@ export interface MarmotGroupView {
      * group-scoped blob-store endpoints and format, if set.
      */
     encryptedMedia?: EncryptedMediaPolicyV1;
+    /**
+     * Group encrypted-media policy (`group.encrypted-media.v2`, `0x800b`), if
+     * set. This is the current-profile media policy; new media references in a
+     * group that carries it use `encrypted-media-v2`.
+     */
+    encryptedMediaV2?: EncryptedMediaPolicyV2;
     /**
      * Message-retention window in seconds (`message-retention.v1`, `0x8005`), if
      * set; `0n` means retain indefinitely.

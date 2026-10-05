@@ -2,7 +2,7 @@
 /**
  * Integrity manifest for the vendored crypto (2026-09-04 audit).
  *
- * `packages/vendor/{marmot-ts,ts-mls}/lib` is the MLS engine and the Marmot layer
+ * `packages/vendor/marmot-ts/lib` (with its bundled `lib/vendor/ts-mls`) is the MLS engine and the Marmot layer
  * on top of it — the end-to-end encryption for group chat. It is COMMITTED BUILT
  * OUTPUT: no source, no build step, no lockfile entry, and (per the README) two
  * deliberate hand-edits, so it cannot be byte-compared against an upstream build
@@ -31,7 +31,8 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(REPO_ROOT, "packages/vendor/INTEGRITY.sha256");
 /** Only `lib/` — `node_modules/` is pnpm's, and `package.json` is covered by the lockfile. */
-const ROOTS = ["packages/vendor/marmot-ts/lib", "packages/vendor/ts-mls/lib"];
+// (`lib/vendor/ts-mls`, the MLS engine marmot-ts bundles, lives inside this root.)
+const ROOTS = ["packages/vendor/marmot-ts/lib"];
 
 /** Every file under `dir`, recursively, as repo-relative POSIX paths, sorted. */
 function walk(dir) {

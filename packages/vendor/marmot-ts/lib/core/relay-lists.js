@@ -84,4 +84,3 @@ export function createInboxRelayListEvent(options) {
         pubkey,
     };
 }
-//# sourceMappingURL=relay-lists.js.map

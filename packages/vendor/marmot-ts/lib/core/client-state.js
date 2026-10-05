@@ -1,8 +1,8 @@
 /** @module @category Core - Client State */
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { clientStateDecoder, clientStateEncoder, ciphersuites, decode, defaultAppDataUpdateCallback, defaultKeyPackageEqualityConfig, defaultKeyRetentionConfig, defaultLifetimeConfig, defaultPaddingConfig, getAppDataDictionary, nodeTypes, encode, } from "ts-mls";
-import { AGENT_TEXT_STREAM_QUIC_COMPONENT, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_BLOSSOM_IMAGE_COMPONENT, GROUP_BLOSSOM_IMAGE_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_PROFILE_COMPONENT, GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT, NOSTR_ROUTING_COMPONENT_ID, decodeAdminPolicyV1, decodeAgentTextStreamQuicPolicyV1, decodeComponentsList, decodeEncryptedMediaPolicyV1, decodeGroupAvatarUrlV1, decodeGroupProfileV1, decodeMessageRetentionV1, decodeNostrRoutingV1, getAdminPolicy, getEncryptedMediaPolicy, getGroupAvatarUrl, getGroupProfile, getMessageRetention, getNostrRouting, } from "./components/index.js";
-import { getGroupMembers } from "./group-members.js";
+import { clientStateDecoder, clientStateEncoder, ciphersuites, decode, defaultAppDataUpdateCallback, defaultKeyPackageEqualityConfig, defaultKeyRetentionConfig, defaultLifetimeConfig, defaultPaddingConfig, getAppDataDictionary, nodeTypes, encode, } from "../vendor/ts-mls/index.js";
+import { AGENT_TEXT_STREAM_QUIC_COMPONENT, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_BLOSSOM_IMAGE_COMPONENT, GROUP_BLOSSOM_IMAGE_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT, GROUP_LIFECYCLE_COMPONENT_ID, GROUP_PROFILE_COMPONENT, GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT, NOSTR_ROUTING_COMPONENT_ID, decodeAdminPolicyV1, decodeAgentTextStreamQuicPolicyV1, decodeComponentsList, decodeEncryptedMediaPolicyV1, decodeEncryptedMediaPolicyV2, decodeGroupAvatarUrlV1, decodeGroupProfileV1, decodeMessageRetentionV1, decodeGroupLifecycleV1, decodeNostrRoutingV1, getAdminPolicy, getEncryptedMediaPolicy, getEncryptedMediaPolicyV2, getGroupAvatarUrl, getGroupProfile, getMessageRetention, getGroupLifecycle, getNostrRouting, } from "./components/index.js";
+import { getGroupMemberPubkeys } from "./group-members.js";
 /** Default ClientConfig for Marmot. */
 export const defaultMarmotClientConfig = {
     keyRetentionConfig: defaultKeyRetentionConfig,
@@ -23,6 +23,8 @@ const COMPONENT_NAMES = new Map([
     [AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT],
     [GROUP_AVATAR_URL_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT],
     [GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT],
+    [GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT],
+    [GROUP_LIFECYCLE_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT],
 ]);
 const CIPHERSUITE_NAMES = new Map(Object.entries(ciphersuites).map(([name, id]) => [id, name]));
 function componentIdHex(id) {
@@ -55,6 +57,10 @@ function decodeGroupComponent(componentId, data) {
             return decodeGroupAvatarUrlV1(data);
         case GROUP_ENCRYPTED_MEDIA_COMPONENT_ID:
             return decodeEncryptedMediaPolicyV1(data);
+        case GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID:
+            return decodeEncryptedMediaPolicyV2(data);
+        case GROUP_LIFECYCLE_COMPONENT_ID:
+            return decodeGroupLifecycleV1(data);
         default:
             return undefined;
     }
@@ -99,7 +105,9 @@ export function getMarmotGroupView(clientState) {
         const routing = getNostrRouting(extensions);
         const avatar = getGroupAvatarUrl(extensions);
         const encryptedMedia = getEncryptedMediaPolicy(extensions);
+        const encryptedMediaV2 = getEncryptedMediaPolicyV2(extensions);
         const messageRetention = getMessageRetention(extensions);
+        const protocolLifecycle = getGroupLifecycle(extensions);
         if (!profile && !adminPubkeys && !routing)
             return null;
         return {
@@ -110,7 +118,9 @@ export function getMarmotGroupView(clientState) {
             relays: routing?.relays ?? [],
             avatarUrl: avatar?.url,
             encryptedMedia,
+            encryptedMediaV2,
             messageRetention,
+            protocolLifecycle,
         };
     }
     catch {
@@ -135,7 +145,7 @@ export function getMarmotGroupInfo(clientState) {
         ? appComponents.decoded.filter((id) => typeof id === "number")
         : [];
     const members = hasLocalClientState(clientState)
-        ? getGroupMembers(clientState)
+        ? getGroupMemberPubkeys(clientState)
         : [];
     return {
         mls: {
@@ -219,4 +229,3 @@ export function deserializeClientState(stored) {
         throw new Error("Failed to deserialize ClientState: Unknown error");
     }
 }
-//# sourceMappingURL=client-state.js.map

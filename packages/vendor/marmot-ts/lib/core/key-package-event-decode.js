@@ -1,4 +1,4 @@
-import { ciphersuites, decode, defaultCredentialTypes, mlsMessageDecoder, wireformats, } from "ts-mls";
+import { ciphersuites, decode, defaultCredentialTypes, mlsMessageDecoder, wireformats, } from "../vendor/ts-mls/index.js";
 import { decodeContent } from "../utils/encoding.js";
 import { getTagValue } from "../utils/nostr.js";
 import { isValidRelayUrl, normalizeRelayUrl } from "../utils/relay-url.js";
@@ -22,6 +22,21 @@ export function getKeyPackage(event) {
     if (message.wireformat !== wireformats.mls_key_package)
         throw new Error(`Expected MLSMessage with mls_key_package wireformat, got wireformat ${message.wireformat}`);
     return message.keyPackage;
+}
+/**
+ * Reads the inbound MLS `Lifetime` ({@link Lifetime}) from a kind 30443
+ * event's decoded KeyPackage leaf node (WIRE-01 inbound read). Returns
+ * `undefined` when the event cannot be decoded as a KeyPackage — never
+ * throws, matching the project's typed-reject convention for boundary
+ * readers (D-08).
+ */
+export function getKeyPackageLifetime(event) {
+    try {
+        return getKeyPackage(event).leafNode.lifetime;
+    }
+    catch {
+        return undefined;
+    }
 }
 /** Gets the MLS protocol version from a kind 30443 event */
 export function getKeyPackageMLSVersion(event) {
@@ -93,12 +108,11 @@ export function getKeyPackageNostrPubkey(event) {
     return getCredentialPubkey(keyPackage.leafNode.credential);
 }
 /**
- * Returns the KeyPackageRef (MIP-00 `i` tag value) from a kind 30443
+ * Returns the KeyPackageRef (the `i` tag value, `transports/nostr.md`) from a kind 30443
  * KeyPackage event.
  *
- * Per MIP-00, KeyPackage events MUST include this tag.
+ * Per `transports/nostr.md` (KeyPackage publication), KeyPackage events MUST include this tag.
  */
 export function getKeyPackageReference(event) {
     return getTagValue(event, "i");
 }
-//# sourceMappingURL=key-package-event-decode.js.map

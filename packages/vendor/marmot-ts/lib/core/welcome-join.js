@@ -1,6 +1,6 @@
 /** @module @category Core - Welcome */
 import { isRumor } from "applesauce-common/helpers/gift-wrap";
-import { joinGroup, } from "ts-mls";
+import { joinGroup, } from "../vendor/ts-mls/index.js";
 import { marmotAuthService } from "./auth-service.js";
 import { getMarmotGroupView } from "./client-state.js";
 import { getWelcome } from "./welcome-event.js";
@@ -59,4 +59,3 @@ export async function readWelcomeMarmotGroupView({ welcome, keyPackage, ciphersu
     });
     return getMarmotGroupView(groupInfo);
 }
-//# sourceMappingURL=welcome-join.js.map

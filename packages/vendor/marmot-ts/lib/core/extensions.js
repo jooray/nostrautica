@@ -1,5 +1,5 @@
 /** @module @category Core - Extensions */
-import { makeCustomExtension } from "ts-mls";
+import { makeCustomExtension } from "../vendor/ts-mls/index.js";
 import { LAST_RESORT_EXTENSION_TYPE } from "./protocol.js";
 /** Checks if an extension is the last_resort extension */
 export function isLastResortExtension(extension) {
@@ -8,7 +8,7 @@ export function isLastResortExtension(extension) {
 }
 /**
  * Modifies an {@link CustomExtension} array to ensure it includes the last_resort extension.
- * This is useful for ensuring that key packages are compliant with MIP-00.
+ * This is useful for ensuring that key packages are compliant with `foundation/key-packages.md` (`last_resort_key_package`).
  *
  * @param extensions - The extensions to modify
  * @returns The modified extensions
@@ -29,4 +29,3 @@ export function ensureLastResortExtension(extensions) {
 export function replaceExtension(extensions, extension) {
     return extensions.map((ext) => ext.extensionType === extension.extensionType ? extension : ext);
 }
-//# sourceMappingURL=extensions.js.map

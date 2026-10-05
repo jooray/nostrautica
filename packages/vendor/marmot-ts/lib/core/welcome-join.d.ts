@@ -1,6 +1,6 @@
 /** @module @category Core - Welcome */
 import { Rumor } from "applesauce-common/helpers/gift-wrap";
-import { CiphersuiteImpl, type GroupInfo, KeyPackage, PrivateKeyPackage, type Welcome } from "ts-mls";
+import { CiphersuiteImpl, type GroupInfo, KeyPackage, PrivateKeyPackage, type Welcome } from "../vendor/ts-mls/index.js";
 import { type MarmotGroupView } from "./client-state.js";
 /**
  * Decrypts the {@link GroupInfo} from a Welcome message using the provided key package,

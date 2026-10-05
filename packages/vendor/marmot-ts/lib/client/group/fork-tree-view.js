@@ -35,4 +35,3 @@ export function buildForkTreeView(tree, canonicalTipTag) {
         nodes,
     };
 }
-//# sourceMappingURL=fork-tree-view.js.map

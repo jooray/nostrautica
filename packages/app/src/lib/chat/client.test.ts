@@ -121,9 +121,14 @@ class FakeGroups {
     const i = this.groups.findIndex((g) => g.idStr === groupId);
     if (i >= 0) this.groups.splice(i, 1);
   });
+  async listIds() {
+    return this.groups.map((g) => g.id);
+  }
   async get(groupId: Uint8Array | string) {
     const found =
-      typeof groupId === "string" ? this.groups.find((g) => g.idStr === groupId) : undefined;
+      typeof groupId === "string"
+        ? this.groups.find((g) => g.idStr === groupId)
+        : this.groups.find((g) => g.id.length === groupId.length && g.id.every((b, i) => b === groupId[i]));
     if (!found) throw new Error("group not found");
     return found;
   }
@@ -222,9 +227,6 @@ vi.mock("@internet-privacy/marmot-ts/core", async (orig) => {
     getGroupMembers: (state: { members?: string[] }) => [...(state?.members ?? [])],
   };
 });
-vi.mock("@internet-privacy/marmot-ts/lib/client/group/proposals/remove-member.js", () => ({
-  proposeRemoveUser: () => async () => [],
-}));
 vi.mock("./identity.js", () => ({
   resolveChatIdentity: async () => ({
     pubkey: "c".repeat(64),
@@ -233,7 +235,6 @@ vi.mock("./identity.js", () => ({
     // type attests and publishes a device kind-0 on bootstrap.
     isAccountKey: false,
     eventSigner: { getPublicKey: () => "c".repeat(64), signEvent: () => ({}), nip44: {} },
-    accountProofSigner: () => new Uint8Array(),
     clientId: "web-test",
     secretKey: new Uint8Array(32),
   }),
@@ -1275,5 +1276,81 @@ describe("MarmotChat.groupMemberPubkeys()", () => {
     await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-mem"]));
 
     expect(await chat.groupMemberPubkeys()).toEqual([COORD, "c".repeat(64), "d".repeat(64)]);
+  });
+});
+
+/**
+ * The 0x8009 flag day on the device: state from marmot-ts 0.6.0 cannot be used by
+ * the current library, so it is discarded and the device re-enrols.
+ */
+describe("MarmotChat.retireLegacyState() — pre-0x8009 state", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coord = (ctx as unknown as { coordinate: string }).coordinate;
+
+  it("discards a legacy-profile group with its history and binding, keeps a current one", async () => {
+    const { InMemoryKvBackend, namespacedStore, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => {
+        set(k: string, v: unknown): Promise<void>;
+        keysWithPrefix(p: string): Promise<string[]>;
+      };
+      namespacedStore: (b: unknown, id: string, ns: string) => {
+        setItem(k: string, v: unknown): Promise<unknown>;
+        getItem(k: string): Promise<unknown>;
+      };
+      MARMOT_NAMESPACES: { history: string; eventGroups: string; groupState: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    const identity = "c".repeat(64);
+    const legacyId = new Uint8Array([0xab, 0xcd]);
+    shared.groups = [
+      {
+        idStr: "abcd",
+        id: legacyId,
+        state: { members: [COORD, identity], nostrGroupId: "gid-legacy" },
+        on: () => {},
+        profileSupport: { kind: "unsupported", proofReason: "legacy-group" },
+      } as unknown as FakeGroup,
+      {
+        idStr: "group-current",
+        id: new Uint8Array([2]),
+        state: { members: [COORD, identity], nostrGroupId: "gid-other" },
+        on: () => {},
+        profileSupport: { kind: "supported" },
+      } as unknown as FakeGroup,
+    ];
+    await namespacedStore(backend, identity, `${MARMOT_NAMESPACES.history}:abcd`).setItem("m1", { id: "m1" });
+    await namespacedStore(backend, identity, MARMOT_NAMESPACES.eventGroups).setItem(coord, "gid-legacy");
+
+    await MarmotChat.create({ accountSigner, ctx });
+
+    expect(lastClient.groups.destroy).toHaveBeenCalledWith("abcd");
+    expect(lastClient.groups.groups.map((g) => g.idStr)).toEqual(["group-current"]);
+    expect(await backend.keysWithPrefix(`${identity}\x1f${MARMOT_NAMESPACES.history}:abcd`)).toEqual([]);
+    expect(await namespacedStore(backend, identity, MARMOT_NAMESPACES.eventGroups).getItem(coord)).toBeNull();
+  });
+
+  it("purges key packages marmot flags nonCurrent, so ensurePublished makes a current one", async () => {
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    const purge = vi.fn(async () => {});
+    (lastClient.keyPackages as unknown as { purge: unknown }).purge = purge;
+    lastClient.storedKeyPackages = [
+      { keyPackageRef: new Uint8Array([1]), identifier: "web-test", nonCurrent: true } as never,
+      { keyPackageRef: new Uint8Array([2]), identifier: "web-test" },
+    ];
+
+    await chat.retireLegacyState();
+
+    expect(purge).toHaveBeenCalledWith([new Uint8Array([1])]);
+  });
+
+  it("is a no-op when everything is current", async () => {
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    const purge = vi.fn(async () => {});
+    (lastClient.keyPackages as unknown as { purge: unknown }).purge = purge;
+    await chat.retireLegacyState();
+    expect(purge).not.toHaveBeenCalled();
+    expect(lastClient.groups.destroy).not.toHaveBeenCalled();
   });
 });

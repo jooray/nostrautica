@@ -78,4 +78,3 @@ function matchesFilter(rumor, filter) {
 export function makeKeyValueRumorHistoryFactory(storeFor) {
     return GroupRumorHistory.makeFactory((groupId) => new KeyValueRumorHistoryBackend(storeFor(groupId)));
 }
-//# sourceMappingURL=key-value-rumor-history-backend.js.map

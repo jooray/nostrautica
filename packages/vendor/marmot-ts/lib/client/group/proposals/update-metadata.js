@@ -1,5 +1,5 @@
 /** @module @category Client - Proposals */
-import { appDataUpdateProposalType, } from "ts-mls";
+import { appDataUpdateProposalType, } from "../../../vendor/ts-mls/index.js";
 import { adminPolicyEntry, encryptedMediaEntry, groupAvatarUrlEntry, groupProfileEntry, messageRetentionEntry, nostrRoutingEntry, } from "../../../core/components/index.js";
 /** Wraps a component entry in a full-replacement `app_data_update` proposal. */
 function componentUpdate(entry) {
@@ -51,4 +51,3 @@ export function proposeUpdateMetadata(metadata) {
         return proposals;
     };
 }
-//# sourceMappingURL=update-metadata.js.map

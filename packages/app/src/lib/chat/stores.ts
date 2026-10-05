@@ -41,6 +41,12 @@ export const MARMOT_NAMESPACES = {
   keyPackage: "key-package",
   invites: "invites",
   rewind: "rewind",
+  // Durable group lifecycle (disband) records, ingest evidence and the realized-
+  // removal marker. Without them marmot-ts keeps these in memory and forgets them
+  // on every reload.
+  lifecycle: "lifecycle",
+  ingestState: "ingest-state",
+  removedMarker: "removed-marker",
   // Decrypted-message history is further sub-namespaced per group (`history:<id>`).
   history: "history",
   // Event-coordinate → nostr_group_id binding (APPK-3 event scoping), one per event.
@@ -102,6 +108,9 @@ export interface MarmotStores {
   keyPackageStore: GenericKeyValueStore<StoredKeyPackage>;
   inviteStore: GenericKeyValueStore<StoredInviteEntry>;
   rewindStore: GenericKeyValueStore<Uint8Array>;
+  lifecycleStore: GenericKeyValueStore<Uint8Array>;
+  ingestStateStore: GenericKeyValueStore<Uint8Array>;
+  removedMarkerStore: GenericKeyValueStore<boolean>;
   /**
    * Event-coordinate → nostr_group_id (hex) bindings recorded at join time
    * (audit APPK-3). MLS group state is namespaced per IDENTITY, not per event,
@@ -119,8 +128,37 @@ export function makeMarmotStores(backend: MarmotKvBackend, identity: string): Ma
     keyPackageStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.keyPackage),
     inviteStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.invites),
     rewindStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.rewind),
+    lifecycleStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.lifecycle),
+    ingestStateStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.ingestState),
+    removedMarkerStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.removedMarker),
     eventGroupStore: namespacedStore(backend, identity, MARMOT_NAMESPACES.eventGroups),
   };
+}
+
+/**
+ * Delete every stored key of one MLS group for one chat identity — state, rewind
+ * tree, lifecycle/ingest evidence, removal marker and decrypted history — without
+ * loading it. The fallback for state the library cannot load any more (a format
+ * written by an older generation); `groups.destroy()` needs a loadable group.
+ * Per-group keys are the group id hex or start with it.
+ */
+export async function purgeGroupLocalState(
+  backend: MarmotKvBackend,
+  identity: string,
+  mlsGroupIdHex: string,
+): Promise<void> {
+  const id = mlsGroupIdHex.toLowerCase();
+  for (const ns of [
+    MARMOT_NAMESPACES.groupState,
+    MARMOT_NAMESPACES.rewind,
+    MARMOT_NAMESPACES.lifecycle,
+    MARMOT_NAMESPACES.ingestState,
+    MARMOT_NAMESPACES.removedMarker,
+  ]) {
+    const prefix = `${identity}${SEP}${ns}${SEP}`;
+    for (const full of await backend.keysWithPrefix(prefix + id)) await backend.del(full);
+  }
+  await backend.clearPrefix(`${identity}${SEP}${MARMOT_NAMESPACES.history}:${id}${SEP}`);
 }
 
 /** Lowercase hex of a byte array (for the per-group history namespace). */

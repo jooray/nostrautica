@@ -57,4 +57,3 @@ export function prunableRetainedEpochs(retainedEpochs, currentTipEpoch, maxRewin
     }
     return prunable.sort((a, b) => a - b);
 }
-//# sourceMappingURL=retained-history.js.map
