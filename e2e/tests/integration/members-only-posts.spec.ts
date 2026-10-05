@@ -77,6 +77,9 @@ test.describe(RELAY_UP ? "members-only posts" : "members-only posts (needs relay
     await outsider.goto(`/#/e/${naddr}/posts`);
     await expect(outsider.getByText(secretText, { exact: false })).toHaveCount(0);
     await expect(outsider.getByText(postTitle, { exact: false })).toHaveCount(0);
-    await expect(outsider.getByText(/members-only post/i).first()).toBeVisible({ timeout: 15_000 });
+    // Match the lock card's heading by role: a bare getByText(/members-only post/i)
+    // also hits this event's own title ("Members-Only Posts E2E"), and .first()
+    // landed on a hidden copy of it in the event header, timing out forever.
+    await expect(outsider.getByRole("heading", { name: /^members-only post$/i })).toBeVisible({ timeout: 15_000 });
   });
 });
