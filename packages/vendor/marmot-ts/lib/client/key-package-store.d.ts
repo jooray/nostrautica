@@ -20,6 +20,12 @@ export type LocalKeyPackage = {
     identifier?: string;
     /** Nostr kind-30443 events this key package has been published under */
     published?: NostrEvent[];
+    /**
+     * Relays this key package was published to. Local bookkeeping for
+     * rotation and deletion only: KeyPackage events do not carry their relays
+     * (`transports/nostr.md`, KeyPackage publication).
+     */
+    relays?: string[];
     /** Whether this key package has been consumed (e.g. used to join a group). Undefined means unused. */
     used?: boolean;
 };
@@ -44,6 +50,12 @@ export type TrackedKeyPackage = {
     identifier?: string;
     /** Nostr kind-30443 events this key package has been published under */
     published?: NostrEvent[];
+    /**
+     * Relays this key package was published to. Local bookkeeping for
+     * rotation and deletion only: KeyPackage events do not carry their relays
+     * (`transports/nostr.md`, KeyPackage publication).
+     */
+    relays?: string[];
     /** Whether this key package has been consumed (e.g. used to join a group). Undefined means unused. */
     used?: boolean;
 };
@@ -117,7 +129,7 @@ export declare class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents>
      *   Optionally include `identifier` to persist the addressable slot identifier.
      * @returns The storage key (hex ref string)
      */
-    add(keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> & Partial<Pick<LocalKeyPackage, "published" | "identifier">>): Promise<string>;
+    add(keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> & Partial<Pick<LocalKeyPackage, "published" | "identifier" | "relays">>): Promise<string>;
     /**
      * Appends a kind-30443 Nostr event to the `published` list of
      * the key package identified by `ref`. If no entry exists yet, a
@@ -126,8 +138,11 @@ export declare class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents>
      *
      * Throws if the event body cannot be decoded as a valid key package, or if
      * the event's `i` tag (KeyPackageRef) does not match the decoded body.
+     *
+     * @param relays - Relays the event was published to, merged into the
+     *   entry's local `relays` record.
      */
-    addPublished(ref: string | Uint8Array, event: NostrEvent): Promise<void>;
+    addPublished(ref: string | Uint8Array, event: NostrEvent, relays?: string[]): Promise<void>;
     /**
      * Retrieves the stored key package entry.
      * Returns any entry regardless of whether it has private material.

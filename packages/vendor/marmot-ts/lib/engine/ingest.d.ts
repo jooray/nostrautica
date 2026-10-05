@@ -157,10 +157,17 @@ export interface IngestContext<TEnvelope> {
  * A failure — including an unattributable sender (no leaf index) or a
  * non-conformant payload — is `invalid_encoding`; the message is dropped, never
  * delivered.
+ *
+ * The sender leaf index refers to the ratchet tree of the epoch the message
+ * was sent in. For a message from a past epoch that tree is the retained
+ * `historicalReceiverData` entry, not `state.ratchetTree`: the sender may have
+ * been removed (or the leaf reused) since. Pass `messageEpoch` so the right
+ * tree is used; MDK reads the credential the same way (OpenMLS
+ * `ProcessedMessage::credential`, `cgka-engine/src/identity.rs`).
  */
 export declare function isAuthenticApplicationMessage(result: ProcessMessageResult & {
     kind: "applicationMessage";
-}, state: ClientState, log: Debugger, label: string): boolean;
+}, state: ClientState, log: Debugger, label: string, messageEpoch?: bigint): boolean;
 /**
  * Ingests transport envelopes and applies MLS messages to group state
  * (Marmot v2 `protocol-core/inbound-processing.md`). Decrypts (retrying against

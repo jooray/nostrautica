@@ -21,7 +21,7 @@ export type CreateKeyPackageOptions = {
     identifier?: string;
     /** Ciphersuite to use (default: MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519) */
     ciphersuite?: CiphersuiteName;
-    /** Whether to mark the key package with the MLS last_resort extension (default: true) */
+    /** Whether to mark the key package as last-resort (`last_resort_key_package` component; default: true) */
     isLastResort?: boolean;
     /** Client identifier string to include in the key package event */
     client?: string;
@@ -43,12 +43,21 @@ export type RotateKeyPackageOptions = {
     d?: string;
     /** Ciphersuite to use for the new key package */
     ciphersuite?: CiphersuiteName;
-    /** Whether to mark the new key package with the MLS last_resort extension (default: true) */
+    /** Whether to mark the new key package as last-resort (`last_resort_key_package` component; default: true) */
     isLastResort?: boolean;
     /** Client identifier string to include in the new key package event */
     client?: string;
     /** Whether to include the NIP-70 protected tag on the new event */
     protected?: boolean;
+};
+/** Options for {@link KeyPackageManager.purge}. */
+export type PurgeKeyPackageOptions = {
+    /**
+     * Extra relays to publish the deletion to, on top of the relays recorded
+     * locally when the key package was published. Needed for key packages
+     * tracked from another device, whose publish relays are not known here.
+     */
+    relays?: string[];
 };
 export type KeyPackageManagerEvents = {
     /** Emitted when a key package is stored locally */
@@ -175,7 +184,7 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      *
      * @param refs - One or more key package references (hex string or Uint8Array)
      */
-    purge(refs: Uint8Array | string | Array<Uint8Array | string>): Promise<void>;
+    purge(refs: Uint8Array | string | Array<Uint8Array | string>, options?: PurgeKeyPackageOptions): Promise<void>;
     /**
      * Observes a Nostr event and, if it is a kind 30443 key package event that
      * passes the trust boundary (SEC-01/WIRE-01/WIRE-02), records it in the

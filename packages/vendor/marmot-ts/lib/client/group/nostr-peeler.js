@@ -12,11 +12,12 @@ export class NostrGroupPeeler {
             unreadable,
         };
     }
-    async wrapGroupMessage(message, state) {
+    async wrapGroupMessage(message, state, options) {
         return createGroupEvent({
             message,
             state,
             ciphersuite: this.ciphersuite,
+            expiration: options?.expiration,
         });
     }
     idOf(envelope) {

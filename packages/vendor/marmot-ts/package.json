@@ -1,14 +1,14 @@
 {
   "name": "@internet-privacy/marmot-ts",
   "version": "0.6.0",
-  "description": "Vendored build of @internet-privacy/marmot-ts 0.6.0 (https://github.com/jooray/marmot-ts.git @ 252b691), bundling its ts-mls fork under lib/vendor/ts-mls. Committed pre-built and re-generated only by scripts/vendor-marmot.mjs — see packages/vendor/README.md.",
+  "description": "Vendored build of @internet-privacy/marmot-ts 0.6.0 (https://github.com/jooray/marmot-ts.git @ 850337f), bundling its ts-mls fork under lib/vendor/ts-mls. Committed pre-built and re-generated only by scripts/vendor-marmot.mjs — see packages/vendor/README.md.",
   "type": "module",
   "private": true,
   "license": "MIT",
   "vendoredFrom": {
     "repo": "https://github.com/jooray/marmot-ts.git",
-    "ref": "nostrautica-vendor",
-    "commit": "252b6910f01d4065c67d684236cc521b36b5f30b",
+    "ref": "850337fba815696bba3d013dcf918592eb775783",
+    "commit": "850337fba815696bba3d013dcf918592eb775783",
     "tsMlsCommit": "af6d1c599f2912fda5fbcac1b461fdd3013e37c7"
   },
   "exports": {
@@ -71,11 +71,11 @@
     "LICENSE"
   ],
   "dependencies": {
+    "@hpke/chacha20poly1305": "1.8.0",
     "@hpke/core": "1.9.0",
     "@hpke/dhkem-x25519": "1.8.0",
     "@hpke/dhkem-x448": "1.8.0",
     "@hpke/hybridkem-x-wing": "0.7.0",
-    "@hpke/chacha20poly1305": "1.8.0",
     "@hpke/ml-kem": "0.3.0",
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",

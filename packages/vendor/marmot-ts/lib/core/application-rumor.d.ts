@@ -3,20 +3,35 @@ import { Rumor } from "applesauce-common/helpers/gift-wrap";
  * Serializes an application rumor (unsigned Nostr event) to bytes.
  * This is the format used for application messages in Marmot groups.
  *
+ * Only the six members a Marmot app event may carry are written
+ * (`foundation/application-messages.md` §Encoding), so a signed event or an
+ * object with extra fields does not leak a `sig` or unknown member onto the
+ * wire. The result is checked with {@link deserializeApplicationData}: a
+ * payload every conformant receiver would drop (wrong `id`, non-integer
+ * `created_at`, unpaired surrogate in a string, ...) throws here instead of
+ * being sent.
+ *
  * @param rumor - The unsigned Nostr event to serialize
  * @returns The serialized application data as bytes
+ * @throws if the rumor would not decode as a valid Marmot app event
  */
 export declare function serializeApplicationRumor(rumor: Rumor): Uint8Array;
 /**
  * Deserializes application data bytes back into a rumor, enforcing the Marmot
  * inner-event encoding rules (`foundation/application-messages.md` §Encoding).
  *
- * Strict decode: the payload MUST be a JSON object carrying exactly the six
- * members `id, pubkey, created_at, kind, tags, content` (no `sig`, no unknown
- * members), and its `id` MUST equal the canonical NIP-01 event id recomputed
- * from the other members (lowercase-hex SHA-256 of `[0, pubkey, created_at,
- * kind, tags, content]`). A mismatch or extra/missing member is rejected — this
- * is the integrity half of the authorship checks; the {@link
+ * Strict decode, matching what MDK accepts (`cgka-traits` `MarmotAppEvent::decode`):
+ * - the bytes are valid UTF-8 and one JSON object;
+ * - the object carries exactly the six members `id, pubkey, created_at, kind,
+ *   tags, content` — no `sig`, no unknown member, no duplicate key;
+ * - `created_at` and `kind` are plain non-negative JSON integers;
+ * - `pubkey` and `id` are 64 lowercase hex characters, `tags` is an array of
+ *   string arrays, and no string carries an unpaired surrogate;
+ * - `id` equals the canonical NIP-01 event id recomputed from the other
+ *   members (lowercase-hex SHA-256 of `[0, pubkey, created_at, kind, tags,
+ *   content]`).
+ *
+ * This is the integrity half of the authorship checks; the {@link
  * verifyApplicationRumorAuthorship} layer adds the MLS-sender binding.
  *
  * @param data - The serialized application data

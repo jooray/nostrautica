@@ -1,8 +1,7 @@
-import { ClientConfig, ClientState, GroupInfo } from "../vendor/ts-mls/index.js";
-import { type EncryptedMediaPolicyV1, type EncryptedMediaPolicyV2 } from "./components/index.js";
+import { ClientState, GroupInfo } from "../vendor/ts-mls/index.js";
+import { type EncryptedMediaPolicyV1, type EncryptedMediaPolicyV2, type GroupBlossomImageV1 } from "./components/index.js";
 import type { GroupProtocolLifecycleValue } from "./components/index.js";
-/** Default ClientConfig for Marmot. */
-export declare const defaultMarmotClientConfig: ClientConfig;
+export { defaultMarmotClientConfig } from "./client-config.js";
 /**
  * A read projection of a Marmot group's app-component state, assembled from the
  * group-scoped components in the MLS `app_data_dictionary` extension. This is
@@ -23,6 +22,13 @@ export interface MarmotGroupView {
     relays: string[];
     /** Group avatar URL (`group.avatar-url.v1`, `0x8007`), if set. */
     avatarUrl?: string;
+    /**
+     * Encrypted group image (`group.blossom.image.v1`, `0x8002`), if one is set
+     * (an absent/cleared image is reported as `undefined`). Fetch the blob by
+     * `imageHash` and decrypt it with `decryptGroupBlossomImage`. When a group
+     * carries both, the spec says `avatarUrl` wins for rendering.
+     */
+    image?: GroupBlossomImageV1;
     /**
      * Group encrypted-media policy (`group.encrypted-media.v1`, `0x8008`): the
      * group-scoped blob-store endpoints and format, if set.

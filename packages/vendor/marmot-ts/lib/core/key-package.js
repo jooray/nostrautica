@@ -38,8 +38,9 @@ export async function generateKeyPackage({ credential, capabilities, lifetime, e
     // rejects an explicit caller-supplied `lifetime` override (D-09).
     if (!isLifetimeWithinCap(resolvedLifetime))
         throw new Error(`generateKeyPackage: lifetime range ${resolvedLifetime.notAfter - resolvedLifetime.notBefore}s exceeds the 7,261,200s (84-day) cap`);
-    // Marmot requires support for last_resort capability signaling (`foundation/key-packages.md`),
-    // but individual KeyPackages may be single-use or last-resort reusable.
+    // Individual KeyPackages may be single-use or last-resort reusable
+    // (`foundation/key-packages.md`); last-resort is a KeyPackage-level marker,
+    // not an advertised capability.
     // `isLastResort` controls whether this KeyPackage is marked reusable.
     const resolvedExtensions = isLastResort
         ? ensureLastResortExtension(extensions ?? [])

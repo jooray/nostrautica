@@ -14,9 +14,13 @@ See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 fla
   upstream `marmot-protocol/marmot-ts` master plus the upstream PRs we need that have not
   merged yet. The exact commit (and the bundled ts-mls commit) is recorded in
   `marmot-ts/package.json` under `"vendoredFrom"` — that field, not this README, is the pin.
-  At the time of writing: `252b691` = upstream master `591eb25` + PR #81
-  (app_data_dictionary last in a new group's GroupContext), #82 (no GREASE proposal types in
-  KeyPackage capabilities), #83 (encrypted media v2, 0x800b).
+  At the time of writing: `850337f` = upstream master `591eb25` + our 24 open interop PRs,
+  #81–#99 and #101–#104 (every one except third-party work). They came from a
+  message-by-message comparison against MDK 0.11.0 and HEAD and cover AppDataUpdate
+  extension order, KeyPackage GREASE/tags/last-resort/relays, encrypted media v2 (0x800b) and
+  the group image (0x8002), strict app-event and kind-445 decoding, past-epoch message
+  retention, Welcome/join and commit-legality checks that match MDK, and fork ranking. The PR
+  list is `gh pr list --repo marmot-protocol/marmot-ts --author jooray`.
 
   This generation produces the **current Marmot profile**: KeyPackages and leaves carry the
   `marmot.member.account-identity-proof.v2` component (**0x8009**, a kind-450 event signed by

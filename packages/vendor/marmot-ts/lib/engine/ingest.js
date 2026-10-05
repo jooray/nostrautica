@@ -4,6 +4,7 @@ import { contentTypes, encode, getCredentialFromLeafIndex, mlsMessageEncoder, pr
 import { verifyApplicationRumorAuthorship } from "../core/application-rumor.js";
 import { getGroupProfileSupport } from "../core/components/account-identity-proof.js";
 import { marmotAuthService } from "../core/auth-service.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
 import { validateCommitLegality, validateUpdateProposalAccountIdentityProofs, } from "../core/components/integrity.js";
 import { classifyDisbandCommit } from "../core/components/disband-validation.js";
 import { commitDigest, compareCommitOrderingKeys, } from "../core/convergence.js";
@@ -75,8 +76,15 @@ function terminalResult(envelope, deferred, errorList, decryptFailed) {
  * A failure — including an unattributable sender (no leaf index) or a
  * non-conformant payload — is `invalid_encoding`; the message is dropped, never
  * delivered.
+ *
+ * The sender leaf index refers to the ratchet tree of the epoch the message
+ * was sent in. For a message from a past epoch that tree is the retained
+ * `historicalReceiverData` entry, not `state.ratchetTree`: the sender may have
+ * been removed (or the leaf reused) since. Pass `messageEpoch` so the right
+ * tree is used; MDK reads the credential the same way (OpenMLS
+ * `ProcessedMessage::credential`, `cgka-engine/src/identity.rs`).
  */
-export function isAuthenticApplicationMessage(result, state, log, label) {
+export function isAuthenticApplicationMessage(result, state, log, label, messageEpoch) {
     const senderLeafIndex = result
         .senderLeafIndex;
     if (senderLeafIndex === undefined) {
@@ -84,7 +92,12 @@ export function isAuthenticApplicationMessage(result, state, log, label) {
         return false;
     }
     try {
-        const credential = getCredentialFromLeafIndex(state.ratchetTree, senderLeafIndex);
+        const ratchetTree = messageEpoch !== undefined && messageEpoch < state.groupContext.epoch
+            ? state.historicalReceiverData.get(messageEpoch)?.ratchetTree
+            : state.ratchetTree;
+        if (!ratchetTree)
+            throw new Error(`no retained ratchet tree for epoch ${messageEpoch}`);
+        const credential = getCredentialFromLeafIndex(ratchetTree, senderLeafIndex);
         const senderPubkey = getCredentialPubkey(credential);
         verifyApplicationRumorAuthorship(result.message, senderPubkey);
         return true;
@@ -304,6 +317,7 @@ export async function* ingestEnvelopes(ctx, envelopes, options) {
                 context: {
                     cipherSuite: ctx.ciphersuite,
                     authService: marmotAuthService,
+                    clientConfig: defaultMarmotClientConfig,
                     externalPsks: {},
                 },
                 state: parentForAuth,
@@ -349,7 +363,7 @@ export async function* ingestEnvelopes(ctx, envelopes, options) {
                 // The MLS layer has authenticated the sender; advance our ratchet to
                 // reflect the consumed generation even if we then drop the payload.
                 ctx.setState(result.newState);
-                if (!isAuthenticApplicationMessage(result, result.newState, log, envelopeLabel(envelope))) {
+                if (!isAuthenticApplicationMessage(result, result.newState, log, envelopeLabel(envelope), framedEpoch(message))) {
                     // M3: forged inner id / author ⇒ invalid_encoding, never delivered.
                     yield {
                         kind: "skipped",
@@ -422,6 +436,7 @@ export async function* ingestEnvelopes(ctx, envelopes, options) {
                 context: {
                     cipherSuite: ctx.ciphersuite,
                     authService: marmotAuthService,
+                    clientConfig: defaultMarmotClientConfig,
                     externalPsks: {},
                 },
                 state: parentForAuth,

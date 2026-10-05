@@ -1,6 +1,7 @@
 /** @module @category Core - Convergence */
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { selfRemoveProposalType } from "../vendor/ts-mls/index.js";
 import { isAppPayloadExpired } from "./retained-history.js";
 /**
  * The default Marmot convergence policy — profile version 1 (`convergence.md`).
@@ -49,6 +50,19 @@ export function isWitnessEligible(witness, forkEpoch, tipEpoch, policy) {
     return (witness.epoch > forkEpoch &&
         !isAppPayloadExpired(witness.epoch, tipEpoch, policy.appPayloadPastEpochLimit));
 }
+/**
+ * Classifies a commit by the proposals it carries (inline and by reference),
+ * mirroring MDK `commit_ordering_priority_for_staged`: a commit with no
+ * proposals (a self-update; MLS forces an UpdatePath) or with only SelfRemove
+ * proposals is `ordinary`; anything else needs an admin and is `privileged`.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `is_allowed_non_admin_commit`
+ */
+export function commitOrderingPriority(proposals) {
+    return proposals.every(({ proposal }) => proposal.proposalType === selfRemoveProposalType)
+        ? "ordinary"
+        : "privileged";
+}
 function witnessesByEpoch(witnesses) {
     const byEpoch = new Map();
     for (const witness of witnesses) {
@@ -92,6 +106,7 @@ export function scoreBranch(branch, policy) {
         effectiveCommitDepth: validCommitDepth + witnessDepthBoost(branch, policy),
         witnessQuorumMet: witnessQuorumMet(branch.appWitnesses, policy),
         appWitnessScore: appWitnessScore(branch.appWitnesses, policy),
+        tipPriority: branch.tipPriority ?? "ordinary",
         tipDigest: branch.tipDigest,
         tipCommitter: branch.tipCommitter ?? new Uint8Array(),
     };
@@ -105,21 +120,29 @@ function compareBytes(a, b) {
     }
     return a.length - b.length;
 }
+function priorityRank(priority) {
+    return priority === "privileged" ? 1 : 0;
+}
 function cmpNum(a, b) {
     return a < b ? -1 : a > b ? 1 : 0;
 }
 /**
  * Compares two branch scores per `convergence.md` "Branch selection": higher
  * effectiveCommitDepth, then witness quorum beats none, then higher
- * rawCommitDepth, then higher appWitnessScore, then LOWER tipDigest. Returns a
+ * rawCommitDepth, then higher appWitnessScore, then a `privileged` tip before
+ * an `ordinary` one, then LOWER tipCommitter, then LOWER tipDigest. Returns a
  * positive number when `a` ranks above `b` (so the canonical branch is the
  * maximum under this ordering).
+ *
+ * @see refs/mdk/crates/cgka-engine/src/convergence.rs `compare_scores`
  */
 export function compareBranchScores(a, b) {
     return (cmpNum(a.effectiveCommitDepth, b.effectiveCommitDepth) ||
         cmpNum(Number(a.witnessQuorumMet), Number(b.witnessQuorumMet)) ||
         cmpNum(a.validCommitDepth, b.validCommitDepth) ||
         cmpNum(a.appWitnessScore, b.appWitnessScore) ||
+        // A privileged tip (one that needed an admin) beats an ordinary one.
+        cmpNum(priorityRank(a.tipPriority), priorityRank(b.tipPriority)) ||
         // Lower authenticated account identity wins, matching MDK.
         compareBytes(b.tipCommitter, a.tipCommitter) ||
         // Lower tip digest wins, so invert the byte comparison.

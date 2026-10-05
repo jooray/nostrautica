@@ -1,7 +1,7 @@
 /** @module @category Core - App Components */
 import { getAppDataDictionary, makeAppDataDictionaryExtension, } from "../../vendor/ts-mls/index.js";
 import { UsageError } from "../../vendor/ts-mls/index.js";
-import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT_ID, GROUP_PROFILE_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID, SAFE_AAD_COMPONENT_ID, SUPPORTED_APP_COMPONENT_IDS, } from "./ids.js";
+import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_BLOSSOM_IMAGE_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT_ID, GROUP_PROFILE_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID, SAFE_AAD_COMPONENT_ID, SUPPORTED_APP_COMPONENT_IDS, } from "./ids.js";
 import { AUTHORIZATION_PROOF_LENGTH } from "../authorization-proof.js";
 import { decodeComponentsList, encodeComponentsList, } from "./app-components-list.js";
 import { decodeGroupProfileV1, encodeGroupProfileV1, } from "./group-profile.js";
@@ -9,6 +9,7 @@ import { decodeAdminPolicyV1, encodeAdminPolicyV1 } from "./admin-policy.js";
 import { decodeNostrRoutingV1, encodeNostrRoutingV1, } from "./nostr-routing.js";
 import { decodeMessageRetentionV1, encodeMessageRetentionV1, } from "./message-retention.js";
 import { decodeGroupAvatarUrlV1, encodeGroupAvatarUrlV1, } from "./avatar-url.js";
+import { decodeGroupBlossomImageV1, encodeGroupBlossomImageV1, } from "./blossom-image.js";
 import { decodeEncryptedMediaPolicyV1, encodeEncryptedMediaPolicyV1, } from "./encrypted-media.js";
 import { decodeEncryptedMediaPolicyV2, encodeEncryptedMediaPolicyV2, } from "./encrypted-media-v2.js";
 import { decodeAgentTextStreamQuicPolicyV1, encodeAgentTextStreamQuicPolicyV1, } from "./agent-text-stream.js";
@@ -113,6 +114,7 @@ const MESSAGE_RETENTION_CODEC = defineCodec(GROUP_MESSAGE_RETENTION_COMPONENT_ID
 (seconds) => encodeMessageRetentionV1(seconds));
 const AGENT_TEXT_STREAM_CODEC = defineCodec(AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, decodeAgentTextStreamQuicPolicyV1, encodeAgentTextStreamQuicPolicyV1);
 const GROUP_AVATAR_URL_CODEC = defineCodec(GROUP_AVATAR_URL_COMPONENT_ID, decodeGroupAvatarUrlV1, encodeGroupAvatarUrlV1);
+const GROUP_BLOSSOM_IMAGE_CODEC = defineCodec(GROUP_BLOSSOM_IMAGE_COMPONENT_ID, decodeGroupBlossomImageV1, encodeGroupBlossomImageV1);
 const ENCRYPTED_MEDIA_CODEC = defineCodec(GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, decodeEncryptedMediaPolicyV1, encodeEncryptedMediaPolicyV1);
 const ENCRYPTED_MEDIA_V2_CODEC = defineCodec(GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, decodeEncryptedMediaPolicyV2, encodeEncryptedMediaPolicyV2);
 const GROUP_LIFECYCLE_CODEC = defineCodec(GROUP_LIFECYCLE_COMPONENT_ID, decodeGroupLifecycleV1, encodeGroupLifecycleV1);
@@ -156,6 +158,10 @@ export function getAgentTextStreamPolicy(extensions) {
 export function getGroupAvatarUrl(extensions) {
     return getComponent(extensions, GROUP_AVATAR_URL_CODEC);
 }
+/** The `group.blossom.image.v1` encrypted group image (`0x8002`). */
+export function getGroupBlossomImage(extensions) {
+    return getComponent(extensions, GROUP_BLOSSOM_IMAGE_CODEC);
+}
 /** The `group.encrypted-media.v1` policy (`0x8008`). */
 export function getEncryptedMediaPolicy(extensions) {
     return getComponent(extensions, ENCRYPTED_MEDIA_CODEC);
@@ -198,6 +204,10 @@ export function agentTextStreamEntry(policy) {
 /** Builds the `group.avatar-url.v1` entry. */
 export function groupAvatarUrlEntry(avatar) {
     return entryFor(GROUP_AVATAR_URL_CODEC, avatar);
+}
+/** Builds the `group.blossom.image.v1` entry (an empty state clears the image). */
+export function groupBlossomImageEntry(image) {
+    return entryFor(GROUP_BLOSSOM_IMAGE_CODEC, image);
 }
 /** Builds the `group.encrypted-media.v1` entry. */
 export function encryptedMediaEntry(policy) {

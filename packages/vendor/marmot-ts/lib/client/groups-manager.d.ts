@@ -17,7 +17,6 @@ import type { GroupPublishResult, GroupSessionSendIntent } from "./session/group
 import type { DispositionedIngestResult, GroupSession } from "./session/group-session.js";
 import type { NostrNetworkInterface, PublishResponse, Unsubscribable } from "./nostr-interface.js";
 import { type RejectReason, type VerifyEventMethod } from "./verify.js";
-/** Deterministic bounded LRU used by long-lived group subscriptions. */
 export declare class BoundedIdCache {
     #private;
     readonly capacity: number;

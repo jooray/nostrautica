@@ -2,11 +2,12 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hexToBytes } from "applesauce-core/helpers";
 import { EventEmitter } from "eventemitter3";
-import { defaultCryptoProvider, joinGroup, } from "../vendor/ts-mls/index.js";
+import { defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
 import { getNostrGroupIdHex, } from "../core/client-state.js";
 import { GROUP_EVENT_KIND } from "../core/protocol.js";
 import { assertCurrentGroupAccountIdentityProofProfile, validateGroupMemberAccountIdentityProofs, } from "../core/components/account-identity-proof.js";
-import { marmotAuthService } from "../core/auth-service.js";
+import { joinWelcomeWithAuthor } from "../core/welcome-join.js";
+import { validateWelcomeGroupState } from "../engine/welcome-validation.js";
 import { logger } from "../utils/debug.js";
 import { hasAck } from "../utils/index.js";
 import { getSingletonTagValue } from "../utils/tag-cardinality.js";
@@ -17,6 +18,30 @@ import { GroupRegistry } from "./group-registry.js";
 import { defaultVerifyEvent, safeVerifyEvent, } from "./verify.js";
 const SUBSCRIPTION_ID_CACHE_CAPACITY = 10_000;
 /** Deterministic bounded LRU used by long-lived group subscriptions. */
+const U64_MAX = (1n << 64n) - 1n;
+/**
+ * The kind-445 tag-set rule (`transports/nostr.md` "Group message delivery"):
+ * besides its single `h` tag, a group event may carry only one NIP-40
+ * `["expiration", <unsigned integer>]` tag, and nothing else. Receivers
+ * validate the whole envelope before decrypting ("Validation before
+ * peeling"). Mirrors MDK `NostrTransportEvent::kind_445_transport_group_id`,
+ * which drops such events, so accepting them here would let a member show
+ * marmot-ts users messages that MDK users never see.
+ */
+function hasOnlyGroupEventTags(event) {
+    let expirations = 0;
+    for (const tag of event.tags) {
+        if (tag[0] === "h")
+            continue; // cardinality checked by getSingletonTagValue
+        if (tag[0] !== "expiration")
+            return false;
+        if (++expirations > 1 || tag.length !== 2)
+            return false;
+        if (!/^[0-9]+$/.test(tag[1]) || BigInt(tag[1]) > U64_MAX)
+            return false;
+    }
+    return true;
+}
 export class BoundedIdCache {
     capacity;
     #ids = new Map();
@@ -324,8 +349,9 @@ export class GroupsManager extends EventEmitter {
             const fresh = events.filter((event) => !seen.has(event.id));
             if (!fresh.length)
                 return;
-            // Trust boundary (SEC-01/WIRE-02): verify signature and `h` tag
-            // cardinality BEFORE any event reaches group.ingest() or occupies the
+            // Trust boundary (SEC-01/WIRE-02): verify signature, the kind-445 tag
+            // set, and `h` tag cardinality BEFORE any event reaches group.ingest()
+            // or occupies the
             // dedup `seen` slot. Not a cross-check of the `h` value against the
             // subscribed group id — that is out of scope (RESEARCH Open Question 1).
             const trusted = [];
@@ -335,7 +361,8 @@ export class GroupsManager extends EventEmitter {
                     this.emit("rejected", group.id, event, "invalid-signature");
                     continue;
                 }
-                if (getSingletonTagValue(event, "h") !== h) {
+                if (!hasOnlyGroupEventTags(event) ||
+                    getSingletonTagValue(event, "h") !== h) {
                     rejected.add(event.id);
                     this.emit("rejected", group.id, event, "tag-cardinality");
                     continue;
@@ -427,20 +454,19 @@ export class GroupsManager extends EventEmitter {
             throw new Error("No matching KeyPackage found in local store. Make sure you have published a KeyPackage event.");
         }
         let clientState = null;
+        let authorLeafIndex = -1;
         let lastError = null;
         let consumedKeyPackageRef = null;
         for (const candidate of candidates) {
             try {
-                clientState = await joinGroup({
-                    context: {
-                        cipherSuite: ciphersuiteImpl,
-                        authService: marmotAuthService,
-                        externalPsks: {},
-                    },
+                const joined = await joinWelcomeWithAuthor({
                     welcome,
                     keyPackage: candidate.publicPackage,
                     privateKeys: candidate.privatePackage,
+                    ciphersuiteImpl,
                 });
+                clientState = joined.state;
+                authorLeafIndex = joined.authorLeafIndex;
                 consumedKeyPackageRef = candidate.keyPackageRef;
                 break;
             }
@@ -461,6 +487,11 @@ export class GroupsManager extends EventEmitter {
         // from v1").
         assertCurrentGroupAccountIdentityProofProfile(clientState.groupContext.extensions);
         validateGroupMemberAccountIdentityProofs(clientState, clientState.groupContext.cipherSuite);
+        // The rest of the Marmot group state, the capabilities this client needs,
+        // and the Welcome author's admin authority (joining.md steps 6-8). Also
+        // before adoptClientState, so a rejected Welcome persists nothing and
+        // leaves the KeyPackage unconsumed.
+        validateWelcomeGroupState({ state: clientState, authorLeafIndex });
         const group = await this.adoptClientState(clientState, { emit: "joined" });
         return { group, consumedKeyPackageRef };
     }

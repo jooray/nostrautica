@@ -48,6 +48,9 @@ export class KeyPackageStore extends EventEmitter {
             ...(keyPackage.published !== undefined
                 ? { published: deduplicatePublishedEvents(keyPackage.published) }
                 : {}),
+            ...(keyPackage.relays !== undefined && keyPackage.relays.length > 0
+                ? { relays: mergeRelays([], keyPackage.relays) }
+                : {}),
         };
         await this.#store.setItem(key, entry);
         this.emit("added", entry);
@@ -62,8 +65,11 @@ export class KeyPackageStore extends EventEmitter {
      *
      * Throws if the event body cannot be decoded as a valid key package, or if
      * the event's `i` tag (KeyPackageRef) does not match the decoded body.
+     *
+     * @param relays - Relays the event was published to, merged into the
+     *   entry's local `relays` record.
      */
-    async addPublished(ref, event) {
+    async addPublished(ref, event, relays = []) {
         const key = this.#resolveKey(ref);
         // The `i` tag IS the KeyPackageRef of the event body. Receivers MUST
         // verify it against the decoded KeyPackage and reject on mismatch
@@ -86,10 +92,12 @@ export class KeyPackageStore extends EventEmitter {
                 event,
             ]);
             const shouldPersistIdentifier = identifier !== undefined && existing.identifier === undefined;
+            const mergedRelays = mergeRelays(existing.relays ?? [], relays);
+            const relaysChanged = mergedRelays.length !== (existing.relays ?? []).length;
             const publishedChanged = existing.published === undefined ||
                 published.length !== existing.published.length ||
                 !published.every((e, index) => e.id === existing.published?.[index]?.id);
-            if (!publishedChanged && !shouldPersistIdentifier) {
+            if (!publishedChanged && !shouldPersistIdentifier && !relaysChanged) {
                 return;
             }
             const updated = {
@@ -97,6 +105,7 @@ export class KeyPackageStore extends EventEmitter {
                 // Persist identifier if discovered for the first time on this entry
                 ...(shouldPersistIdentifier ? { identifier } : {}),
                 published,
+                ...(mergedRelays.length > 0 ? { relays: mergedRelays } : {}),
             };
             await this.#store.setItem(key, updated);
             this.emit("updated", updated);
@@ -109,6 +118,7 @@ export class KeyPackageStore extends EventEmitter {
                 publicPackage,
                 ...(identifier !== undefined ? { identifier } : {}),
                 published: [event],
+                ...(relays.length > 0 ? { relays: mergeRelays([], relays) } : {}),
             };
             await this.#store.setItem(key, entry);
             this.emit("added", entry);
@@ -148,7 +158,7 @@ export class KeyPackageStore extends EventEmitter {
         const packages = await Promise.all(allKeys.map((key) => this.#store.getItem(key)));
         return packages
             .filter((pkg) => pkg !== null && pkg.privatePackage !== undefined)
-            .map(({ keyPackageRef, publicPackage, identifier, published, used }) => {
+            .map(({ keyPackageRef, publicPackage, identifier, published, relays, used, }) => {
             let nonCurrent = false;
             try {
                 validateKeyPackageAccountIdentityProof(publicPackage);
@@ -161,6 +171,7 @@ export class KeyPackageStore extends EventEmitter {
                 publicPackage,
                 ...(identifier !== undefined ? { identifier } : {}),
                 ...(published !== undefined ? { published } : {}),
+                ...(relays !== undefined ? { relays } : {}),
                 ...(used !== undefined ? { used } : {}),
                 ...(nonCurrent ? { nonCurrent: true } : {}),
             };
@@ -226,4 +237,8 @@ export class KeyPackageStore extends EventEmitter {
             }
         }
     }
+}
+/** Union of two relay lists, keeping first-seen order and dropping duplicates. */
+function mergeRelays(existing, added) {
+    return [...new Set([...existing, ...added])];
 }

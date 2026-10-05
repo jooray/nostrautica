@@ -12,7 +12,7 @@ import { createEncryptedGroupEventContent } from "./group-message-crypto.js";
  * @returns A signed Nostr event
  */
 export async function createGroupEvent(options) {
-    const { message, state, ciphersuite } = options;
+    const { message, state, ciphersuite, expiration } = options;
     const content = await createEncryptedGroupEventContent({
         state,
         ciphersuite,
@@ -25,6 +25,8 @@ export async function createGroupEvent(options) {
         content,
         tags: [[nostrTransportBinding.groupIdTag, groupId]],
     };
+    if (expiration !== undefined)
+        draft.tags.push(["expiration", expiration.toString()]);
     // Ephemeral keypair for signing — distinct from the encryption keypair (`transports/nostr.md`: fresh per-event ephemeral key)
     const ephemeralSecretKey = generateSecretKey();
     return finalizeEvent(draft, ephemeralSecretKey);

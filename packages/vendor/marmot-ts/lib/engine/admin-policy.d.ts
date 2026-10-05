@@ -3,6 +3,12 @@ import { type ClientState, type IncomingMessageCallback, type Proposal, type Pro
 import { type AppComponentId } from "../core/components/ids.js";
 import { type CommitIntegrityViolation } from "../core/components/integrity.js";
 /**
+ * Payload decoders for every app component whose format this library knows.
+ * An AppDataUpdate for an id outside this table is opaque to the library and
+ * left to the application (`app-components/README.md` "Unknown Data").
+ */
+export declare const COMPONENT_PAYLOAD_DECODERS: ReadonlyMap<number, (data: Uint8Array) => unknown>;
+/**
  * The parent epoch's required app-component ids, in the shape
  * {@link validatePreApplyProposals} consumes — or `[]` when the
  * `app_components` bytes do not decode.
@@ -51,6 +57,37 @@ export declare function requiredComponentIdsOf(state: ClientState): readonly App
  * @see refs/mdk/crates/cgka-engine/src/app_components.rs `validate_app_data_update_batch_against`, `validate_app_component_remove_against`, `validate_app_component_bytes`, `validate_membership_proposal`
  */
 export declare function validatePreApplyProposals(proposals: readonly (Proposal | ProposalWithSender)[], ciphersuiteId: number, requiredIds?: readonly AppComponentId[]): CommitIntegrityViolation | undefined;
+/**
+ * Why a proposal's SENDER may not make it, or `undefined` when it may.
+ *
+ * Mirrors MDK `authorize_proposal`, which runs for every standalone proposal
+ * against its source epoch and again for every proposal a commit carries
+ * (by reference or inline), always against the proposal's own authenticated
+ * sender rather than the committer:
+ *
+ * - SelfRemove: any member except an active admin (an admin drops admin first);
+ * - Add, Remove, Update, GroupContextExtensions and AppDataUpdate: active
+ *   admins only. In v1 the only standalone proposal a non-admin may send is
+ *   SelfRemove (`protocol-core/group-messaging.md` "Commit authorization");
+ * - a lifecycle (`0x800c`) AppDataUpdate must be inline in the commit that
+ *   realizes it, so it is never valid standalone or by reference;
+ * - PreSharedKey, ReInit, ExternalInit and any other type: unsupported.
+ *
+ * Without this, a non-admin's standalone Remove or AppDataUpdate was staged
+ * and then bundled by reference into the next commit a marmot-ts admin made;
+ * MDK rejects that commit (`authorize_staged_commit_proposals`) and the group
+ * splits.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `authorize_proposal`
+ * @see refs/marmot/app-components/README.md "Authorization Evaluation"
+ */
+export declare function proposalSenderViolation(proposal: Proposal, senderIsAdmin: boolean, standalone: boolean): string | undefined;
+/**
+ * The first proposal-sender violation in `proposals`, each judged against its
+ * own sender in the state whose `ratchetTree` and admin set are given (the
+ * proposal's source epoch, which for a commit is the candidate parent).
+ */
+export declare function findProposalSenderViolation(proposals: readonly ProposalWithSender[], ratchetTree: ClientState["ratchetTree"], adminPubkeys: readonly string[], standalone: boolean): string | undefined;
 /**
  * Build an incoming-message callback that enforces
  * `refs/marmot/protocol-core/group-messaging.md` "admin-only commits".

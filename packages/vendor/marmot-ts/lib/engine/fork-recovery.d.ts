@@ -1,6 +1,6 @@
 import { type CiphersuiteImpl, type ClientState, type IncomingMessageCallback, type MlsFramedMessage, MlsMessage, type ProcessMessageResult } from "../vendor/ts-mls/index.js";
 import { type CommitIntegrityViolation } from "../core/components/integrity.js";
-import { type AppWitness, type ConvergencePolicy, type BranchScore } from "../core/convergence.js";
+import { type AppWitness, type CommitOrderingPriority, type ConvergencePolicy, type BranchScore } from "../core/convergence.js";
 import type { EdgeSnapshot } from "./history-tree.js";
 import type { RetainedAppliedLink } from "./retained-store.js";
 import type { DisbandCandidateEvidence, GroupPeeler } from "./types.js";
@@ -25,6 +25,11 @@ export interface ChainLink {
 export interface KnownNextState {
     parentTag: string;
     state: ClientState;
+    /**
+     * The commit's ordering class recorded when it was authored, used only when
+     * its proposals cannot be rebuilt from the parent snapshot.
+     */
+    priority?: CommitOrderingPriority;
 }
 /** Shared parent-relative candidate resolution used by live and tree recovery. */
 export type ParentResolution = {
@@ -32,6 +37,8 @@ export type ParentResolution = {
     result: ProcessMessageResult & {
         kind: "newState";
     };
+    /** Ordering class of the resolved commit (`convergence.md` `tip_priority`). */
+    priority: CommitOrderingPriority;
 } | {
     kind: "authentication_mismatch";
 } | {

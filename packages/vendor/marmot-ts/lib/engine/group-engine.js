@@ -1,7 +1,9 @@
 /** @module @category Engine */
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { appDataUpdateProposalType, contentTypes, createApplicationMessage, createCommit, decode, createProposal, defaultProposalTypes, encode, getCredentialFromLeafIndex, isSelfRemoveProposal, mlsMessageEncoder, mlsMessageDecoder, nodeTypes, processMessage, proposalOrRefTypes, wireformats, } from "../vendor/ts-mls/index.js";
+import { appDataDictionaryExtensionType, appDataUpdateProposalType, contentTypes, createApplicationMessage, createCommit, decode, createProposal, defaultProposalTypes, encode, getCredentialFromLeafIndex, isSelfRemoveProposal, mlsMessageEncoder, mlsMessageDecoder, nodeTypes, processMessage, proposalOrRefTypes, wireformats, } from "../vendor/ts-mls/index.js";
+import { getAppMessageExpiration } from "../core/app-message-expiration.js";
 import { marmotAuthService } from "../core/auth-service.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
 import { getMarmotGroupView } from "../core/client-state.js";
 import { deserializeClientState, serializeClientState, } from "../core/client-state.js";
 import { decideCommitAuthorization } from "../core/commit-authorization.js";
@@ -16,12 +18,12 @@ import { getCredentialPubkey } from "../core/credential.js";
 import { getGroupMemberPubkeys, getPubkeyLeafNodeIndexes, } from "../core/group-members.js";
 import { decideAutoCommit } from "./auto-committer.js";
 import { convergenceStatuses, deriveConvergenceStatus, } from "../core/convergence-status.js";
-import { commitDigest, DEFAULT_CONVERGENCE_POLICY, isWitnessEligible, normalizeConvergencePolicy, selectCanonicalBranch, validateConvergencePolicy, } from "../core/convergence.js";
+import { commitDigest, commitOrderingPriority, DEFAULT_CONVERGENCE_POLICY, isWitnessEligible, normalizeConvergencePolicy, selectCanonicalBranch, validateConvergencePolicy, } from "../core/convergence.js";
 import { canTransitionLifecycle, groupLifecycleStates, mayApplyRetainedInbound, mayPrepareLocalCommit, transitionLifecycle, } from "../core/group-lifecycle.js";
 import { auditEpochStateName, createAuditEmitter, digestString, errorDetail, messageArtifactKindFromNostrKind, } from "../audit/index.js";
-import { framedContentType } from "./wire-format.js";
+import { framedCommitProposalsWithSender, framedContentType, framedEpoch, } from "./wire-format.js";
 import { logger } from "../utils/debug.js";
-import { createAdminCommitPolicyCallback, requiredComponentIdsOf, validatePreApplyProposals, withCapturedProposals, } from "./admin-policy.js";
+import { createAdminCommitPolicyCallback, findProposalSenderViolation, requiredComponentIdsOf, validatePreApplyProposals, withCapturedProposals, } from "./admin-policy.js";
 import { DeliveredPayloadLedger } from "./delivered-payloads.js";
 import { collectWitnessesAt, ForkRecovery, resolveCandidateParent, } from "./fork-recovery.js";
 import { GroupHistoryTree } from "./history-tree.js";
@@ -61,6 +63,21 @@ export class CommitLegalityError extends Error {
         super(violation.detail);
         this.violation = violation;
         this.name = "CommitLegalityError";
+    }
+}
+/**
+ * Thrown before publishing a standalone proposal its sender is not authorized
+ * to make (`app-components/admin-policy-v1.md`, `protocol-core/group-messaging.md`):
+ * a non-admin's Add, Remove, Update, GroupContextExtensions or AppDataUpdate,
+ * an admin's SelfRemove, or an unsupported proposal type. Every peer would
+ * refuse it.
+ */
+export class ProposalAuthorizationError extends Error {
+    reason;
+    constructor(reason) {
+        super(`Not authorized to send this proposal: ${reason}`);
+        this.reason = reason;
+        this.name = "ProposalAuthorizationError";
     }
 }
 /** Typed ordinary-outbound refusal while irreversible terminal intent is pending. */
@@ -654,12 +671,16 @@ export class MarmotGroupEngine {
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                         externalPsks: {},
                     },
                     state: this.state,
                     message: intent.payload,
                 });
-                const envelope = await this.peeler.wrapGroupMessage(message, this.state);
+                // Pinned from the source epoch: `this.state` is still the state the
+                // message was encrypted under (message-retention-v1.md).
+                const expiration = getAppMessageExpiration(this.state, intent.payload);
+                const envelope = await this.peeler.wrapGroupMessage(message, this.state, expiration === undefined ? undefined : { expiration });
                 this.#sentContentIds.add(contentDedupId(message));
                 this.#setState(newState);
                 this.#delivered.record({
@@ -717,10 +738,23 @@ export class MarmotGroupEngine {
                 const proposalViolation = validatePreApplyProposals([intent.proposal], this.ciphersuite.id);
                 if (proposalViolation)
                     throw new CommitLegalityError(proposalViolation);
+                // Every peer (marmot-ts and MDK alike) refuses a standalone proposal
+                // its sender may not make, so refuse it before publishing. In v1 a
+                // non-admin may only send SelfRemove, and an admin may not send
+                // SelfRemove until it has left the admin set.
+                const senderViolation = findProposalSenderViolation([
+                    {
+                        proposal: intent.proposal,
+                        senderLeafIndex: Number(this.state.privatePath.leafIndex),
+                    },
+                ], this.state.ratchetTree, this.#adminPubkeysOf(this.state), true);
+                if (senderViolation)
+                    throw new ProposalAuthorizationError(senderViolation);
                 const { message, newState } = await createProposal({
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                         externalPsks: {},
                     },
                     state: this.state,
@@ -787,6 +821,7 @@ export class MarmotGroupEngine {
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                     },
                     // WR-05: staged invalid Adds pruned, so never bundled by reference.
                     state: prepared.commitState,
@@ -907,6 +942,7 @@ export class MarmotGroupEngine {
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                     },
                     // WR-05: staged invalid Adds pruned, so never bundled by reference.
                     state: prepared.commitState,
@@ -984,6 +1020,7 @@ export class MarmotGroupEngine {
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                     },
                     // WR-05: staged invalid Adds pruned, so never bundled by reference.
                     state: prepared.commitState,
@@ -1064,6 +1101,15 @@ export class MarmotGroupEngine {
                 senderLeafIndex: Number(actorLeaf),
             });
         }
+        const dictionaryLast = dictionaryLastRepairFor(state, committedProposals, referenced.map((p) => p.proposal));
+        if (dictionaryLast) {
+            extraProposals.unshift(dictionaryLast);
+            committedProposals.unshift(dictionaryLast);
+            committedWithSenders.unshift({
+                proposal: dictionaryLast,
+                senderLeafIndex: Number(actorLeaf),
+            });
+        }
         // CR-02: the SAME pre-apply payload gate every inbound seam runs, on the
         // exact proposal union `createCommit` will bundle (staged references +
         // by-value + the D-05 splice). Without it the send path published — and,
@@ -1086,18 +1132,12 @@ export class MarmotGroupEngine {
         if (!authorization.authorized) {
             throw new Error("Not a group admin. Non-admins may only commit a self-update-only or self_remove-only commit. Wait for the staged proposal to be committed, or ask an admin to commit it.");
         }
-        const nonAdminShape = decideCommitAuthorization({
-            actorPubkey,
-            actorLeafIndex: Number(actorLeaf),
-            adminPubkeys: [],
-            proposals: committedWithSenders,
-        });
         return {
             extraProposals,
             committedProposals,
             committedWithSenders,
             committer: actorPubkey,
-            priority: nonAdminShape.authorized ? "ordinary" : "privileged",
+            priority: commitOrderingPriority(committedWithSenders),
             commitState,
         };
     }
@@ -1666,6 +1706,7 @@ export class MarmotGroupEngine {
                 context: {
                     cipherSuite: this.ciphersuite,
                     authService: marmotAuthService,
+                    clientConfig: defaultMarmotClientConfig,
                     externalPsks: {},
                 },
                 state,
@@ -1746,7 +1787,7 @@ export class MarmotGroupEngine {
             return { kind: "processed", result, envelope, message };
         }
         if (result.kind === "applicationMessage") {
-            if (!isAuthenticApplicationMessage(result, state, log, "sweep"))
+            if (!isAuthenticApplicationMessage(result, state, log, "sweep", framedEpoch(message)))
                 return {
                     kind: "skipped",
                     envelope,
@@ -2543,12 +2584,16 @@ export class MarmotGroupEngine {
         const witnessesByTip = witnessEnvelopes.length > 0
             ? await this.#gatherTreeWitnesses(set, witnessEnvelopes)
             : undefined;
-        const candidates = witnessesByTip
-            ? set.candidates.map((c) => ({
-                ...c,
-                appWitnesses: witnessesByTip.get(c.id) ?? [],
-            }))
-            : set.candidates;
+        // The tree's light index carries only epoch and digest. The tip ordering
+        // metadata (`tip_priority`, `tip_committer`) ranks above the digest, so it
+        // is read from the stored parent snapshot and commit before scoring;
+        // without it this pass and pool replay order the same branches
+        // differently and the tip flips between them.
+        const candidates = await Promise.all(set.candidates.map(async (c) => ({
+            ...c,
+            ...(await this.#treeTipOrdering(c.id)),
+            appWitnesses: witnessesByTip?.get(c.id) ?? c.appWitnesses,
+        })));
         // CR-01: select among ADOPTABLE branches only. A permanently invalid link
         // (an illegal edge persisted by an older build, say) is never adopted,
         // mirroring MDK, which drops a commit invalid against its candidate state
@@ -2587,7 +2632,7 @@ export class MarmotGroupEngine {
                 const prefix = outcome.lastValidTag === undefined ||
                     onCurrentPath.has(outcome.lastValidTag)
                     ? undefined
-                    : this.#treePrefixCandidate(winner, outcome.lastValidTag);
+                    : await this.#treePrefixCandidate(winner, outcome.lastValidTag);
                 if (prefix && !remaining.some((c) => c.id === prefix.id))
                     remaining = [...remaining, prefix];
             }
@@ -2667,13 +2712,53 @@ export class MarmotGroupEngine {
         return results;
     }
     /**
+     * The authenticated ordering metadata of the commit that produced tree node
+     * `tag`: the committer's account identity, resolved against the parent
+     * snapshot's ratchet tree, and the commit's `tip_priority`, classified from
+     * its inline proposals plus the parent's staged proposals it references.
+     * Fields that cannot be derived are omitted rather than guessed; the stored
+     * own-commit stamp supplies the priority when the references no longer
+     * resolve.
+     *
+     * @see refs/marmot/protocol-core/convergence.md "Candidate branches"
+     */
+    async #treeTipOrdering(tag) {
+        const parentTag = this.#tree.parentOf(tag);
+        if (parentTag === undefined)
+            return {};
+        const [parent, message] = await Promise.all([
+            this.#tree.stateAt(parentTag),
+            this.#tree.commitMessageOf(tag),
+        ]);
+        if (!parent || !message)
+            return {};
+        const framed = framedCommitProposalsWithSender(message, parent);
+        const senderLeaf = framed?.senderLeafIndex ?? this.#tree.node(tag)?.edge?.senderLeafIndex;
+        let tipCommitter;
+        if (senderLeaf !== undefined) {
+            try {
+                tipCommitter = hexToBytes(getCredentialPubkey(getCredentialFromLeafIndex(parent.ratchetTree, senderLeaf)));
+            }
+            catch {
+                tipCommitter = undefined;
+            }
+        }
+        const tipPriority = framed
+            ? commitOrderingPriority(framed.proposals)
+            : (await this.#tree.ownCommitStampOf(tag))?.priority;
+        return {
+            ...(tipCommitter ? { tipCommitter } : {}),
+            ...(tipPriority ? { tipPriority } : {}),
+        };
+    }
+    /**
      * WR-02: `candidate` truncated to its legal prefix ending at node `tag`, with
      * the same scoring inputs `buildTreeBranchSet` derives for a tip (the node's
      * epoch and its own edge digest). Only witnesses that decrypt on the prefix
      * and remain eligible for its shorter tip are kept. `undefined` when the
      * tree lacks the node's epoch or edge.
      */
-    #treePrefixCandidate(candidate, tag) {
+    async #treePrefixCandidate(candidate, tag) {
         const tipEpoch = this.#tree.epochOf(tag);
         const tipDigest = this.#tree.node(tag)?.edge?.commitDigest;
         if (tipEpoch === undefined || tipDigest === undefined)
@@ -2683,6 +2768,7 @@ export class MarmotGroupEngine {
             forkEpoch: candidate.forkEpoch,
             tipEpoch,
             tipDigest,
+            ...(await this.#treeTipOrdering(tag)),
             appWitnesses: candidate.appWitnesses.filter((witness) => witness.epoch <= tipEpoch &&
                 isWitnessEligible(witness, candidate.forkEpoch, tipEpoch, this.#policy)),
         };
@@ -2835,6 +2921,15 @@ export class MarmotGroupEngine {
         }
         return byTip;
     }
+    /** The admin set of `state`, or `[]` when the admin policy does not decode. */
+    #adminPubkeysOf(state) {
+        try {
+            return getAdminPolicy(state.groupContext.extensions) ?? [];
+        }
+        catch {
+            return [];
+        }
+    }
     #createAdminVerificationCallback(state = this.state) {
         const ciphersuiteId = this.ciphersuite.id;
         // CR-03: read ONLY the admin policy. `getMarmotGroupView` decodes every
@@ -2858,6 +2953,7 @@ export class MarmotGroupEngine {
             // to close (T-09-17).
             return (incoming) => incoming.kind === "commit" ||
                 validatePreApplyProposals([incoming.proposal], ciphersuiteId) ||
+                findProposalSenderViolation([incoming.proposal], state.ratchetTree, [], true) ||
                 validateUpdateProposalAccountIdentityProofs([incoming.proposal], state.ratchetTree, ciphersuiteId)
                 ? "reject"
                 : "accept";
@@ -2901,9 +2997,75 @@ export class MarmotGroupEngine {
  * one would silently delete a proposal that is individually valid. Those are
  * caught by the batch check in {@link MarmotGroupEngine.#prepareOutboundCommitProposals}.
  */
+/**
+ * A `GroupContextExtensions` proposal that moves `app_data_dictionary` to the
+ * end of the GroupContext extension list, for a commit that carries an
+ * AppDataUpdate in a group whose dictionary is not already last. `undefined`
+ * when no repair is needed or allowed.
+ *
+ * GroupContext extensions are an ordered list that feeds the key schedule.
+ * ts-mls applies an AppDataUpdate by replacing the dictionary in place, while
+ * OpenMLS (MDK) removes it and re-appends it (`Extensions::add_or_replace`).
+ * Groups created before the dictionary was put last ([app_data_dictionary,
+ * required_capabilities]) therefore compute a different GroupContext for every
+ * AppDataUpdate commit on the two sides, and MDK rejects the commit with a
+ * confirmation tag mismatch. Both libraries apply a GroupContextExtensions
+ * proposal as a plain list replacement, and then update the dictionary at its
+ * new (last) position, so one commit carrying the reordered list and the
+ * AppDataUpdate is read identically by MDK, current marmot-ts and older
+ * marmot-ts. Every later AppDataUpdate then needs no repair.
+ *
+ * Lifecycle (0x800c) enablement and disband commits are left alone: both MDK
+ * and the spec allow no proposal besides their own updates in them. So is a
+ * commit that references a standalone AppDataUpdate (see below).
+ */
+function dictionaryLastRepairFor(state, committedProposals, referencedProposals) {
+    // An AppDataUpdate must follow the GroupContextExtensions proposal in the
+    // commit (draft-ietf-mls-extensions), and `createCommit` lists references
+    // before inline proposals, so an inline repair cannot precede a referenced
+    // AppDataUpdate.
+    if (referencedProposals.some((proposal) => proposal.proposalType === appDataUpdateProposalType))
+        return undefined;
+    let carriesAppDataUpdate = false;
+    for (const proposal of committedProposals) {
+        if (proposal.proposalType === defaultProposalTypes.group_context_extensions)
+            return undefined;
+        if (proposal.proposalType !== appDataUpdateProposalType ||
+            !("appDataUpdate" in proposal))
+            continue;
+        if (proposal.appDataUpdate.componentId === GROUP_LIFECYCLE_COMPONENT_ID)
+            return undefined;
+        carriesAppDataUpdate = true;
+    }
+    if (!carriesAppDataUpdate)
+        return undefined;
+    const extensions = state.groupContext.extensions;
+    const dictionaryIndex = extensions.findIndex((extension) => extension.extensionType === appDataDictionaryExtensionType);
+    if (dictionaryIndex === -1 || dictionaryIndex === extensions.length - 1)
+        return undefined;
+    return {
+        proposalType: defaultProposalTypes.group_context_extensions,
+        groupContextExtensions: {
+            extensions: [
+                ...extensions.filter((_, index) => index !== dictionaryIndex),
+                extensions[dictionaryIndex],
+            ],
+        },
+    };
+}
 function withoutInadmissibleStagedProposals(state, ciphersuiteId) {
     const entries = Object.entries(state.unappliedProposals);
+    if (entries.length === 0)
+        return state;
+    let adminPubkeys = [];
+    try {
+        adminPubkeys = getAdminPolicy(state.groupContext.extensions) ?? [];
+    }
+    catch {
+        adminPubkeys = [];
+    }
     const admissible = entries.filter(([, staged]) => !validatePreApplyProposals([staged], ciphersuiteId) &&
+        !findProposalSenderViolation([staged], state.ratchetTree, adminPubkeys, true) &&
         !validateUpdateProposalAccountIdentityProofs([staged], state.ratchetTree, ciphersuiteId));
     if (admissible.length === entries.length)
         return state;

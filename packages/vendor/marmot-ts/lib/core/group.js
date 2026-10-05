@@ -2,6 +2,7 @@
 import { randomBytes } from "@noble/hashes/utils.js";
 import { createGroup as MLSCreateGroup, } from "../vendor/ts-mls/index.js";
 import { marmotAuthService } from "./auth-service.js";
+import { defaultMarmotClientConfig } from "./client-config.js";
 import { marmotRequiredCapabilitiesExtension } from "./capabilities.js";
 import { adminPolicyEntry, appComponentsEntry, DEFAULT_ENCRYPTED_MEDIA_BLOB_ENDPOINTS, DEFAULT_GROUP_COMPONENT_IDS, encryptedMediaV2BlossomDefault, encryptedMediaV2Entry, GROUP_LIFECYCLE_COMPONENT_ID, groupLifecycleEntry, groupProtocolLifecycleValues, groupProfileEntry, makeAppComponentsExtension, nostrRoutingEntry, } from "./components/index.js";
 import { getCredentialPubkey } from "./credential.js";
@@ -46,6 +47,7 @@ export async function createGroup(params) {
         context: {
             cipherSuite: ciphersuiteImpl,
             authService: marmotAuthService,
+            clientConfig: defaultMarmotClientConfig,
         },
         groupId,
         keyPackage: creatorKeyPackage.publicPackage,

@@ -4,6 +4,7 @@ import { AppComponentId } from "./ids.js";
 import { GroupProfileV1 } from "./group-profile.js";
 import { NostrRoutingV1 } from "./nostr-routing.js";
 import { GroupAvatarUrlV1 } from "./avatar-url.js";
+import { GroupBlossomImageV1 } from "./blossom-image.js";
 import { EncryptedMediaPolicyV1 } from "./encrypted-media.js";
 import { EncryptedMediaPolicyV2 } from "./encrypted-media-v2.js";
 import { AgentTextStreamQuicPolicyV1 } from "./agent-text-stream.js";
@@ -74,6 +75,8 @@ export declare function getMessageRetention(extensions: GroupContextExtension[])
 export declare function getAgentTextStreamPolicy(extensions: GroupContextExtension[]): AgentTextStreamQuicPolicyV1 | undefined;
 /** The `group.avatar-url.v1` component (`0x8007`). */
 export declare function getGroupAvatarUrl(extensions: GroupContextExtension[]): GroupAvatarUrlV1 | undefined;
+/** The `group.blossom.image.v1` encrypted group image (`0x8002`). */
+export declare function getGroupBlossomImage(extensions: GroupContextExtension[]): GroupBlossomImageV1 | undefined;
 /** The `group.encrypted-media.v1` policy (`0x8008`). */
 export declare function getEncryptedMediaPolicy(extensions: GroupContextExtension[]): EncryptedMediaPolicyV1 | undefined;
 /** The `group.encrypted-media.v2` policy (`0x800b`). */
@@ -94,6 +97,8 @@ export declare function messageRetentionEntry(seconds: number | bigint): Compone
 export declare function agentTextStreamEntry(policy: AgentTextStreamQuicPolicyV1): ComponentData;
 /** Builds the `group.avatar-url.v1` entry. */
 export declare function groupAvatarUrlEntry(avatar: GroupAvatarUrlV1): ComponentData;
+/** Builds the `group.blossom.image.v1` entry (an empty state clears the image). */
+export declare function groupBlossomImageEntry(image: GroupBlossomImageV1): ComponentData;
 /** Builds the `group.encrypted-media.v1` entry. */
 export declare function encryptedMediaEntry(policy: EncryptedMediaPolicyV1): ComponentData;
 /** Builds the `group.encrypted-media.v2` entry. */

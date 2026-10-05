@@ -8,7 +8,13 @@ export type CreateKeyPackageEventOptions = {
      * throwing {@link MissingSlotIdentifierError} when none is available.
      */
     identifier: string;
-    /** Relay URLs to advertise in the event */
+    /**
+     * @deprecated Ignored. KeyPackage events do not repeat the publishing relays
+     * (`transports/nostr.md`, KeyPackage publication: "KeyPackage events do not
+     * repeat those relays"); peers find KeyPackages through the author's kind
+     * 10002 relay list. {@link KeyPackageManager} records the publish relays in
+     * its local store instead.
+     */
     relays?: string[];
     client?: string;
     /**

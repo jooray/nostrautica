@@ -96,7 +96,11 @@ export class KeyPackageManager extends EventEmitter {
             isLastResort: options.isLastResort,
         });
         // Store private material locally, including the slot identifier
-        const refHex = await this.#store.add({ ...keyPackage, identifier });
+        const refHex = await this.#store.add({
+            ...keyPackage,
+            identifier,
+            relays: options.relays,
+        });
         // Build, sign and publish the kind 30443 event
         const signed = await this.#publisher.publish({
             keyPackage: keyPackage.publicPackage,
@@ -106,7 +110,7 @@ export class KeyPackageManager extends EventEmitter {
             protected: options.protected,
         });
         // Record the published event on the stored entry
-        await this.#store.addPublished(refHex, signed);
+        await this.#store.addPublished(refHex, signed, options.relays);
         const stored = await this.#store.get(refHex);
         if (!stored)
             throw new Error("Key package not found after store operation");
@@ -168,9 +172,10 @@ export class KeyPackageManager extends EventEmitter {
         // Determine relays for the new key package
         const oldEvents = existing.published ?? [];
         const relaysForNew = options?.relays ??
-            (oldEvents.length > 0
-                ? getKeyPackageRelays(oldEvents[oldEvents.length - 1])
-                : undefined);
+            (existing.relays && existing.relays.length > 0
+                ? existing.relays
+                : undefined) ??
+            legacyRelaysOf(oldEvents);
         if (!relaysForNew || relaysForNew.length === 0) {
             throw new KeyPackageRotatePreconditionError();
         }
@@ -217,17 +222,20 @@ export class KeyPackageManager extends EventEmitter {
      *
      * @param refs - One or more key package references (hex string or Uint8Array)
      */
-    async purge(refs) {
+    async purge(refs, options) {
         const refList = Array.isArray(refs) ? refs : [refs];
         this.#log("purging %d key package(s)", refList.length);
         // Collect all published events and relays across the provided refs
         const allEvents = [];
-        const allRelays = new Set();
+        const allRelays = new Set(options?.relays ?? []);
         for (const ref of refList) {
             const stored = await this.#store.get(ref);
             const events = stored?.published ?? [];
+            for (const relay of stored?.relays ?? [])
+                allRelays.add(relay);
             for (const event of events) {
                 allEvents.push(event);
+                // Events published by older versions still carry a relays tag.
                 for (const relay of getKeyPackageRelays(event) ?? []) {
                     allRelays.add(relay);
                 }
@@ -436,4 +444,13 @@ export class KeyPackageManager extends EventEmitter {
             this.off("published", signal);
         }
     }
+}
+/**
+ * Relays named by the `relays` tag of the newest event, for key packages
+ * published by versions that still emitted that tag.
+ */
+function legacyRelaysOf(events) {
+    return events.length > 0
+        ? getKeyPackageRelays(events[events.length - 1])
+        : undefined;
 }

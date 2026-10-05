@@ -314,47 +314,35 @@ export declare function validateAddProposalAccountIdentityProofs(proposals: read
  */
 export declare function validateUpdateProposalAccountIdentityProofs(proposals: readonly (Proposal | ProposalWithSender)[], ratchetTree: ClientState["ratchetTree"], ciphersuite: number): CommitIntegrityViolation | undefined;
 /**
- * The single shared seam adapter for commit legality: derives every argument
- * {@link validateAppComponentIntegrity}, {@link validateCommitAccountIdentityProofs},
- * {@link classifyDisbandCommit}, and {@link validateAdminLeafCoupling} need
- * from `parentState`/`resultingState`/`proposals`, so no seam re-derives them
- * independently (the mdk#707 bug class — "a guard that exists on one seam
- * only is a documented bug").
+ * The current-profile invariants of a commit's COMPLETE resulting state,
+ * mirroring MDK `validate_current_profile_invariants_for_staged_commit`, which
+ * every MDK seam (send, ingest, convergence replay) runs before a commit can
+ * become canonical:
  *
- * Runs four checks, in this fixed order (D-07):
- * 1. `validateAppComponentIntegrity` — component-integrity (WIRE-03). A
- *    violation here returns immediately.
- * 2. `validateCommitAccountIdentityProofs` — account-identity-proof profile
- *    drift, changed-leaf proof validity, and replacement-leaf identity
- *    binding (D-01/D-02/D-03, UPD-01). Runs before disband/admin-leaf-coupling
- *    reasoning, so an invalid identity blocks a commit before any admin-set
- *    reasoning does. `0x8009` data appearing in the GroupContext dictionary
- *    itself still reports `component-integrity` (rejected earlier by step
- *    1), so Phase 7 expectations hold. A `violation` here returns
- *    immediately; an `undecidable` outcome (Phase 9, D-03) is NOT returned
- *    yet — it is remembered and checks 3-4 still run, so a definite
- *    violation there still outranks it (the same precedence rule this
- *    function's own changed-leaf loop enforces internally).
- * 3. `classifyDisbandCommit` — disband-legality.
- * 4. `validateAdminLeafCoupling` — admin-leaf-coupling (CONV-01).
+ * - `required_capabilities` exists and requires `app_data_dictionary` and
+ *   `app_data_update`;
+ * - the dictionary exists, its `app_components` list decodes, it requires
+ *   admin-policy (`0x8003`) and the account proof (`0x8009`), and neither
+ *   requires nor carries the frozen encrypted-media v1 (`0x8008`);
+ * - every required component other than `0x8009` is a known group component
+ *   and has GroupContext state;
+ * - EVERY resulting leaf advertises each required non-default MLS extension,
+ *   proposal and credential type, and every required component id in its own
+ *   `app_components` support list.
  *
- * The remembered undecidable detail from step 2, if any, is returned only
- * after steps 3-4 both find no violation.
+ * ts-mls checks the MLS `required_capabilities` only for leaves a commit adds,
+ * and knows nothing about Marmot app components. Without this check marmot-ts
+ * applied commits MDK rejects (an Add of a KeyPackage that does not advertise
+ * a required component, an AppDataUpdate that requires a component some
+ * member lacks), and the group split.
  *
- * Stays pure: reads two `ClientState` values, performs no I/O, and calls
- * nothing from `src/engine` or `src/client`.
- *
- * Returns a {@link CommitLegalityOutcome}. Each calling seam supplies its own
- * disposition: `violation` throws on send (D-02), yields `rejected` with the
- * violation's `reason` on inbound (D-03), or drops the candidate edge on
- * convergence/replay (D-04/D-09); `undecidable` MUST map to that seam's own
- * existing deferral idiom, never to a terminal rejection (Phase 9, D-03,
- * `refs/marmot/foundation/errors.md` lines 63-68). This adapter itself is
- * seam-agnostic.
- *
- * @see refs/mdk/crates/cgka-engine/src/account_identity_proof.rs `validate_staged_commit_account_identity_proofs`
- * @see refs/marmot/app-components/account-identity-proof-v2.md "Validation"
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `validate_current_profile_group_context`, `validate_resulting_leaf_capabilities`
+ * @see refs/marmot/app-components/README.md
  */
+export declare function validateResultingProfileInvariants(args: {
+    resultingExtensions: GroupContextExtension[];
+    resultingTree: ClientState["ratchetTree"];
+}): CommitIntegrityViolation | undefined;
 export declare function validateCommitLegality(args: {
     parentState: ClientState;
     resultingState: ClientState;

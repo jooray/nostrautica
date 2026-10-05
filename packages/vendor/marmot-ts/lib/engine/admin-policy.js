@@ -4,11 +4,12 @@ import { decodeAdminPolicyV1 } from "../core/components/admin-policy.js";
 import { decodeAgentTextStreamQuicPolicyV1 } from "../core/components/agent-text-stream.js";
 import { decodeComponentsList } from "../core/components/app-components-list.js";
 import { decodeGroupAvatarUrlV1 } from "../core/components/avatar-url.js";
+import { decodeGroupBlossomImageV1 } from "../core/components/blossom-image.js";
 import { decodeEncryptedMediaPolicyV1 } from "../core/components/encrypted-media.js";
 import { decodeEncryptedMediaPolicyV2 } from "../core/components/encrypted-media-v2.js";
 import { decodeGroupLifecycleV1 } from "../core/components/group-lifecycle.js";
 import { decodeGroupProfileV1 } from "../core/components/group-profile.js";
-import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID, SAFE_AAD_COMPONENT_ID, } from "../core/components/ids.js";
+import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_BLOSSOM_IMAGE_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID, SAFE_AAD_COMPONENT_ID, } from "../core/components/ids.js";
 import { validateAddProposalAccountIdentityProofs, validateUpdateProposalAccountIdentityProofs, } from "../core/components/integrity.js";
 import { decodeMessageRetentionV1 } from "../core/components/message-retention.js";
 import { decodeNostrRoutingV1 } from "../core/components/nostr-routing.js";
@@ -22,7 +23,7 @@ function toLeafIndex(index) {
  * An AppDataUpdate for an id outside this table is opaque to the library and
  * left to the application (`app-components/README.md` "Unknown Data").
  */
-const COMPONENT_PAYLOAD_DECODERS = new Map([
+export const COMPONENT_PAYLOAD_DECODERS = new Map([
     [APP_COMPONENTS_COMPONENT_ID, decodeComponentsList],
     [GROUP_PROFILE_COMPONENT_ID, decodeGroupProfileV1],
     [GROUP_ADMIN_POLICY_COMPONENT_ID, decodeAdminPolicyV1],
@@ -30,6 +31,7 @@ const COMPONENT_PAYLOAD_DECODERS = new Map([
     [GROUP_MESSAGE_RETENTION_COMPONENT_ID, decodeMessageRetentionV1],
     [AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, decodeAgentTextStreamQuicPolicyV1],
     [GROUP_AVATAR_URL_COMPONENT_ID, decodeGroupAvatarUrlV1],
+    [GROUP_BLOSSOM_IMAGE_COMPONENT_ID, decodeGroupBlossomImageV1],
     [GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, decodeEncryptedMediaPolicyV1],
     [GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, decodeEncryptedMediaPolicyV2],
     [GROUP_LIFECYCLE_COMPONENT_ID, decodeGroupLifecycleV1],
@@ -198,6 +200,82 @@ export function validatePreApplyProposals(proposals, ciphersuiteId, requiredIds 
     return undefined;
 }
 /**
+ * Why a proposal's SENDER may not make it, or `undefined` when it may.
+ *
+ * Mirrors MDK `authorize_proposal`, which runs for every standalone proposal
+ * against its source epoch and again for every proposal a commit carries
+ * (by reference or inline), always against the proposal's own authenticated
+ * sender rather than the committer:
+ *
+ * - SelfRemove: any member except an active admin (an admin drops admin first);
+ * - Add, Remove, Update, GroupContextExtensions and AppDataUpdate: active
+ *   admins only. In v1 the only standalone proposal a non-admin may send is
+ *   SelfRemove (`protocol-core/group-messaging.md` "Commit authorization");
+ * - a lifecycle (`0x800c`) AppDataUpdate must be inline in the commit that
+ *   realizes it, so it is never valid standalone or by reference;
+ * - PreSharedKey, ReInit, ExternalInit and any other type: unsupported.
+ *
+ * Without this, a non-admin's standalone Remove or AppDataUpdate was staged
+ * and then bundled by reference into the next commit a marmot-ts admin made;
+ * MDK rejects that commit (`authorize_staged_commit_proposals`) and the group
+ * splits.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `authorize_proposal`
+ * @see refs/marmot/app-components/README.md "Authorization Evaluation"
+ */
+export function proposalSenderViolation(proposal, senderIsAdmin, standalone) {
+    switch (proposal.proposalType) {
+        case selfRemoveProposalType:
+            return senderIsAdmin
+                ? "self_remove sender is an active admin"
+                : undefined;
+        case appDataUpdateProposalType:
+            if (!senderIsAdmin)
+                return "app_data_update sender is not an admin";
+            if (standalone &&
+                "appDataUpdate" in proposal &&
+                proposal.appDataUpdate.componentId === GROUP_LIFECYCLE_COMPONENT_ID)
+                return "group lifecycle update must be inline";
+            return undefined;
+        case defaultProposalTypes.add:
+        case defaultProposalTypes.remove:
+        case defaultProposalTypes.update:
+        case defaultProposalTypes.group_context_extensions:
+            return senderIsAdmin
+                ? undefined
+                : `proposal type ${proposal.proposalType} sender is not an admin`;
+        default:
+            return `proposal type ${proposal.proposalType} is not supported`;
+    }
+}
+/** Whether the member at `leafIndex` is an active admin; `undefined` if unreadable. */
+function leafIsAdmin(ratchetTree, adminPubkeys, leafIndex) {
+    if (leafIndex === undefined)
+        return undefined;
+    try {
+        return adminPubkeys.includes(getCredentialPubkey(getCredentialFromLeafIndex(ratchetTree, toLeafIndex(Number(leafIndex)))));
+    }
+    catch {
+        return undefined;
+    }
+}
+/**
+ * The first proposal-sender violation in `proposals`, each judged against its
+ * own sender in the state whose `ratchetTree` and admin set are given (the
+ * proposal's source epoch, which for a commit is the candidate parent).
+ */
+export function findProposalSenderViolation(proposals, ratchetTree, adminPubkeys, standalone) {
+    for (const { proposal, senderLeafIndex } of proposals) {
+        const isAdmin = leafIsAdmin(ratchetTree, adminPubkeys, senderLeafIndex);
+        if (isAdmin === undefined)
+            return "proposal sender is not a current member";
+        const violation = proposalSenderViolation(proposal, isAdmin, standalone);
+        if (violation)
+            return violation;
+    }
+    return undefined;
+}
+/**
  * Build an incoming-message callback that enforces
  * `refs/marmot/protocol-core/group-messaging.md` "admin-only commits".
  *
@@ -225,30 +303,21 @@ export function createAdminCommitPolicyCallback(args) {
             // time by the tree-diff adapter (`validateCommitAccountIdentityProofs`)
             // as defence in depth.
             return validatePreApplyProposals([incoming.proposal], ciphersuiteId) ||
+                findProposalSenderViolation([incoming.proposal], ratchetTree, adminPubkeys, true) ||
                 validateUpdateProposalAccountIdentityProofs([incoming.proposal], ratchetTree, ciphersuiteId)
                 ? "reject"
                 : "accept";
         }
         if (validatePreApplyProposals(incoming.proposals, ciphersuiteId, requiredIds))
             return "reject";
-        // An admin MUST drop admin before self-removing (member-departure.md), so a
-        // self_remove whose sender (the leaver) is still an active admin is invalid.
-        // Checked before the admin short-circuit below, so even an admin committer
-        // cannot splice in an admin's self_remove.
-        for (const { proposal, senderLeafIndex } of incoming.proposals) {
-            if (proposal.proposalType !== selfRemoveProposalType)
-                continue;
-            if (senderLeafIndex === undefined)
-                return "reject";
-            try {
-                const leaverPubkey = getCredentialPubkey(getCredentialFromLeafIndex(ratchetTree, toLeafIndex(Number(senderLeafIndex))));
-                if (adminPubkeys.includes(leaverPubkey))
-                    return "reject";
-            }
-            catch {
-                return "reject";
-            }
-        }
+        // Every carried proposal is re-authorized against its OWN sender in the
+        // parent epoch (MDK `authorize_staged_commit_proposals`): a by-reference
+        // proposal keeps its original proposer, an inline one is the committer's.
+        // Checked before the admin short-circuit below, so an admin committer
+        // cannot launder a non-admin's Remove or AppDataUpdate, nor an admin's
+        // self_remove (an admin MUST drop admin before leaving).
+        if (findProposalSenderViolation(incoming.proposals, ratchetTree, adminPubkeys, false))
+            return "reject";
         const senderLeafIndexUnknown = incoming.senderLeafIndex;
         if (senderLeafIndexUnknown === undefined)
             return "reject";

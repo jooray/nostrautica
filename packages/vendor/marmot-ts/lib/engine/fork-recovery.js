@@ -2,10 +2,11 @@
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { bytesToBase64, contentTypes, encode, getAppDataDictionary, getCredentialFromLeafIndex, mlsMessageEncoder, processMessage, proposalOrRefTypes, wireformats, senderTypes, } from "../vendor/ts-mls/index.js";
 import { marmotAuthService } from "../core/auth-service.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
 import { getAppComponents } from "../core/components/dictionary.js";
 import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, } from "../core/components/ids.js";
 import { validateAdminLeafCoupling, validateAppComponentIntegrity, validateCommitAccountIdentityProofs, validateCommitLegality, } from "../core/components/integrity.js";
-import { commitDigest, compareBranchScores, DEFAULT_CONVERGENCE_POLICY, isWitnessEligible, scoreBranch, selectCanonicalBranch, } from "../core/convergence.js";
+import { commitDigest, commitOrderingPriority, compareBranchScores, DEFAULT_CONVERGENCE_POLICY, isWitnessEligible, scoreBranch, selectCanonicalBranch, } from "../core/convergence.js";
 import { getCredentialPubkey } from "../core/credential.js";
 import { getGroupMemberPubkeys } from "../core/group-members.js";
 import { deserializeClientState, serializeClientState, } from "../core/client-state.js";
@@ -229,6 +230,9 @@ export async function resolveCandidateParent(params) {
             aad: new Uint8Array(),
         };
         const rebuilt = proposalsFromPublicCommit(parent, message);
+        const priority = rebuilt
+            ? commitOrderingPriority(rebuilt.proposals)
+            : (known.priority ?? "ordinary");
         let outcome;
         try {
             outcome = rebuilt
@@ -245,7 +249,7 @@ export async function resolveCandidateParent(params) {
         }
         switch (outcome.kind) {
             case "legal":
-                return { kind: "resolved", result };
+                return { kind: "resolved", result, priority };
             case "violation":
                 return {
                     kind: "rejected",
@@ -265,6 +269,7 @@ export async function resolveCandidateParent(params) {
             context: {
                 cipherSuite: ciphersuite,
                 authService: marmotAuthService,
+                clientConfig: defaultMarmotClientConfig,
                 externalPsks: {},
             },
             state: parent,
@@ -292,7 +297,11 @@ export async function resolveCandidateParent(params) {
         });
         switch (outcome.kind) {
             case "legal":
-                return { kind: "resolved", result };
+                return {
+                    kind: "resolved",
+                    result,
+                    priority: commitOrderingPriority(capturedCommit.proposals),
+                };
             case "violation":
                 return {
                     kind: "rejected",
@@ -403,7 +412,7 @@ export class ForkRecovery {
             }
             return out;
         };
-        const explore = async (state, tipMessage, seen, chain, witnesses) => {
+        const explore = async (state, tipMessage, seen, chain, witnesses, tipPriority) => {
             const accumulated = [...witnesses, ...(await witnessesAt(state))];
             let extended = false;
             let branchDeferred = false;
@@ -471,6 +480,7 @@ export class ForkRecovery {
                             tipEpoch: forkEpoch + chain.length + 1,
                             tipDigest: digest,
                             tipCommitter: hexToBytes(terminal.actorPubkey),
+                            tipPriority: resolution.priority,
                             appWitnesses: accumulated,
                         };
                         tips.set(branch, next.newState);
@@ -495,7 +505,7 @@ export class ForkRecovery {
                     commitDigest: commitDigest(commitBytes),
                     childSnapshot: serializeClientState(next.newState),
                 });
-                await explore(next.newState, message, new Set([...seen, tag]), [...chain, { parent: state, message, child: next.newState }], accumulated);
+                await explore(next.newState, message, new Set([...seen, tag]), [...chain, { parent: state, message, child: next.newState }], accumulated, resolution.priority);
             }
             if (!extended && !branchDeferred && tipMessage !== undefined) {
                 // A removed receiver's ts-mls tombstone retains its parent epoch even
@@ -506,6 +516,7 @@ export class ForkRecovery {
                     forkEpoch,
                     tipEpoch,
                     tipDigest: this.#commitDigestOf(tipMessage),
+                    tipPriority,
                     tipCommitter: (() => {
                         const parent = chain.at(-1)?.parent;
                         if (!parent)
@@ -591,6 +602,7 @@ export class ForkRecovery {
             knownNextStates.set(bytesToHex(this.#commitDigestOf(msg)), {
                 parentTag: bytesToHex(parent.confirmationTag),
                 state: deserializeClientState(serializeClientState(next)),
+                priority: structural.ownCommitStamp.priority,
             });
         }
         const { branches, tips, chains, edges, rejected } = await this.#buildBranches(root, [...ours, ...pool], encrypted, witnessEnvelopes, adminCallbackFor, knownNextStates, terminalCandidates);
@@ -612,10 +624,12 @@ export class ForkRecovery {
                     ? "witness_quorum_met"
                     : winnerScore.appWitnessScore !== runner.appWitnessScore
                         ? "app_witness_score"
-                        : bytesToHex(winnerScore.tipCommitter) !==
-                            bytesToHex(runner.tipCommitter)
-                            ? "tip_committer"
-                            : "tip_digest"
+                        : winnerScore.tipPriority !== runner.tipPriority
+                            ? "tip_priority"
+                            : bytesToHex(winnerScore.tipCommitter) !==
+                                bytesToHex(runner.tipCommitter)
+                                ? "tip_committer"
+                                : "tip_digest"
             : "only_candidate";
         const decision = {
             selectedBranchId: bytesToHex(winnerTip.confirmationTag),
@@ -676,6 +690,7 @@ export async function collectWitnessesAt(params) {
                     context: {
                         cipherSuite: ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                         externalPsks: {},
                     },
                     state,

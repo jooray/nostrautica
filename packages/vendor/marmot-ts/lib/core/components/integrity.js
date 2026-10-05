@@ -1,10 +1,11 @@
 /** @module @category Core - App Components */
-import { appDataUpdateProposalType, defaultProposalTypes, getAppDataDictionary, getCredentialFromLeafIndex, } from "../../vendor/ts-mls/index.js";
+import { appDataDictionaryExtensionType, appDataUpdateProposalType, defaultExtensionTypes, defaultProposalTypes, getAppDataDictionary, makeAppDataDictionaryExtension, getCredentialFromLeafIndex, nodeTypes, } from "../../vendor/ts-mls/index.js";
 import { getAdminPolicy, getAppComponents } from "./dictionary.js";
 import { getGroupMemberPubkeys } from "../group-members.js";
 import { getCredentialPubkey } from "../credential.js";
-import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, } from "./ids.js";
+import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, } from "./ids.js";
 import { bytesEqual } from "./bytes.js";
+import { decodeComponentsList } from "./app-components-list.js";
 import { AccountIdentityProofError, getGroupProfileSupport, validateKeyPackageAccountIdentityProof, validateLeafAccountIdentityProof, } from "./account-identity-proof.js";
 import { diffChangedLeaves } from "./tree-diff.js";
 import { classifyChangedLeaf, } from "./leaf-replacement.js";
@@ -624,12 +625,184 @@ export function validateUpdateProposalAccountIdentityProofs(proposals, ratchetTr
  * @see refs/mdk/crates/cgka-engine/src/account_identity_proof.rs `validate_staged_commit_account_identity_proofs`
  * @see refs/marmot/app-components/account-identity-proof-v2.md "Validation"
  */
+/**
+ * The GroupContext extensions a commit produces, rebuilt from its proposals,
+ * for a receiver the commit removes.
+ *
+ * ts-mls stops processing once it sees that the commit removes the local leaf:
+ * the returned tombstone has the post-commit tree but keeps the PARENT
+ * GroupContext. Checking that pair against the resulting-epoch invariants is
+ * wrong. A commit that removes an admin also drops it from the admin policy,
+ * but the tombstone still lists it while its leaf is gone, so the removed admin
+ * reported an admin-leaf-coupling violation, rejected its own removal and kept
+ * presenting the group as active. MDK (OpenMLS) stages the full resulting
+ * context even for a removed receiver.
+ *
+ * Applies a GroupContextExtensions replacement, then every AppDataUpdate in
+ * commit order to the dictionary (last update wins, removals delete the entry,
+ * new entries are inserted in component-id order), mirroring ts-mls
+ * `applyAppDataUpdates`.
+ */
+function projectedRemovedReceiverExtensions(parentExtensions, proposals) {
+    let extensions = parentExtensions;
+    for (const proposal of proposals)
+        if (proposal.proposalType === defaultProposalTypes.group_context_extensions &&
+            "groupContextExtensions" in proposal)
+            extensions = proposal.groupContextExtensions.extensions;
+    const updates = proposals.flatMap((proposal) => proposal.proposalType === appDataUpdateProposalType &&
+        "appDataUpdate" in proposal
+        ? [proposal.appDataUpdate]
+        : []);
+    if (updates.length === 0)
+        return extensions;
+    const dictionary = [...(getAppDataDictionary(extensions) ?? [])];
+    for (const update of updates) {
+        const index = dictionary.findIndex((entry) => entry.componentId === update.componentId);
+        if (update.operation === "remove") {
+            if (index !== -1)
+                dictionary.splice(index, 1);
+            continue;
+        }
+        if (index !== -1) {
+            dictionary[index] = {
+                componentId: update.componentId,
+                data: update.update,
+            };
+            continue;
+        }
+        const insertAt = dictionary.findIndex((entry) => entry.componentId > update.componentId);
+        dictionary.splice(insertAt === -1 ? dictionary.length : insertAt, 0, {
+            componentId: update.componentId,
+            data: update.update,
+        });
+    }
+    const replacement = makeAppDataDictionaryExtension(dictionary);
+    const position = extensions.findIndex((extension) => extension.extensionType === appDataDictionaryExtensionType);
+    return position === -1
+        ? [...extensions, replacement]
+        : extensions.map((extension, i) => i === position ? replacement : extension);
+}
+/** MLS default extension (1..=5) and proposal (1..=7) types every leaf supports implicitly. */
+const isDefaultMlsExtensionType = (type) => type >= 1 && type <= 5;
+const isDefaultMlsProposalType = (type) => type >= 1 && type <= 7;
+/**
+ * Component ids with a GroupContext state format in the current profile: the
+ * protocol-owned registry minus the leaf-only account proof (`0x8009`) and the
+ * ephemeral-only multi-device join authorization (`0x800a`). A required
+ * component outside this set is unsupported. Mirrors MDK
+ * `is_known_group_component` over `PROTOCOL_OWNED_APP_COMPONENT_IDS`.
+ */
+const KNOWN_GROUP_COMPONENT_IDS = new Set([
+    0x0001, 0x0002, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006, 0x8007,
+    0x8008, 0x800b, 0x800c,
+]);
+/** The frozen encrypted-media v1 component, not permitted in the current profile. */
+const ENCRYPTED_MEDIA_V1_COMPONENT_ID = 0x8008;
+/**
+ * The current-profile invariants of a commit's COMPLETE resulting state,
+ * mirroring MDK `validate_current_profile_invariants_for_staged_commit`, which
+ * every MDK seam (send, ingest, convergence replay) runs before a commit can
+ * become canonical:
+ *
+ * - `required_capabilities` exists and requires `app_data_dictionary` and
+ *   `app_data_update`;
+ * - the dictionary exists, its `app_components` list decodes, it requires
+ *   admin-policy (`0x8003`) and the account proof (`0x8009`), and neither
+ *   requires nor carries the frozen encrypted-media v1 (`0x8008`);
+ * - every required component other than `0x8009` is a known group component
+ *   and has GroupContext state;
+ * - EVERY resulting leaf advertises each required non-default MLS extension,
+ *   proposal and credential type, and every required component id in its own
+ *   `app_components` support list.
+ *
+ * ts-mls checks the MLS `required_capabilities` only for leaves a commit adds,
+ * and knows nothing about Marmot app components. Without this check marmot-ts
+ * applied commits MDK rejects (an Add of a KeyPackage that does not advertise
+ * a required component, an AppDataUpdate that requires a component some
+ * member lacks), and the group split.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `validate_current_profile_group_context`, `validate_resulting_leaf_capabilities`
+ * @see refs/marmot/app-components/README.md
+ */
+export function validateResultingProfileInvariants(args) {
+    const fail = (detail) => ({
+        reason: "component-integrity",
+        detail: `invalid resulting state: ${detail}`,
+    });
+    const requiredExtension = args.resultingExtensions.find((extension) => extension.extensionType === defaultExtensionTypes.required_capabilities);
+    if (!requiredExtension)
+        return fail("missing required_capabilities");
+    const required = requiredExtension.extensionData;
+    if (!required.extensionTypes.includes(appDataDictionaryExtensionType))
+        return fail("app_data_dictionary is not a required extension");
+    if (!required.proposalTypes.includes(appDataUpdateProposalType))
+        return fail("app_data_update is not a required proposal");
+    const dictionary = getAppDataDictionary(args.resultingExtensions);
+    if (!dictionary)
+        return fail("missing app_data_dictionary");
+    let requiredComponents;
+    try {
+        requiredComponents = getAppComponents(args.resultingExtensions) ?? [];
+    }
+    catch {
+        return fail("app_components list does not decode");
+    }
+    const hasState = (id) => dictionary.some((entry) => entry.componentId === id);
+    if (requiredComponents.includes(ENCRYPTED_MEDIA_V1_COMPONENT_ID) ||
+        hasState(ENCRYPTED_MEDIA_V1_COMPONENT_ID))
+        return fail("frozen encrypted-media v1 component 0x8008 is not permitted");
+    for (const mandatory of [
+        GROUP_ADMIN_POLICY_COMPONENT_ID,
+        ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
+    ])
+        if (!requiredComponents.includes(mandatory))
+            return fail(`missing mandatory component requirement 0x${mandatory.toString(16)}`);
+    for (const id of requiredComponents) {
+        if (id === ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)
+            continue;
+        if (!KNOWN_GROUP_COMPONENT_IDS.has(id))
+            return fail(`unsupported required component 0x${id.toString(16)}`);
+        if (!hasState(id))
+            return fail(`required component 0x${id.toString(16)} has no state`);
+    }
+    for (const node of args.resultingTree) {
+        if (!node || node.nodeType !== nodeTypes.leaf)
+            continue;
+        const leaf = node.leaf;
+        const capabilities = leaf.capabilities ?? {
+            extensions: [],
+            proposals: [],
+            credentials: [],
+        };
+        const supportsMls = required.extensionTypes.every((type) => isDefaultMlsExtensionType(type) ||
+            capabilities.extensions.includes(type)) &&
+            required.proposalTypes.every((type) => isDefaultMlsProposalType(type) ||
+                capabilities.proposals.includes(type)) &&
+            required.credentialTypes.every((type) => capabilities.credentials.includes(type));
+        if (!supportsMls)
+            return fail("a member lacks a required MLS capability");
+        let advertised = [];
+        try {
+            const list = getAppDataDictionary(leaf.extensions)?.find((entry) => entry.componentId === APP_COMPONENTS_COMPONENT_ID);
+            advertised = list ? decodeComponentsList(list.data) : [];
+        }
+        catch {
+            return fail("a member's app_components list does not decode");
+        }
+        if (requiredComponents.some((id) => !advertised.includes(id)))
+            return fail("a member lacks a required app component");
+    }
+    return undefined;
+}
 export function validateCommitLegality(args) {
     const proposalsWithSenders = args.proposals.map((item) => "proposal" in item
         ? item
         : { proposal: item, senderLeafIndex: undefined });
     const proposals = proposalsWithSenders.map(({ proposal }) => proposal);
     const appDataUpdateOps = collectAppDataUpdateOps(proposals);
+    const resultingExtensions = args.resultingState.groupActiveState?.kind === "removedFromGroup"
+        ? projectedRemovedReceiverExtensions(args.parentState.groupContext.extensions, proposals)
+        : args.resultingState.groupContext.extensions;
     // The `app_components` (0x0001) bytes are attacker-influenceable: an admin
     // can land an AppDataUpdate writing arbitrary bytes to that id (Rule 3
     // accepts it because the change IS backed by that commit's own op, and
@@ -657,7 +830,7 @@ export function validateCommitLegality(args) {
     }
     const integrityViolation = validateAppComponentIntegrity({
         currentExtensions: args.parentState.groupContext.extensions,
-        resultingExtensions: args.resultingState.groupContext.extensions,
+        resultingExtensions,
         appDataUpdateOps,
         requiredIds,
     });
@@ -695,11 +868,25 @@ export function validateCommitLegality(args) {
     const resultingMemberAccounts = getGroupMemberPubkeys(args.resultingState);
     const adminLeafCouplingViolation = validateAdminLeafCoupling({
         currentExtensions: args.parentState.groupContext.extensions,
-        resultingExtensions: args.resultingState.groupContext.extensions,
+        resultingExtensions,
         resultingMemberAccounts,
     });
     if (adminLeafCouplingViolation)
         return { kind: "violation", violation: adminLeafCouplingViolation };
+    // MDK selects the profile from the parent and checks the current-profile
+    // invariants of the whole resulting state; other profiles are refused
+    // elsewhere (`profileSupport`).
+    if (getGroupProfileSupport(args.parentState.groupContext.extensions).kind ===
+        "supported") {
+        // A removed receiver's tombstone keeps the parent GroupContext, so check
+        // the projected extensions (see projectedRemovedReceiverExtensions).
+        const profileViolation = validateResultingProfileInvariants({
+            resultingExtensions,
+            resultingTree: args.resultingState.ratchetTree,
+        });
+        if (profileViolation)
+            return { kind: "violation", violation: profileViolation };
+    }
     if (undecidableDetail !== undefined)
         return { kind: "undecidable", detail: undecidableDetail };
     return { kind: "legal" };

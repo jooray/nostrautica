@@ -33,6 +33,17 @@ export declare class CommitLegalityError extends Error {
     readonly violation: CommitIntegrityViolation;
     constructor(violation: CommitIntegrityViolation);
 }
+/**
+ * Thrown before publishing a standalone proposal its sender is not authorized
+ * to make (`app-components/admin-policy-v1.md`, `protocol-core/group-messaging.md`):
+ * a non-admin's Add, Remove, Update, GroupContextExtensions or AppDataUpdate,
+ * an admin's SelfRemove, or an unsupported proposal type. Every peer would
+ * refuse it.
+ */
+export declare class ProposalAuthorizationError extends Error {
+    readonly reason: string;
+    constructor(reason: string);
+}
 /** Typed ordinary-outbound refusal while irreversible terminal intent is pending. */
 export declare class DisbandingError extends Error {
     readonly reason: "disbanding";

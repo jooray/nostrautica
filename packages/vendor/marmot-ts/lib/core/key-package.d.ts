@@ -24,10 +24,11 @@ export type GenerateKeyPackageOptions = {
     lifetime?: Lifetime;
     extensions?: CustomExtension[];
     /**
-     * Whether to mark this KeyPackage as reusable using the MLS `last_resort` extension.
+     * Whether to mark this KeyPackage as reusable (last-resort).
      *
-     * - `true`: include the `last_resort` KeyPackage extension (reusable; helps with race windows)
-     * - `false`: omit the extension (single-use; private init_key is expected to be consumed)
+     * - `true`: add the empty `last_resort_key_package` component (`0x0004`) to an
+     *   `app_data_dictionary` KeyPackage extension (reusable; helps with race windows)
+     * - `false`: omit the marker (single-use; private init_key is expected to be consumed)
      *
      * Default: `true` for backwards compatibility with existing marmot-ts behavior.
      */

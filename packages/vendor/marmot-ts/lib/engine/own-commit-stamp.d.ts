@@ -1,4 +1,5 @@
-export type CommitOrderingPriority = "privileged" | "ordinary";
+import type { CommitOrderingPriority } from "../core/convergence.js";
+export type { CommitOrderingPriority };
 /** Evidence captured while a locally-authored commit is still staged. */
 export interface OwnCommitConvergenceStamp {
     /** Authenticated Marmot account identity of the committer. */

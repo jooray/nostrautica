@@ -3,10 +3,9 @@ import { bytesToHex } from "@noble/hashes/utils.js";
 import { encode, mlsMessageEncoder, protocolVersions, wireformats, } from "../vendor/ts-mls/index.js";
 import { encodeContent } from "../utils/encoding.js";
 import { unixNow } from "../utils/nostr.js";
-import { isValidRelayUrl, normalizeRelayUrl } from "../utils/relay-url.js";
 import { isGreaseValue } from "./grease.js";
 import { calculateKeyPackageRef } from "./key-package.js";
-import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_APP_COMPONENTS_TAG, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, KEY_PACKAGE_RELAYS_TAG, } from "./protocol.js";
+import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_APP_COMPONENTS_TAG, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, } from "./protocol.js";
 import { SUPPORTED_APP_COMPONENT_IDS } from "./components/ids.js";
 /**
  * Creates an addressable key package event (kind 30443) from a key package.
@@ -18,7 +17,7 @@ export function createKeyPackageEvent(options) {
     return createKeyPackageEventInternal(options);
 }
 async function createKeyPackageEventInternal(options) {
-    const { keyPackage, relays, client } = options;
+    const { keyPackage, client } = options;
     // Publish the KeyPackage wrapped in an MLSMessage with wire_format
     // mls_key_package (RFC 9420 §6). The kind-30443 content is specified as the
     // serialized MLSMessage bytes (transports/nostr.md), mirroring the kind-444
@@ -54,7 +53,7 @@ async function createKeyPackageEventInternal(options) {
         }
     }
     // Filter out GREASE values from the extension types
-    // We only want to include real extension ids (e.g. last_resort, app_data_dictionary), not GREASE
+    // We only want to include real extension ids (e.g. app_data_dictionary), not GREASE
     const filteredExtensionTypes = extensionTypes.filter((hexValue) => {
         // Parse the hex value back to number to check if it's a GREASE value
         const extType = parseInt(hexValue);
@@ -86,13 +85,6 @@ async function createKeyPackageEventInternal(options) {
     // Add client tag if provided
     if (client)
         tags.push([KEY_PACKAGE_CLIENT_TAG, client]);
-    // Add relay tags if provided
-    if (relays && relays.length > 0) {
-        const validRelays = relays.filter(isValidRelayUrl).map(normalizeRelayUrl);
-        if (validRelays.length > 0) {
-            tags.push([KEY_PACKAGE_RELAYS_TAG, ...validRelays]);
-        }
-    }
     return {
         kind: ADDRESSABLE_KEY_PACKAGE_KIND,
         created_at: unixNow(),
