@@ -25,7 +25,9 @@ const fixture = JSON.parse(
   coordSkHex: string;
   group: { mlsGroupIdHex: string; nostrGroupIdHex: string };
   keyPackageEvent: Ev;
+  memberSkHex: string;
   coordinatorKv: Record<string, Record<string, string>>;
+  memberKeyPackageStore: Record<string, Record<string, string>>;
 };
 
 const RELAYS = ["wss://test.relay"];
@@ -84,6 +86,29 @@ describe("0x8009 flag day — retiring legacy MLS groups", () => {
     });
     await member.keyPackages.ensurePublished({ relays: RELAYS });
     expect(keyPackageProfile(network.events[0] as never)).toEqual({ current: true });
+  });
+
+  it("a device's stored 0.6.0 KeyPackage is flagged nonCurrent, so ensurePublished makes a fresh one", async () => {
+    // The app's retireLegacyState purges exactly these; this proves the flag is set
+    // on real legacy bytes, not just on a test double.
+    const sk = hexToBytes(fixture.memberSkHex);
+    const store = new Store(":memory:", sk);
+    for (const [k, v] of Object.entries(fixture.memberKeyPackageStore["key-package"]!)) store.marmotKvSet("key-package", k, v);
+    const stores = makeMarmotStores(store);
+    const network = new FakeNetwork();
+    const device = new MarmotClient({
+      signer: makeCoordinatorSigner(sk) as never,
+      network,
+      groupStateStore: stores.groupStateStore,
+      keyPackageStore: stores.keyPackageStore,
+      clientId: "web-legacy",
+    });
+    const listed = await device.keyPackages.list();
+    expect(listed).toHaveLength(1);
+    expect(listed[0]!.nonCurrent).toBe(true);
+    await device.keyPackages.ensurePublished({ relays: RELAYS, identifier: "web-legacy" });
+    expect(network.events).toHaveLength(1);
+    expect(keyPackageProfile(network.events[0] as never).current).toBe(true);
   });
 
   it("retires the legacy room and its state, then a fresh current group takes its place", async () => {
