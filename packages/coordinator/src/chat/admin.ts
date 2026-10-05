@@ -14,7 +14,7 @@
  * group and subscriptions when `isMarmotChatEnabled` holds.
  */
 import type { Store, MarmotChatLinkRow } from "../store/db.js";
-import type { ChatMls } from "./mls.js";
+import { keyPackageProfile, type ChatMls } from "./mls.js";
 import {
   verifyChatDeviceProof,
   MAX_CHAT_KEYS_PER_ACCOUNT,
@@ -1132,7 +1132,11 @@ export class MarmotAdmin {
     const kps = (await this.fetchKeyPackages(coordinate, [w]).catch(() => [] as AnyEvent[]))
       .filter((kp) => kp.pubkey === w)
       .sort((a, b) => Number(b.created_at ?? 0) - Number(a.created_at ?? 0) || (a.id < b.id ? -1 : 1));
-    const kp = kps[0];
+    // Newest CURRENT (0x8009) KeyPackage first: one account can have several `d`
+    // slots (devices, clients), and an outdated one must not shadow a usable one.
+    // With only legacy ones, the newest still goes through and is refused below
+    // as ineligible, which tells the user to update White Noise.
+    const kp = kps.find((k) => keyPackageProfile(k).current) ?? kps[0];
     if (!kp) {
       this.store.countChatLinkRequest(coordinate, accountPubkey, w, windowStartedAt, windowCount, now);
       this.log(`[chat] REJECTED 21607 link ${who}: no kind-30443 key package found for the key`);
