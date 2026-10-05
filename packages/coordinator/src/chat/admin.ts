@@ -236,14 +236,16 @@ export class MarmotAdmin {
       await this.syncAdmins(opts.coordinate);
       return { mlsGroupIdHex: existing.mls_group_id, nostrGroupIdHex: existing.nostr_group_id };
     }
-    // Create with the coordinator + any already-approved organizer chat devices
-    // as admins (usually just the coordinator at creation time; organizers are
-    // promoted as they approve/attest — see syncAdmins).
+    // Create with the coordinator as the only admin. Organizer chat devices are
+    // not members of a brand-new group, and an admin must hold a member leaf
+    // (MDK admin-leaf coupling): listing them here made every later commit,
+    // invites included, illegal. They are promoted once their Add lands
+    // (syncAdmins after a successful add).
     const ids = await this.mls.createGroup({
       name: opts.name,
       description: opts.description,
       relays: opts.relays,
-      adminPubkeys: opts.adminPubkeys ?? this.desiredAdminPubkeys(opts.coordinate),
+      adminPubkeys: opts.adminPubkeys ?? [this.coordinatorPubkey],
     });
     this.store.upsertMarmotGroup({
       coordinate: opts.coordinate,
@@ -846,6 +848,12 @@ export class MarmotAdmin {
       await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
       this.store.markKpConsumed(coordinate, kp.id);
       this.log(`[chat] added ${kp.pubkey.slice(0, 8)} to ${coordinate} from 30443 ${kp.id.slice(0, 8)}`);
+      // An organizer device can only be promoted once it holds a leaf.
+      if (this.desiredAdminPubkeys(coordinate).includes(kp.pubkey)) {
+        await this.syncAdmins(coordinate).catch((e) =>
+          this.log(`[chat] promoting ${kp.pubkey.slice(0, 8)} in ${coordinate} failed: ${String(e)}`),
+        );
+      }
       return true;
     } catch (e) {
       // A single malformed/incompatible key package (e.g. a proof version our

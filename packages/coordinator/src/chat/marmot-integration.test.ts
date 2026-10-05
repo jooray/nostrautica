@@ -130,6 +130,58 @@ describe("marmot-ts real round-trip (coordinator admin bot)", () => {
     30_000,
   );
 
+  // Prod 2026-10-05 (0.9.0): every commit in an event room failed with "N admin
+  // key(s) have no member leaf in the resulting epoch". The new library enforces
+  // MDK's admin-leaf coupling: each admin must hold a member leaf. The room was
+  // created listing organizer chat devices that had not joined yet, and removing
+  // an admin device was a plain Remove that left it in the admin policy. So no
+  // invite could commit, and the organizer was stuck in a remove/re-add loop.
+  it(
+    "promotes an organizer device only once it holds a leaf, and demotes it in the same commit that removes it",
+    async () => {
+      const network = new FakeNetwork();
+      const coordSk = generateSecretKey();
+      const coordPub = getPublicKey(coordSk);
+      const { mls } = createMarmotClientMls({ store: new Store(":memory:", coordSk), coordSk, network });
+      const ids = await mls.createGroup({ name: "Devcon chat", description: "", relays: RELAYS });
+      const gid = ids.mlsGroupIdHex;
+
+      const join = async () => {
+        const sk = generateSecretKey();
+        const pub = getPublicKey(sk);
+        await makeMemberClient(sk, network).keyPackages.ensurePublished({ relays: RELAYS });
+        const [kp] = await network.request(RELAYS, { kinds: [30443], authors: [pub] });
+        return { pub, kp };
+      };
+
+      const organizer = await join();
+      // Desired before the device has joined: a no-op, not a poisoned admin set.
+      await mls.setAdmins(gid, [coordPub, organizer.pub]);
+      expect(await mls.getAdmins(gid)).toEqual([coordPub]);
+
+      // So other members can still be added.
+      const alice = await join();
+      await mls.invite(gid, alice.kp as never);
+      expect(await mls.isMember(gid, alice.pub)).toBe(true);
+
+      // Once the organizer device holds a leaf it is promoted.
+      await mls.invite(gid, organizer.kp as never);
+      await mls.setAdmins(gid, [coordPub, organizer.pub]);
+      expect((await mls.getAdmins(gid)).sort()).toEqual([coordPub, organizer.pub].sort());
+
+      // Removing it drops it from the admin policy in the same commit.
+      await mls.removePubkeys(gid, [organizer.pub]);
+      expect(await mls.isMember(gid, organizer.pub)).toBe(false);
+      expect(await mls.getAdmins(gid)).toEqual([coordPub]);
+
+      // And the room keeps working afterwards.
+      const bob = await join();
+      await mls.invite(gid, bob.kp as never);
+      expect(await mls.isMember(gid, bob.pub)).toBe(true);
+    },
+    60_000,
+  );
+
   // NIP §10.5: the external-client link confirmation group, through the real
   // engine. The external key joins from the coordinator's Welcome and decrypts the
   // one kind-9 message carrying the code — the whole proof of possession rests on

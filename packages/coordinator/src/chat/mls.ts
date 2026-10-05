@@ -333,6 +333,9 @@ export class MarmotClientMls implements ChatMls {
         extraProposals.push(...removes);
       }
       if (extraProposals.length === 0) return;
+      // No admin-policy update here: the library's commit path already drops a
+      // removed admin from the policy in the same commit (adding our own made it
+      // "multiple AppDataUpdate operations for 0x8003").
       await this.client.groups.commit(mlsGroupIdHex, { extraProposals });
     });
   }
@@ -405,7 +408,14 @@ export class MarmotClientMls implements ChatMls {
       // re-encodes it whole), so `adminPubkeys` must already be the COMPLETE
       // desired set including the coordinator. No-op when it's unchanged
       // (order-insensitive) so a re-sync doesn't spend an epoch for nothing.
-      const want = [...new Set(adminPubkeys)];
+      // Only keys that hold a member leaf can be admins: the resulting epoch of
+      // any commit must not list an admin without a leaf (MDK admin-leaf
+      // coupling), so a desired-but-not-yet-joined organizer device is promoted
+      // later, after its Add lands. Listing it early made EVERY later commit
+      // illegal ("N admin key(s) have no member leaf"), including invites.
+      const want = [...new Set(adminPubkeys)].filter(
+        (k) => getPubkeyLeafNodes(group.state, k).length > 0,
+      );
       if (want.length === current.length && want.every((k) => current.includes(k))) return;
       const ctx = group.session.proposalContext();
       const proposals = await proposeUpdateMetadata({ adminPubkeys: want })(ctx);
