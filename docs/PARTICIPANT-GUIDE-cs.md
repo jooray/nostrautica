@@ -366,7 +366,7 @@ nespoléhejte) a připojení do skupiny může chvíli trvat, nebo občas potře
 nový pokus, než se začnou objevovat zprávy. Pokud záložka zůstane zaseknutá na
 „nastavuje se“, dejte tomu pár minut a otevřete ji znovu.
 
-**Chatujte i z White Noise.** V části **Zařízení v chatu** můžete propojit účet
+**Chatujte i z White Noise nebo jiného klienta Marmot.** V části **Zařízení v chatu** můžete propojit účet
 ve White Noise a číst a odpovídat v místnosti i z aplikace White Noise v
 telefonu. Zadejte jeho npub, nebo klepněte na **Použít npub mého účtu**, pokud
 White Noise používá stejný klíč, kterým jste se přihlásili sem. U vlastního npub

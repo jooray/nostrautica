@@ -71,7 +71,7 @@ An approved attendee can link the identity of an external Marmot client, typical
 White Noise npub, to their account for one event. The coordinator then adds that key
 to the event's group like any other device. The normative flow is NIP §10.5; in short:
 
-- **UI:** "Also chat from White Noise" sits under the chat's **Chat devices** list
+- **UI:** "Also chat from White Noise or another Marmot client" sits under the chat's **Chat devices** list
   (`WhiteNoiseLinkCard.svelte`, logic in `chat/external-link.ts`). It takes an npub,
   nprofile or hex key, or fills in the account npub with one tap.
 - **Same key as the account:** a 21607 `op:"link"` is sealed by that key, which proves

@@ -399,7 +399,7 @@ Gruppe kann eine Weile dauern oder gelegentlich einen erneuten Versuch
 brauchen, bevor Nachrichten ankommen. Bleibt der Reiter bei „wird
 eingerichtet“ hängen, gib ihm ein paar Minuten und öffne ihn erneut.
 
-**Auch in White Noise chatten.** Unter **Chat-Geräte** kannst du ein
+**Auch in White Noise oder einem anderen Marmot-Client chatten.** Unter **Chat-Geräte** kannst du ein
 White-Noise-Konto verknüpfen und den Raum dann auch in der App White Noise auf
 deinem Handy lesen und beantworten. Gib dessen npub ein, oder tippe auf **npub
 meines Kontos verwenden**, wenn White Noise denselben Schlüssel nutzt, mit dem

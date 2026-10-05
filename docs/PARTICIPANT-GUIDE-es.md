@@ -377,7 +377,7 @@ tardar un poco, o de vez en cuando necesitar un reintento, antes de que
 empiecen a llegar los mensajes. Si la pestaña se queda atascada en
 "configurando", dale unos minutos y vuelve a abrirla.
 
-**Chatea también desde White Noise.** En **Dispositivos de chat** puedes
+**Chatea también desde White Noise u otro cliente Marmot.** En **Dispositivos de chat** puedes
 vincular una cuenta de White Noise para leer y responder la sala también desde
 la app White Noise en tu teléfono. Escribe su npub, o toca **Usar el npub de mi
 cuenta** si White Noise usa la misma clave con la que iniciaste sesión aquí.
