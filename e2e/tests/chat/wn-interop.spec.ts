@@ -188,7 +188,7 @@ test.describe.serial(WN_BIN && COORD_NPUB ? "white noise interop" : "white noise
 
   test("own-npub link: White Noise joins and messages flow both ways", async () => {
     test.setTimeout(240_000);
-    const card = alice.getByRole("group", { name: "Also chat from White Noise" });
+    const card = alice.getByRole("group", { name: "Also chat from White Noise or another Marmot client" });
     await card.getByRole("button", { name: "Use my account npub" }).click();
     await card.getByRole("button", { name: "Link", exact: true }).click();
     await expect(card.getByText(/Invite sent to White Noise/)).toBeVisible({ timeout: 30_000 });
@@ -202,7 +202,7 @@ test.describe.serial(WN_BIN && COORD_NPUB ? "white noise interop" : "white noise
 
   test("one-time-code link: confirmation group, code, then the event room", async () => {
     test.setTimeout(240_000);
-    const card = alice.getByRole("group", { name: "Also chat from White Noise" });
+    const card = alice.getByRole("group", { name: "Also chat from White Noise or another Marmot client" });
     const another = card.getByRole("button", { name: "Link another account" });
     if (await another.count()) await another.click();
     await card.getByLabel("White Noise npub").fill(nip19.npubEncode(wHex));
@@ -210,7 +210,7 @@ test.describe.serial(WN_BIN && COORD_NPUB ? "white noise interop" : "white noise
     await expect(card.getByText(/accept the invite/)).toBeVisible({ timeout: 30_000 });
 
     const confirmGroup = await acceptInvite(wHex, /confirm White Noise link/);
-    const code = await until("the code message", () => messagesText(wHex, confirmGroup).match(/\b[A-Z0-9]{4}-[A-Z0-9]{4}\b/)?.[0]);
+    const code = await until("the code message", () => messagesText(wHex, confirmGroup).match(/\b[A-Z0-9]{8}\b/)?.[0]);
     await card.getByLabel("Code from White Noise").fill(code);
     await card.getByRole("button", { name: "Confirm" }).click();
     await expect(card.getByText(/Invite sent to White Noise/)).toBeVisible({ timeout: 60_000 });

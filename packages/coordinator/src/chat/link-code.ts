@@ -59,12 +59,23 @@ export function chatLinkCodeMatches(
   return timingSafeEqual(got, Buffer.from(storedHash, "hex"));
 }
 
-/** The one message posted in the confirmation group. English only: the daemon has no locale. */
-export function chatLinkCodeMessage(code: string, ttlMinutes: number): string {
+/**
+ * The messages posted in the confirmation group, in order. English only: the
+ * daemon has no locale.
+ *
+ * The code goes in a message of its own, last, with nothing else in it: Marmot
+ * clients copy a whole message, so a code inside a sentence had to be pasted
+ * somewhere and trimmed by hand. Undashed, so the copy is exactly what to type
+ * (the app also accepts it with a dash or spaces).
+ */
+export function chatLinkCodeMessages(code: string, ttlMinutes: number): [string, string] {
   return [
-    `Your Nostrautica link code: ${formatChatLinkCode(code)}`,
-    "",
-    "Type this code into Nostrautica (event chat, \"Also chat from White Noise\") to finish linking this account to your event chat.",
-    `It expires in ${ttlMinutes} minutes. Don't share it with anyone. You can leave this group once you're done.`,
-  ].join("\n");
+    [
+      "Your Nostrautica link code is in the next message.",
+      "",
+      "Copy it into Nostrautica (event chat, \"Also chat from White Noise or another Marmot client\") to finish linking this account to your event chat.",
+      `It expires in ${ttlMinutes} minutes. Don't share it with anyone. You can leave this group once you're done.`,
+    ].join("\n"),
+    normalizeChatLinkCode(code),
+  ];
 }

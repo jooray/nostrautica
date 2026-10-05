@@ -5,7 +5,7 @@ import {
   formatChatLinkCode,
   hashChatLinkCode,
   chatLinkCodeMatches,
-  chatLinkCodeMessage,
+  chatLinkCodeMessages,
 } from "./link-code.js";
 
 const COORD = "31923:" + "e".repeat(64) + ":ev";
@@ -43,11 +43,12 @@ describe("link codes (NIP §10.5)", () => {
     expect(chatLinkCodeMatches("ABCD2345", "", COORD, A, W)).toBe(false);
   });
 
-  it("formats and phrases the message the external client shows", () => {
+  it("posts the instructions, then the code alone so it can be copied as-is", () => {
     expect(formatChatLinkCode("ABCD2345")).toBe("ABCD-2345");
-    const msg = chatLinkCodeMessage("ABCD2345", 30);
-    expect(msg).toContain("ABCD-2345");
-    expect(msg).toContain("30 minutes");
-    expect(msg).toMatch(/Don't share it/);
+    const [instructions, code] = chatLinkCodeMessages("ABCD2345", 30);
+    expect(instructions).toContain("30 minutes");
+    expect(instructions).toMatch(/Don't share it/);
+    expect(instructions).not.toContain("ABCD");
+    expect(code).toBe("ABCD2345");
   });
 });

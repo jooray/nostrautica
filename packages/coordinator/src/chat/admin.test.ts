@@ -1714,12 +1714,11 @@ describe("MarmotAdmin — linking an external Marmot client (White Noise)", () =
   function linkConfirm(code: string, chatPubkey = W): ChatKeyAttestationContent {
     return { v: 2, a: COORD, op: "link_confirm", chat_pubkey: chatPubkey, code };
   }
-  /** The code the coordinator posted in the confirmation group (the latest one). */
+  /** The code the coordinator posted in the confirmation group: the latest message, on its own. */
   function postedCode(mls: FakeMls): string {
     const last = mls.sent[mls.sent.length - 1];
-    const m = /code: ([A-Z0-9]{4}-[A-Z0-9]{4})/.exec(last?.content ?? "");
-    if (!m) throw new Error("no code posted");
-    return m[1]!;
+    if (!/^[A-Z0-9]{8}$/.test(last?.content ?? "")) throw new Error("no code posted");
+    return last!.content;
   }
 
   async function setup(opts: { kps?: AnyEvent[]; role?: "attendee" | "organizer" } = {}) {
@@ -1764,9 +1763,10 @@ describe("MarmotAdmin — linking an external Marmot client (White Noise)", () =
     expect(h.mls.createdNames[1]).toBe("Nostrautica: confirm White Noise link");
     expect(h.mls.admins.get("mls-2")).toEqual([COORDINATOR]);
     expect(await h.mls.isMember("mls-2", W)).toBe(true);
-    expect(h.mls.sent).toHaveLength(1);
-    expect(h.mls.sent[0]!.group).toBe("mls-2");
+    expect(h.mls.sent).toHaveLength(2);
+    expect(h.mls.sent.map((m) => m.group)).toEqual(["mls-2", "mls-2"]);
     expect(h.mls.sent[0]!.content).toMatch(/Don't share it/);
+    expect(h.mls.sent[1]!.content).toMatch(/^[A-Z0-9]{8}$/);
     // Not bound, not in the room, and the code is not stored in the clear.
     expect(h.store.getChatKey(COORD, W)).toBeUndefined();
     expect(await h.mls.isMember(EVENT_GROUP, W)).toBe(false);

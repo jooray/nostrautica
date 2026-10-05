@@ -26,7 +26,7 @@ import {
   generateChatLinkCode,
   hashChatLinkCode,
   chatLinkCodeMatches,
-  chatLinkCodeMessage,
+  chatLinkCodeMessages,
 } from "./link-code.js";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
@@ -1217,7 +1217,8 @@ export class MarmotAdmin {
         return false;
       }
       await this.mls.invite(confirmGroupId, kp); // Add commit + Welcome to W's 10050 inbox
-      await this.mls.sendText(confirmGroupId, chatLinkCodeMessage(code, Math.round(CHAT_LINK_TTL_MS / 60_000)));
+      for (const text of chatLinkCodeMessages(code, Math.round(CHAT_LINK_TTL_MS / 60_000)))
+        await this.mls.sendText(confirmGroupId, text);
     } catch (e) {
       this.log(`[chat] 21607 link ${who}: confirmation group setup FAILED: ${e instanceof Error ? e.message : e}`);
       if (confirmGroupId) await this.closeLink(coordinate, accountPubkey);
