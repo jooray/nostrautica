@@ -145,6 +145,7 @@ import { ProviderContractError } from "./providers/types.js";
 import { MarmotAdmin } from "./chat/admin.js";
 import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
+import { profilePicture } from "./chat/avatar.js";
 import { sanitizeRelayUrls, type RelayPolicy } from "./net/relay-urls.js";
 import {
   sanitizeLlmText,
@@ -683,6 +684,12 @@ interface EventState {
   maxTalkSec: number;
   /** Whether Marmot group chat is operative for this event (§1.3). */
   chat: boolean;
+  /**
+   * The newest applied E_id kind-0 (the event/community identity's profile), for
+   * the chat group's avatar: its `picture` is the event icon. Read when chat comes
+   * up and kept current by the chat subscription; unset for a chat-off event.
+   */
+  eidProfile?: { id: string; created_at: number; picture?: string };
   scoringCtx: EventContextForScoring;
   /** Newest applied 31600 config event id + timestamp (audit H5 replaceable ordering). */
   configEventId?: string;
@@ -5135,8 +5142,60 @@ export class Coordinator {
     // the room split silently. `ensureRelays` is additive and idempotent — it was
     // simply being handed the wrong list.
     await this.phase("chat:ensure-relays", () => this.marmot!.ensureRelays(state.coordinate, chatRelaysFor(state)));
+    // The group avatar mirrors the event icon (E_id kind-0 `picture`). Before the
+    // roster scan, so a freshly created group already carries it when the first
+    // members are added. A failed read leaves the avatar alone rather than
+    // clearing it — "could not fetch" is not "the icon was removed".
+    await this.phase("chat:ensure-avatar", async () => {
+      if (await this.refreshEidProfile(state)) {
+        await this.marmot!.ensureAvatar(state.coordinate, state.eidProfile?.picture);
+      }
+    });
     await this.phase("chat:roster-scan", () => this.marmot!.backfillApproved(state.coordinate));
     this.subscribeChat(state);
+  }
+
+  /**
+   * Read the E_id's newest kind-0 into `state.eidProfile`. Returns false when the
+   * read failed (nothing is known), true otherwise — including "E_id has no
+   * profile at all", which genuinely means no icon.
+   */
+  private async refreshEidProfile(state: EventState): Promise<boolean> {
+    let events: NostrEvent[];
+    try {
+      events = await this.deps.transport.fetch(
+        { kinds: [KIND_PROFILE], authors: [state.eidPubkey], limit: 1 },
+        state.configRelays,
+      );
+    } catch (e) {
+      log(`[chat] could not read the event profile of ${state.coordinate}: ${e instanceof Error ? e.message : e}`);
+      return false;
+    }
+    const latest = pickLatest(events.filter((e) => e.kind === KIND_PROFILE && e.pubkey === state.eidPubkey));
+    if (latest) this.applyEidProfile(state, latest);
+    return true;
+  }
+
+  /** Adopt `event` as the E_id profile if it supersedes the one we hold. */
+  private applyEidProfile(state: EventState, event: NostrEvent): boolean {
+    if (event.kind !== KIND_PROFILE || event.pubkey !== state.eidPubkey) return false;
+    const held = state.eidProfile;
+    if (held && !supersedes({ id: event.id, created_at: event.created_at }, { id: held.id, created_at: held.created_at })) {
+      return false;
+    }
+    state.eidProfile = { id: event.id, created_at: event.created_at, picture: profilePicture(event.content) };
+    return true;
+  }
+
+  /** A live E_id kind-0 revision: re-sync the group avatar if the icon changed. */
+  private handleEidProfile(state: EventState, event: NostrEvent): void {
+    if (!this.marmot || !state.chat) return;
+    const before = state.eidProfile?.picture;
+    if (!this.applyEidProfile(state, event)) return;
+    if (state.eidProfile?.picture === before) return; // a name/about edit — nothing for the avatar
+    void this.marmot
+      .ensureAvatar(state.coordinate, state.eidProfile?.picture)
+      .catch((e) => log(`[chat] avatar update for ${state.coordinate} failed: ${e instanceof Error ? e.message : e}`));
   }
 
   /** Subscribe to 30443 key packages (add/heal) and 445 group traffic (ingest). */
@@ -5158,6 +5217,13 @@ export class Coordinator {
         chatRelays,
       );
       if (kpCloser) closers.push(kpCloser);
+      // The event identity's kind-0: its `picture` is the group avatar.
+      const profileCloser = (this.deps.transport as any).subscribe?.(
+        { kinds: [KIND_PROFILE], authors: [state.eidPubkey] },
+        (e: NostrEvent) => this.handleEidProfile(state, e),
+        state.configRelays,
+      );
+      if (profileCloser) closers.push(profileCloser);
       // 445 ingest: the coordinator is a silent member; ingesting keeps its leaf
       // converged and drives self_remove auto-commits. Routed by the group's random `h`.
       if (group) {

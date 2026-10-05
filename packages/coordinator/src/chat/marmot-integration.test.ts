@@ -181,6 +181,53 @@ describe("marmot-ts real round-trip (coordinator admin bot)", () => {
     30_000,
   );
 
+  // group.avatar-url.v1 through the real engine: the coordinator commits the
+  // avatar, a member joining afterwards reads it from the Welcome, follows a
+  // later change and a clear, and an unchanged avatar costs no epoch.
+  it(
+    "setAvatar: a joining member sees the avatar, follows a change and a clear; unchanged is a no-op",
+    async () => {
+      const network = new FakeNetwork();
+      const coordSk = generateSecretKey();
+      const coordStore = new Store(":memory:", coordSk);
+      const { mls, client } = createMarmotClientMls({ store: coordStore, coordSk, network });
+      const epochOf = async (idHex: string) => getEpoch((await client.groups.get(idHex)).state as never);
+
+      const ids = await mls.createGroup({ name: "Devcon chat", description: "hi", relays: RELAYS });
+      expect(await mls.getAvatar(ids.mlsGroupIdHex)).toBe("");
+      expect(await mls.setAvatar(ids.mlsGroupIdHex, "https://img.example.com/icon.png")).toBe(true);
+      const epoch = await epochOf(ids.mlsGroupIdHex);
+      expect(await mls.setAvatar(ids.mlsGroupIdHex, "https://img.example.com/icon.png")).toBe(false);
+      expect(await epochOf(ids.mlsGroupIdHex)).toBe(epoch);
+
+      const memberSk = generateSecretKey();
+      const member = makeMemberClient(memberSk, network);
+      await member.keyPackages.ensurePublished({ relays: RELAYS });
+      const [kp] = await network.request(RELAYS, { kinds: [30443], authors: [getPublicKey(memberSk)] });
+      await mls.invite(ids.mlsGroupIdHex, kp as never);
+      await member.invites.ingestEvents(network.events.filter((e) => e.kind === 1059) as never);
+      await member.invites.decryptGiftWraps();
+      const [invite] = await member.invites.getUnread();
+      const { group } = await member.joinGroupFromWelcome({ welcomeRumor: invite! });
+      expect(group.groupData?.avatarUrl).toBe("https://img.example.com/icon.png");
+
+      const seen = new Set(network.events.map((e) => e.id));
+      const followNew = async () => {
+        const fresh = network.events.filter((e) => e.kind === 445 && !seen.has(e.id));
+        for (const e of fresh) seen.add(e.id);
+        for await (const _ of group.ingest(fresh as never)) void _;
+      };
+      expect(await mls.setAvatar(ids.mlsGroupIdHex, "https://img.example.com/icon2.png")).toBe(true);
+      await followNew();
+      expect(group.groupData?.avatarUrl).toBe("https://img.example.com/icon2.png");
+      expect(await mls.setAvatar(ids.mlsGroupIdHex, "")).toBe(true);
+      await followNew();
+      expect(group.groupData?.avatarUrl ?? "").toBe("");
+      expect(await mls.getAvatar(ids.mlsGroupIdHex)).toBe("");
+    },
+    30_000,
+  );
+
   it(
     "ensureRelays additively unions new relays into the group's routing state, idempotently",
     async () => {

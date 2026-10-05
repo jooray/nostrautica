@@ -15,6 +15,7 @@
  */
 import type { Store, MarmotChatLinkRow } from "../store/db.js";
 import { keyPackageProfile, type ChatMls } from "./mls.js";
+import { normalizeAvatarUrl } from "./avatar.js";
 import {
   verifyChatDeviceProof,
   MAX_CHAT_KEYS_PER_ACCOUNT,
@@ -283,6 +284,33 @@ export class MarmotAdmin {
     const group = this.activeGroup(coordinate);
     if (!group) return;
     await this.mls.ensureRelays(group.mls_group_id, relays);
+  }
+
+  /**
+   * Reconcile the group's avatar (group.avatar-url.v1) with the event's icon — the
+   * `picture` of the E_id kind-0 (see avatar.ts). Commits only when the normalized
+   * URL differs from what the group holds, so re-running it on every install and
+   * every kind-0 revision is free when nothing changed; a removed icon clears the
+   * avatar. An icon that cannot be stored validly is skipped with a log line and
+   * the avatar is left as it is — it must never break creation or reconciliation.
+   */
+  async ensureAvatar(coordinate: string, iconUrl: string | undefined): Promise<void> {
+    const group = this.activeGroup(coordinate);
+    if (!group) return;
+    const normalized = normalizeAvatarUrl(iconUrl);
+    if (!normalized.ok) {
+      this.log(
+        `[chat] event icon of ${coordinate} is not usable as the group avatar (${normalized.reason}) — avatar left unchanged`,
+      );
+      return;
+    }
+    if (await this.mls.setAvatar(group.mls_group_id, normalized.url)) {
+      this.log(
+        normalized.url
+          ? `[chat] group avatar of ${coordinate} set to ${normalized.url}`
+          : `[chat] group avatar of ${coordinate} cleared (the event has no icon)`,
+      );
+    }
   }
 
   // ── authorized chat identities ─────────────────────────────────────────────

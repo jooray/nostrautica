@@ -107,6 +107,14 @@ export interface ChatMls {
    * the coordinator out of admin commits.
    */
   setAdmins(mlsGroupIdHex: string, adminPubkeys: string[]): Promise<void>;
+  /** The group's avatar URL (group.avatar-url.v1), "" when it has none. */
+  getAvatar(mlsGroupIdHex: string): Promise<string>;
+  /**
+   * Set the group's avatar URL — "" clears it (the component's empty state). The
+   * caller passes an already-normalized URL (see avatar.ts). A no-op when it is
+   * already the group's avatar; returns whether a commit was made.
+   */
+  setAvatar(mlsGroupIdHex: string, url: string): Promise<boolean>;
   /**
    * Post one kind-9 chat message, authored by the coordinator, to a group. Used
    * only for the external-client link confirmation group (NIP §10.5), whose one
@@ -362,6 +370,25 @@ export class MarmotClientMls implements ChatMls {
       const ctx = group.session.proposalContext();
       const proposals = await proposeUpdateMetadata({ relays: union })(ctx);
       await this.client.groups.commit(mlsGroupIdHex, { extraProposals: proposals });
+    });
+  }
+
+  async getAvatar(mlsGroupIdHex: string): Promise<string> {
+    const group = await this.client.groups.get(mlsGroupIdHex);
+    return group.groupData?.avatarUrl ?? "";
+  }
+
+  async setAvatar(mlsGroupIdHex: string, url: string): Promise<boolean> {
+    return this.serialize(mlsGroupIdHex, async () => {
+      const group = await this.client.groups.get(mlsGroupIdHex);
+      // Compared in normalized form on both sides: the caller normalizes, and what
+      // the group holds was normalized by whoever wrote it (decoders reject
+      // anything else). A group that never had the component reads as "".
+      if ((group.groupData?.avatarUrl ?? "") === url) return false;
+      const ctx = group.session.proposalContext();
+      const proposals = await proposeUpdateMetadata({ avatarUrl: url })(ctx);
+      await this.client.groups.commit(mlsGroupIdHex, { extraProposals: proposals });
+      return true;
     });
   }
 

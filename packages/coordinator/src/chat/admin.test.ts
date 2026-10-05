@@ -105,6 +105,17 @@ class FakeMls implements ChatMls {
     if (missing.length === 0) return;
     this.relays.set(group, [...(this.relays.get(group) ?? []), ...missing]);
   }
+  avatars = new Map<string, string>();
+  avatarCommits: { group: string; url: string }[] = [];
+  async getAvatar(group: string): Promise<string> {
+    return this.avatars.get(group) ?? "";
+  }
+  async setAvatar(group: string, url: string): Promise<boolean> {
+    if ((this.avatars.get(group) ?? "") === url) return false;
+    this.avatars.set(group, url);
+    this.avatarCommits.push({ group, url });
+    return true;
+  }
   async getAdmins(group: string): Promise<string[]> {
     return this.admins.get(group) ?? [];
   }
@@ -1935,5 +1946,70 @@ describe("MarmotAdmin — linking an external Marmot client (White Noise)", () =
     expect(admins).toContain(CHATKEY);
     expect(admins).not.toContain(ACCOUNT);
     expect(await h.mls.isMember(EVENT_GROUP, ACCOUNT)).toBe(true);
+  });
+});
+
+/**
+ * The group avatar mirrors the event icon (E_id kind-0 `picture`), through the
+ * same idempotent reconciliation as relays and admins.
+ */
+describe("MarmotAdmin.ensureAvatar — the group avatar follows the event icon", () => {
+  function setup() {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const logs: string[] = [];
+    const admin = makeAdmin(store, mls, [], (m) => logs.push(m));
+    return { store, mls, admin, logs };
+  }
+
+  it("a newly created group gets the icon, normalized", async () => {
+    const { mls, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.ensureAvatar(COORD, "  HTTPS://Img.Example.COM:443/a/../icon.png ");
+    expect(mls.avatarCommits).toEqual([{ group: "mls-1", url: "https://img.example.com/icon.png" }]);
+  });
+
+  it("commits a changed icon, and nothing when it is unchanged", async () => {
+    const { mls, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.ensureAvatar(COORD, "https://img.example.com/a.png");
+    await admin.ensureAvatar(COORD, "https://img.example.com/a.png"); // restart / re-ensure
+    await admin.ensureAvatar(COORD, "https://img.example.com/b.png");
+    expect(mls.avatarCommits.map((c) => c.url)).toEqual([
+      "https://img.example.com/a.png",
+      "https://img.example.com/b.png",
+    ]);
+  });
+
+  it("clears the avatar when the icon is removed", async () => {
+    const { mls, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.ensureAvatar(COORD, "https://img.example.com/a.png");
+    await admin.ensureAvatar(COORD, undefined);
+    expect(mls.avatarCommits.map((c) => c.url)).toEqual(["https://img.example.com/a.png", ""]);
+  });
+
+  it("no icon on a new group is no commit at all", async () => {
+    const { mls, admin } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.ensureAvatar(COORD, undefined);
+    expect(mls.avatarCommits).toEqual([]);
+  });
+
+  it("an invalid icon URL is skipped with a log line and the avatar left as it was", async () => {
+    const { mls, admin, logs } = setup();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.ensureAvatar(COORD, "https://img.example.com/a.png");
+    for (const bad of ["http://img.example.com/a.png", "https://u:p@img.example.com/a.png", "https://img.example.com/a.png#x", "not a url"]) {
+      await expect(admin.ensureAvatar(COORD, bad)).resolves.toBeUndefined();
+    }
+    expect(mls.avatarCommits.map((c) => c.url)).toEqual(["https://img.example.com/a.png"]);
+    expect(logs.filter((l) => l.includes("not usable as the group avatar"))).toHaveLength(4);
+  });
+
+  it("does nothing for an event without an active group", async () => {
+    const { mls, admin } = setup();
+    await admin.ensureAvatar(COORD, "https://img.example.com/a.png");
+    expect(mls.avatarCommits).toEqual([]);
   });
 });
