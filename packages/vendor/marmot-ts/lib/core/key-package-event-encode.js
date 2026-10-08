@@ -53,7 +53,11 @@ async function createKeyPackageEventInternal(options) {
         }
     }
     // Filter out GREASE values from the extension types
-    // We only want to include real extension ids (e.g. app_data_dictionary), not GREASE
+    // We only want to include real extension ids (e.g. app_data_dictionary), not GREASE.
+    // MDK strips GREASE from extensions on both its publish and validate sides
+    // (refs/mdk crates/cgka-engine/src/capabilities.rs
+    // `advertised_capabilities_from_caps`), so mls_extensions stays GREASE-free.
+    // Proposals are treated differently; see the mls_proposals comment below.
     const filteredExtensionTypes = extensionTypes.filter((hexValue) => {
         // Parse the hex value back to number to check if it's a GREASE value
         const extType = parseInt(hexValue);
@@ -73,10 +77,23 @@ async function createKeyPackageEventInternal(options) {
     // Addressable identifier (required for kind 30443)
     tags.push(["d", options.identifier]);
     // Supported MLS proposal ids advertised by this leaf (e.g. app_data_update
-    // 0x0008), formatted as lowercase 0x-prefixed hex; GREASE values dropped.
-    const proposalTypes = (keyPackage.leafNode.capabilities?.proposals ?? [])
-        .filter((p) => !isGreaseValue(p))
-        .map((p) => `0x${p.toString(16).padStart(4, "0")}`);
+    // 0x0008), formatted as lowercase 0x-prefixed hex, GREASE ids INCLUDED.
+    // MDK validates the mls_proposals value set against the decoded leaf's
+    // advertised proposals without stripping GREASE (refs/mdk
+    // crates/marmot-app/src/key_package_records.rs
+    // `require_multi_value_key_package_tag_matches`, fed by
+    // crates/cgka-engine/src/capabilities.rs `advertised_capabilities_from_caps`,
+    // which strips GREASE from extensions only). Dropping GREASE here made MDK
+    // reject every KeyPackage whose leaf drew a GREASE proposal, so the tag must
+    // carry GREASE ids exactly as the leaf does. Values are deduplicated (first
+    // occurrence wins) because refs/marmot transports/nostr.md "KeyPackage
+    // publication" forbids repeated id-list values.
+    const proposalTypes = [];
+    for (const p of keyPackage.leafNode.capabilities?.proposals ?? []) {
+        const hexValue = `0x${p.toString(16).padStart(4, "0")}`;
+        if (!proposalTypes.includes(hexValue))
+            proposalTypes.push(hexValue);
+    }
     // Supported Marmot app-component ids this implementation can encode/decode.
     const appComponentIds = SUPPORTED_APP_COMPONENT_IDS.map((id) => `0x${id.toString(16).padStart(4, "0")}`);
     // The spec forbids an `encoding` tag (transports/nostr.md "Transport byte

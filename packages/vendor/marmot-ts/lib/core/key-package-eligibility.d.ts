@@ -31,8 +31,9 @@ export interface KeyPackageEligibility {
  * group, against every Marmot add requirement: cipher-suite match, the group's
  * `required_capabilities` (extension/proposal/credential types), its required
  * app components, the agent-text-stream-QUIC `required_member_roles` policy,
- * and whether the
- * KeyPackage's account is already a member.
+ * the Lifetime cap/current check, the `mls_proposals` tag matching the leaf's
+ * advertised proposals (with or without GREASE), and whether the KeyPackage's
+ * account is already a member.
  *
  * This is the eligibility logic an app needs before sending an invite — the
  * invite proposal itself enforces only {@link missingGroupRequirements}. A

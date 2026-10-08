@@ -14,10 +14,16 @@ See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 fla
   upstream `marmot-protocol/marmot-ts` master plus the upstream PRs we need that have not
   merged yet. The exact commit (and the bundled ts-mls commit) is recorded in
   `marmot-ts/package.json` under `"vendoredFrom"` — that field, not this README, is the pin.
-  At the time of writing: `850337f` = upstream master `591eb25` + our 24 open interop PRs,
-  #81–#99 and #101–#104 (every one except third-party work). They came from a
+  At the time of writing: `0ab8336` = upstream master `71999f56` + our 22 open interop PRs,
+  `#81`, `#83`–`#99` and `#101`–`#104` (every one except third-party work). PR `#82` is not
+  carried: upstream fixed the same problem in `7b59a722`/`162239da` — GREASE ids stay in the
+  `mls_proposals` tag, tag and leaf must match exactly at invite/eligibility, and the
+  GREASE-stripped tags older builds publish stay accepted as a legacy mode — and this branch
+  keeps our `key-package-event-validate` tag check in lockstep with upstream's
+  `checkKeyPackageProposalsTag` so GREASE-carrying tags pass both. The pre-rebase tip is kept
+  as branch `nostrautica-vendor-pre-71999f56` on the fork. The PRs came from a
   message-by-message comparison against MDK 0.11.0 and HEAD and cover AppDataUpdate
-  extension order, KeyPackage GREASE/tags/last-resort/relays, encrypted media v2 (0x800b) and
+  extension order, KeyPackage tags/last-resort/relays, encrypted media v2 (0x800b) and
   the group image (0x8002), strict app-event and kind-445 decoding, past-epoch message
   retention, Welcome/join and commit-legality checks that match MDK, and fork ranking. The PR
   list is `gh pr list --repo marmot-protocol/marmot-ts --author jooray`.

@@ -18,8 +18,10 @@ export declare class KeyPackageEventMetadataError extends Error {
  * - `mls_ciphersuite`, `mls_extensions`, `mls_proposals` and `app_components`
  *   each appear exactly once, non-empty, without duplicate values;
  * - `mls_ciphersuite` is the KeyPackage's cipher suite;
- * - `mls_extensions` / `mls_proposals` equal the LeafNode's extension /
- *   proposal capabilities (GREASE ignored), compared as sets of `0x%04x`;
+ * - `mls_extensions` equals the LeafNode's extension capabilities with GREASE
+ *   ignored on both sides; `mls_proposals` equals the leaf's proposals exactly
+ *   (GREASE included) or with GREASE stripped from both sides, compared as sets
+ *   of `0x%04x`;
  * - `app_components` equals the LeafNode's advertised private-use
  *   (`>= 0x8000`) app components and includes `0x8009`;
  * - `i` is the KeyPackageRef computed with `hash` (the cipher suite's hash).

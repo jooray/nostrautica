@@ -2,8 +2,10 @@ import { ciphersuites, decode, defaultCredentialTypes, mlsMessageDecoder, wirefo
 import { decodeContent } from "../utils/encoding.js";
 import { getTagValue } from "../utils/nostr.js";
 import { isValidRelayUrl, normalizeRelayUrl } from "../utils/relay-url.js";
+import { getListTag } from "../utils/tag-cardinality.js";
 import { getCredentialPubkey } from "./credential.js";
-import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_RELAYS_TAG, } from "./protocol.js";
+import { GREASE_VALUE_SET, isGreaseValue } from "./grease.js";
+import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, KEY_PACKAGE_RELAYS_TAG, } from "./protocol.js";
 /** Get the KeyPackage from a kind 30443 event */
 export function getKeyPackage(event) {
     // Transport byte encoding is always standard base64; the spec forbids an
@@ -66,6 +68,57 @@ export function getKeyPackageExtensions(event) {
         .map((t) => parseInt(t))
         .filter((id) => Number.isFinite(id));
     return ids;
+}
+/** Formats an MLS id as the canonical lowercase 0x-prefixed 4-digit hex. */
+function formatIdHex(id) {
+    return `0x${id.toString(16).padStart(4, "0")}`;
+}
+/** Canonical tag spellings of every GREASE id (RFC 9420 §13.5). */
+const GREASE_HEX_SET = new Set([...GREASE_VALUE_SET].map(formatIdHex));
+function setsEqual(a, b) {
+    if (a.size !== b.size)
+        return false;
+    for (const value of a)
+        if (!b.has(value))
+            return false;
+    return true;
+}
+/**
+ * Checks a kind 30443 event's `mls_proposals` tag against the decoded
+ * KeyPackage leaf's `capabilities.proposals`.
+ *
+ * Values are compared as exact strings against the canonical lowercase
+ * `0x%04x` spelling of each leaf id, with no parsing, so a non-canonical
+ * spelling is a mismatch. An exact match (GREASE included) is what MDK
+ * requires. The `grease-stripped` mode exists to accept KeyPackages from
+ * older marmot-ts publishers that filtered GREASE out of the tag; because it
+ * removes GREASE from both sides, a tag carrying different GREASE ids than
+ * the leaf still matches in that mode (GREASE ids carry no semantics).
+ *
+ * Never throws — malformed input is a typed result, not an exception.
+ *
+ * @param event - The kind 30443 event (or any `{ tags }` shape) to read the tag from
+ * @param keyPackage - The KeyPackage decoded from the same event's content
+ * @returns A {@link KeyPackageProposalsTagCheck} discriminated by `kind`
+ * @see refs/marmot transports/nostr.md "KeyPackage publication" — id-list
+ *   tags are compared as exact strings and MUST NOT repeat values
+ * @see refs/mdk crates/marmot-app/src/key_package_records.rs
+ *   `require_multi_value_key_package_tag_matches`
+ */
+export function checkKeyPackageProposalsTag(event, keyPackage) {
+    const values = getListTag(event, KEY_PACKAGE_PROPOSALS_TAG);
+    if (!values)
+        return { kind: "malformed" };
+    const leaf = keyPackage.leafNode.capabilities?.proposals ?? [];
+    const expected = new Set(leaf.map(formatIdHex));
+    const actual = new Set(values);
+    if (setsEqual(expected, actual))
+        return { kind: "match", mode: "exact" };
+    const strippedExpected = new Set(leaf.filter((id) => !isGreaseValue(id)).map(formatIdHex));
+    const strippedActual = new Set(values.filter((value) => !GREASE_HEX_SET.has(value)));
+    if (setsEqual(strippedExpected, strippedActual))
+        return { kind: "match", mode: "grease-stripped" };
+    return { kind: "mismatch" };
 }
 /** Gets the relays for a kind 30443 event */
 export function getKeyPackageRelays(event) {

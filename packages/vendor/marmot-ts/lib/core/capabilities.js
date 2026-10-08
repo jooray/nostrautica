@@ -1,7 +1,6 @@
 /** @module @category Core - Capabilities */
 import { appDataDictionaryExtensionType, appDataUpdateProposalType, defaultExtensionTypes, selfRemoveProposalType, } from "../vendor/ts-mls/index.js";
 import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agent-text-stream.js";
-import { isGreaseValue } from "./grease.js";
 /**
  * Ensures a {@link Capabilities} object advertises the MLS code points a Marmot
  * v2 group relies on, so a LeafNode bearing these capabilities passes MLS
@@ -35,19 +34,10 @@ import { isGreaseValue } from "./grease.js";
  * is not portably available in browsers/Node/Bun), so it never advertises
  * `send` (`0xf2d2`) or `fanout` (`0xf2d4`), which would claim the ability to
  * originate or relay live QUIC streams it cannot fulfill.
- *
- * GREASE values are dropped from `proposals` (they stay in the other fields).
- * The kind-30443 `mls_proposals` tag never carries GREASE, and MDK requires
- * that tag to equal the decoded LeafNode proposal capabilities exactly: it
- * strips GREASE from extensions before comparing but not from proposals
- * (`cgka-engine/src/capabilities.rs`, `advertised_capabilities_from_caps`).
- * ts-mls GREASEs each list at random, so most KeyPackages would otherwise be
- * rejected by MDK with "mls_proposals tag does not exactly match decoded
- * KeyPackage metadata". MDK does not GREASE proposals either.
  */
 export function ensureMarmotCapabilities(capabilities) {
     const extensions = Array.from(capabilities.extensions);
-    const proposals = Array.from(capabilities.proposals).filter((p) => !isGreaseValue(p));
+    const proposals = Array.from(capabilities.proposals);
     // app_data_dictionary extension carrying the group's app components.
     if (!extensions.includes(appDataDictionaryExtensionType))
         extensions.push(appDataDictionaryExtensionType);

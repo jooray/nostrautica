@@ -5,6 +5,7 @@ import { getListTag, getSingletonTagValue } from "../utils/tag-cardinality.js";
 import { getAppComponents } from "./components/dictionary.js";
 import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID } from "./components/ids.js";
 import { isGreaseValue } from "./grease.js";
+import { checkKeyPackageProposalsTag } from "./key-package-event-decode.js";
 import { KEY_PACKAGE_APP_COMPONENTS_TAG, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, } from "./protocol.js";
 /** First Marmot private-use app component id; lower ids are upstream ones. */
 const PRIVATE_USE_COMPONENT_ID_START = 0x8000;
@@ -41,8 +42,10 @@ function requireIdList(event, name, expected) {
  * - `mls_ciphersuite`, `mls_extensions`, `mls_proposals` and `app_components`
  *   each appear exactly once, non-empty, without duplicate values;
  * - `mls_ciphersuite` is the KeyPackage's cipher suite;
- * - `mls_extensions` / `mls_proposals` equal the LeafNode's extension /
- *   proposal capabilities (GREASE ignored), compared as sets of `0x%04x`;
+ * - `mls_extensions` equals the LeafNode's extension capabilities with GREASE
+ *   ignored on both sides; `mls_proposals` equals the leaf's proposals exactly
+ *   (GREASE included) or with GREASE stripped from both sides, compared as sets
+ *   of `0x%04x`;
  * - `app_components` equals the LeafNode's advertised private-use
  *   (`>= 0x8000`) app components and includes `0x8009`;
  * - `i` is the KeyPackageRef computed with `hash` (the cipher suite's hash).
@@ -60,7 +63,15 @@ export async function validateKeyPackageEventMetadata(event, keyPackage, hash) {
     const capabilities = keyPackage.leafNode.capabilities;
     requireIdList(event, KEY_PACKAGE_CIPHER_SUITE_TAG, [keyPackage.cipherSuite]);
     requireIdList(event, KEY_PACKAGE_EXTENSIONS_TAG, capabilities.extensions.filter((id) => !isGreaseValue(id)));
-    requireIdList(event, KEY_PACKAGE_PROPOSALS_TAG, capabilities.proposals.filter((id) => !isGreaseValue(id)));
+    // `mls_proposals` mirrors the leaf's proposals GREASE ids included (MDK
+    // exact-match parity, upstream behaviour); the GREASE-stripped tag older
+    // publishers emit is still accepted. This is the same check invite creation
+    // and eligibility run, kept in lockstep by shared code.
+    const proposalsCheck = checkKeyPackageProposalsTag(event, keyPackage);
+    if (proposalsCheck.kind === "malformed")
+        throw new KeyPackageEventMetadataError(`${KEY_PACKAGE_PROPOSALS_TAG} tag is missing, repeated, empty, or has duplicate values`);
+    if (proposalsCheck.kind === "mismatch")
+        throw new KeyPackageEventMetadataError(`${KEY_PACKAGE_PROPOSALS_TAG} tag does not match the decoded KeyPackage`);
     let leafComponents;
     try {
         leafComponents = getAppComponents(keyPackage.leafNode.extensions);

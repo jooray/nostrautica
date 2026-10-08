@@ -2,8 +2,8 @@
 import { isEvent } from "applesauce-core/helpers/event";
 import { defaultProposalTypes } from "../../../vendor/ts-mls/index.js";
 import { validateKeyPackageAccountIdentityProof } from "../../../core/components/account-identity-proof.js";
-import { getKeyPackage, validateKeyPackageEventMetadata, } from "../../../core/key-package-event.js";
 import { missingGroupRequirements } from "../../../core/key-package-eligibility.js";
+import { getKeyPackage, validateKeyPackageEventMetadata, } from "../../../core/key-package-event.js";
 /** Builds a proposal to invite a user to the group from a key package event or raw key package */
 export function proposeInviteUser(keyPackageEvent) {
     return async ({ ciphersuite, state }) => {

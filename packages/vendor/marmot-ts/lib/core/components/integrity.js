@@ -878,10 +878,8 @@ export function validateCommitLegality(args) {
     // elsewhere (`profileSupport`).
     if (getGroupProfileSupport(args.parentState.groupContext.extensions).kind ===
         "supported") {
-        // A removed receiver's tombstone keeps the parent GroupContext, so check
-        // the projected extensions (see projectedRemovedReceiverExtensions).
         const profileViolation = validateResultingProfileInvariants({
-            resultingExtensions,
+            resultingExtensions: args.resultingState.groupContext.extensions,
             resultingTree: args.resultingState.ratchetTree,
         });
         if (profileViolation)

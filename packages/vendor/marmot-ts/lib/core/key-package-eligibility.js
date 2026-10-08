@@ -1,12 +1,11 @@
 import { getAppDataDictionary, } from "../vendor/ts-mls/index.js";
 import { getMarmotGroupInfo } from "./client-state.js";
 import { getCredentialPubkey } from "./credential.js";
-import { AGENT_TEXT_STREAM_QUIC_FANOUT_EXTENSION_TYPE, AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE, AGENT_TEXT_STREAM_QUIC_SEND_EXTENSION_TYPE, AGENT_TEXT_STREAM_ROLE_FANOUT, AGENT_TEXT_STREAM_ROLE_RECEIVE, AGENT_TEXT_STREAM_ROLE_SEND, } from "./components/agent-text-stream.js";
-import { decodeAgentTextStreamQuicPolicyV1 } from "./components/agent-text-stream.js";
+import { AGENT_TEXT_STREAM_QUIC_FANOUT_EXTENSION_TYPE, AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE, AGENT_TEXT_STREAM_QUIC_SEND_EXTENSION_TYPE, AGENT_TEXT_STREAM_ROLE_FANOUT, AGENT_TEXT_STREAM_ROLE_RECEIVE, AGENT_TEXT_STREAM_ROLE_SEND, decodeAgentTextStreamQuicPolicyV1, } from "./components/agent-text-stream.js";
 import { decodeComponentsList } from "./components/app-components-list.js";
 import { getAppComponents } from "./components/dictionary.js";
 import { AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, } from "./components/ids.js";
-import { getKeyPackage } from "./key-package-event.js";
+import { checkKeyPackageProposalsTag, getKeyPackage, } from "./key-package-event.js";
 import { isLifetimeCurrentWithGrace, isLifetimeWithinCap, } from "../utils/timestamp.js";
 /**
  * MLS `required_capabilities` GroupContext extension type (code point `0x0003`).
@@ -100,8 +99,9 @@ export function missingGroupRequirements(keyPackage, groupExtensions) {
  * group, against every Marmot add requirement: cipher-suite match, the group's
  * `required_capabilities` (extension/proposal/credential types), its required
  * app components, the agent-text-stream-QUIC `required_member_roles` policy,
- * and whether the
- * KeyPackage's account is already a member.
+ * the Lifetime cap/current check, the `mls_proposals` tag matching the leaf's
+ * advertised proposals (with or without GREASE), and whether the KeyPackage's
+ * account is already a member.
  *
  * This is the eligibility logic an app needs before sending an invite — the
  * invite proposal itself enforces only {@link missingGroupRequirements}. A
@@ -141,6 +141,18 @@ export function evaluateKeyPackageForGroup(state, keyPackageEvent) {
         }
         else if (!isLifetimeCurrentWithGrace(lifetime)) {
             reasons.push("KeyPackage lifetime is not current (outside ~1h grace)");
+        }
+        // MDK exact-match parity (defense-in-depth): mirrors the createInviteIntent
+        // hard reject, with the same rationale as the WIRE-01 Lifetime mirror
+        // above. The mls_proposals tag must match the leaf's advertised proposals,
+        // with GREASE included or removed from both sides. Reasons never echo tag
+        // values (attacker-controlled).
+        const proposalsCheck = checkKeyPackageProposalsTag(keyPackageEvent, keyPackage);
+        if (proposalsCheck.kind === "malformed") {
+            reasons.push("mls_proposals tag is malformed (absent, repeated, empty, or duplicate values)");
+        }
+        else if (proposalsCheck.kind === "mismatch") {
+            reasons.push("mls_proposals tag does not match the KeyPackage's advertised proposals");
         }
     }
     catch (err) {
