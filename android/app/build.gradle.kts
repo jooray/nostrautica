@@ -48,7 +48,7 @@ android {
 
     sourceSets {
         getByName("main") {
-            java.directories.add(marmotKitDir.dir("kotlin").asFile.path)
+            kotlin.directories.add(marmotKitDir.dir("kotlin").asFile.path)
             jniLibs.directories.add(marmotKitDir.dir("jniLibs").asFile.path)
         }
     }
