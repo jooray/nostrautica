@@ -1,5 +1,6 @@
 package today.cypherpunk.nostrautica.domain.chat
 
+import today.cypherpunk.nostrautica.domain.dm.dms
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -69,19 +70,11 @@ class Chat(internal val c: AppContainer) {
 
     /**
      * A NIP-17 DM for `/msg` (events/dm.ts sendDm): one rumor, wrapped to the
-     * recipient and to ourselves so the sent copy shows on every device. Private to
-     * chat until the shared DM service lands; same wire format.
+     * recipient and to ourselves, through the DM service so it also shows in the
+     * thread with that person.
      */
-    suspend fun sendDm(peer: String, text: String): Boolean {
-        val me = c.accounts.pubkey
-        val at = nowSec()
-        val tags = listOf(listOf("p", peer))
-        val toPeer = c.accounts.wrap(peer, Kinds.DM, text, tags, at)
-        val toSelf = c.accounts.wrap(me, Kinds.DM, text, tags, at)
-        val a = c.accounts.publishWrapToAccount(toPeer, peer, emptyList(), "dm")
-        val b = c.accounts.publishWrapToAccount(toSelf, me, emptyList(), "dm")
-        return a is Nostr.PublishResult.Published && b is Nostr.PublishResult.Published
-    }
+    suspend fun sendDm(peer: String, text: String): Boolean =
+        c.dms.send(peer, text) is Nostr.PublishResult.Published
 
     /**
      * The device key's own kind-0 (NIP §10.3), so other Marmot clients show a name:
