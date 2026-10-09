@@ -1,0 +1,11 @@
+.gradle/
+build/
+local.properties
+.idea/
+*.iml
+.kotlin/
+captures/
+# MarmotKit's prebuilt bindings and native libraries are fetched and verified by
+# tools/marmotkit/fetch.sh, never committed (≈180 MB per release).
+app/src/main/jniLibs/
+app/src/marmotkit/
