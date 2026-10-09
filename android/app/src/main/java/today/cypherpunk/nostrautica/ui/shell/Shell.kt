@@ -227,7 +227,13 @@ fun EventScaffold(naddr: String, back: Pair<String, () -> Unit>? = null, content
         error = null
         runCatching { c.contexts.get(naddr, force = reload > 0) }
             .onSuccess { value = it; c.membership.noteOpened(account?.pubkey ?: "anon", it.coordinate, naddr) }
-            .onFailure { e -> if (value == null) error = when (e) { is UpdateRequired -> s.t("update.available"); else -> e.message?.takeIf { it.contains('.') }?.let { s.t(it) } ?: s.t("event.loadFailed") } }
+            .onFailure { e ->
+                if (value == null) error = when {
+                    e is UpdateRequired -> s.t("update.available")
+                    e.message == "error.badEventLink" -> s.t("error.badEventLink")
+                    else -> s.t("event.loadFailed") + "\n\n" + s.t("event.loadFailed.body")
+                }
+            }
     }
     val state = remember(ctx, account, keysVersion, membershipVersion) {
         ctx?.let { cx ->

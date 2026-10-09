@@ -96,7 +96,7 @@ class EventContexts(private val nostr: Nostr, private val cache: Cache) {
             Filter(kinds = listOf(coord.kind), authors = listOf(coord.pubkey), tags = mapOf("d" to listOf(coord.identifier))),
             Filter(kinds = listOf(Kinds.PROFILE), authors = listOf(coord.pubkey)),
         )
-        return fromStore(naddr, coord) ?: throw IllegalStateException("event.notFound")
+        return fromStore(naddr, coord) ?: throw IllegalStateException("event not found")
     }
 
     /** Build the context from whatever the store holds (also used offline). */

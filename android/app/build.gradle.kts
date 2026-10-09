@@ -34,6 +34,12 @@ android {
         versionCode = 1
         versionName = "0.9.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        // Empty in every real build. For testing against the local stack the PWA's
+        // e2e uses (docs/E2E-TESTING-GUIDE.md): -PdevRelays=ws://10.0.2.2:7777
+        // -PdevBlossom=http://10.0.2.2:3000 replace the default relays/Blossom
+        // servers, the way the PWA's ENV_RELAYS / ENV_BLOSSOM do.
+        buildConfigField("String", "DEV_RELAYS", "\"${project.findProperty("devRelays") ?: ""}\"")
+        buildConfigField("String", "DEV_BLOSSOM", "\"${project.findProperty("devBlossom") ?: ""}\"")
     }
 
     androidResources {
