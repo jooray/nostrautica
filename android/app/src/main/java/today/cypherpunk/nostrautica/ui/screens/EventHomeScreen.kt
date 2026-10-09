@@ -28,6 +28,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.delay
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.launch
 import today.cypherpunk.nostrautica.domain.Role
 import today.cypherpunk.nostrautica.i18n.LocalStrings
@@ -158,21 +159,23 @@ fun EventHomeScreen(naddr: String) {
 
         // Waiting for approval: re-check grants on a slow, bounded cadence while
         // this screen is open (join.ts's adaptive poll), never in the background.
+        val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
         LaunchedEffect(ev.role, account) {
             val a = account ?: return@LaunchedEffect
             if (ev.role != Role.PENDING) return@LaunchedEffect
             var gap = 5_000L
             val started = System.currentTimeMillis()
-            while (true) {
+            // Only while the screen is actually visible: paused in the background.
+            lifecycle.repeatOnLifecycle(androidx.lifecycle.Lifecycle.State.STARTED) { while (true) {
                 delay(gap)
                 c.cache.forget("homescan:${a.pubkey}")
                 runCatching { c.grants.receive(a.signer, maxUnwraps = 10, interactive = false) }
                 if (c.membership.role(a.pubkey, ev.coordinate) != Role.PENDING) {
                     c.membership.clearJoinSent(a.pubkey, ev.coordinate)
-                    break
+                    return@repeatOnLifecycle
                 }
                 gap = if (System.currentTimeMillis() - started > 180_000) 60_000 else 15_000
-            }
+            } }
         }
         // Members: keep the roster/directory/matches warm (cache-first, TTL-bounded).
         LaunchedEffect(ev.role, account) {
