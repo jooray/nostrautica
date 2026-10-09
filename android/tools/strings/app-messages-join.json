@@ -1,0 +1,67 @@
+{
+  "en": {
+    "join.android.photoUnreadable": "That photo couldn't be read. Please choose a different one.",
+    "join.android.photoRemove": "Remove photo",
+    "join.android.photoNotUploaded": "Your photo couldn't be uploaded, so your profile has no picture yet. You can add one later.",
+    "record.android.permission.camera": "Recording needs the camera and microphone. Allow them when Android asks, or in Settings → Apps → Nostrautica → Permissions. You can also record audio or type your intro instead.",
+    "record.android.permission.mic": "Recording needs the microphone. Allow it when Android asks, or in Settings → Apps → Nostrautica → Permissions. You can also type your intro instead.",
+    "record.android.openSettings": "Open settings",
+    "record.android.compressing": "Preparing video… {pct}%",
+    "record.android.needsNetwork": "Uploading needs an internet connection. Your recording stays on this phone, so send it when you're back online.",
+    "record.android.takeRestored": "Your unsent recording is still here.",
+    "record.android.switchCamera": "Switch camera",
+    "event.android.offlineNote": "What you've opened in this event is saved on this phone and works without a signal."
+  },
+  "sk": {
+    "join.android.photoUnreadable": "Túto fotku sa nepodarilo načítať. Vyberte, prosím, inú.",
+    "join.android.photoRemove": "Odstrániť fotku",
+    "join.android.photoNotUploaded": "Fotku sa nepodarilo nahrať, takže váš profil zatiaľ nemá obrázok. Môžete ho pridať neskôr.",
+    "record.android.permission.camera": "Na nahrávanie treba kameru a mikrofón. Povoľte ich, keď sa Android opýta, alebo v Nastavenia → Aplikácie → Nostrautica → Povolenia. Môžete tiež nahrať zvuk alebo predstavenie napísať.",
+    "record.android.permission.mic": "Na nahrávanie treba mikrofón. Povoľte ho, keď sa Android opýta, alebo v Nastavenia → Aplikácie → Nostrautica → Povolenia. Predstavenie môžete aj napísať.",
+    "record.android.openSettings": "Otvoriť nastavenia",
+    "record.android.compressing": "Pripravujeme video… {pct} %",
+    "record.android.needsNetwork": "Na nahranie treba internetové pripojenie. Nahrávka zostáva v tomto telefóne, takže ju pošlite, keď budete znova online.",
+    "record.android.takeRestored": "Vaša neodoslaná nahrávka je stále tu.",
+    "record.android.switchCamera": "Prepnúť kameru",
+    "event.android.offlineNote": "Čo ste si v tomto podujatí otvorili, je uložené v telefóne a funguje aj bez signálu."
+  },
+  "cs": {
+    "join.android.photoUnreadable": "Tuto fotku se nepodařilo načíst. Vyberte prosím jinou.",
+    "join.android.photoRemove": "Odebrat fotku",
+    "join.android.photoNotUploaded": "Fotku se nepodařilo nahrát, takže váš profil zatím nemá obrázek. Můžete ho přidat později.",
+    "record.android.permission.camera": "K nahrávání je potřeba kamera a mikrofon. Povolte je, až se Android zeptá, nebo v Nastavení → Aplikace → Nostrautica → Oprávnění. Můžete také nahrát zvuk nebo představení napsat.",
+    "record.android.permission.mic": "K nahrávání je potřeba mikrofon. Povolte ho, až se Android zeptá, nebo v Nastavení → Aplikace → Nostrautica → Oprávnění. Představení můžete i napsat.",
+    "record.android.openSettings": "Otevřít nastavení",
+    "record.android.compressing": "Připravujeme video… {pct} %",
+    "record.android.needsNetwork": "K nahrání je potřeba připojení k internetu. Nahrávka zůstává v tomto telefonu, takže ji odešlete, až budete znovu online.",
+    "record.android.takeRestored": "Vaše neodeslaná nahrávka je stále tady.",
+    "record.android.switchCamera": "Přepnout kameru",
+    "event.android.offlineNote": "Co jste si v této akci otevřeli, je uložené v telefonu a funguje i bez signálu."
+  },
+  "de": {
+    "join.android.photoUnreadable": "Dieses Foto konnte nicht gelesen werden. Bitte wähle ein anderes.",
+    "join.android.photoRemove": "Foto entfernen",
+    "join.android.photoNotUploaded": "Dein Foto konnte nicht hochgeladen werden, dein Profil hat also noch kein Bild. Du kannst später eins hinzufügen.",
+    "record.android.permission.camera": "Zum Aufnehmen brauchst du Kamera und Mikrofon. Erlaube sie, wenn Android fragt, oder unter Einstellungen → Apps → Nostrautica → Berechtigungen. Du kannst auch Audio aufnehmen oder deine Vorstellung tippen.",
+    "record.android.permission.mic": "Zum Aufnehmen brauchst du das Mikrofon. Erlaube es, wenn Android fragt, oder unter Einstellungen → Apps → Nostrautica → Berechtigungen. Du kannst deine Vorstellung auch tippen.",
+    "record.android.openSettings": "Einstellungen öffnen",
+    "record.android.compressing": "Video wird vorbereitet… {pct} %",
+    "record.android.needsNetwork": "Zum Hochladen brauchst du eine Internetverbindung. Deine Aufnahme bleibt auf diesem Telefon, schick sie also ab, sobald du wieder online bist.",
+    "record.android.takeRestored": "Deine nicht gesendete Aufnahme ist noch da.",
+    "record.android.switchCamera": "Kamera wechseln",
+    "event.android.offlineNote": "Was du in diesem Event geöffnet hast, ist auf diesem Telefon gespeichert und funktioniert auch ohne Empfang."
+  },
+  "es": {
+    "join.android.photoUnreadable": "No se pudo leer esa foto. Elige otra, por favor.",
+    "join.android.photoRemove": "Quitar foto",
+    "join.android.photoNotUploaded": "No se pudo subir tu foto, así que tu perfil aún no tiene imagen. Puedes añadir una más tarde.",
+    "record.android.permission.camera": "Para grabar se necesitan la cámara y el micrófono. Permítelos cuando Android te lo pida, o en Ajustes → Aplicaciones → Nostrautica → Permisos. También puedes grabar audio o escribir tu presentación.",
+    "record.android.permission.mic": "Para grabar se necesita el micrófono. Permítelo cuando Android te lo pida, o en Ajustes → Aplicaciones → Nostrautica → Permisos. También puedes escribir tu presentación.",
+    "record.android.openSettings": "Abrir ajustes",
+    "record.android.compressing": "Preparando el vídeo… {pct} %",
+    "record.android.needsNetwork": "Para subir necesitas conexión a internet. Tu grabación se queda en este teléfono, así que envíala cuando vuelvas a estar en línea.",
+    "record.android.takeRestored": "Tu grabación sin enviar sigue aquí.",
+    "record.android.switchCamera": "Cambiar de cámara",
+    "event.android.offlineNote": "Lo que has abierto en este evento está guardado en este teléfono y funciona sin señal."
+  }
+}
