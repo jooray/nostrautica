@@ -207,7 +207,9 @@ fun EventHomeScreen(naddr: String) {
             }
             if (ev.isMember) item { ReadinessCard(ev) }
             if (ev.isMember) item { MemberActions(ev) }
-            if (ev.isOrganizer) item { OrganizerCard(ev) }
+            // Organizers get admin/duplicate; a signed-in non-member gets the
+            // organizer-key recovery offer (a fresh device), so the slot decides.
+            if (ev.isOrganizer || (account != null && !ev.isMember)) item { OrganizerCard(ev) }
             item { EventPageSections(ev) }
             ev.ctx.cfg.retentionDays?.let { days -> item { Dim(s.t("event.retention.line", "days" to days), size = 13) } }
         }
