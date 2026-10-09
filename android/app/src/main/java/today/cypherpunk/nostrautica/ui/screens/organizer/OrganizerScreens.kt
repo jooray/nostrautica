@@ -1,14 +1,5 @@
 package today.cypherpunk.nostrautica.ui.screens.organizer
 
-import androidx.compose.runtime.Composable
-import today.cypherpunk.nostrautica.ui.nav.Route
-import today.cypherpunk.nostrautica.ui.screens.StubScreen
-
-@Composable
-fun CreateScreen() = StubScreen("title.create")
-
-@Composable
-fun AdminScreen(naddr: String) = StubScreen("title.admin", naddr)
-
-@Composable
-fun EventSettingsScreen(naddr: String) = StubScreen("title.eventSettings", naddr)
+// The organizer area's three routes (AppRoot): CreateScreen() lives in
+// CreateScreen.kt, AdminScreen(naddr) in AdminScreen.kt and
+// EventSettingsScreen(naddr) in EventSettingsScreen.kt.

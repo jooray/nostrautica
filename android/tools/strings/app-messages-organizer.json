@@ -1,0 +1,32 @@
+{
+  "en": {
+    "organizer.picker.ok": "Set",
+    "organizer.invites.count": "How many codes",
+    "organizer.theme.webOnly": "The theme shows in the web app. This app draws events in its own style, so there is no preview here.",
+    "organizer.feeds.sinceFormat": "Format: YYYY-MM-DD"
+  },
+  "sk": {
+    "organizer.picker.ok": "Nastaviť",
+    "organizer.invites.count": "Počet kódov",
+    "organizer.theme.webOnly": "Motív sa prejaví vo webovej aplikácii. Táto aplikácia zobrazuje udalosti vo vlastnom štýle, preto tu náhľad nie je.",
+    "organizer.feeds.sinceFormat": "Formát: RRRR-MM-DD"
+  },
+  "cs": {
+    "organizer.picker.ok": "Nastavit",
+    "organizer.invites.count": "Počet kódů",
+    "organizer.theme.webOnly": "Motiv se projeví ve webové aplikaci. Tato aplikace zobrazuje události ve vlastním stylu, proto tu náhled není.",
+    "organizer.feeds.sinceFormat": "Formát: RRRR-MM-DD"
+  },
+  "de": {
+    "organizer.picker.ok": "Übernehmen",
+    "organizer.invites.count": "Anzahl Codes",
+    "organizer.theme.webOnly": "Das Theme wirkt in der Web-App. Diese App zeigt Events in ihrem eigenen Stil, deshalb gibt es hier keine Vorschau.",
+    "organizer.feeds.sinceFormat": "Format: JJJJ-MM-TT"
+  },
+  "es": {
+    "organizer.picker.ok": "Aplicar",
+    "organizer.invites.count": "Cuántos códigos",
+    "organizer.theme.webOnly": "El tema se ve en la app web. Esta app muestra los eventos con su propio estilo, así que aquí no hay vista previa.",
+    "organizer.feeds.sinceFormat": "Formato: AAAA-MM-DD"
+  }
+}
