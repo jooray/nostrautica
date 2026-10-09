@@ -400,7 +400,8 @@ private fun CreateBody(p: androidx.compose.foundation.layout.PaddingValues) {
                     NumberField(maxVideo, { maxVideo = it }, s.t("create.field.maxVideo"), enabled = !videoUnlimited, decimal = true, modifier = Modifier.weight(1f))
                 }
                 ToggleRow(s.t("create.field.noLimit"), videoUnlimited, { videoUnlimited = it })
-                ChoiceField(s.t("create.field.approval"), listOf("manual" to s.t("create.approval.manual"), "invite" to s.t("create.approval.invite"), "manual+invite" to s.t("create.approval.both")), approval, { approval = it })
+                // A community is always "open" (the kind description says so); only events choose.
+                if (!community) ChoiceField(s.t("create.field.approval"), listOf("manual" to s.t("create.approval.manual"), "invite" to s.t("create.approval.invite"), "manual+invite" to s.t("create.approval.both")), approval, { approval = it })
                 ChoiceField(s.t("create.field.matching"), listOf(true to s.t("create.matching.on"), false to s.t("create.matching.off")), matching, { matching = it })
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(enrollSelf, { enrollSelf = it })

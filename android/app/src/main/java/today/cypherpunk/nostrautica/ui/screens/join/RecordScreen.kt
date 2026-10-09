@@ -171,7 +171,8 @@ private fun RecordBody(ev: EventState, r: Route.Record, p: androidx.compose.foun
     val camera = remember { CameraTake(ctx) }
     val audio = remember { AudioTake(ctx) }
     val meter = remember { LevelMeter() }
-    val previewView = remember { PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER } }
+    // COMPATIBLE (TextureView): the default SurfaceView renders black inside a scrolling list.
+    val previewView = remember { PreviewView(ctx).apply { scaleType = PreviewView.ScaleType.FILL_CENTER; implementationMode = PreviewView.ImplementationMode.COMPATIBLE } }
     var tickJob by remember { mutableStateOf<Job?>(null) }
     val shrinker = remember { VideoShrink(ctx) }
 

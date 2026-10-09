@@ -37,6 +37,15 @@ import kotlin.math.abs
 /** What a finished take is (capture.ts CaptureResult). */
 data class Take(val file: File, val mime: String, val durationSec: Double)
 
+/** A media file's container duration in seconds, or null if it can't be read. */
+fun fileDurationSec(f: File): Double? = runCatching {
+    val r = android.media.MediaMetadataRetriever()
+    try {
+        r.setDataSource(f.path)
+        r.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull()?.takeIf { it > 0 }?.let { it / 1000.0 }
+    } finally { r.release() }
+}.getOrNull()
+
 /** Countdown/elapsed ticks for a capped or unlimited take (capture.ts onTick). */
 object CaptureClock {
     /** Seconds left for a capped take, or seconds elapsed (counting up) when unlimited. */
@@ -122,7 +131,7 @@ class AudioTake(private val context: Context) {
         r.release()
         val f = file ?: return null
         if (!ok || f.length() == 0L) { f.delete(); return null }
-        return Take(f, "audio/mp4", (System.currentTimeMillis() - startedAt) / 1000.0)
+        return Take(f, "audio/mp4", fileDurationSec(f) ?: ((System.currentTimeMillis() - startedAt) / 1000.0))
     }
 
     fun cancel() {
@@ -177,8 +186,11 @@ class CameraTake(private val context: Context) {
                         val ok = !e.hasError() || e.error == VideoRecordEvent.Finalize.ERROR_DURATION_LIMIT_REACHED ||
                             e.error == VideoRecordEvent.Finalize.ERROR_SOURCE_INACTIVE
                         if (ok && f.length() > 0) {
+                            // The finished file's own duration is the truth; the recorder's
+                            // stats follow the audio clock, which is not always sane.
                             val nanos = e.recordingStats.recordedDurationNanos
-                            done.complete(Take(f, "video/mp4", if (nanos > 0) nanos / 1e9 else (System.currentTimeMillis() - started) / 1000.0))
+                            val sec = fileDurationSec(f) ?: if (nanos > 0) nanos / 1e9 else (System.currentTimeMillis() - started) / 1000.0
+                            done.complete(Take(f, "video/mp4", sec))
                         } else {
                             f.delete()
                             done.completeExceptionally(e.cause ?: IllegalStateException("recording failed (${e.error})"))

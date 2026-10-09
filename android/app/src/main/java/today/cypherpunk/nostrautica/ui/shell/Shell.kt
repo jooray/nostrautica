@@ -118,7 +118,8 @@ private fun ThemeToggle() {
 fun TopStrip(back: Pair<String, () -> Unit>?) {
     val t = LocalTokens.current
     val s = LocalStrings.current
-    Column(Modifier.fillMaxWidth().statusBarsPadding()) {
+    // Opaque: page content scrolls under it.
+    Column(Modifier.fillMaxWidth().background(t.bg).statusBarsPadding()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(Modifier.weight(1f)) {
                 if (back != null) BackPill(back.first, back.second)
