@@ -42,6 +42,25 @@ class ChatDeviceKeys(private val kv: SecretKv) {
         return Device(account, sk, pk, clientId)
     }
 
+    /** The stored device key, or null — never mints. */
+    @Synchronized
+    fun peek(account: String): Device? {
+        val sk = kv.get(keyName(account))?.takeIf { it.length == 64 }?.let(Bytes::fromHex)?.takeIf(Secp::isValidSecret) ?: return null
+        return ensure(account)
+    }
+
+    /** Store a device key minted elsewhere (the chat engine) as this account's. */
+    @Synchronized
+    fun adopt(account: String, sk: ByteArray): Device {
+        require(Secp.isValidSecret(sk)) { "invalid device key" }
+        kv.put(keyName(account), Bytes.toHex(sk))
+        return ensure(account)
+    }
+
+    /** Forget a device key that never made it into the engine. */
+    @Synchronized
+    fun discard(account: String) = kv.put(keyName(account), null)
+
     /** The device key without minting one (the device list's "this device" badge). */
     fun peekPubkey(account: String): String? =
         kv.get(keyName(account))?.takeIf { it.length == 64 }?.let { runCatching { Secp.pubkeyHex(Bytes.fromHex(it)) }.getOrNull() }

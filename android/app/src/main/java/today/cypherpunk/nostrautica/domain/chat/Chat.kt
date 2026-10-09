@@ -73,6 +73,10 @@ class Chat(internal val c: AppContainer) {
      * recipient and to ourselves, through the DM service so it also shows in the
      * thread with that person.
      */
+    /** Whether the roster already lists [chatPubkey] as one of [account]'s chat devices. */
+    suspend fun isAttested(account: String, ctx: EventContext, chatPubkey: String): Boolean =
+        cachedRoster(account, ctx.coordinate)?.attendees?.firstOrNull { it.pubkey == account }?.chatKeys?.any { it.pubkey == chatPubkey } == true
+
     suspend fun sendDm(peer: String, text: String): Boolean =
         c.dms.send(peer, text) is Nostr.PublishResult.Published
 

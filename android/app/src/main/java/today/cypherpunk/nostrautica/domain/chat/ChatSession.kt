@@ -113,10 +113,23 @@ class ChatSession internal constructor(
         try {
             engine.acquire()
             acquired = true
-            val d = chat.keys.ensure(account)
+            val chatRelays = chat.chatRelays(ctx)
+            // A new device key is minted by the engine itself (no import-time
+            // discovery). A stored key the engine doesn't know is imported; if that
+            // import can't complete, a key never attested is safely replaced.
+            var d = chat.keys.peek(account)
+            if (d != null && !engine.hasAccount(d.pubkey)) {
+                val stored = d
+                val imported = runCatching { engine.ensureAccount(stored, ChatDeviceKeys.mergeRelays(chat.keys.advertisedRelays(stored.pubkey), chatRelays), chatRelays) }
+                if (imported.isFailure && !chat.isAttested(account, ctx, stored.pubkey)) {
+                    Log.w(TAG, "device key import failed (${imported.exceptionOrNull()?.javaClass?.simpleName}); minting a new one")
+                    chat.keys.discard(account)
+                    d = null
+                } else imported.getOrThrow()
+            }
+            if (d == null) d = chat.keys.adopt(account, engine.createDeviceIdentity(chatRelays, chatRelays))
             device = d
             _state.update { it.copy(chatPubkey = d.pubkey, error = null, phase = if (it.phase == Phase.ERROR) Phase.STARTING else it.phase) }
-            val chatRelays = chat.chatRelays(ctx)
             val advertised = ChatDeviceKeys.mergeRelays(chat.keys.advertisedRelays(d.pubkey), chatRelays)
             val roster0 = chat.cachedRoster(account, ctx.coordinate)
             _state.update { it.copy(roster = roster0) }

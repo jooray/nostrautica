@@ -40,6 +40,17 @@ interface ChatEngine {
      */
     suspend fun ensureAccount(device: ChatDeviceKeys.Device, relays: List<String>, bootstrap: List<String>): String
 
+    /**
+     * Mint a brand-new device identity inside the engine and return its secret.
+     * Unlike importing a key (which first runs a relay-list discovery that must
+     * be conclusive on every discovery relay, and a fresh key has nothing to
+     * discover), this publishes the new account's relay lists directly.
+     */
+    suspend fun createDeviceIdentity(relays: List<String>, bootstrap: List<String>): ByteArray
+
+    /** Whether the engine already holds an account for this device key. */
+    suspend fun hasAccount(pubkey: String): Boolean
+
     /** The initial key package and relay lists have been published (MDK NETWORK_READY). */
     suspend fun networkReady(account: String): Boolean
 

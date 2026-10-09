@@ -9,6 +9,7 @@ import dev.ipf.marmotkit.MarmotAndroid
 import dev.ipf.marmotkit.MarmotEventFfi
 import dev.ipf.marmotkit.MarmotKitException
 import dev.ipf.marmotkit.MarmotOptions
+import dev.ipf.marmotkit.RelayPolicyFfi
 import dev.ipf.marmotkit.SecretStore
 import dev.ipf.marmotkit.SelfMembershipFfi
 import dev.ipf.marmotkit.SendAcceptDispositionFfi
@@ -33,6 +34,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import today.cypherpunk.nostrautica.nostr.RelayPool
+import today.cypherpunk.nostrautica.protocol.Bytes
 import today.cypherpunk.nostrautica.protocol.Nip19
 import java.io.File
 
@@ -92,7 +94,14 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             nativeReady = true
         }
         val root = File(context.noBackupFilesDir, "marmot").apply { mkdirs() }
-        val options = MarmotOptions(clientName = CLIENT_NAME, secretStore = KvSecretStore(kv))
+        val options = MarmotOptions(
+            clientName = CLIENT_NAME,
+            secretStore = KvSecretStore(kv),
+            // Plain ws:// only exists in debug builds pointed at the local test
+            // stack (-PdevRelays=ws://127.0.0.1:7777 via `adb reverse`); MDK accepts
+            // it for loopback alone, and only when asked. Real builds stay public-only.
+            relayPolicy = if (today.cypherpunk.nostrautica.BuildConfig.DEV_RELAYS.isNotEmpty()) RelayPolicyFfi.ALLOW_LOOPBACK_RELAYS_AND_BLOBS else null,
+        )
         var attempt = 0
         val m = run {
             while (true) {
@@ -146,6 +155,18 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
     private fun m(): Marmot = marmot ?: throw IllegalStateException("chat engine is closed")
 
     private suspend fun <T> io(block: suspend Marmot.() -> T): T = withContext(Dispatchers.IO) { m().block() }
+
+    override suspend fun createDeviceIdentity(relays: List<String>, bootstrap: List<String>): ByteArray = io {
+        val created = createIdentity(relays, bootstrap, relays)
+        // MDK hands every secret to our SecretStore (KvSecretStore), so the new
+        // key is already in the Keystore-backed store; the 21607 proof of
+        // possession needs it. (exportEncryptedSecretKey would also work, but its
+        // NIP-49 scrypt cost needs ~256 MB, more than an app's Java heap.)
+        val hex = kv.get("chat.mk:${created.accountIdHex}") ?: throw IllegalStateException("chat engine did not store the new device key")
+        Bytes.fromHex(hex)
+    }
+
+    override suspend fun hasAccount(pubkey: String): Boolean = io { listAccounts().any { it.accountIdHex == pubkey } }
 
     override suspend fun ensureAccount(device: ChatDeviceKeys.Device, relays: List<String>, bootstrap: List<String>): String = io {
         fun find() = listAccounts().firstOrNull { it.accountIdHex == device.pubkey }
