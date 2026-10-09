@@ -40,4 +40,13 @@ class AppContainer(val context: Context) {
     val membership = Membership(nostr, cache, eventKeys, prefs)
     val grants = Grants(nostr, cache, eventKeys, contexts, accounts, prefs)
     val social = Social(nostr, accounts)
+
+    private val areas = java.util.concurrent.ConcurrentHashMap<String, Any>()
+
+    /**
+     * Feature areas register their services lazily, from their own files:
+     * `val AppContainer.dms: Dms get() = area("dms") { Dms(nostr, accounts) }`.
+     */
+    @Suppress("UNCHECKED_CAST")
+    fun <T : Any> area(key: String, create: () -> T): T = areas.getOrPut(key, create) as T
 }
