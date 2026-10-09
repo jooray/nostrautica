@@ -1,0 +1,47 @@
+{
+  "en": {
+    "signin.nip55": "Signer app on this phone",
+    "signin.nip55.button": "Sign in with {app}",
+    "signin.nip55.hint": "Your key stays in {app}. Once you allow Nostrautica there, signing happens in the background.",
+    "signin.nip55.none": "No signer app found on this phone. Amber is one; or use another option below.",
+    "signin.remote.showQr": "Show a QR code for a signer on another device",
+    "app.android.updateHint": "Updates arrive through Zapstore or wherever you installed the app from.",
+    "app.android.offlineCached": "Offline. Showing what is saved on this phone."
+  },
+  "sk": {
+    "signin.nip55": "Podpisovacia aplikácia v tomto telefóne",
+    "signin.nip55.button": "Prihlásiť sa cez {app}",
+    "signin.nip55.hint": "Váš kľúč zostáva v aplikácii {app}. Keď tam Nostrautice povolíte prístup, podpisovanie prebieha na pozadí.",
+    "signin.nip55.none": "V tomto telefóne sme nenašli podpisovaciu aplikáciu. Jednou z nich je Amber; alebo použite inú možnosť nižšie.",
+    "signin.remote.showQr": "Zobraziť QR kód pre podpisovač na inom zariadení",
+    "app.android.updateHint": "Aktualizácie prichádzajú cez Zapstore alebo odkiaľ ste aplikáciu nainštalovali.",
+    "app.android.offlineCached": "Ste offline. Zobrazujeme, čo je uložené v tomto telefóne."
+  },
+  "cs": {
+    "signin.nip55": "Podepisovací aplikace v tomto telefonu",
+    "signin.nip55.button": "Přihlásit se přes {app}",
+    "signin.nip55.hint": "Váš klíč zůstává v aplikaci {app}. Jakmile tam Nostrautice povolíte přístup, podepisování probíhá na pozadí.",
+    "signin.nip55.none": "V tomto telefonu jsme nenašli podepisovací aplikaci. Jednou z nich je Amber; nebo použijte jinou možnost níže.",
+    "signin.remote.showQr": "Zobrazit QR kód pro podepisovač na jiném zařízení",
+    "app.android.updateHint": "Aktualizace přicházejí přes Zapstore nebo odkud jste aplikaci nainstalovali.",
+    "app.android.offlineCached": "Jste offline. Zobrazujeme, co je uložené v tomto telefonu."
+  },
+  "de": {
+    "signin.nip55": "Signer-App auf diesem Telefon",
+    "signin.nip55.button": "Mit {app} anmelden",
+    "signin.nip55.hint": "Dein Schlüssel bleibt in {app}. Sobald du Nostrautica dort erlaubst, wird im Hintergrund signiert.",
+    "signin.nip55.none": "Auf diesem Telefon wurde keine Signer-App gefunden. Amber ist eine; oder nutze eine andere Option unten.",
+    "signin.remote.showQr": "QR-Code für einen Signer auf einem anderen Gerät zeigen",
+    "app.android.updateHint": "Updates kommen über Zapstore oder dorther, wo du die App installiert hast.",
+    "app.android.offlineCached": "Offline. Angezeigt wird, was auf diesem Telefon gespeichert ist."
+  },
+  "es": {
+    "signin.nip55": "App firmante en este teléfono",
+    "signin.nip55.button": "Iniciar sesión con {app}",
+    "signin.nip55.hint": "Tu clave se queda en {app}. Cuando permitas Nostrautica allí, la firma ocurre en segundo plano.",
+    "signin.nip55.none": "No encontramos ninguna app firmante en este teléfono. Amber es una; o usa otra opción de abajo.",
+    "signin.remote.showQr": "Mostrar un código QR para un firmante en otro dispositivo",
+    "app.android.updateHint": "Las actualizaciones llegan por Zapstore o desde donde instalaste la app.",
+    "app.android.offlineCached": "Sin conexión. Se muestra lo guardado en este teléfono."
+  }
+}
