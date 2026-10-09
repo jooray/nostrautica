@@ -1,0 +1,17 @@
+{
+  "en": {
+    "dm.android.failed": "Not sent. Tap to retry"
+  },
+  "sk": {
+    "dm.android.failed": "Neodoslané. Ťuknite pre opakovanie"
+  },
+  "cs": {
+    "dm.android.failed": "Neodesláno. Klepněte pro opakování"
+  },
+  "de": {
+    "dm.android.failed": "Nicht gesendet. Tippe, um es erneut zu versuchen"
+  },
+  "es": {
+    "dm.android.failed": "No enviado. Toca para reintentar"
+  }
+}
