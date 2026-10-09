@@ -250,8 +250,8 @@ class Dms(
         for (wrap in todo) {
             if (owner != me) break
             val outcome: DmMemoEntry? = try {
-                val rumor = if (interactive || signer.isLocal) GiftWrap.unwrap(wrap, signer, Kinds.ATTENDEE_RUMOR_KINDS)
-                else silently { GiftWrap.unwrap(wrap, signer, Kinds.ATTENDEE_RUMOR_KINDS) }
+                val rumor = if (interactive || signer.isLocal) accounts.unwrap(wrap, Kinds.ATTENDEE_RUMOR_KINDS)
+                else silently { accounts.unwrap(wrap, Kinds.ATTENDEE_RUMOR_KINDS) }
                 DmMemoEntry(DmLogic.classify(rumor, me), wrap.createdAt)
             } catch (e: CancellationException) {
                 throw e

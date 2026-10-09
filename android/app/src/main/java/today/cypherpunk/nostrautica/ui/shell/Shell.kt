@@ -68,6 +68,7 @@ import today.cypherpunk.nostrautica.domain.Role
 import today.cypherpunk.nostrautica.domain.UpdateRequired
 import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.ui.LocalContainer
+import today.cypherpunk.nostrautica.domain.dm.dms
 import today.cypherpunk.nostrautica.ui.LocalRouter
 import today.cypherpunk.nostrautica.ui.components.BackPill
 import today.cypherpunk.nostrautica.ui.components.ErrorCard
@@ -128,7 +129,7 @@ fun TopStrip(back: Pair<String, () -> Unit>?) {
     }
 }
 
-data class NavItem(val icon: ImageVector, val label: String, val active: Boolean, val badge: Int = 0, val avatar: (@Composable () -> Unit)? = null, val onClick: () -> Unit)
+data class NavItem(val icon: ImageVector, val label: String, val active: Boolean, val badge: Int = 0, val dot: Boolean = false, val avatar: (@Composable () -> Unit)? = null, val onClick: () -> Unit)
 
 @Composable
 fun BottomBar(items: List<NavItem>) {
@@ -146,6 +147,9 @@ fun BottomBar(items: List<NavItem>) {
                     Box {
                         if (item.avatar != null) item.avatar.invoke()
                         else Icon(item.icon, null, Modifier.size(24.dp), tint = if (item.active) t.accent else t.textDim)
+                        if (item.badge == 0 && item.dot) {
+                            Box(Modifier.align(Alignment.TopEnd).offset(x = 4.dp, y = (-2).dp).size(8.dp).clip(CircleShape).background(t.accent))
+                        }
                         if (item.badge > 0) {
                             Text(
                                 if (item.badge > 99) "99+" else item.badge.toString(),
@@ -198,7 +202,9 @@ fun GlobalScaffold(back: Pair<String, () -> Unit>? = null, content: @Composable 
     val items = buildList {
         add(NavItem(Icons.Outlined.Home, s.t("nav.events"), r is Route.Home) { router.resetTo(Route.Home) })
         if (account != null) {
-            add(NavItem(Icons.AutoMirrored.Outlined.Chat, s.t("nav.chat"), r is Route.Dm || r is Route.DmPeer) { router.switchTo(Route.Dm) })
+            val unread by c.dms.unreadCount.collectAsState()
+            val encrypted by c.dms.hasEncryptedActivity.collectAsState()
+            add(NavItem(Icons.AutoMirrored.Outlined.Chat, s.t("nav.chat"), r is Route.Dm || r is Route.DmPeer, badge = unread, dot = encrypted) { router.switchTo(Route.Dm) })
             add(NavItem(Icons.Outlined.Person, s.t("nav.me"), r is Route.Me) { router.switchTo(Route.Me) })
         } else {
             add(NavItem(Icons.Outlined.Login, s.t("nav.login"), r is Route.Login) { router.switchTo(Route.Login()) })
@@ -245,6 +251,8 @@ fun EventScaffold(naddr: String, back: Pair<String, () -> Unit>? = null, content
         if (account == null) state?.ctx?.cfg?.lang?.let { c.i18n.adoptEventLang(it) }
     }
     val r = router.current
+    val unread by c.dms.unreadCount.collectAsState()
+    val encrypted by c.dms.hasEncryptedActivity.collectAsState()
     val backTo = back ?: (s.t("more.allEvents") to { if (!router.back()) router.resetTo(Route.Home) })
     val bottom: @Composable () -> Unit = {
         if (state != null) {
@@ -254,7 +262,7 @@ fun EventScaffold(naddr: String, back: Pair<String, () -> Unit>? = null, content
                 if (state.showTalks && state.talksFirst) add(talks)
                 if (state.showPeople) add(NavItem(Icons.Outlined.People, s.t("nav.people"), r is Route.Attendees || r is Route.Attendee) { router.switchTo(Route.Attendees(naddr)) })
                 if (state.showTalks && !state.talksFirst) add(talks)
-                if (state.showChat) add(NavItem(Icons.AutoMirrored.Outlined.Chat, s.t("nav.chat"), r is Route.Chat) { router.switchTo(Route.Chat(naddr)) })
+                if (state.showChat) add(NavItem(Icons.AutoMirrored.Outlined.Chat, s.t("nav.chat"), r is Route.Chat || r is Route.Dm || r is Route.DmPeer, badge = unread, dot = encrypted) { router.switchTo(Route.Chat(naddr)) })
                 add(NavItem(Icons.Outlined.Campaign, s.t("nav.updates"), r is Route.Posts || r is Route.Post) { router.switchTo(Route.Posts(naddr)) })
                 add(NavItem(Icons.Outlined.MoreHoriz, s.t("nav.more"), r is Route.EventMore || r is Route.MyProfile || r is Route.Admin || r is Route.EventSettings) { router.switchTo(Route.EventMore(naddr)) })
             }

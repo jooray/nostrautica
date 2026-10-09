@@ -25,6 +25,7 @@ import today.cypherpunk.nostrautica.protocol.Rumor
 import today.cypherpunk.nostrautica.protocol.Secp
 import today.cypherpunk.nostrautica.protocol.Wire
 import today.cypherpunk.nostrautica.protocol.nowSec
+import today.cypherpunk.nostrautica.signer.silently
 
 /** The outcome of a bounded scan (events/scan-budget.ts): what Home says about a partial answer. */
 data class ScanOutcome(
@@ -113,7 +114,7 @@ class Grants(
      * Returns the coordinates that gained keys. [force] = "Search my whole history".
      * [maxUnwraps] bounds signer round trips (each wrap costs two on a remote signer).
      */
-    suspend fun receive(signer: NostrSigner, force: Boolean = false, maxUnwraps: Int = 60, outcome: ScanOutcome = ScanOutcome()): Set<String> = lock.withLock {
+    suspend fun receive(signer: NostrSigner, force: Boolean = false, maxUnwraps: Int = 60, outcome: ScanOutcome = ScanOutcome(), interactive: Boolean = true): Set<String> = lock.withLock {
         val pubkey = signer.pubkey
         val held = keys.list(pubkey)
         val last = prefs.getLong("grants-backfilled:$pubkey").takeIf { it > 0 }
@@ -143,10 +144,18 @@ class Grants(
             if (!signer.isLocal && budget-- <= 0) { outcome.truncated = true; break }
             outcome.attempted++
             val rumor = try {
-                GiftWrap.unwrap(wrap, signer, Kinds.ATTENDEE_RUMOR_KINDS + Kinds.ORGANIZER_RUMOR_KINDS).also { unwrapped++; outcome.succeeded++ }
+                (if (signer.isLocal || interactive) accounts.unwrap(wrap, Kinds.ATTENDEE_RUMOR_KINDS + Kinds.ORGANIZER_RUMOR_KINDS)
+                    else silently { accounts.unwrap(wrap, Kinds.ATTENDEE_RUMOR_KINDS + Kinds.ORGANIZER_RUMOR_KINDS) }).also { unwrapped++; outcome.succeeded++ }
             } catch (e: GiftWrap.UnwrapException) {
                 // A definitively foreign or malformed wrap (wrong kind for this key, forged seal).
                 memo[wrap.id] = MemoEntry(done = true); dirty = true; continue
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: today.cypherpunk.nostrautica.signer.SignerNeedsUser) {
+                // A remote signer would have to ask the user. Grants found while
+                // the user is waiting for them come from the Join/Overview screens,
+                // which call receive() interactively; a background scan stops here.
+                outcome.truncated = true; break
             } catch (e: Exception) {
                 failed++; continue // transient: not memoized, retried next scan
             }

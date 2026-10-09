@@ -8,6 +8,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlin.random.Random
 
 /** An unwrapped, authenticated rumor (giftwrap.ts `Rumor`). */
+@kotlinx.serialization.Serializable
 data class Rumor(
     val id: String,
     val pubkey: String,

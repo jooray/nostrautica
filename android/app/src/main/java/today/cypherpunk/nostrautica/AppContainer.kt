@@ -48,5 +48,6 @@ class AppContainer(val context: Context) {
      * `val AppContainer.dms: Dms get() = area("dms") { Dms(nostr, accounts) }`.
      */
     @Suppress("UNCHECKED_CAST")
-    fun <T : Any> area(key: String, create: () -> T): T = areas.getOrPut(key, create) as T
+    fun <T : Any> area(key: String, create: () -> T): T =
+        (areas[key] ?: synchronized(areas) { areas.getOrPut(key, create) }) as T
 }

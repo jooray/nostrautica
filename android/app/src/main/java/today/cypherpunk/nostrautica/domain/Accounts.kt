@@ -15,6 +15,7 @@ import today.cypherpunk.nostrautica.protocol.LocalSigner
 import today.cypherpunk.nostrautica.protocol.Nip44
 import today.cypherpunk.nostrautica.protocol.NostrEvent
 import today.cypherpunk.nostrautica.protocol.NostrSigner
+import today.cypherpunk.nostrautica.protocol.Rumor
 import today.cypherpunk.nostrautica.protocol.UnsignedEvent
 import today.cypherpunk.nostrautica.protocol.nowSec
 import today.cypherpunk.nostrautica.signer.Session
@@ -112,6 +113,28 @@ class Accounts(private val session: Session, private val nostr: Nostr, private v
         val created = if (Kinds.isReplaceable(kind) || Kinds.isAddressable(kind)) monotonicCreatedAt(kind, pubkey, d) else nowSec()
         val ev = signer.sign(UnsignedEvent(pubkey, created, kind, tags, content))
         return ev to nostr.publish(ev, relays, pubkey, label)
+    }
+
+    /**
+     * Unwrap a gift wrap addressed to the user, at most once per wrap ever: the
+     * authenticated rumor is kept in the owner cache, so the grant scan and the
+     * DM inbox (which both read every 1059 `#p` = me) never ask a remote signer
+     * to decrypt the same wrap twice. Only successes are cached; the caller
+     * decides what a failure means.
+     */
+    suspend fun unwrap(wrap: NostrEvent, allowedKinds: Set<Int>): Rumor {
+        val acct = requireAccount()
+        val key = "rumor:${wrap.id}"
+        cache.get(acct.pubkey, key, Rumor.serializer())?.let { r ->
+            if (r.kind !in allowedKinds) throw GiftWrap.UnwrapException("rumor kind ${r.kind} is not accepted here")
+            return r
+        }
+        // Unwrap with every kind this account may receive, so the cached result
+        // serves whichever caller comes next; then apply this caller's allowlist.
+        val r = GiftWrap.unwrap(wrap, acct.signer, Kinds.ATTENDEE_RUMOR_KINDS + Kinds.ORGANIZER_RUMOR_KINDS)
+        cache.put(acct.pubkey, key, Rumor.serializer(), r, wrap.createdAt)
+        if (r.kind !in allowedKinds) throw GiftWrap.UnwrapException("rumor kind ${r.kind} is not accepted here")
+        return r
     }
 
     fun forget(pubkey: String) { blind.remove(pubkey) }

@@ -166,7 +166,7 @@ fun EventHomeScreen(naddr: String) {
             while (true) {
                 delay(gap)
                 c.cache.forget("homescan:${a.pubkey}")
-                runCatching { c.grants.receive(a.signer, maxUnwraps = 10) }
+                runCatching { c.grants.receive(a.signer, maxUnwraps = 10, interactive = false) }
                 if (c.membership.role(a.pubkey, ev.coordinate) != Role.PENDING) {
                     c.membership.clearJoinSent(a.pubkey, ev.coordinate)
                     break
