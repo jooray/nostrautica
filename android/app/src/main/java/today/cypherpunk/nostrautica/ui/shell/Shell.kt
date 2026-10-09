@@ -66,6 +66,7 @@ import today.cypherpunk.nostrautica.domain.EventContext
 import today.cypherpunk.nostrautica.domain.EventKeys
 import today.cypherpunk.nostrautica.domain.Role
 import today.cypherpunk.nostrautica.domain.UpdateRequired
+import today.cypherpunk.nostrautica.domain.people.whatsNew
 import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.ui.LocalContainer
 import today.cypherpunk.nostrautica.domain.dm.dms
@@ -253,6 +254,12 @@ fun EventScaffold(naddr: String, back: Pair<String, () -> Unit>? = null, content
     val r = router.current
     val unread by c.dms.unreadCount.collectAsState()
     val encrypted by c.dms.hasEncryptedActivity.collectAsState()
+    // People tab badge: new arrivals + new matches since the list was last open (pure cache read).
+    val peopleBadge by remember(account?.pubkey, state?.coordinate, state?.isMember) {
+        val coord = state?.coordinate
+        val owner = account?.pubkey
+        if (coord != null && owner != null && state.isMember) c.whatsNew.peopleBadge(owner, coord) else kotlinx.coroutines.flow.flowOf(0)
+    }.collectAsState(0)
     val backTo = back ?: (s.t("more.allEvents") to { if (!router.back()) router.resetTo(Route.Home) })
     val bottom: @Composable () -> Unit = {
         if (state != null) {
@@ -260,7 +267,7 @@ fun EventScaffold(naddr: String, back: Pair<String, () -> Unit>? = null, content
                 add(NavItem(Icons.Outlined.Explore, s.t("nav.overview"), r is Route.Event || r is Route.Join) { router.switchTo(Route.Event(naddr)) })
                 val talks = NavItem(Icons.Outlined.OndemandVideo, s.t("nav.talks"), r is Route.Talks || r is Route.Talk) { router.switchTo(Route.Talks(naddr)) }
                 if (state.showTalks && state.talksFirst) add(talks)
-                if (state.showPeople) add(NavItem(Icons.Outlined.People, s.t("nav.people"), r is Route.Attendees || r is Route.Attendee) { router.switchTo(Route.Attendees(naddr)) })
+                if (state.showPeople) add(NavItem(Icons.Outlined.People, s.t("nav.people"), r is Route.Attendees || r is Route.Attendee, badge = peopleBadge) { router.switchTo(Route.Attendees(naddr)) })
                 if (state.showTalks && !state.talksFirst) add(talks)
                 if (state.showChat) add(NavItem(Icons.AutoMirrored.Outlined.Chat, s.t("nav.chat"), r is Route.Chat || r is Route.Dm || r is Route.DmPeer, badge = unread, dot = encrypted) { router.switchTo(Route.Chat(naddr)) })
                 add(NavItem(Icons.Outlined.Campaign, s.t("nav.updates"), r is Route.Posts || r is Route.Post) { router.switchTo(Route.Posts(naddr)) })
