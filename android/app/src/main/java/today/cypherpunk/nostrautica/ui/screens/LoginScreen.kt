@@ -170,8 +170,24 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
             } else {
                 SecondaryButton(s.t("signin.paste.import"), {
                     error = null
-                    runCatching { c.session.importKey(paste, passphrase.ifEmpty { null }) }.onSuccess { finish() }.onFailure(::fail)
-                }, enabled = paste.isNotEmpty())
+                    busy = "import"
+                    scope.launch {
+                        // NIP-49 scrypt takes a second or more: never on the main thread.
+                        val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                            try { Result.success(c.session.importKey(paste, passphrase.ifEmpty { null })) }
+                            catch (e: OutOfMemoryError) { Result.failure(IllegalStateException(s.t("signin.paste.tooStrong"))) }
+                            catch (e: Exception) { Result.failure(e) }
+                        }
+                        busy = null
+                        r.onSuccess { finish() }.onFailure { e ->
+                            error = when {
+                                e is IllegalStateException && e.message == s.t("signin.paste.tooStrong") -> e.message
+                                paste.startsWith("ncryptsec1") && e.message == "wrong password" -> s.t("signin.paste.wrongPassphrase")
+                                else -> s.t("signin.paste.invalid")
+                            }
+                        }
+                    }
+                }, enabled = paste.isNotEmpty(), busy = busy == "import")
             }
             Dim(s.t("signin.paste.saferHint"), size = 13)
         }

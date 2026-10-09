@@ -235,7 +235,7 @@ fun AddEventByLink() {
     var error by remember { mutableStateOf<String?>(null) }
     Card {
         SectionTitle(s.t("home.addByLink.title"))
-        Dim(s.t("home.addByLink.body"))
+        Dim(s.t("home.addByLink.body.native"))
         Field(text, { text = it; error = null }, s.t("home.addByLink.label"), placeholder = s.t("home.addByLink.placeholder"), isError = error != null, supporting = error)
         SecondaryButton(s.t("home.addByLink.action"), {
             val r = parseEventLink(text)

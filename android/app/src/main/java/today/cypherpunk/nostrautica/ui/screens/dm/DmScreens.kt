@@ -187,12 +187,13 @@ private fun DmList(p: PaddingValues, account: Session.Account) {
     val profiles = rememberProfiles(remember(threads) { threads.map { it.peer } })
     // Group chats: visited events the user belongs to, with chat on. Cache only — never blocks the list.
     val groups by produceState(emptyList<GroupChat>(), account.pubkey, membershipVersion) {
-        value = c.membership.recent(account.pubkey).mapNotNull { r ->
-            val role = c.membership.role(account.pubkey, r.coordinate)
-            if (role == Role.VISITOR) return@mapNotNull null
-            val ctx: EventContext = c.contexts.cached(r.naddr) ?: return@mapNotNull null
+        // The same sources as Home (held keys, joins, recently opened), so a chat
+        // shows here after a re-login even before its event is opened again.
+        value = today.cypherpunk.nostrautica.ui.screens.loadHomeEvents(c, account).mapNotNull { e ->
+            if (e.role != Role.ATTENDEE && e.role != Role.ORGANIZER) return@mapNotNull null
+            val ctx: EventContext = e.ctx ?: return@mapNotNull null
             if (!ctx.cfg.isMarmotChatEnabled) return@mapNotNull null
-            GroupChat(r.naddr, r.coordinate, ctx.title, ctx.icon, role)
+            GroupChat(e.naddr, e.coordinate, ctx.title, ctx.icon, e.role)
         }
     }
     val loading = messages.isEmpty() && !settled
