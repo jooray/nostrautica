@@ -77,9 +77,57 @@ class EventStore(private val db: AppDatabase) {
 
     private fun rows(r: List<EventRow>) = r.mapNotNull { NostrEvent.fromJsonString(it.json) }
 
-    suspend fun query(vararg filters: Filter): List<NostrEvent> = rows(dao.query(sql(filters.toList())))
+    /**
+     * Older Android SQLite caps a statement at 999 bound variables, and a roster
+     * of a few hundred people in one `IN (…)` gets close; thousands exceed it. So
+     * any filter with a long list is split into several filters of at most
+     * [MAX_LIST] values each (same meaning: the filters are OR-ed), and the
+     * filters are spread over as many statements as needed.
+     */
+    private fun split(filters: List<Filter>): List<List<Filter>> {
+        val expanded = filters.flatMap { f ->
+            var parts = listOf(f)
+            parts = parts.flatMap { p -> p.ids?.takeIf { it.size > MAX_LIST }?.chunked(MAX_LIST)?.map { p.copy(ids = it) } ?: listOf(p) }
+            parts = parts.flatMap { p -> p.authors?.takeIf { it.size > MAX_LIST }?.chunked(MAX_LIST)?.map { p.copy(authors = it) } ?: listOf(p) }
+            parts.flatMap { p ->
+                val big = p.tags.entries.firstOrNull { it.value.size > MAX_LIST }
+                big?.value?.chunked(MAX_LIST)?.map { p.copy(tags = p.tags + (big.key to it)) } ?: listOf(p)
+            }
+        }
+        val groups = mutableListOf<MutableList<Filter>>()
+        var vars = 0
+        for (f in expanded) {
+            val n = (f.ids?.size ?: 0) + (f.authors?.size ?: 0) + (f.kinds?.size ?: 0) + f.tags.values.sumOf { it.size + 1 } + 2
+            if (groups.isEmpty() || vars + n > MAX_VARS) { groups += mutableListOf<Filter>(); vars = 0 }
+            groups.last() += f
+            vars += n
+        }
+        return groups
+    }
 
-    fun observe(vararg filters: Filter): Flow<List<NostrEvent>> = dao.observe(sql(filters.toList())).map(::rows)
+    private fun merge(parts: List<List<NostrEvent>>, limit: Int?): List<NostrEvent> {
+        val all = parts.flatten().distinctBy { it.id }
+            .sortedWith(compareByDescending<NostrEvent> { it.createdAt }.thenBy { it.id })
+        return if (limit != null) all.take(limit) else all
+    }
+
+    suspend fun query(vararg filters: Filter): List<NostrEvent> {
+        val groups = split(filters.toList())
+        if (groups.size == 1) return rows(dao.query(sql(groups[0])))
+        return merge(groups.map { rows(dao.query(sql(it))) }, filters.mapNotNull { it.limit }.maxOrNull())
+    }
+
+    fun observe(vararg filters: Filter): Flow<List<NostrEvent>> {
+        val groups = split(filters.toList())
+        if (groups.size == 1) return dao.observe(sql(groups[0])).map(::rows)
+        val limit = filters.mapNotNull { it.limit }.maxOrNull()
+        return kotlinx.coroutines.flow.combine(groups.map { g -> dao.observe(sql(g)).map(::rows) }) { merge(it.toList(), limit) }
+    }
+
+    companion object {
+        const val MAX_LIST = 400
+        const val MAX_VARS = 900
+    }
 
     /** The current version of an addressable/replaceable event, from the phone. */
     suspend fun latest(kind: Int, pubkey: String, d: String? = null): NostrEvent? =
