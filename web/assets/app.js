@@ -9,6 +9,30 @@
   var LANGS = window.NOSTRAUTICA_LANGS || ["en", "sk", "cs"];
   var DICT = window.NOSTRAUTICA_I18N || {};
 
+  /* ---------- Platform ---------- */
+
+  // Android visitors get the native app as the main recommendation in #install;
+  // everyone else (iPhone, iPad, desktop) keeps "the installed web app is the
+  // whole app". Elements opt in with data-i18n-android (alternative copy key)
+  // and data-android-class (alternative button style). The default markup is
+  // the non-Android version, so without JS nothing is lost.
+  var IS_ANDROID = (function () {
+    try {
+      // Either signal counts: Firefox has no userAgentData, and Chrome's
+      // "desktop site" mode drops Android from the UA string but not from it.
+      var uad = navigator.userAgentData;
+      return /android/i.test(navigator.userAgent || "") ||
+        !!(uad && /android/i.test(uad.platform || ""));
+    } catch (e) { return false; }
+  })();
+
+  if (IS_ANDROID) {
+    document.documentElement.classList.add("is-android");
+    document.querySelectorAll("[data-android-class]").forEach(function (el) {
+      el.className = el.getAttribute("data-android-class");
+    });
+  }
+
   /* ---------- Language ---------- */
 
   // A language encoded in the URL hash (#en / #sk / #cs / #de / #es, or #cz as
@@ -52,7 +76,7 @@
     document.documentElement.setAttribute("lang", lang);
 
     document.querySelectorAll("[data-i18n]").forEach(function (el) {
-      var key = el.getAttribute("data-i18n");
+      var key = (IS_ANDROID && el.getAttribute("data-i18n-android")) || el.getAttribute("data-i18n");
       if (dict[key] !== undefined) el.textContent = dict[key];
     });
 
