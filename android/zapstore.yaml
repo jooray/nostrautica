@@ -1,0 +1,19 @@
+# Zapstore listing for the Android app. Releases come from the GitHub mirror:
+# each one carries the signed nostrautica-<version>.apk (see AGENTS.md,
+# "Releasing the Android app"). Run zsp from this directory.
+repository: https://github.com/jooray/nostrautica
+name: Nostrautica
+summary: Nostr events built for meeting the right people
+description: |
+  Nostrautica runs conferences, meetups and other events on Nostr. Attendees join an event, tell it who they would like to meet, and get introductions to the people who fit, with the reason for each match. The event page holds the schedule, talks and posts, and the people there can talk in the event's group chat or by private message.
+
+  Organizers create the event, approve who joins, set it up and read the report afterwards, all from the phone.
+
+  There is no app server. Everything runs on your phone against Nostr relays: encrypted private messages (NIP-17), group chat over MLS, event keys. Sign in with Amber or any NIP-46 signer, or bring your own key.
+
+  This is the native version of the web app at nostrautica.cypherpunk.today. Open source under the MIT licence.
+website: https://nostrautica.cypherpunk.today
+icon: ../packages/app/static/icon-512.png
+tags: [nostr, events, conference, networking, chat, amber]
+license: MIT
+pubkey: npub1m2mvvpjugwdehtaskrcl7ksvdqnnhnjur9v6g9v266nss504q7mqvlr8p9

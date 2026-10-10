@@ -84,6 +84,12 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
     var showQr by remember { mutableStateOf(false) }
     var waitJob by remember { mutableStateOf<Job?>(null) }
     val signers = remember { Nip55Signer.installedSigners(ctx) }
+    // Nothing on this phone takes a nostrconnect:// link, so the only way in over
+    // NIP-46 is a signer on another device: create the code and show its QR at once.
+    val noSignerApp = remember {
+        Intent(Intent.ACTION_VIEW, Uri.parse("nostrconnect://")).resolveActivity(ctx.packageManager) == null
+    }
+    var autoConnected by remember { mutableStateOf(false) }
     val clipboard = LocalClipboardManager.current
 
     fun finish() {
@@ -123,23 +129,29 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
             SectionTitle(s.t("signin.remote"))
             Dim(s.t("signin.remote.hint"))
             val o = offer
+            val connect = {
+                error = null
+                val fresh = Nip46Signer.nostrConnectOffer()
+                offer = fresh
+                waitJob?.cancel()
+                waitJob = scope.launch {
+                    runCatching { Nip46Signer.awaitNostrConnect(c.pool, fresh) }
+                        .onSuccess { c.session.adoptNip46(it); offer = null; finish() }
+                        .onFailure { if (it !is kotlinx.coroutines.CancellationException) { offer = null; fail(it) } }
+                }
+            }
+            if (noSignerApp && o == null && !autoConnected) {
+                LaunchedEffect(Unit) { autoConnected = true; showQr = true; connect() }
+            }
             if (o == null) {
-                SecondaryButton(s.t("signin.remote.connect"), {
-                    error = null
-                    val fresh = Nip46Signer.nostrConnectOffer()
-                    offer = fresh
-                    waitJob?.cancel()
-                    waitJob = scope.launch {
-                        runCatching { Nip46Signer.awaitNostrConnect(c.pool, fresh) }
-                            .onSuccess { c.session.adoptNip46(it); offer = null; finish() }
-                            .onFailure { if (it !is kotlinx.coroutines.CancellationException) { offer = null; fail(it) } }
-                    }
-                })
+                SecondaryButton(s.t("signin.remote.connect"), { connect() })
             } else {
                 Dim(s.t("signin.remote.waiting"))
-                PrimaryButton(s.t("signin.remote.openSigner"), {
-                    runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(o.uri))) }
-                })
+                if (!noSignerApp) {
+                    PrimaryButton(s.t("signin.remote.openSigner"), {
+                        runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(o.uri))) }
+                    })
+                }
                 if (showQr) {
                     Dim(s.t("signin.remote.scan"))
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { QrCode(o.uri) }
