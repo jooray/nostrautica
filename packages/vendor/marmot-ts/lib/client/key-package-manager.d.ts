@@ -1,11 +1,11 @@
 import { EventSigner } from "applesauce-core";
 import { NostrEvent } from "applesauce-core/helpers/event";
 import { EventEmitter } from "eventemitter3";
-import { CiphersuiteName, CryptoProvider, PrivateKeyPackage, Welcome } from "ts-mls";
-import type { AccountIdentityProofSigner } from "../core/account-identity-proof.js";
+import { CiphersuiteName, CryptoProvider, PrivateKeyPackage, Welcome } from "../vendor/ts-mls/index.js";
 import { GenericKeyValueStore } from "../utils/key-value.js";
 import { ListedKeyPackage, LocalKeyPackage, StoredKeyPackage, WelcomeKeyPackageCandidate } from "./key-package-store.js";
 import { NostrNetworkInterface } from "./nostr-interface.js";
+import { type RejectReason, type VerifyEventMethod } from "./verify.js";
 export { KeyPackageNotFoundError, KeyPackageRotatePreconditionError, MissingRelayError, MissingSlotIdentifierError, } from "./key-package-errors.js";
 export { KeyPackageStore, type KeyPackageStoreEvents, type ListedKeyPackage, type LocalKeyPackage, type StoredKeyPackage, type TrackedKeyPackage, type WelcomeKeyPackageCandidate, } from "./key-package-store.js";
 export { KeyPackagePublisher, type KeyPackagePublisherOptions, } from "./key-package-publisher.js";
@@ -21,7 +21,7 @@ export type CreateKeyPackageOptions = {
     identifier?: string;
     /** Ciphersuite to use (default: MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519) */
     ciphersuite?: CiphersuiteName;
-    /** Whether to mark the key package with the MLS last_resort extension (default: true) */
+    /** Whether to mark the key package as last-resort (`last_resort_key_package` component; default: true) */
     isLastResort?: boolean;
     /** Client identifier string to include in the key package event */
     client?: string;
@@ -43,12 +43,21 @@ export type RotateKeyPackageOptions = {
     d?: string;
     /** Ciphersuite to use for the new key package */
     ciphersuite?: CiphersuiteName;
-    /** Whether to mark the new key package with the MLS last_resort extension (default: true) */
+    /** Whether to mark the new key package as last-resort (`last_resort_key_package` component; default: true) */
     isLastResort?: boolean;
     /** Client identifier string to include in the new key package event */
     client?: string;
     /** Whether to include the NIP-70 protected tag on the new event */
     protected?: boolean;
+};
+/** Options for {@link KeyPackageManager.purge}. */
+export type PurgeKeyPackageOptions = {
+    /**
+     * Extra relays to publish the deletion to, on top of the relays recorded
+     * locally when the key package was published. Needed for key packages
+     * tracked from another device, whose publish relays are not known here.
+     */
+    relays?: string[];
 };
 export type KeyPackageManagerEvents = {
     /** Emitted when a key package is stored locally */
@@ -59,6 +68,13 @@ export type KeyPackageManagerEvents = {
     updated: (keyPackage: StoredKeyPackage) => void;
     /** Emitted when a key package publish is recorded (own publish or observed relay event) */
     published: (refHex: string, eventId: string, relays: string[]) => void;
+    /**
+     * Emitted when an inbound kind-30443 KeyPackage event is rejected at the
+     * trust boundary in {@link KeyPackageManager.track} — invalid signature,
+     * required-tag cardinality violation, or Lifetime cap/current failure
+     * (SEC-01/WIRE-01/WIRE-02) — before it is ever persisted.
+     */
+    rejected: (event: NostrEvent, reason: RejectReason) => void;
 };
 /** Options for creating a new KeyPackageManager */
 export type KeyPackageManagerOptions = {
@@ -68,19 +84,16 @@ export type KeyPackageManagerOptions = {
     clientId?: string;
     /** The signer used for the clients identity */
     signer: EventSigner;
-    /**
-     * Optional Nostr-account proof signer. When provided, generated key packages
-     * carry a `marmot.account-identity-proof.v1` LeafNode extension binding the
-     * account to the leaf signature key (required for darkmatter wire interop).
-     * Supply this from a signer with raw BIP-340 access (e.g. a PrivateKeyAccount
-     * secret key via `signAccountIdentityProof`); the applesauce `EventSigner`
-     * alone cannot sign the proof digest.
-     */
-    accountProofSigner?: AccountIdentityProofSigner;
     /** The nostr relay pool to use for the client. Should implement GroupNostrInterface for group operations. */
     network: NostrNetworkInterface;
     /** The crypto provider to use for cryptographic operations */
     cryptoProvider?: CryptoProvider;
+    /**
+     * Injectable Nostr event verifier for the 30443 KeyPackage trust boundary
+     * (SEC-01). Defaults to applesauce's `verifyEvent`. Stored for the
+     * inbound-verify gate on `track()`/publish-record paths.
+     */
+    verifyEvent?: VerifyEventMethod;
 };
 /**
  * Manages the full lifecycle of MLS key packages — local private material and
@@ -123,13 +136,20 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      */
     create(options: CreateKeyPackageOptions): Promise<ListedKeyPackage>;
     /**
-     * Ensures this client has at least one unused KeyPackage published, so peers
-     * can always invite it. A no-op (returning the existing unused KeyPackage)
-     * when one already exists; otherwise creates and publishes a fresh one to
-     * `options.relays` via {@link create}. Idempotent — safe to call on every
-     * startup.
+     * Ensures this client has at least one unused, current KeyPackage published,
+     * so peers can always invite it. A no-op (returning the existing unused
+     * current KeyPackage) when one already exists; otherwise creates and
+     * publishes a fresh one to `options.relays` via {@link create}. Idempotent —
+     * safe to call on every startup.
      *
-     * @returns The existing unused KeyPackage, or the freshly created one.
+     * Stored entries flagged `nonCurrent` (D-09) — for example a KeyPackage
+     * published by a pre-v2 release that lacks a valid `0x8009` proof — are
+     * skipped and left stored as-is; nothing is deleted and no relay deletion
+     * event is published. Their kind-30443 events therefore stay discoverable on
+     * relays, and a peer's invite that picks one will fail, until {@link purge}
+     * publishes a NIP-09 deletion for them — call it explicitly when migrating.
+     *
+     * @returns The existing unused current KeyPackage, or the freshly created one.
      */
     ensurePublished(options: CreateKeyPackageOptions): Promise<ListedKeyPackage>;
     /**
@@ -164,12 +184,18 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      *
      * @param refs - One or more key package references (hex string or Uint8Array)
      */
-    purge(refs: Uint8Array | string | Array<Uint8Array | string>): Promise<void>;
+    purge(refs: Uint8Array | string | Array<Uint8Array | string>, options?: PurgeKeyPackageOptions): Promise<void>;
     /**
-     * Observes a Nostr event and, if it is a kind 30443 key package event whose
-     * `i` tag (MIP-00 KeyPackageRef) matches its decoded body, records it in the
-     * store. Events with no `i` tag, an undecodable body, or an `i` tag that does
-     * not match the recomputed ref are rejected.
+     * Observes a Nostr event and, if it is a kind 30443 key package event that
+     * passes the trust boundary (SEC-01/WIRE-01/WIRE-02), records it in the
+     * store. Non-key-package events are silently ignored. Events that fail the
+     * boundary — invalid signature, non-singleton/invalid `d`/`i`/
+     * `mls_protocol_version`, an over-long or not-current KeyPackage Lifetime,
+     * an undecodable body, or an `i` tag that does not match the recomputed
+     * ref — are rejected: a `rejected` event is emitted with a typed
+     * {@link RejectReason} (except for the last two, which the underlying
+     * {@link KeyPackageStore.addPublished} chokepoint throws on and this
+     * method converts to a `false` return without an emit).
      *
      * @param event - Any Nostr event; non-key-package events are silently ignored
      * @returns `true` if the event was recorded, `false` if ignored or rejected
@@ -177,7 +203,8 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
     track(event: NostrEvent): Promise<boolean>;
     /**
      * Lists all locally stored key packages, each enriched with their published
-     * Nostr events.
+     * Nostr events. Entries lacking a valid current account identity proof
+     * (`0x8009`) carry `nonCurrent: true` (D-09) — see {@link ensurePublished}.
      */
     list(): Promise<ListedKeyPackage[]>;
     /** Returns the number of locally stored key packages. */

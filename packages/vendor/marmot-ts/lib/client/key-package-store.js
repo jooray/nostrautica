@@ -1,7 +1,8 @@
 /** @module @category Client - Key Package Manager */
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { EventEmitter } from "eventemitter3";
-import { defaultCryptoProvider, } from "ts-mls";
+import { defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
+import { validateKeyPackageAccountIdentityProof } from "../core/components/account-identity-proof.js";
 import { getKeyPackage, getKeyPackageIdentifier, } from "../core/key-package-event.js";
 import { calculateKeyPackageRef } from "../core/key-package.js";
 import { logger } from "../utils/debug.js";
@@ -47,6 +48,9 @@ export class KeyPackageStore extends EventEmitter {
             ...(keyPackage.published !== undefined
                 ? { published: deduplicatePublishedEvents(keyPackage.published) }
                 : {}),
+            ...(keyPackage.relays !== undefined && keyPackage.relays.length > 0
+                ? { relays: mergeRelays([], keyPackage.relays) }
+                : {}),
         };
         await this.#store.setItem(key, entry);
         this.emit("added", entry);
@@ -61,10 +65,13 @@ export class KeyPackageStore extends EventEmitter {
      *
      * Throws if the event body cannot be decoded as a valid key package, or if
      * the event's `i` tag (KeyPackageRef) does not match the decoded body.
+     *
+     * @param relays - Relays the event was published to, merged into the
+     *   entry's local `relays` record.
      */
-    async addPublished(ref, event) {
+    async addPublished(ref, event, relays = []) {
         const key = this.#resolveKey(ref);
-        // MIP-00: the `i` tag IS the KeyPackageRef of the event body. Receivers MUST
+        // The `i` tag IS the KeyPackageRef of the event body. Receivers MUST
         // verify it against the decoded KeyPackage and reject on mismatch
         // (transports/nostr.md §KeyPackage publication) so a forged `i` tag cannot
         // make us index a package under a ref that is not its own. Decoding here
@@ -85,10 +92,12 @@ export class KeyPackageStore extends EventEmitter {
                 event,
             ]);
             const shouldPersistIdentifier = identifier !== undefined && existing.identifier === undefined;
+            const mergedRelays = mergeRelays(existing.relays ?? [], relays);
+            const relaysChanged = mergedRelays.length !== (existing.relays ?? []).length;
             const publishedChanged = existing.published === undefined ||
                 published.length !== existing.published.length ||
                 !published.every((e, index) => e.id === existing.published?.[index]?.id);
-            if (!publishedChanged && !shouldPersistIdentifier) {
+            if (!publishedChanged && !shouldPersistIdentifier && !relaysChanged) {
                 return;
             }
             const updated = {
@@ -96,6 +105,7 @@ export class KeyPackageStore extends EventEmitter {
                 // Persist identifier if discovered for the first time on this entry
                 ...(shouldPersistIdentifier ? { identifier } : {}),
                 published,
+                ...(mergedRelays.length > 0 ? { relays: mergedRelays } : {}),
             };
             await this.#store.setItem(key, updated);
             this.emit("updated", updated);
@@ -108,6 +118,7 @@ export class KeyPackageStore extends EventEmitter {
                 publicPackage,
                 ...(identifier !== undefined ? { identifier } : {}),
                 published: [event],
+                ...(relays.length > 0 ? { relays: mergeRelays([], relays) } : {}),
             };
             await this.#store.setItem(key, entry);
             this.emit("added", entry);
@@ -137,19 +148,34 @@ export class KeyPackageStore extends EventEmitter {
     /**
      * Lists all {@link LocalKeyPackage} entries (those with private material),
      * without the private package itself.
+     *
+     * Classifies each entry's `nonCurrent` flag by running
+     * `validateKeyPackageAccountIdentityProof` against its `publicPackage` — one BIP-340
+     * verify per stored package.
      */
     async list() {
         const allKeys = await this.#store.keys();
         const packages = await Promise.all(allKeys.map((key) => this.#store.getItem(key)));
         return packages
             .filter((pkg) => pkg !== null && pkg.privatePackage !== undefined)
-            .map(({ keyPackageRef, publicPackage, identifier, published, used }) => ({
-            keyPackageRef,
-            publicPackage,
-            ...(identifier !== undefined ? { identifier } : {}),
-            ...(published !== undefined ? { published } : {}),
-            ...(used !== undefined ? { used } : {}),
-        }));
+            .map(({ keyPackageRef, publicPackage, identifier, published, relays, used, }) => {
+            let nonCurrent = false;
+            try {
+                validateKeyPackageAccountIdentityProof(publicPackage);
+            }
+            catch {
+                nonCurrent = true;
+            }
+            return {
+                keyPackageRef,
+                publicPackage,
+                ...(identifier !== undefined ? { identifier } : {}),
+                ...(published !== undefined ? { published } : {}),
+                ...(relays !== undefined ? { relays } : {}),
+                ...(used !== undefined ? { used } : {}),
+                ...(nonCurrent ? { nonCurrent: true } : {}),
+            };
+        });
     }
     /**
      * Lists all local key packages with their published events defaulted to an
@@ -212,4 +238,7 @@ export class KeyPackageStore extends EventEmitter {
         }
     }
 }
-//# sourceMappingURL=key-package-store.js.map
+/** Union of two relay lists, keeping first-seen order and dropping duplicates. */
+function mergeRelays(existing, added) {
+    return [...new Set([...existing, ...added])];
+}

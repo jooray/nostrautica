@@ -1,10 +1,13 @@
 /**
  * Marmot chat identity resolution (NIP §10, wire v2 — per-device keys).
  *
- * The mandatory `marmot.account-identity-proof.v1` leaf requires **raw BIP-340**
- * signing over a 32-byte digest that is not a Nostr event — something NIP-46/Amber
- * and NIP-07 cannot do. So the MLS account identity for chat is always a key the
- * app holds locally.
+ * The MLS account identity for chat is always a key the app holds locally. That
+ * started as a necessity — the legacy `marmot.account-identity-proof.v1` (0xF2F1)
+ * needed raw BIP-340 over a non-event digest, which NIP-46/Amber and NIP-07
+ * cannot produce — and stays a decision (NIP §10): the current proof
+ * (`marmot.member.account-identity-proof.v2`, 0x8009) is an ordinary kind-450
+ * event signed by `signEvent`, but every MLS commit, KeyPackage and leaf update
+ * still has to be signed without a remote-signer round trip per message.
  *
  * **Chat identity is per DEVICE, for every account type** (local key, NIP-07,
  * NIP-46 — decision D3). On first chat use each browser/device mints its own chat
@@ -30,10 +33,6 @@ import {
   base64ToBytes,
   KIND_PROFILE,
 } from "@nostrautica/protocol";
-import {
-  signAccountIdentityProof,
-  type AccountIdentityProofSigner,
-} from "@internet-privacy/marmot-ts/core";
 import type { AppSigner } from "$lib/signer/types.js";
 import { marmotKvBackend, identityPrefix } from "./stores.js";
 
@@ -64,10 +63,12 @@ export interface ChatIdentity {
    * account type now attests its device key and publishes a device kind-0.
    */
   isAccountKey: boolean;
-  /** applesauce-shaped signer over the chat identity's raw key. */
+  /**
+   * applesauce-shaped signer over the chat identity's raw key. Also signs the
+   * kind-450 account identity proof (0x8009) marmot-ts puts in every KeyPackage
+   * and leaf.
+   */
   eventSigner: ChatEventSigner;
-  /** Raw BIP-340 proof signer (§3.1) over the chat identity's key. */
-  accountProofSigner: AccountIdentityProofSigner;
   /** Stable per-install 30443 slot id (`clientId`). */
   clientId: string;
   /** The chat identity's raw secret key (held locally; never leaves the device unencrypted). */
@@ -457,7 +458,6 @@ export async function resolveChatIdentity(accountSigner: AppSigner): Promise<Cha
     account,
     isAccountKey,
     eventSigner: eventSignerFromKey(sk),
-    accountProofSigner: (request) => signAccountIdentityProof(request, sk),
     clientId,
     secretKey: sk,
   };

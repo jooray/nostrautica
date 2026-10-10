@@ -16,6 +16,8 @@ export const groupLifecycleStates = {
     merging: "Merging",
     /** A fork-shaped conflict was detected; selecting a safe retained branch. */
     recovering: "Recovering",
+    /** A selected lifecycle-v1 disband Commit terminated this group forever. */
+    disbanded: "Disbanded",
     /** No safe branch can be selected from retained local material (client-local). */
     unrecoverable: "Unrecoverable",
 };
@@ -29,7 +31,8 @@ const LEGAL_TRANSITIONS = {
     [S.stable]: [S.pendingPublish, S.recovering],
     [S.pendingPublish]: [S.merging, S.stable],
     [S.merging]: [S.stable],
-    [S.recovering]: [S.stable, S.unrecoverable, S.recovering],
+    [S.recovering]: [S.stable, S.unrecoverable, S.disbanded, S.recovering],
+    [S.disbanded]: [],
     [S.unrecoverable]: [S.stable],
 };
 /** Returns whether `from -> to` is a legal lifecycle transition. */
@@ -61,4 +64,3 @@ export function mayApplyRetainedInbound(state) {
 export function mayRunForkDetection(state) {
     return state === S.stable;
 }
-//# sourceMappingURL=group-lifecycle.js.map

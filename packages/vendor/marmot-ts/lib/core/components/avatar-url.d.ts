@@ -6,6 +6,14 @@ export interface GroupAvatarUrlV1 {
     /** Optional thumbhash render hint. */
     thumbhash?: string;
 }
+/**
+ * Contact policy for a group avatar URL: throws when the URL points at
+ * localhost or a non-routable address. Use it before fetching or rendering the
+ * avatar. It is separate from component validity on purpose, so a URL can be
+ * valid group state and still unsafe for this client to contact (mirrors MDK
+ * `reject_unsafe_group_avatar_contact_url`).
+ */
+export declare function rejectUnsafeGroupAvatarContactUrl(url: string): void;
 /** Encodes a {@link GroupAvatarUrlV1} to its component `data` bytes. */
 export declare function encodeGroupAvatarUrlV1(avatar: GroupAvatarUrlV1): Uint8Array;
 /** Decodes `marmot.group.avatar-url.v1` component `data` bytes. */

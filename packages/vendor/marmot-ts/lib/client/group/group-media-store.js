@@ -128,4 +128,3 @@ export class GroupMediaStore extends EventEmitter {
         }
     }
 }
-//# sourceMappingURL=group-media-store.js.map

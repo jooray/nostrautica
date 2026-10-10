@@ -1,7 +1,40 @@
 /** @module @category Core - Welcome */
 import { Rumor } from "applesauce-common/helpers/gift-wrap";
-import { CiphersuiteImpl, type GroupInfo, KeyPackage, PrivateKeyPackage, type Welcome } from "ts-mls";
+import { type AuthenticationService, CiphersuiteImpl, type ClientState, type GroupInfo, type GroupInfoExtension, KeyPackage, PrivateKeyPackage, type Welcome } from "../vendor/ts-mls/index.js";
 import { type MarmotGroupView } from "./client-state.js";
+/** The result of {@link joinWelcomeWithAuthor}. */
+export interface WelcomeJoinResult {
+    /** The joined MLS state. Nothing has been persisted. */
+    state: ClientState;
+    /** Extensions carried by the Welcome's GroupInfo (e.g. `ratchet_tree`). */
+    groupInfoExtensions: GroupInfoExtension[];
+    /**
+     * Leaf index of the GroupInfo signer, i.e. the Welcome author
+     * (`protocol-core/joining.md` receiving-flow step 6).
+     */
+    authorLeafIndex: number;
+}
+/**
+ * Runs the MLS Welcome join and also identifies the Welcome author: the leaf
+ * that signed the GroupInfo.
+ *
+ * ts-mls verifies the GroupInfo signature against `tree[gi.signer]` but does
+ * not return `gi.signer`. It does call `authService.validateCredential` for
+ * that signer leaf before anything else, and right before checking the
+ * GroupInfo signature against that leaf's key. So the first key passed to the
+ * auth service is the verified signer's signature key. The author leaf is then
+ * found by that key; MLS requires signature keys to be unique across leaves.
+ * If the key cannot be matched to exactly one leaf, the join fails closed.
+ *
+ * Nothing is persisted, and the KeyPackage is not consumed.
+ */
+export declare function joinWelcomeWithAuthor({ welcome, keyPackage, privateKeys, ciphersuiteImpl, authService, }: {
+    welcome: Welcome;
+    keyPackage: KeyPackage;
+    privateKeys: PrivateKeyPackage;
+    ciphersuiteImpl: CiphersuiteImpl;
+    authService?: AuthenticationService;
+}): Promise<WelcomeJoinResult>;
 /**
  * Decrypts the {@link GroupInfo} from a Welcome message using the provided key package,
  * without performing a full group join.

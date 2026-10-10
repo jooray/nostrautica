@@ -208,4 +208,3 @@ export function decodeEncryptedMediaPolicyV1(data) {
     }
     return { mediaFormat, allowedLocatorKinds, defaultBlobEndpoints };
 }
-//# sourceMappingURL=encrypted-media.js.map

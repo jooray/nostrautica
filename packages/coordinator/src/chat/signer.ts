@@ -1,18 +1,16 @@
 /**
- * The coordinator's Marmot identity (MARMOT-GROUP-CHAT §4). Unlike Amber/NIP-46
- * attendees, the coordinator holds a plain secret key (`coordSk`) and can raw-sign
- * BIP-340, so its account-identity proof is trivial (`signAccountIdentityProof`).
+ * The coordinator's Marmot identity (MARMOT-GROUP-CHAT §4): a plain secret key
+ * (`coordSk`).
  *
  * marmot-ts wants an applesauce `EventSigner` — `getPublicKey` / `signEvent` /
  * `nip44.{encrypt,decrypt}`. We build one over `coordSk` with nostr-tools +
- * protocol NIP-44, and an `accountProofSigner` over the same key.
+ * protocol NIP-44. The same `signEvent` produces the kind-450 account identity
+ * proof (`marmot.member.account-identity-proof.v2`, component 0x8009) that every
+ * KeyPackage and leaf the coordinator creates carries, which is what lets strict
+ * clients (White Noise / MDK) accept the groups it runs.
  */
 import { getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { nip44Encrypt, nip44Decrypt } from "@nostrautica/protocol";
-import {
-  signAccountIdentityProof,
-  type AccountIdentityProofSigner,
-} from "@internet-privacy/marmot-ts/core";
 
 /** A structural applesauce-`EventSigner` (we avoid a direct applesauce-core dep). */
 export interface CoordinatorEventSigner {
@@ -46,12 +44,3 @@ export function makeCoordinatorSigner(coordSk: Uint8Array): CoordinatorEventSign
   };
 }
 
-/**
- * The account-identity-proof signer: raw BIP-340 over the marmot digest with
- * `coordSk`. Every KeyPackage and leaf the coordinator publishes carries a valid
- * `marmot.account-identity-proof.v1` extension, so strict (Whitenoise/MDK) clients
- * accept the group.
- */
-export function makeCoordinatorProofSigner(coordSk: Uint8Array): AccountIdentityProofSigner {
-  return (request) => signAccountIdentityProof(request, coordSk);
-}

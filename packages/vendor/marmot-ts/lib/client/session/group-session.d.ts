@@ -1,6 +1,7 @@
 /** @module @category Client - Session */
 import type { NostrEvent } from "applesauce-core/helpers/event";
-import type { CiphersuiteImpl, ClientState, Proposal } from "ts-mls";
+import { type CiphersuiteImpl, type ClientState, type Proposal } from "../../vendor/ts-mls/index.js";
+import type { GroupProfileSupport } from "../../core/components/account-identity-proof.js";
 import { type MarmotGroupView, type SerializedClientState } from "../../core/client-state.js";
 import type { ConvergencePolicy } from "../../core/convergence.js";
 import type { Disposition } from "../../core/inbound.js";
@@ -8,62 +9,38 @@ import type { AuditContextOptions, AuditSink } from "../../audit/index.js";
 import type { IngestionPoolOptions } from "../../engine/ingestion-pool.js";
 import { GroupHistoryTree } from "../../engine/history-tree.js";
 import type { RetainedHistoryStore } from "../../engine/retained-store.js";
-import type { PendingState, ProposalContext } from "../../engine/types.js";
+import type { DisbandRequest } from "../../engine/disband-request.js";
+import { type DisbandTombstone } from "../../engine/disband-tombstone.js";
+import type { IngestResult as EngineIngestResult, PendingState, ProposalContext, DisbandCandidateEvidence } from "../../engine/types.js";
+import type { StateNotification } from "../../engine/state-notifications.js";
 import type { GenericKeyValueStore } from "../../utils/key-value.js";
 import type { GroupEffects, GroupSessionSendIntent } from "./group-effects.js";
-export type ProcessedIngestResult = {
-    kind: "processed";
-    result: import("ts-mls").ProcessMessageResult;
+/**
+ * Public session results are the engine result union with the transport field
+ * renamed at the Nostr boundary. Keeping this transformation distributive
+ * makes new engine fields and variants flow through without a parallel union
+ * that can silently drift (WR-12).
+ */
+type SessionIngestResult<TResult extends EngineIngestResult<NostrEvent>> = TResult extends {
+    envelope: NostrEvent;
+} ? Omit<TResult, "envelope"> & {
     event: NostrEvent;
-    message: import("ts-mls").MlsMessage;
-};
-export type RejectedIngestResult = {
-    kind: "rejected";
-    result: import("ts-mls").ProcessMessageResult;
-    event: NostrEvent;
-    message: import("ts-mls").MlsMessage;
-};
-export type SkippedIngestResult = {
-    kind: "skipped";
-    event: NostrEvent;
-    message: import("ts-mls").MlsMessage;
-    reason: "past-epoch" | "wrong-wireformat" | "self-echo" | "beyond-anchor" | "missing-retained-anchor" | "invalid-app-payload";
-};
-export type UnreadableIngestResult = {
-    kind: "unreadable";
-    event: NostrEvent;
-    errors: unknown[];
-};
-export type DeferredIngestResult = {
-    kind: "deferred";
-    event: NostrEvent;
-    message: import("ts-mls").MlsMessage;
-    reason: import("../../core/inbound.js").DeferredReason;
-};
-export type InvalidatedIngestResult = {
-    kind: "invalidated";
-    event: NostrEvent;
-    message: import("ts-mls").MlsMessage;
-    /** The decrypted Marmot app payload bytes of the invalidated message. */
-    payload?: Uint8Array;
-    /** Hex confirmation tag of the losing fork-tree node it decrypted against. */
-    tag?: string;
-    /** MLS epoch of that fork node. */
-    epoch?: number;
-};
-export type AutoCommitIngestResult = {
-    kind: "autoCommit";
-    event: NostrEvent;
-    pending: PendingState;
-    actorPubkey: string;
-};
-export type RemovedIngestResult = {
-    kind: "removed";
-    result: import("ts-mls").ProcessMessageResult;
-    event: NostrEvent;
-    message: import("ts-mls").MlsMessage;
-};
-export type IngestResult = ProcessedIngestResult | RejectedIngestResult | SkippedIngestResult | DeferredIngestResult | InvalidatedIngestResult | AutoCommitIngestResult | RemovedIngestResult | UnreadableIngestResult;
+} : TResult;
+type EngineIngestResultOfKind<TKind extends EngineIngestResult<NostrEvent>["kind"]> = Extract<EngineIngestResult<NostrEvent>, {
+    kind: TKind;
+}>;
+export type ProcessedIngestResult = SessionIngestResult<EngineIngestResultOfKind<"processed">>;
+export type RejectedIngestResult = SessionIngestResult<EngineIngestResultOfKind<"rejected">>;
+export type SkippedIngestResult = SessionIngestResult<EngineIngestResultOfKind<"skipped">>;
+export type UnreadableIngestResult = SessionIngestResult<EngineIngestResultOfKind<"unreadable">>;
+export type DeferredIngestResult = SessionIngestResult<EngineIngestResultOfKind<"deferred">>;
+export type InvalidatedIngestResult = SessionIngestResult<EngineIngestResultOfKind<"invalidated">>;
+export type AutoCommitIngestResult = SessionIngestResult<EngineIngestResultOfKind<"autoCommit">>;
+export type RemovedIngestResult = SessionIngestResult<EngineIngestResultOfKind<"removed">>;
+export type StateInvalidatedIngestResult = SessionIngestResult<EngineIngestResultOfKind<"stateInvalidated">>;
+export type AppliedNotificationsIngestResult = SessionIngestResult<EngineIngestResultOfKind<"appliedNotifications">>;
+export type StateRevalidatedIngestResult = SessionIngestResult<EngineIngestResultOfKind<"stateRevalidated">>;
+export type IngestResult = SessionIngestResult<EngineIngestResult<NostrEvent>>;
 export type DispositionedIngestResult = IngestResult & {
     disposition: Disposition;
 };
@@ -75,6 +52,9 @@ export type GroupSessionOptions<THistory extends GroupSessionHistory | undefined
     state: ClientState;
     ciphersuite: CiphersuiteImpl;
     store: GenericKeyValueStore<SerializedClientState>;
+    ingestStateStore?: GenericKeyValueStore<Uint8Array>;
+    /** Durable lifecycle request/terminal store (defaults to ingestStateStore). */
+    lifecycleStore?: GenericKeyValueStore<Uint8Array>;
     /**
      * Dedicated store for the full-fork history tree (per-node keys under a hex
      * group-id prefix). When set, the tree is flushed on {@link GroupSession.save}
@@ -82,6 +62,8 @@ export type GroupSessionOptions<THistory extends GroupSessionHistory | undefined
      * and rebuilt from the current tip after each restart.
      */
     rewindStore?: GenericKeyValueStore<Uint8Array>;
+    /** Group-scoped removal marker backend, potentially shared with state storage. */
+    removedMarkerStore?: GenericKeyValueStore<boolean>;
     /**
      * The bounded convergence window, derived from the history tree on load (never
      * persisted separately). Set by the loader ({@link GroupRegistry}); fresh
@@ -112,6 +94,7 @@ export type GroupSessionOptions<THistory extends GroupSessionHistory | undefined
     onStateSaved?: () => void;
     onApplicationMessage?: (message: Uint8Array) => void;
     onHistoryError?: (error: Error) => void;
+    onHistoryChanged?: () => void;
     /** Injectable wall-clock for the convergence quiescence window (B5; tests). */
     now?: () => number;
     /** Quiescence window (ms) before convergence may be treated as settled. */
@@ -131,28 +114,84 @@ export declare class GroupSession<THistory extends GroupSessionHistory | undefin
     readonly ciphersuite: CiphersuiteImpl;
     readonly store: GenericKeyValueStore<SerializedClientState>;
     readonly rewindStore?: GenericKeyValueStore<Uint8Array>;
+    readonly ingestStateStore?: GenericKeyValueStore<Uint8Array>;
+    readonly lifecycleStore?: GenericKeyValueStore<Uint8Array>;
     readonly history: THistory;
     constructor(options: GroupSessionOptions<THistory>);
     get id(): Uint8Array;
     get state(): ClientState;
     set state(newState: ClientState);
     get lifecycle(): import("../../index.js").GroupLifecycleState;
+    /**
+     * Whether this group's canonical GroupContext still classifies as the
+     * current account identity proof profile (D-11). Orthogonal to `lifecycle`:
+     * an unsupported group can still be `Stable` — it stays listable and
+     * `destroy()`-able, but every outbound `send` and every inbound envelope is
+     * refused. Delegates to the engine, which recomputes this on every access.
+     */
+    get profileSupport(): GroupProfileSupport;
     /** The derived convergence status (`group-state.md` §Convergence status, B5). */
     get convergenceStatus(): import("../../core/convergence-status.js").ConvergenceStatus;
     get groupData(): MarmotGroupView | null;
     get relays(): string[] | undefined;
     /** The full-fork history tree (every observed state, canonical + forks). */
     get historyTree(): GroupHistoryTree;
-    get unappliedProposals(): import("ts-mls").UnappliedProposals;
+    /**
+     * The retained canonical states within the rollback horizon, newest epoch
+     * first — the candidate epochs for cross-epoch encrypted-media decryption
+     * (see {@link MarmotGroupEngine.retainedStates}).
+     */
+    retainedStates(): ClientState[];
+    /**
+     * Transport events received but not yet decrypted/processed into the history
+     * tree — the engine's ingestion pool (undecryptable-so-far events held for
+     * retry as the tree grows).
+     */
+    pendingEvents(): NostrEvent[];
+    get unappliedProposals(): import("../../vendor/ts-mls/index.js").UnappliedProposals;
     get dirty(): boolean;
     save(force?: boolean): Promise<void>;
+    /**
+     * Re-scores the persisted fork history against the current tip and switches to
+     * the canonical branch if a competing fork now wins (`convergence.md`), then
+     * persists a resulting switch. Sources candidates from the history tree, so a
+     * client that diverged onto a losing fork converges from disk without waiting
+     * for the network to re-deliver the winning branch. Called on load.
+     *
+     * Returns the pass's results in the same shape {@link ingest} yields, so the
+     * caller can route them through the identical handler — in particular the
+     * `stateInvalidated` withdrawal that clears the removed-inactive marker
+     * (CONV-03, D-12). This layer used to swallow them (CR-06).
+     */
+    reconverge(): Promise<DispositionedIngestResult[]>;
+    /** Runs one retained-input scheduler edge through the normal reconciliation seam. */
+    driveConvergence(): Promise<DispositionedIngestResult[]>;
     destroyLocalState(): Promise<void>;
+    /** Returns authoritative terminal evidence, failing closed on corrupt bytes. */
+    disbandTombstone(): Promise<DisbandTombstone | undefined>;
+    /** Synchronous terminal authority after lifecycle hydration has completed. */
+    get terminalTombstone(): DisbandTombstone | undefined;
+    /** Durably records public notification delivery before application callbacks run. */
+    markDisbandNotificationDelivered(): Promise<DisbandTombstone | undefined>;
+    /** Waits until both durable lifecycle namespaces have been decoded. */
+    hydrateLifecycleEvidence(): Promise<void>;
+    /**
+     * Commits selected terminal evidence before repeatable cleanup. The first
+     * durable write is authoritative even if any later store operation fails.
+     */
+    persistSelectedDisband(evidence: DisbandCandidateEvidence): Promise<DisbandTombstone>;
     /** Releases engine resources (the settle-check timer); call on teardown (B5). */
     dispose(): void;
-    confirmPublished(pending: PendingState): void;
+    confirmPublished(pending: PendingState): StateNotification[];
     publishFailed(pending: PendingState): void;
     proposalContext(): ProposalContext;
     send(intent: GroupSessionSendIntent): Promise<GroupEffects>;
+    /** Persists irreversible terminal intent before returning publish work. */
+    requestDisband(): Promise<GroupEffects>;
+    /** Returns the hydrated durable disband request, if one exists. */
+    disbandRequest(): Promise<DisbandRequest | undefined>;
+    /** Builds the atomic active+required lifecycle enablement commit. */
+    enableGroupDisbanding(): Promise<GroupEffects>;
     /**
      * Builds the self-remove proposal effects for leaving the group.
      *
@@ -169,5 +208,10 @@ export declare class GroupSession<THistory extends GroupSessionHistory | undefin
     ingest(events: NostrEvent[], options?: {
         maxRetries?: number;
     }): AsyncGenerator<DispositionedIngestResult>;
+    /** Establishes the durable application-observation boundary for an effect. */
+    acknowledgeConvergenceEffect(result: Extract<DispositionedIngestResult, {
+        kind: "stateInvalidated" | "stateRevalidated";
+    }>): Promise<void>;
 }
 export type ProposalBuilder<Args extends unknown[], T extends Proposal | Proposal[]> = (...args: Args) => import("../../engine/types.js").ProposalAction<T>;
+export {};

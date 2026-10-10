@@ -1,5 +1,5 @@
 /** @module @category Core - Group Messages */
-import { contentTypes, encode, mlsMessageEncoder, wireformats, } from "ts-mls";
+import { contentTypes, encode, mlsMessageEncoder, wireformats, } from "../vendor/ts-mls/index.js";
 import { commitDigest, compareCommitOrderingKeys, } from "./convergence.js";
 /**
  * Orders group commits by the content-derived convergence key
@@ -55,4 +55,3 @@ export function isProposalMessage(pair) {
         return false;
     return pair.message.privateMessage.contentType === contentTypes.proposal;
 }
-//# sourceMappingURL=group-message-classify.js.map

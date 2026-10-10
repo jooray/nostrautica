@@ -1,5 +1,5 @@
 /** @module @category Core - Capabilities */
-import { Capabilities, type ExtensionRequiredCapabilities } from "ts-mls";
+import { Capabilities, type ExtensionRequiredCapabilities } from "../vendor/ts-mls/index.js";
 /**
  * Ensures a {@link Capabilities} object advertises the MLS code points a Marmot
  * v2 group relies on, so a LeafNode bearing these capabilities passes MLS
@@ -9,9 +9,14 @@ import { Capabilities, type ExtensionRequiredCapabilities } from "ts-mls";
  * `app_data_dictionary` GroupContext extension (`0x0006`) and mutates them with
  * `app_data_update` proposals (`0x0008`), both from draft-ietf-mls-extensions-09.
  * Every member MUST advertise support for the extension and the proposal type.
- * `last_resort` (`0x000a` extension) is also advertised for key-package reuse,
- * and the `self_remove` proposal (`0x000a` proposal type) for member departure
- * (`protocol-core/member-departure.md`).
+ * The `self_remove` proposal (`0x000a`) is advertised for member departure
+ * (`protocol-core/member-departure.md`). Last-resort status is not advertised:
+ * it is a `last_resort_key_package` component in the KeyPackage's own
+ * `app_data_dictionary`, "not an MLS capability or extension type"
+ * (`foundation/key-packages.md`), so the legacy `last_resort` extension type
+ * (`0x000a`) is not listed, matching MDK's `leaf_capabilities`. The account identity proof (`0x8009`)
+ * is a required app component (see `DEFAULT_GROUP_COMPONENT_IDS`), not an MLS
+ * required capability, so it is not advertised here.
  *
  * The agent-text-stream-QUIC `receive` role capability (`0xf2d1`) is advertised
  * so a member can be invited into a group whose
@@ -37,12 +42,16 @@ export declare function ensureMarmotCapabilities(capabilities: Capabilities): Ca
  * member whose LeafNode does not cover them (capability-negotiation.md §5.2
  * "enforce on add").
  *
- * The baseline is fixed, not member-derived: the `app_data_dictionary`
- * extension (`0x0006`) and account-identity-proof extension (`0xF2F1`) plus the
- * `app_data_update` (`0x0008`) and `self_remove` (`0x000a`) proposals. The
- * `self_remove` requirement matches a darkmatter MIP-03 client (which registers
- * the self-remove feature as Required, advertising proposal type 10 in both leaf
- * and required capabilities). Lists are sorted ascending to mirror the Rust
- * `BTreeSet` ordering; `credentialTypes` is empty.
+ * The required GroupContext extension baseline is `0x0006`
+ * (`app_data_dictionary`) only, matching MDK's
+ * `CURRENT_PROFILE_REQUIRED_GROUP_CONTEXT_EXTENSIONS`. The account identity
+ * proof (`0x8009`) is a required app component (see
+ * `DEFAULT_GROUP_COMPONENT_IDS`), not an MLS required capability — it is
+ * never listed here. Required proposals are `app_data_update` (`0x0008`) and
+ * `self_remove` (`0x000a`); the `self_remove` requirement matches a
+ * darkmatter client (`protocol-core/member-departure.md`; it registers the self-remove feature as
+ * Required, advertising proposal type 10 in both leaf and required
+ * capabilities). Lists are sorted ascending to mirror the Rust `BTreeSet`
+ * ordering; `credentialTypes` is empty.
  */
 export declare function marmotRequiredCapabilitiesExtension(): ExtensionRequiredCapabilities;

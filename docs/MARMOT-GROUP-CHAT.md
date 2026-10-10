@@ -29,9 +29,11 @@ a device key it has attested.
   carries a proof of possession signed by the device key (§10.2). The per-account
   active-device count is capped (§10.1).
 - A local-nsec account is no exception: it too mints and attests a distinct per-device
-  chat key rather than reusing the account key as the member. (The MLS identity proof
-  requires raw BIP-340 signing, which the app-held device key always provides;
-  NIP-46/NIP-07 signers cannot raw-sign it at all.)
+  chat key rather than reusing the account key as the member. (This began as a
+  necessity: the legacy identity proof needed raw BIP-340 signing, which NIP-46/NIP-07
+  signers cannot do. The current proof is an ordinary kind-450 event, but every MLS
+  commit and leaf update still needs a signer that answers without a remote round
+  trip, so the app-held device key stays.)
 
 ## What the coordinator does (admin bot)
 
@@ -49,6 +51,12 @@ The coordinator runs a headless Marmot admin bot
 - Promotes each approved **organizer**'s chat devices to MLS co-admins, so the
   group stays administrable if the coordinator's own state is lost (see the
   operator runbook's recovery section).
+- Keeps the group avatar (`marmot.group.avatar-url.v1`, 0x8007) equal to the event's
+  icon: the `picture` of the event identity's (E_id) kind-0, not the banner. It is
+  applied when chat comes up and re-applied when a newer E_id kind-0 changes the
+  picture (a kind-0 subscription for chat-enabled events). A removed icon clears the
+  avatar, an icon URL that is not a valid https URL is skipped with a log line, and
+  nothing is committed when the normalized URL already matches (`chat/avatar.ts`).
 
 ## What clients do
 
@@ -56,6 +64,84 @@ The app enrolls the current device's chat key at approval time, discovers the
 group via the roster's `nostr_group_id`, and reads live kind-445 traffic forward
 from its own join epoch. A device that loses its chat key mints a new one and
 re-attests; the old leaf is removed on revoke.
+
+## Also chatting from White Noise (external Marmot clients)
+
+An approved attendee can link the identity of an external Marmot client, typically a
+White Noise npub, to their account for one event. The coordinator then adds that key
+to the event's group like any other device. The normative flow is NIP §10.5; in short:
+
+- **UI:** "Also chat from White Noise or another Marmot client" sits under the chat's **Chat devices** list
+  (`WhiteNoiseLinkCard.svelte`, logic in `chat/external-link.ts`). It takes an npub,
+  nprofile or hex key, or fills in the account npub with one tap.
+- **Same key as the account:** a 21607 `op:"link"` is sealed by that key, which proves
+  possession, so the coordinator binds and invites it at once.
+- **A different key:** the coordinator invites it into a throwaway two-member group
+  ("Nostrautica: confirm White Noise link") and posts one message with an 8-character
+  code. The user accepts the invite in White Noise and types the code into Nostrautica
+  (`op:"link_confirm"`). The coordinator stores only a hash of the code; it expires
+  after 30 minutes and dies after 5 wrong tries. On a match the key is bound, added
+  through the normal `syncMember` path, and the confirmation group is torn down.
+- **Afterwards** the key is a device: listed in the roster's `chat_keys` with
+  `external: true` (the device list badges it), counted against the device cap,
+  removable with the ordinary revoke. It is never promoted to MLS co-admin, even for
+  an organizer. It reads from its join epoch forward, like every device.
+- **Feedback** arrives as 21606 notices on stage `chat_link` (refusals as `poison` with
+  a category, progress as `cleared`), kept apart from the `chat_attestation` setup
+  banner.
+- **Delivery to the external client:** its key package is found via its NIP-65 relays
+  (`key-package-discovery.ts`), and its kind-10050 inbox via the default and chat
+  interop relays and then its NIP-65 relays (`network.ts`), so the Welcome lands where
+  White Noise reads.
+- **Key-package reuse:** the confirmation group consumes one of the external client's
+  key packages. The event-group add prefers a rotated one, holds off up to 90 s when
+  only the spent one is visible, then uses it (correct for last-resort key packages).
+
+Verified live against the White Noise CLI (MDK 0.11.0, the version the shipped apps
+use, and MDK HEAD) with the opt-in `e2e/tests/chat/wn-interop.spec.ts`: both link
+paths, messages both ways, avatar commits followed by White Noise, and revoke.
+
+## Library: vendored marmot-ts and the 0x8009 flag day
+
+Both the app and the coordinator run `@internet-privacy/marmot-ts`, vendored pre-built
+in `packages/vendor/marmot-ts` (with its ts-mls fork bundled inside) from
+`jooray/marmot-ts` branch `nostrautica-vendor`, which is upstream master plus the
+upstream PRs we need before they merge. `packages/vendor/README.md` has the pin, the
+carried patches and the one-command re-vendor (`node scripts/vendor-marmot.mjs`).
+
+This generation speaks the **current Marmot profile**. Every KeyPackage and leaf carries
+`marmot.member.account-identity-proof.v2` (component **0x8009**): a kind-450 event over
+the leaf's MLS signature key, signed by the member's own Nostr key through the
+client's ordinary `signEvent`. White Noise / MDK 0.11+ accept only this profile. The
+previously vendored marmot-ts 0.6.0 wrote the legacy 0xF2F1 proof, so its groups and
+KeyPackages are incompatible in both directions.
+
+**The upgrade is a flag day** (owner decision: old rooms and their history are
+discarded, not migrated). Each side retires what it cannot run:
+
+- **Coordinator** (`chat/retire.ts`, at startup before any group loads): every stored
+  group outside the current profile, or whose state does not load, is purged from
+  `marmot_kv` and its `marmot_groups` row dropped. The ordinary `ensureChat` then
+  creates a fresh group, which republishes the roster with the new `nostr_group_id`,
+  and backfill plus the 30443 watcher re-add each attested device as soon as it
+  publishes a current KeyPackage. This publishes nothing for the retired group, needs
+  no schema change, and does nothing on later starts.
+- **Pre-upgrade KeyPackages** (from a tab still running the old build, or an outdated
+  White Noise) are recognised up front and skipped quietly: marked consumed, not
+  reported to the owner as a refused device. The device fixes it itself.
+- **App** (`MarmotChat.retireLegacyState`, on every chat client creation): local
+  groups outside the current profile are destroyed together with their history and
+  event binding, and KeyPackages that marmot flags `nonCurrent` are purged. The next
+  `ensurePublished` publishes a current 30443 in the same `d` slot and re-attests, and
+  the device joins the new room through the normal Welcome path.
+
+**Encrypted media.** marmot-ts now creates every group with
+`marmot.group.encrypted-media.v2` (0x800b), listing MDK's default Blossom servers, as
+a required component — exactly what MDK does. Nostrautica does not send media in chat,
+but we keep the component: White Noise members need it to send and see images in the
+room, and dropping it (`encryptedMedia: false`) would also make the group refuse
+invitees whose KeyPackages advertise it differently from MDK's. Nostrautica clients
+simply ignore media references they cannot render.
 
 ## Rejoining a device that fell out of the group
 

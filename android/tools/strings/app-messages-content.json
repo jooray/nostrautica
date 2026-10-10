@@ -1,0 +1,22 @@
+{
+  "en": {
+    "media.playTalk": "▶ Play talk",
+    "content.updateNeeded": "Some of this was written by a newer version of Nostrautica. Update the app to see it."
+  },
+  "sk": {
+    "media.playTalk": "▶ Prehrať prednášku",
+    "content.updateNeeded": "Časť obsahu vytvorila novšia verzia Nostrautiky. Ak ju chcete vidieť, aktualizujte aplikáciu."
+  },
+  "cs": {
+    "media.playTalk": "▶ Přehrát přednášku",
+    "content.updateNeeded": "Část obsahu vytvořila novější verze Nostrautiky. Pokud ji chcete vidět, aktualizujte aplikaci."
+  },
+  "de": {
+    "media.playTalk": "▶ Vortrag abspielen",
+    "content.updateNeeded": "Ein Teil davon stammt aus einer neueren Version von Nostrautica. Aktualisiere die App, um ihn zu sehen."
+  },
+  "es": {
+    "media.playTalk": "▶ Reproducir charla",
+    "content.updateNeeded": "Parte de esto se escribió con una versión más reciente de Nostrautica. Actualiza la app para verlo."
+  }
+}

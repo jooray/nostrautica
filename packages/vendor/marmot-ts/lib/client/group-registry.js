@@ -2,11 +2,12 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hexToBytes } from "applesauce-core/helpers";
 import { EventEmitter } from "eventemitter3";
-import { defaultCryptoProvider } from "ts-mls";
+import { defaultCryptoProvider } from "../vendor/ts-mls/index.js";
 import { deserializeClientState, } from "../core/client-state.js";
 import { DEFAULT_CONVERGENCE_POLICY, } from "../core/convergence.js";
 import { GroupHistoryTree } from "../engine/history-tree.js";
 import { RetainedHistoryStore } from "../engine/retained-store.js";
+import { disbandRegistryStateKey, disbandTombstoneKey, } from "../engine/disband-tombstone.js";
 import { logger } from "../utils/debug.js";
 import { MarmotGroup, } from "./group/marmot-group.js";
 const log = logger.extend("GroupRegistry");
@@ -19,7 +20,10 @@ const log = logger.extend("GroupRegistry");
  */
 export class GroupRegistry extends EventEmitter {
     store;
+    ingestStateStore;
+    lifecycleStore;
     rewindStore;
+    removedMarkerStore;
     signer;
     network;
     audit;
@@ -35,10 +39,15 @@ export class GroupRegistry extends EventEmitter {
     #groupListeners = new Map();
     /** Tracks in-flight group loads to prevent duplicate instances under concurrency */
     #groupLoadPromises = new Map();
+    /** Group ids provisionally cached while their post-hydration activation runs. */
+    #activatingGroups = new Set();
     constructor(options) {
         super();
         this.store = options.store;
+        this.ingestStateStore = options.ingestStateStore;
+        this.lifecycleStore = options.lifecycleStore;
         this.rewindStore = options.rewindStore;
+        this.removedMarkerStore = options.removedMarkerStore;
         this.signer = options.signer;
         this.network = options.network;
         this.audit = options.audit;
@@ -52,7 +61,9 @@ export class GroupRegistry extends EventEmitter {
     }
     /** Returns the list of currently loaded (cached) group instances. */
     get loaded() {
-        return Array.from(this.#groups.values());
+        return Array.from(this.#groups.entries())
+            .filter(([id]) => !this.#activatingGroups.has(id))
+            .map(([, group]) => group);
     }
     /** Reads the cached instance for a group id, without loading from the store. */
     peek(groupId) {
@@ -63,7 +74,10 @@ export class GroupRegistry extends EventEmitter {
     async build(state, retained, historyTree) {
         return MarmotGroup.fromClientState(state, {
             store: this.store,
+            ingestStateStore: this.ingestStateStore,
+            lifecycleStore: this.lifecycleStore,
             rewindStore: this.rewindStore,
+            removedMarkerStore: this.removedMarkerStore,
             retained,
             historyTree,
             convergencePolicy: this.convergencePolicy,
@@ -82,7 +96,8 @@ export class GroupRegistry extends EventEmitter {
         const id = typeof groupId === "string" ? hexToBytes(groupId) : groupId;
         const idHex = bytesToHex(id);
         log("loading group %s from store", idHex);
-        const stateBytes = await this.store.getItem(idHex);
+        const stateBytes = (await this.store.getItem(idHex)) ??
+            (await this.lifecycleStore?.getItem(disbandRegistryStateKey(idHex)));
         if (!stateBytes)
             throw new Error(`Group ${idHex} not found`);
         const state = deserializeClientState(stateBytes);
@@ -148,13 +163,15 @@ export class GroupRegistry extends EventEmitter {
             const commit = await tree.commitMessageOf(path[i]);
             if (!commit)
                 return undefined;
-            retained.record(states[i - 1], commit, states[i]);
+            const ownCommitStamp = await tree.ownCommitStampOf(path[i]);
+            retained.record(states[i - 1], commit, states[i], [], ownCommitStamp);
         }
         return retained;
     }
-    /** Caches a group instance and subscribes to its destroy event. */
-    track(group) {
+    /** Caches a group, attaches lifecycle forwarders, then activates its state. */
+    async track(group) {
         const id = bytesToHex(group.id);
+        this.#activatingGroups.add(id);
         this.#groups.set(id, group);
         // If a group self-destroys, drop it from the cache so `loaded` stays accurate.
         const destroyed = () => this.untrack(id);
@@ -163,8 +180,51 @@ export class GroupRegistry extends EventEmitter {
         // signal so the manager can re-emit it to the application.
         const removed = () => this.emit("removed", group);
         group.on("removed", removed);
-        this.#groupListeners.set(id, { destroyed, removed });
-        this.emit("updated", this.loaded);
+        const disbanded = (_group, evidence) => this.emit("disbanded", group, evidence);
+        group.on("disbanded", disbanded);
+        const listeners = { destroyed, removed, disbanded };
+        this.#groupListeners.set(id, listeners);
+        try {
+            // Hydration is deliberately side-effect free. Persisted competing tips can
+            // change canonical state (including landing on removal), so activate them
+            // only after every public lifecycle forwarder is attached.
+            await group.session.hydrateLifecycleEvidence();
+            // D-11/D-12: a group outside the current account identity proof profile
+            // still loads and is fully hydrated above, but activation steps that can
+            // trigger outbound work (reconvergence, resumed disband) are skipped for
+            // it — nothing is published automatically. `getGroupProfileSupport` is
+            // non-throwing (D-11), so classification can never reject this
+            // `Promise.all`-batched load or any sibling group's load.
+            const profileSupported = group.profileSupport.kind === "supported";
+            if (!profileSupported)
+                log("group %s is outside the current account identity proof profile (%s); loading without reconvergence or resumed disband", id, group.profileSupport.kind === "unsupported"
+                    ? group.profileSupport.proofReason
+                    : undefined);
+            if (profileSupported && group.forkTree.tips().length > 1)
+                await group.reconverge();
+            await group.realizeRemovalIfNeeded();
+            await group.realizeDisbandIfNeeded();
+            if (profileSupported)
+                await group.resumePendingDisband();
+            this.#activatingGroups.delete(id);
+            this.emit("updated", this.loaded);
+        }
+        catch (error) {
+            // Activation is atomic from the registry's perspective. Always detach and
+            // dispose this failed instance, but only remove cache entries that still
+            // point to it so a stale rejection cannot evict a newer activation.
+            group.off("destroyed", destroyed);
+            group.off("removed", removed);
+            group.off("disbanded", disbanded);
+            if (this.#groups.get(id) === group) {
+                this.#groups.delete(id);
+                this.#activatingGroups.delete(id);
+                if (this.#groupListeners.get(id) === listeners)
+                    this.#groupListeners.delete(id);
+            }
+            group.dispose();
+            throw error;
+        }
     }
     /** Removes a group instance from the cache and detaches its listeners. */
     untrack(groupId) {
@@ -176,6 +236,7 @@ export class GroupRegistry extends EventEmitter {
         if (listeners) {
             existing.off("destroyed", listeners.destroyed);
             existing.off("removed", listeners.removed);
+            existing.off("disbanded", listeners.disbanded);
             this.#groupListeners.delete(id);
         }
         // Release the settle-check timer + any queued outbound so an unloaded
@@ -186,37 +247,39 @@ export class GroupRegistry extends EventEmitter {
     }
     /** Lists all persisted group IDs, decoded from their hex storage keys. */
     async listIds() {
-        const keys = await this.store.keys();
-        return keys.map((key) => hexToBytes(key));
+        const ids = new Set((await this.store.keys()).filter((key) => /^[0-9a-f]+$/i.test(key)));
+        for (const key of (await this.lifecycleStore?.keys()) ?? []) {
+            const match = /^([0-9a-f]+)\/disband\/terminal$/i.exec(key);
+            if (match)
+                ids.add(match[1]);
+        }
+        return [...ids].map((key) => hexToBytes(key));
     }
     /** Checks if a group exists in the backend. */
     async has(groupId) {
         const key = typeof groupId === "string" ? groupId : bytesToHex(groupId);
-        const item = await this.store.getItem(key);
-        return item !== null;
+        return ((await this.store.getItem(key)) !== null ||
+            (await this.lifecycleStore?.getItem(disbandTombstoneKey(key))) != null);
     }
     /** Gets a group from cache or loads it from the store, caching the result. */
     async get(groupId) {
         const id = typeof groupId === "string" ? groupId : bytesToHex(groupId);
+        const existingLoad = this.#groupLoadPromises.get(id);
+        if (existingLoad)
+            return existingLoad;
         let group = this.#groups.get(id);
         if (!group) {
-            const existingLoad = this.#groupLoadPromises.get(id);
-            if (existingLoad) {
-                group = await existingLoad;
-            }
-            else {
-                const loadPromise = this.load(groupId)
-                    .then((loaded) => {
-                    this.track(loaded);
-                    this.emit("loaded", loaded);
-                    return loaded;
-                })
-                    .finally(() => {
-                    this.#groupLoadPromises.delete(id);
-                });
-                this.#groupLoadPromises.set(id, loadPromise);
-                group = await loadPromise;
-            }
+            const loadPromise = this.load(groupId)
+                .then(async (loaded) => {
+                await this.track(loaded);
+                this.emit("loaded", loaded);
+                return loaded;
+            })
+                .finally(() => {
+                this.#groupLoadPromises.delete(id);
+            });
+            this.#groupLoadPromises.set(id, loadPromise);
+            group = await loadPromise;
         }
         return group;
     }
@@ -226,4 +289,3 @@ export class GroupRegistry extends EventEmitter {
         return Promise.all(groupIds.map((groupId) => this.get(groupId)));
     }
 }
-//# sourceMappingURL=group-registry.js.map

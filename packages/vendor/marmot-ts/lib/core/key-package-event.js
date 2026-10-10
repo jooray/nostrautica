@@ -6,4 +6,5 @@ export * from "./key-package-event-decode.js";
 export * from "./key-package-event-encode.js";
 // NIP-09 kind-5 delete builder for KeyPackage events.
 export * from "./key-package-event-delete.js";
-//# sourceMappingURL=key-package-event.js.map
+// Tag-vs-KeyPackage consistency check run before inviting from an event.
+export * from "./key-package-event-validate.js";

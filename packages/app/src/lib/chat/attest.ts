@@ -28,7 +28,7 @@ import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 
 /** The attestation body a caller supplies — `v`/`a`/`proof` are filled in here. */
 export interface AttestationInput {
-  op: "add" | "revoke";
+  op: "add" | "revoke" | "link" | "link_confirm";
   chatPubkey: string;
   clientId?: string;
   /** Human device label ("Chrome on laptop"). Required for op:"add". */
@@ -36,6 +36,8 @@ export interface AttestationInput {
   /** Precomputed proof (128-hex). Normally left unset — `sendChatKeyAttestation`
    *  builds it from `deviceSecretKey` over the rumor's created_at. */
   proof?: string;
+  /** The one-time code from the external client (op:"link_confirm" only, NIP §10.5). */
+  code?: string;
 }
 
 /** Build and validate a 21607 v2 content object (pure — unit-tested). */
@@ -51,18 +53,21 @@ export function buildChatKeyAttestationContent(
     ...(input.label ? { label: input.label } : {}),
     ...(input.clientId ? { client_id: input.clientId } : {}),
     ...(input.proof ? { proof: input.proof } : {}),
+    ...(input.code !== undefined ? { code: input.code } : {}),
   });
 }
 
 /** Send-side input: the caller passes the device secret so we can build the proof. */
 export interface SendAttestationInput {
-  op: "add" | "revoke";
+  op: "add" | "revoke" | "link" | "link_confirm";
   chatPubkey: string;
   clientId?: string;
   label?: string;
   /** The chat device's raw secret key (held locally). Required for op:"add" —
    *  it signs the §10.2 proof of possession. */
   deviceSecretKey?: Uint8Array;
+  /** op:"link_confirm": the code shown inside the external client. */
+  code?: string;
 }
 
 /**
@@ -108,6 +113,7 @@ export async function sendChatKeyAttestation(
     clientId: input.clientId,
     label: input.label,
     proof,
+    code: input.code,
   });
   const wrap = await signerWrap(accountSigner, coordinator, {
     kind: KIND_CHAT_KEY_ATTESTATION,

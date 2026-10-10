@@ -23,4 +23,3 @@ export function unixNow() {
     return Math.floor(Date.now() / 1000);
 }
 export const hasAck = (publishResult) => Object.values(publishResult).some((res) => res.ok);
-//# sourceMappingURL=nostr.js.map

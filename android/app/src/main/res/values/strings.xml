@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- UI text lives in assets/i18n (generated from the PWA's messages.ts by
+     tools/strings/generate.mjs). Only what Android itself reads is here. -->
+<resources>
+    <string name="app_name" translatable="false">Nostrautica</string>
+</resources>

@@ -1,0 +1,891 @@
+/** @module @category Core - App Components */
+import { appDataDictionaryExtensionType, appDataUpdateProposalType, defaultExtensionTypes, defaultProposalTypes, getAppDataDictionary, makeAppDataDictionaryExtension, getCredentialFromLeafIndex, nodeTypes, } from "../../vendor/ts-mls/index.js";
+import { getAdminPolicy, getAppComponents } from "./dictionary.js";
+import { getGroupMemberPubkeys } from "../group-members.js";
+import { getCredentialPubkey } from "../credential.js";
+import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, } from "./ids.js";
+import { bytesEqual } from "./bytes.js";
+import { decodeComponentsList } from "./app-components-list.js";
+import { AccountIdentityProofError, getGroupProfileSupport, validateKeyPackageAccountIdentityProof, validateLeafAccountIdentityProof, } from "./account-identity-proof.js";
+import { diffChangedLeaves } from "./tree-diff.js";
+import { classifyChangedLeaf, } from "./leaf-replacement.js";
+import { classifyDisbandCommit, } from "./disband-validation.js";
+/**
+ * Turns a commit's `Proposal[]` into the `AppDataUpdateOp[]` shape every seam
+ * feeds to {@link validateAppComponentIntegrity} (and, later, the shared seam
+ * adapter). This is the single adapter every seam uses so the proposal → op
+ * mapping is never re-implemented seam-locally.
+ *
+ * Preserves commit order and does not deduplicate. Note that a legal commit
+ * never carries more than one `AppDataUpdate` op for the same component id —
+ * `validatePreApplyProposals` (`src/engine/admin-policy.ts`) rejects a
+ * duplicate id before apply, matching MDK's `seen` set in
+ * `validate_app_data_update_batch_against`. This adapter stays
+ * duplicate-tolerant anyway because it is a pure mapping run on the
+ * already-admitted batch, and because rule 3 of
+ * {@link validateAppComponentIntegrity} must stay well-defined even for a
+ * batch that reached it without pre-apply admission.
+ */
+export function collectAppDataUpdateOps(proposals) {
+    const ops = [];
+    for (const proposal of proposals) {
+        if (proposal.proposalType !== appDataUpdateProposalType ||
+            !("appDataUpdate" in proposal))
+            continue;
+        const { appDataUpdate } = proposal;
+        if (appDataUpdate.operation === "update") {
+            ops.push({
+                componentId: appDataUpdate.componentId,
+                data: appDataUpdate.update,
+            });
+        }
+        else {
+            ops.push({ componentId: appDataUpdate.componentId, data: undefined });
+        }
+    }
+    return ops;
+}
+/**
+ * Ported from `validate_app_component_integrity_for_staged_commit`: rejects a
+ * commit whose resulting GroupContext strips or rewrites Marmot component
+ * state outside the validated `AppDataUpdate` channel.
+ *
+ * Enforced rules, in order (mirrors the MDK rustdoc numbering):
+ * 1. the `app_data_dictionary` extension itself may never be dropped if it was
+ *    present before;
+ * 2. the `app_components` id (`0x0001`) and every id in the CURRENT epoch's
+ *    required-component-id list may never be dropped;
+ * 3. every dictionary entry that changes relative to the current epoch —
+ *    added, rewritten, or removed — must match one of this commit's own
+ *    `AppDataUpdate` operations.
+ *
+ * @param args.requiredIds MUST be derived by the caller from the CURRENT
+ * (pre-commit) extensions — see Pitfall 2 in 03-RESEARCH.md. Deriving this
+ * from `resultingExtensions` would let a commit add an id to `app_components`
+ * and thereby protect that same id in the same commit, which is the exact bug
+ * class this validator exists to close.
+ *
+ * Additionally, per account-identity-proof-v2.md "Lifecycle, authorization, and
+ * removal" ("It is not GroupContext state and MUST NOT be created, replaced, or
+ * removed with `AppDataUpdate`"), this rejects any commit whose `AppDataUpdate`
+ * ops target the leaf-only account identity proof component (`0x8009`), or
+ * whose resulting GroupContext dictionary carries a `0x8009` entry at all —
+ * mirroring MDK's `CURRENT_PROFILE_LEAF_ONLY_APP_COMPONENTS`.
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `validate_app_component_integrity_for_staged_commit`
+ * @see Marmot v2 spec: app-components/README.md "Update Processing", "Unknown Data"
+ */
+export function validateAppComponentIntegrity(args) {
+    // Read the raw dictionary generically (not the typed accessors in
+    // dictionary.ts) so unknown component ids participate in the diff.
+    //
+    // WR-03: `getAppDataDictionary` throws on malformed bytes or a duplicate
+    // component id. This validator is documented as typed and non-throwing, and
+    // the convergence/replay seams reach it through `validateCommitLegality`
+    // without wrapping the call, so an escaping throw aborted the ingest
+    // generator instead of producing a verdict. Map it to the same typed
+    // violation the sibling `getAppComponents` decode failure already produces.
+    let current;
+    let resulting;
+    try {
+        current = getAppDataDictionary(args.currentExtensions);
+        resulting = getAppDataDictionary(args.resultingExtensions);
+    }
+    catch {
+        return {
+            reason: "component-integrity",
+            detail: "app_data_dictionary did not decode",
+        };
+    }
+    // Rule 1: the app_data_dictionary extension itself may never be dropped.
+    if (current !== undefined && resulting === undefined) {
+        return {
+            reason: "component-integrity",
+            detail: "resulting GroupContext drops the app_data_dictionary",
+        };
+    }
+    // Leaf-only guard: 0x8009 (account identity proof) is never valid
+    // GroupContext state, so no AppDataUpdate op may target it and no resulting
+    // dictionary entry may carry it, regardless of any AppDataUpdate op backing
+    // the change (account-identity-proof-v2.md "Lifecycle, authorization, and
+    // removal"; mirrors MDK CURRENT_PROFILE_LEAF_ONLY_APP_COMPONENTS).
+    if (args.appDataUpdateOps.some((op) => op.componentId === ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)) {
+        return {
+            reason: "component-integrity",
+            detail: "AppDataUpdate targets leaf-only app component 0x8009",
+        };
+    }
+    if (resulting?.some((entry) => entry.componentId === ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)) {
+        return {
+            reason: "component-integrity",
+            detail: "resulting GroupContext carries leaf-only app component 0x8009",
+        };
+    }
+    // Rule 2: the protected set (current required ids + 0x0001) may never be
+    // dropped.
+    const protectedIds = new Set(args.requiredIds);
+    protectedIds.add(APP_COMPONENTS_COMPONENT_ID);
+    for (const id of protectedIds) {
+        const currentlyPresent = current?.some((c) => c.componentId === id) ?? false;
+        const stillPresent = resulting?.some((c) => c.componentId === id) ?? false;
+        if (currentlyPresent && !stillPresent) {
+            return {
+                reason: "component-integrity",
+                detail: `drops required app component 0x${id.toString(16)}`,
+            };
+        }
+    }
+    // Rule 3: every changed entry must be attributable to one of this commit's
+    // own AppDataUpdate ops.
+    const opsByComponent = new Map();
+    for (const op of args.appDataUpdateOps) {
+        const list = opsByComponent.get(op.componentId) ?? [];
+        list.push(op.data);
+        opsByComponent.set(op.componentId, list);
+    }
+    const allIds = new Set();
+    for (const entry of current ?? [])
+        allIds.add(entry.componentId);
+    for (const entry of resulting ?? [])
+        allIds.add(entry.componentId);
+    for (const id of allIds) {
+        const before = current?.find((c) => c.componentId === id)?.data;
+        const after = resulting?.find((c) => c.componentId === id)?.data;
+        if (bytesEqual(before, after))
+            continue;
+        const allowed = opsByComponent.get(id);
+        const backed = allowed?.some((candidate) => bytesEqual(candidate, after));
+        if (!backed) {
+            return {
+                reason: "component-integrity",
+                detail: `changes app component 0x${id.toString(16)} outside an AppDataUpdate proposal`,
+            };
+        }
+    }
+    return undefined;
+}
+/**
+ * Ported from `validate_admin_leaf_coupling_for_staged_commit`: enforces the
+ * admin-policy resulting-epoch invariant (admin-policy-v1.md "Validation") —
+ * every admin key in the resulting epoch's admin set MUST correspond to an
+ * account with at least one member leaf in the resulting epoch.
+ *
+ * `resultingMemberAccounts` is the set of hex account pubkeys that have at
+ * least one member leaf in the RESULTING epoch (D-08: account-level, not
+ * leaf-level — an account with two leaves survives if only one is removed).
+ * Callers derive it from the post-apply state; this validator stays pure and
+ * MLS-free.
+ *
+ * When the resulting extensions carry no admin-policy bytes, this evaluates
+ * the carried-forward (current-epoch) admin set instead of skipping the check
+ * (Pitfall 3): a membership-only commit that de-leafs an admin without
+ * touching admin-policy bytes must still be rejected.
+ *
+ * An empty resolved admin set returns `undefined` (vacuously satisfied):
+ * component bytes cannot encode an empty admin list, so an empty resolved set
+ * means the epoch carries no admin-policy state at all — not a bypass, per
+ * MDK's own documented rationale for the same early return.
+ *
+ * Does NOT special-case SelfRemove (Pitfall 4): a non-admin's SelfRemove never
+ * changes the admin set and passes trivially here; an admin's SelfRemove is
+ * already refused earlier by `createAdminCommitPolicyCallback`
+ * (`src/engine/admin-policy.ts`), so this validator never needs its own
+ * carve-out for it.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `validate_admin_leaf_coupling_for_staged_commit`, `reject_admins_without_member_accounts`
+ * @see Marmot v2 spec: app-components/admin-policy-v1.md "Validation"
+ */
+export function validateAdminLeafCoupling(args) {
+    let resultingSet;
+    try {
+        resultingSet = getAdminPolicy(args.resultingExtensions);
+    }
+    catch {
+        return {
+            reason: "admin-leaf-coupling",
+            detail: "resulting admin-policy component did not decode",
+        };
+    }
+    let resultingAdmins;
+    if (resultingSet !== undefined) {
+        resultingAdmins = resultingSet;
+    }
+    else {
+        try {
+            resultingAdmins = getAdminPolicy(args.currentExtensions) ?? [];
+        }
+        catch {
+            return {
+                reason: "admin-leaf-coupling",
+                detail: "carried-forward admin-policy component did not decode",
+            };
+        }
+    }
+    // An empty resolved admin set means the epoch has no admin-policy state at
+    // all (component bytes cannot encode an empty list) — vacuously satisfied,
+    // not a bypass.
+    if (resultingAdmins.length === 0)
+        return undefined;
+    const memberAccounts = new Set(args.resultingMemberAccounts);
+    const orphaned = resultingAdmins.filter((admin) => !memberAccounts.has(admin));
+    if (orphaned.length > 0) {
+        return {
+            reason: "admin-leaf-coupling",
+            detail: `${orphaned.length} admin key(s) have no member leaf in the resulting epoch`,
+        };
+    }
+    return undefined;
+}
+/**
+ * Ported from `validate_staged_commit_account_identity_proofs` (D-01, D-02,
+ * D-03), extended in Phase 9 (UPD-01) with replacement-leaf identity binding.
+ * Rejects a commit that drifts the GroupContext account-identity-proof
+ * profile away from `"current"`, that carries an invalid `0x8009` proof on
+ * any new or re-signed member leaf, or that replaces an existing member's
+ * leaf with one bound to a different account identity. Pure and non-throwing
+ * — returns a {@link CommitLegalityOutcome} rather than throwing or returning
+ * `undefined`.
+ *
+ * Three checks, in order:
+ * (a) **Profile drift (D-01a).** Both `parentState` and `resultingState` must
+ *     classify as the current profile ({@link getGroupProfileSupport}). Both
+ *     are checked — not just the resulting one — so a commit can never
+ *     "fix" an already-drifted parent into passing; the profile must already
+ *     have been, and remain, current.
+ * (b) **Changed-leaf proof validity (D-01b, D-02, D-03).** Every entry
+ *     {@link diffChangedLeaves} reports between the two ratchet trees — every
+ *     non-blank leaf that is new (Add) or re-signed (Update proposal, or the
+ *     committer's own update-path leaf) — is validated with
+ *     {@link validateLeafAccountIdentityProof} against the RESULTING epoch's
+ *     ciphersuite. Unchanged leaves are trusted and never re-validated (D-01).
+ *     This runs BEFORE bucket classification for every changed leaf, so
+ *     UPD-02/UPD-03 keep reporting their existing proof reasons regardless of
+ *     which bucket the leaf falls into.
+ * (c) **Replacement-leaf identity binding (UPD-01, D-01/D-02/D-03).** Each
+ *     changed leaf is classified with {@link classifyChangedLeaf} against
+ *     `args.classification` (when supplied):
+ *       - `add` — a new member in a freed slot legitimately carries a
+ *         different identity than whoever occupied the slot before removal;
+ *         no prior-identity comparison runs (D-01).
+ *       - `update-proposal` / `committer-update-path` — a genuine replacement
+ *         of an existing member's leaf. Its {@link ChangedLeaf.parentLeaf} MUST
+ *         be defined (a replacement always has a prior occupant); if it is
+ *         not, or if `getCredentialPubkey` throws for either leaf, this is a
+ *         fail-closed violation. Otherwise the replacement leaf's account
+ *         identity is compared against the prior leaf's; a mismatch is a
+ *         terminal `member-identity-changed` violation (UPD-01) — per
+ *         account-identity-proof-v2.md, a change of account identity is not a
+ *         self-update.
+ *       - `unattributable` — the changed leaf matches no Add, no Update
+ *         sender, and is not the committer's own leaf, with full
+ *         classification information available: fail closed as
+ *         `unattributable-leaf` (D-02).
+ *       - `undecidable` — classification information was incomplete (no
+ *         `args.classification`, or an undefined `committerLeafIndex` with no
+ *         matching proposal). This does NOT return immediately: the loop
+ *         continues, because a definite violation elsewhere in the commit
+ *         must always outrank an undecidable leaf (D-03) — otherwise a
+ *         provably illegal commit could be pooled and retried until it ages
+ *         out instead of being rejected. The first undecidable leaf's detail
+ *         is remembered and returned only if the whole loop completes with no
+ *         violation.
+ *
+ * Every thrown `AccountIdentityProofError` (or any other unexpected throw) is
+ * caught and mapped to a typed violation, never left to escape — fork-recovery
+ * and tree-fed convergence call {@link validateCommitLegality} unwrapped.
+ * Every `detail` string this function builds names only the numeric
+ * `leafIndex` and a reason literal — never credential bytes, account
+ * identity, pubkey hex, or `err.message` (D-06, diagnostics-privacy rule).
+ *
+ * @see refs/mdk/crates/cgka-engine/src/account_identity_proof.rs `validate_staged_commit_account_identity_proofs`, `validate_leaf_account_identity_proof_for_member`
+ * @see refs/marmot/app-components/account-identity-proof-v2.md "Validation"
+ * @see refs/marmot/foundation/errors.md lines 63-68 (deferred vs terminal authorization_failed)
+ */
+export function validateCommitAccountIdentityProofs(args) {
+    const parentSupport = getGroupProfileSupport(args.parentState.groupContext.extensions);
+    if (parentSupport.kind === "unsupported") {
+        return {
+            kind: "violation",
+            violation: {
+                reason: "account-identity-proof",
+                detail: `parent GroupContext is outside the current account identity proof profile (${parentSupport.proofReason})`,
+                proofReason: parentSupport.proofReason,
+            },
+        };
+    }
+    const resultingSupport = getGroupProfileSupport(args.resultingState.groupContext.extensions);
+    if (resultingSupport.kind === "unsupported") {
+        return {
+            kind: "violation",
+            violation: {
+                reason: "account-identity-proof",
+                detail: `resulting GroupContext is outside the current account identity proof profile (${resultingSupport.proofReason})`,
+                proofReason: resultingSupport.proofReason,
+            },
+        };
+    }
+    const changedLeaves = diffChangedLeaves(args.parentState.ratchetTree, args.resultingState.ratchetTree);
+    let undecidableDetail;
+    for (const entry of changedLeaves) {
+        const { leafIndex, leaf } = entry;
+        try {
+            validateLeafAccountIdentityProof(leaf, args.resultingState.groupContext.cipherSuite);
+        }
+        catch (err) {
+            if (err instanceof AccountIdentityProofError) {
+                return {
+                    kind: "violation",
+                    violation: {
+                        reason: "account-identity-proof",
+                        detail: `member leaf ${leafIndex} account identity proof invalid (${err.reason})`,
+                        proofReason: err.reason,
+                        leafIndex,
+                    },
+                };
+            }
+            return {
+                kind: "violation",
+                violation: {
+                    reason: "account-identity-proof",
+                    detail: `member leaf ${leafIndex} account identity proof validation failed`,
+                    leafIndex,
+                },
+            };
+        }
+        const classification = classifyChangedLeaf(entry, args.classification);
+        switch (classification.kind) {
+            case "add":
+                continue;
+            case "update-proposal":
+            case "committer-update-path": {
+                if (entry.parentLeaf === undefined) {
+                    return {
+                        kind: "violation",
+                        violation: {
+                            reason: "account-identity-proof",
+                            detail: `member leaf ${leafIndex} replacement leaf has no prior occupant`,
+                            proofReason: "unattributable-leaf",
+                            leafIndex,
+                        },
+                    };
+                }
+                let replacementPubkey;
+                let priorPubkey;
+                try {
+                    replacementPubkey = getCredentialPubkey(leaf.credential);
+                    priorPubkey = getCredentialPubkey(entry.parentLeaf.credential);
+                }
+                catch {
+                    return {
+                        kind: "violation",
+                        violation: {
+                            reason: "account-identity-proof",
+                            detail: `member leaf ${leafIndex} replacement leaf credential did not decode`,
+                            proofReason: "invalid-credential",
+                            leafIndex,
+                        },
+                    };
+                }
+                if (replacementPubkey !== priorPubkey) {
+                    return {
+                        kind: "violation",
+                        violation: {
+                            reason: "account-identity-proof",
+                            detail: `member leaf ${leafIndex} replacement leaf changed account identity`,
+                            proofReason: "member-identity-changed",
+                            leafIndex,
+                        },
+                    };
+                }
+                continue;
+            }
+            case "unattributable":
+                return {
+                    kind: "violation",
+                    violation: {
+                        reason: "account-identity-proof",
+                        detail: `member leaf ${leafIndex} changed leaf is not attributable to any Add, Update proposal, or the committer`,
+                        proofReason: "unattributable-leaf",
+                        leafIndex,
+                    },
+                };
+            case "undecidable":
+                if (undecidableDetail === undefined) {
+                    undecidableDetail = `member leaf ${leafIndex} changed leaf could not be classified against this commit's proposals`;
+                }
+                continue;
+        }
+    }
+    if (undecidableDetail !== undefined) {
+        return { kind: "undecidable", detail: undecidableDetail };
+    }
+    return { kind: "legal" };
+}
+/**
+ * Ported from `validate_standalone_proposal_account_identity_proof` (Add
+ * branch; D-08/D-09): validates the `0x8009` proof of every Add proposal's
+ * `KeyPackage` against `ciphersuite`, pure and non-throwing. Used pre-apply by
+ * the standalone-proposal admission seams (`src/engine/admin-policy.ts`
+ * inbound, `src/engine/group-engine.ts` local propose path) so a bad Add
+ * never reaches the queued-proposal state in the first place — the commit-time
+ * tree diff in {@link validateCommitAccountIdentityProofs} still catches it
+ * after apply if either admission gate is bypassed, since both call the same
+ * underlying {@link validateKeyPackageAccountIdentityProof}.
+ *
+ * Accepts both bare `Proposal` and `ProposalWithSender` items (normalizes
+ * each first) and ignores every non-Add proposal kind. Returns on the first
+ * failing Add; `leafIndex` is always omitted (the KeyPackage has no tree
+ * position yet, pre-apply).
+ *
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `validate_membership_proposal`
+ */
+export function validateAddProposalAccountIdentityProofs(proposals, ciphersuite) {
+    const normalized = proposals.map((item) => "proposal" in item ? item.proposal : item);
+    for (let position = 0; position < normalized.length; position++) {
+        const proposal = normalized[position];
+        if (proposal.proposalType !== defaultProposalTypes.add)
+            continue;
+        if (!("add" in proposal))
+            continue;
+        try {
+            validateKeyPackageAccountIdentityProof(proposal.add.keyPackage, ciphersuite);
+        }
+        catch (err) {
+            if (err instanceof AccountIdentityProofError) {
+                return {
+                    reason: "account-identity-proof",
+                    detail: `Add proposal ${position} KeyPackage account identity proof invalid (${err.reason})`,
+                    proofReason: err.reason,
+                };
+            }
+            return {
+                reason: "account-identity-proof",
+                detail: `Add proposal ${position} KeyPackage account identity proof validation failed`,
+            };
+        }
+    }
+    return undefined;
+}
+/** Narrowing cast to ts-mls's `LeafIndex` branded type, matching `src/engine/admin-policy.ts`'s local helper. */
+function toLeafIndex(index) {
+    return index;
+}
+/**
+ * The Update branch of `validate_standalone_proposal_account_identity_proof`
+ * (UPD-04, D-09/D-10) — the sibling of {@link validateAddProposalAccountIdentityProofs}
+ * for standalone Update proposals. Pure and non-throwing. Used pre-apply by
+ * the same two standalone-proposal admission seams (`src/engine/admin-policy.ts`
+ * inbound, `src/engine/group-engine.ts` local propose path) so a bad Update —
+ * an unattributable sender, an invalid `0x8009` proof, or a replacement leaf
+ * bound to a different account identity — never reaches the queued-proposal
+ * state. The commit-time tree diff in
+ * {@link validateCommitAccountIdentityProofs} still catches a bad Update
+ * after apply if either admission gate is bypassed; both entry points enforce
+ * the same rule.
+ *
+ * Deliberately returns `CommitIntegrityViolation | undefined`, NOT the
+ * {@link CommitLegalityOutcome} tri-state: per D-10, pre-apply admission is
+ * branch-independent — there is no candidate parent whose later arrival could
+ * make an unresolvable-sender Update proposal judgeable, so there is no
+ * deferral case here (unlike {@link validateCommitAccountIdentityProofs}'s
+ * `undecidable` outcome, which exists because a commit MAY later become
+ * classifiable against a different candidate parent).
+ *
+ * Accepts both bare `Proposal` and `ProposalWithSender` items (normalizes
+ * each first) and ignores every non-Update proposal kind. Returns on the
+ * first failing Update, in this order:
+ * 1. the sender must be attributable — a normalized item with an undefined
+ *    `senderLeafIndex` is rejected as `unattributable-leaf` (D-10 rejects
+ *    rather than defers, matching `admin-policy.ts`'s self_remove
+ *    sender-resolution template);
+ * 2. the sender's CURRENT identity is resolved via
+ *    `getCredentialFromLeafIndex(ratchetTree, senderLeafIndex)` +
+ *    {@link getCredentialPubkey}; any throw (a blank or out-of-range leaf, a
+ *    non-basic credential) is also `unattributable-leaf`;
+ * 3. the replacement leaf's own `0x8009` proof is validated with
+ *    {@link validateLeafAccountIdentityProof}; an `AccountIdentityProofError`
+ *    carries its `reason` as `proofReason`, any other throw omits it;
+ * 4. the replacement leaf's credential identity is compared against the
+ *    resolved sender identity; a throw is `invalid-credential`, a mismatch is
+ *    `member-identity-changed` — the same literal the commit-time path uses
+ *    for the same spec rule (account-identity-proof-v2.md "a change of
+ *    account identity is not a self-update"), so the two admission points
+ *    cannot report the same violation differently.
+ *
+ * `leafIndex` is omitted throughout (D-06): the proposal has not been
+ * applied, so the replacement leaf has no tree position yet, matching the Add
+ * sibling's documented convention. Every `detail` string names only the
+ * positional proposal index and the reason — never a pubkey, credential
+ * bytes, or `err.message`.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/account_identity_proof.rs `validate_standalone_proposal_account_identity_proof`
+ * @see refs/marmot/app-components/account-identity-proof-v2.md "Lifecycle, authorization, and removal"
+ */
+export function validateUpdateProposalAccountIdentityProofs(proposals, ratchetTree, ciphersuite) {
+    const normalized = proposals.map((item) => "proposal" in item ? item : { proposal: item, senderLeafIndex: undefined });
+    for (let position = 0; position < normalized.length; position++) {
+        const { proposal, senderLeafIndex } = normalized[position];
+        if (proposal.proposalType !== defaultProposalTypes.update)
+            continue;
+        if (!("update" in proposal))
+            continue;
+        if (senderLeafIndex === undefined) {
+            return {
+                reason: "account-identity-proof",
+                detail: `Update proposal ${position} has no attributable sender`,
+                proofReason: "unattributable-leaf",
+            };
+        }
+        let senderPubkey;
+        try {
+            senderPubkey = getCredentialPubkey(getCredentialFromLeafIndex(ratchetTree, toLeafIndex(Number(senderLeafIndex))));
+        }
+        catch {
+            return {
+                reason: "account-identity-proof",
+                detail: `Update proposal ${position} sender leaf could not be resolved`,
+                proofReason: "unattributable-leaf",
+            };
+        }
+        try {
+            validateLeafAccountIdentityProof(proposal.update.leafNode, ciphersuite);
+        }
+        catch (err) {
+            if (err instanceof AccountIdentityProofError) {
+                return {
+                    reason: "account-identity-proof",
+                    detail: `Update proposal ${position} replacement leaf account identity proof invalid (${err.reason})`,
+                    proofReason: err.reason,
+                };
+            }
+            return {
+                reason: "account-identity-proof",
+                detail: `Update proposal ${position} replacement leaf account identity proof validation failed`,
+            };
+        }
+        let replacementPubkey;
+        try {
+            replacementPubkey = getCredentialPubkey(proposal.update.leafNode.credential);
+        }
+        catch {
+            return {
+                reason: "account-identity-proof",
+                detail: `Update proposal ${position} replacement leaf credential did not decode`,
+                proofReason: "invalid-credential",
+            };
+        }
+        if (replacementPubkey !== senderPubkey) {
+            return {
+                reason: "account-identity-proof",
+                detail: `Update proposal ${position} replacement leaf changed account identity`,
+                proofReason: "member-identity-changed",
+            };
+        }
+    }
+    return undefined;
+}
+/**
+ * The single shared seam adapter for commit legality: derives every argument
+ * {@link validateAppComponentIntegrity}, {@link validateCommitAccountIdentityProofs},
+ * {@link classifyDisbandCommit}, and {@link validateAdminLeafCoupling} need
+ * from `parentState`/`resultingState`/`proposals`, so no seam re-derives them
+ * independently (the mdk#707 bug class — "a guard that exists on one seam
+ * only is a documented bug").
+ *
+ * Runs four checks, in this fixed order (D-07):
+ * 1. `validateAppComponentIntegrity` — component-integrity (WIRE-03). A
+ *    violation here returns immediately.
+ * 2. `validateCommitAccountIdentityProofs` — account-identity-proof profile
+ *    drift, changed-leaf proof validity, and replacement-leaf identity
+ *    binding (D-01/D-02/D-03, UPD-01). Runs before disband/admin-leaf-coupling
+ *    reasoning, so an invalid identity blocks a commit before any admin-set
+ *    reasoning does. `0x8009` data appearing in the GroupContext dictionary
+ *    itself still reports `component-integrity` (rejected earlier by step
+ *    1), so Phase 7 expectations hold. A `violation` here returns
+ *    immediately; an `undecidable` outcome (Phase 9, D-03) is NOT returned
+ *    yet — it is remembered and checks 3-4 still run, so a definite
+ *    violation there still outranks it (the same precedence rule this
+ *    function's own changed-leaf loop enforces internally).
+ * 3. `classifyDisbandCommit` — disband-legality.
+ * 4. `validateAdminLeafCoupling` — admin-leaf-coupling (CONV-01).
+ *
+ * The remembered undecidable detail from step 2, if any, is returned only
+ * after steps 3-4 both find no violation.
+ *
+ * Stays pure: reads two `ClientState` values, performs no I/O, and calls
+ * nothing from `src/engine` or `src/client`.
+ *
+ * Returns a {@link CommitLegalityOutcome}. Each calling seam supplies its own
+ * disposition: `violation` throws on send (D-02), yields `rejected` with the
+ * violation's `reason` on inbound (D-03), or drops the candidate edge on
+ * convergence/replay (D-04/D-09); `undecidable` MUST map to that seam's own
+ * existing deferral idiom, never to a terminal rejection (Phase 9, D-03,
+ * `refs/marmot/foundation/errors.md` lines 63-68). This adapter itself is
+ * seam-agnostic.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/account_identity_proof.rs `validate_staged_commit_account_identity_proofs`
+ * @see refs/marmot/app-components/account-identity-proof-v2.md "Validation"
+ */
+/**
+ * The GroupContext extensions a commit produces, rebuilt from its proposals,
+ * for a receiver the commit removes.
+ *
+ * ts-mls stops processing once it sees that the commit removes the local leaf:
+ * the returned tombstone has the post-commit tree but keeps the PARENT
+ * GroupContext. Checking that pair against the resulting-epoch invariants is
+ * wrong. A commit that removes an admin also drops it from the admin policy,
+ * but the tombstone still lists it while its leaf is gone, so the removed admin
+ * reported an admin-leaf-coupling violation, rejected its own removal and kept
+ * presenting the group as active. MDK (OpenMLS) stages the full resulting
+ * context even for a removed receiver.
+ *
+ * Applies a GroupContextExtensions replacement, then every AppDataUpdate in
+ * commit order to the dictionary (last update wins, removals delete the entry,
+ * new entries are inserted in component-id order), mirroring ts-mls
+ * `applyAppDataUpdates`.
+ */
+function projectedRemovedReceiverExtensions(parentExtensions, proposals) {
+    let extensions = parentExtensions;
+    for (const proposal of proposals)
+        if (proposal.proposalType === defaultProposalTypes.group_context_extensions &&
+            "groupContextExtensions" in proposal)
+            extensions = proposal.groupContextExtensions.extensions;
+    const updates = proposals.flatMap((proposal) => proposal.proposalType === appDataUpdateProposalType &&
+        "appDataUpdate" in proposal
+        ? [proposal.appDataUpdate]
+        : []);
+    if (updates.length === 0)
+        return extensions;
+    const dictionary = [...(getAppDataDictionary(extensions) ?? [])];
+    for (const update of updates) {
+        const index = dictionary.findIndex((entry) => entry.componentId === update.componentId);
+        if (update.operation === "remove") {
+            if (index !== -1)
+                dictionary.splice(index, 1);
+            continue;
+        }
+        if (index !== -1) {
+            dictionary[index] = {
+                componentId: update.componentId,
+                data: update.update,
+            };
+            continue;
+        }
+        const insertAt = dictionary.findIndex((entry) => entry.componentId > update.componentId);
+        dictionary.splice(insertAt === -1 ? dictionary.length : insertAt, 0, {
+            componentId: update.componentId,
+            data: update.update,
+        });
+    }
+    const replacement = makeAppDataDictionaryExtension(dictionary);
+    const position = extensions.findIndex((extension) => extension.extensionType === appDataDictionaryExtensionType);
+    return position === -1
+        ? [...extensions, replacement]
+        : extensions.map((extension, i) => i === position ? replacement : extension);
+}
+/** MLS default extension (1..=5) and proposal (1..=7) types every leaf supports implicitly. */
+const isDefaultMlsExtensionType = (type) => type >= 1 && type <= 5;
+const isDefaultMlsProposalType = (type) => type >= 1 && type <= 7;
+/**
+ * Component ids with a GroupContext state format in the current profile: the
+ * protocol-owned registry minus the leaf-only account proof (`0x8009`) and the
+ * ephemeral-only multi-device join authorization (`0x800a`). A required
+ * component outside this set is unsupported. Mirrors MDK
+ * `is_known_group_component` over `PROTOCOL_OWNED_APP_COMPONENT_IDS`.
+ */
+const KNOWN_GROUP_COMPONENT_IDS = new Set([
+    0x0001, 0x0002, 0x8001, 0x8002, 0x8003, 0x8004, 0x8005, 0x8006, 0x8007,
+    0x8008, 0x800b, 0x800c,
+]);
+/** The frozen encrypted-media v1 component, not permitted in the current profile. */
+const ENCRYPTED_MEDIA_V1_COMPONENT_ID = 0x8008;
+/**
+ * The current-profile invariants of a commit's COMPLETE resulting state,
+ * mirroring MDK `validate_current_profile_invariants_for_staged_commit`, which
+ * every MDK seam (send, ingest, convergence replay) runs before a commit can
+ * become canonical:
+ *
+ * - `required_capabilities` exists and requires `app_data_dictionary` and
+ *   `app_data_update`;
+ * - the dictionary exists, its `app_components` list decodes, it requires
+ *   admin-policy (`0x8003`) and the account proof (`0x8009`), and neither
+ *   requires nor carries the frozen encrypted-media v1 (`0x8008`);
+ * - every required component other than `0x8009` is a known group component
+ *   and has GroupContext state;
+ * - EVERY resulting leaf advertises each required non-default MLS extension,
+ *   proposal and credential type, and every required component id in its own
+ *   `app_components` support list.
+ *
+ * ts-mls checks the MLS `required_capabilities` only for leaves a commit adds,
+ * and knows nothing about Marmot app components. Without this check marmot-ts
+ * applied commits MDK rejects (an Add of a KeyPackage that does not advertise
+ * a required component, an AppDataUpdate that requires a component some
+ * member lacks), and the group split.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `validate_current_profile_group_context`, `validate_resulting_leaf_capabilities`
+ * @see refs/marmot/app-components/README.md
+ */
+export function validateResultingProfileInvariants(args) {
+    const fail = (detail) => ({
+        reason: "component-integrity",
+        detail: `invalid resulting state: ${detail}`,
+    });
+    const requiredExtension = args.resultingExtensions.find((extension) => extension.extensionType === defaultExtensionTypes.required_capabilities);
+    if (!requiredExtension)
+        return fail("missing required_capabilities");
+    const required = requiredExtension.extensionData;
+    if (!required.extensionTypes.includes(appDataDictionaryExtensionType))
+        return fail("app_data_dictionary is not a required extension");
+    if (!required.proposalTypes.includes(appDataUpdateProposalType))
+        return fail("app_data_update is not a required proposal");
+    const dictionary = getAppDataDictionary(args.resultingExtensions);
+    if (!dictionary)
+        return fail("missing app_data_dictionary");
+    let requiredComponents;
+    try {
+        requiredComponents = getAppComponents(args.resultingExtensions) ?? [];
+    }
+    catch {
+        return fail("app_components list does not decode");
+    }
+    const hasState = (id) => dictionary.some((entry) => entry.componentId === id);
+    if (requiredComponents.includes(ENCRYPTED_MEDIA_V1_COMPONENT_ID) ||
+        hasState(ENCRYPTED_MEDIA_V1_COMPONENT_ID))
+        return fail("frozen encrypted-media v1 component 0x8008 is not permitted");
+    for (const mandatory of [
+        GROUP_ADMIN_POLICY_COMPONENT_ID,
+        ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
+    ])
+        if (!requiredComponents.includes(mandatory))
+            return fail(`missing mandatory component requirement 0x${mandatory.toString(16)}`);
+    for (const id of requiredComponents) {
+        if (id === ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)
+            continue;
+        if (!KNOWN_GROUP_COMPONENT_IDS.has(id))
+            return fail(`unsupported required component 0x${id.toString(16)}`);
+        if (!hasState(id))
+            return fail(`required component 0x${id.toString(16)} has no state`);
+    }
+    for (const node of args.resultingTree) {
+        if (!node || node.nodeType !== nodeTypes.leaf)
+            continue;
+        const leaf = node.leaf;
+        const capabilities = leaf.capabilities ?? {
+            extensions: [],
+            proposals: [],
+            credentials: [],
+        };
+        const supportsMls = required.extensionTypes.every((type) => isDefaultMlsExtensionType(type) ||
+            capabilities.extensions.includes(type)) &&
+            required.proposalTypes.every((type) => isDefaultMlsProposalType(type) ||
+                capabilities.proposals.includes(type)) &&
+            required.credentialTypes.every((type) => capabilities.credentials.includes(type));
+        if (!supportsMls)
+            return fail("a member lacks a required MLS capability");
+        let advertised = [];
+        try {
+            const list = getAppDataDictionary(leaf.extensions)?.find((entry) => entry.componentId === APP_COMPONENTS_COMPONENT_ID);
+            advertised = list ? decodeComponentsList(list.data) : [];
+        }
+        catch {
+            return fail("a member's app_components list does not decode");
+        }
+        if (requiredComponents.some((id) => !advertised.includes(id)))
+            return fail("a member lacks a required app component");
+    }
+    return undefined;
+}
+export function validateCommitLegality(args) {
+    const proposalsWithSenders = args.proposals.map((item) => "proposal" in item
+        ? item
+        : { proposal: item, senderLeafIndex: undefined });
+    const proposals = proposalsWithSenders.map(({ proposal }) => proposal);
+    const appDataUpdateOps = collectAppDataUpdateOps(proposals);
+    const resultingExtensions = args.resultingState.groupActiveState?.kind === "removedFromGroup"
+        ? projectedRemovedReceiverExtensions(args.parentState.groupContext.extensions, proposals)
+        : args.resultingState.groupContext.extensions;
+    // The `app_components` (0x0001) bytes are attacker-influenceable: an admin
+    // can land an AppDataUpdate writing arbitrary bytes to that id (Rule 3
+    // accepts it because the change IS backed by that commit's own op, and
+    // Rule 2 only checks presence, never decodability). From the next commit
+    // onward every seam decodes those bytes here, and `decodeComponentsList`
+    // throws on malformed input or a duplicate id. Honour this adapter's
+    // documented non-throwing contract (D-01/D-02) by converting that into a
+    // typed violation — otherwise the throw escapes the convergence/replay
+    // seams (`fork-recovery.ts`, `group-engine.ts` tree re-convergence), which
+    // do not wrap this call, and aborts the ingest generator before the caller
+    // can persist state.
+    let requiredIds;
+    try {
+        requiredIds =
+            getAppComponents(args.parentState.groupContext.extensions) ?? [];
+    }
+    catch {
+        return {
+            kind: "violation",
+            violation: {
+                reason: "component-integrity",
+                detail: "current app_components component did not decode",
+            },
+        };
+    }
+    const integrityViolation = validateAppComponentIntegrity({
+        currentExtensions: args.parentState.groupContext.extensions,
+        resultingExtensions,
+        appDataUpdateOps,
+        requiredIds,
+    });
+    if (integrityViolation)
+        return { kind: "violation", violation: integrityViolation };
+    const accountIdentityProofOutcome = validateCommitAccountIdentityProofs({
+        parentState: args.parentState,
+        resultingState: args.resultingState,
+        classification: {
+            proposals: proposalsWithSenders,
+            committerLeafIndex: args.committerLeafIndex,
+        },
+    });
+    if (accountIdentityProofOutcome.kind === "violation")
+        return accountIdentityProofOutcome;
+    // A definite violation elsewhere in the commit still outranks an
+    // undecidable identity outcome (Phase 9, D-03): remember it and keep
+    // running disband/admin-leaf-coupling instead of returning immediately, so
+    // a commit that is provably illegal on one of those grounds is rejected
+    // rather than pooled.
+    const undecidableDetail = accountIdentityProofOutcome.kind === "undecidable"
+        ? accountIdentityProofOutcome.detail
+        : undefined;
+    const disband = classifyDisbandCommit({
+        parentState: args.parentState,
+        resultingState: args.resultingState,
+        proposals: proposalsWithSenders,
+        committerLeafIndex: args.committerLeafIndex,
+    });
+    if (disband.kind === "violation")
+        return {
+            kind: "violation",
+            violation: { reason: "disband-legality", detail: disband.detail },
+        };
+    const resultingMemberAccounts = getGroupMemberPubkeys(args.resultingState);
+    const adminLeafCouplingViolation = validateAdminLeafCoupling({
+        currentExtensions: args.parentState.groupContext.extensions,
+        resultingExtensions,
+        resultingMemberAccounts,
+    });
+    if (adminLeafCouplingViolation)
+        return { kind: "violation", violation: adminLeafCouplingViolation };
+    // MDK selects the profile from the parent and checks the current-profile
+    // invariants of the whole resulting state; other profiles are refused
+    // elsewhere (`profileSupport`).
+    if (getGroupProfileSupport(args.parentState.groupContext.extensions).kind ===
+        "supported") {
+        const profileViolation = validateResultingProfileInvariants({
+            resultingExtensions: args.resultingState.groupContext.extensions,
+            resultingTree: args.resultingState.ratchetTree,
+        });
+        if (profileViolation)
+            return { kind: "violation", violation: profileViolation };
+    }
+    if (undecidableDetail !== undefined)
+        return { kind: "undecidable", detail: undecidableDetail };
+    return { kind: "legal" };
+}

@@ -110,4 +110,3 @@ export function decodeAgentTextStreamQuicPolicyV1(data) {
     validate(policy);
     return policy;
 }
-//# sourceMappingURL=agent-text-stream.js.map

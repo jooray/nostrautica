@@ -4,6 +4,7 @@ import type { NostrEvent } from "applesauce-core/helpers/event";
 import type { MarmotGroupView } from "../../core/client-state.js";
 import { type AuditContextOptions, type AuditSink } from "../../audit/index.js";
 import type { PendingState } from "../../engine/types.js";
+import type { StateNotification } from "../../engine/state-notifications.js";
 import type { GroupEffects, GroupPublishResult, GroupPublishWork } from "../session/group-effects.js";
 import type { NostrNetworkInterface, PublishResponse } from "../nostr-interface.js";
 import { NostrWelcomeDelivery, type WelcomeRecipient } from "../transport/nostr/welcome-delivery.js";
@@ -13,7 +14,7 @@ export type GroupRuntimeOptions = {
     getRelays: () => string[] | undefined;
     getGroupRef: () => string;
     getGroupData: () => MarmotGroupView | null;
-    confirmPublished: (pending: PendingState) => void;
+    confirmPublished: (pending: PendingState) => StateNotification[];
     publishFailed: (pending: PendingState) => void;
     save: () => Promise<void>;
     log?: Debugger;
@@ -25,7 +26,7 @@ export type PublishCommitOptions = {
     pending: PendingState;
     actorPubkey: string;
     welcome?: {
-        welcome?: import("ts-mls").Welcome;
+        welcome?: import("../../vendor/ts-mls/index.js").Welcome;
     };
     welcomeRecipients?: WelcomeRecipient[];
 };

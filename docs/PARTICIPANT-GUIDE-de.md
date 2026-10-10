@@ -399,6 +399,22 @@ Gruppe kann eine Weile dauern oder gelegentlich einen erneuten Versuch
 brauchen, bevor Nachrichten ankommen. Bleibt der Reiter bei „wird
 eingerichtet“ hängen, gib ihm ein paar Minuten und öffne ihn erneut.
 
+**Auch in White Noise oder einem anderen Marmot-Client chatten.** Unter **Chat-Geräte** kannst du ein
+White-Noise-Konto verknüpfen und den Raum dann auch in der App White Noise auf
+deinem Handy lesen und beantworten. Gib dessen npub ein, oder tippe auf **npub
+meines Kontos verwenden**, wenn White Noise denselben Schlüssel nutzt, mit dem
+du dich hier angemeldet hast. Bei deiner eigenen npub ist das schon alles. Bei
+jeder anderen npub bekommt White Noise eine Einladung namens „Nostrautica:
+confirm White Noise link“ mit einem kurzen Code. Nimm sie an, gib den Code
+innerhalb von 30 Minuten in Nostrautica ein und zeig ihn niemandem. Danach lädt
+der Dienst des Organisators dein White-Noise-Konto in den Event-Chat ein. Es
+erscheint in deiner Geräteliste und lässt sich wie jedes andere Gerät
+entfernen. Wie jedes neue Gerät sieht es nur Nachrichten, die nach dem Beitritt
+gesendet wurden. White Noise muss in einer aktuellen Version laufen. Wird die
+Verknüpfung abgelehnt, weil der Koordinator die Schlüssel deines White Noise
+nicht verwenden kann, aktualisiere White Noise, öffne es einmal und versuche es
+erneut.
+
 ## 6. Dein Event-Bericht
 
 Jederzeit vor, während oder nach dem Event öffnest du über das Event-Menü

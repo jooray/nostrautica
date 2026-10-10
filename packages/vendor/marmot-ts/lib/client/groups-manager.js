@@ -2,16 +2,73 @@
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { hexToBytes } from "applesauce-core/helpers";
 import { EventEmitter } from "eventemitter3";
-import { defaultCryptoProvider, joinGroup, } from "ts-mls";
+import { defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
 import { getNostrGroupIdHex, } from "../core/client-state.js";
 import { GROUP_EVENT_KIND } from "../core/protocol.js";
-import { verifyAllLeafAccountIdentityProofs, } from "../core/account-identity-proof.js";
-import { marmotAuthService } from "../core/auth-service.js";
+import { assertCurrentGroupAccountIdentityProofProfile, validateGroupMemberAccountIdentityProofs, } from "../core/components/account-identity-proof.js";
+import { joinWelcomeWithAuthor } from "../core/welcome-join.js";
+import { validateWelcomeGroupState } from "../engine/welcome-validation.js";
 import { logger } from "../utils/debug.js";
 import { hasAck } from "../utils/index.js";
+import { getSingletonTagValue } from "../utils/tag-cardinality.js";
+import { GroupTerminalError, } from "./group/marmot-group.js";
 import { createInviteIntent } from "./group/invite.js";
 import { GroupFactory } from "./group-factory.js";
 import { GroupRegistry } from "./group-registry.js";
+import { defaultVerifyEvent, safeVerifyEvent, } from "./verify.js";
+const SUBSCRIPTION_ID_CACHE_CAPACITY = 10_000;
+/** Deterministic bounded LRU used by long-lived group subscriptions. */
+const U64_MAX = (1n << 64n) - 1n;
+/**
+ * The kind-445 tag-set rule (`transports/nostr.md` "Group message delivery"):
+ * besides its single `h` tag, a group event may carry only one NIP-40
+ * `["expiration", <unsigned integer>]` tag, and nothing else. Receivers
+ * validate the whole envelope before decrypting ("Validation before
+ * peeling"). Mirrors MDK `NostrTransportEvent::kind_445_transport_group_id`,
+ * which drops such events, so accepting them here would let a member show
+ * marmot-ts users messages that MDK users never see.
+ */
+function hasOnlyGroupEventTags(event) {
+    let expirations = 0;
+    for (const tag of event.tags) {
+        if (tag[0] === "h")
+            continue; // cardinality checked by getSingletonTagValue
+        if (tag[0] !== "expiration")
+            return false;
+        if (++expirations > 1 || tag.length !== 2)
+            return false;
+        if (!/^[0-9]+$/.test(tag[1]) || BigInt(tag[1]) > U64_MAX)
+            return false;
+    }
+    return true;
+}
+export class BoundedIdCache {
+    capacity;
+    #ids = new Map();
+    constructor(capacity) {
+        this.capacity = capacity;
+        if (!Number.isSafeInteger(capacity) || capacity < 1)
+            throw new Error("BoundedIdCache capacity must be a positive integer");
+    }
+    get size() {
+        return this.#ids.size;
+    }
+    has(id) {
+        if (!this.#ids.delete(id))
+            return false;
+        this.#ids.set(id, undefined);
+        return true;
+    }
+    add(id) {
+        this.#ids.delete(id);
+        this.#ids.set(id, undefined);
+        if (this.#ids.size <= this.capacity)
+            return;
+        const oldest = this.#ids.keys().next().value;
+        if (oldest !== undefined)
+            this.#ids.delete(oldest);
+    }
+}
 const log = logger.extend("GroupsManager");
 /**
  * Orchestrates the lifecycle of {@link MarmotGroup} instances. Delegates
@@ -24,26 +81,31 @@ export class GroupsManager extends EventEmitter {
     store;
     /** The signer used for the clients identity */
     signer;
-    /** Signs the account identity proof on the group creator's own leaf */
-    accountProofSigner;
     /** The nostr relay pool to use for the client */
     network;
     /** Crypto provider for cryptographic operations */
     cryptoProvider;
+    ingestPersistence;
     /** Owns the in-memory cache + store hydration. */
     #registry;
-    /** Builds new groups (the accountProofSigner/ciphersuite consumer). */
+    /** Builds new groups (the identity-signer/ciphersuite consumer). */
     #factory;
+    /** The injectable event verifier gating the 445 drain (SEC-01). */
+    #verifyEvent;
     constructor(options) {
         super();
         this.store = options.store;
+        this.ingestPersistence = options.ingestPersistence;
         this.signer = options.signer;
-        this.accountProofSigner = options.accountProofSigner;
         this.network = options.network;
         this.cryptoProvider = options.cryptoProvider ?? defaultCryptoProvider;
+        this.#verifyEvent = options.verifyEvent ?? defaultVerifyEvent;
         this.#registry = new GroupRegistry({
             store: options.store,
+            ingestStateStore: options.ingestStateStore,
+            lifecycleStore: options.lifecycleStore,
             rewindStore: options.rewindStore,
+            removedMarkerStore: options.removedMarkerStore,
             convergencePolicy: options.convergencePolicy,
             ingestionPool: options.ingestionPool,
             signer: options.signer,
@@ -56,7 +118,10 @@ export class GroupsManager extends EventEmitter {
         });
         this.#factory = new GroupFactory({
             store: options.store,
+            ingestStateStore: options.ingestStateStore,
+            lifecycleStore: options.lifecycleStore,
             rewindStore: options.rewindStore,
+            removedMarkerStore: options.removedMarkerStore,
             convergencePolicy: options.convergencePolicy,
             ingestionPool: options.ingestionPool,
             signer: options.signer,
@@ -64,14 +129,15 @@ export class GroupsManager extends EventEmitter {
             audit: options.audit,
             auditContext: options.auditContext,
             cryptoProvider: this.cryptoProvider,
-            accountProofSigner: options.accountProofSigner,
             historyFactory: options.historyFactory,
             mediaFactory: options.mediaFactory,
+            verifyEvent: this.#verifyEvent,
         });
         // Forward the registry's cache-level events as our own.
         this.#registry.on("updated", (groups) => this.emit("updated", groups));
         this.#registry.on("loaded", (group) => this.emit("loaded", group));
         this.#registry.on("removed", (group) => this.emit("removed", group.id));
+        this.#registry.on("disbanded", (group, evidence) => this.emit("disbanded", group.id, evidence));
     }
     /** Returns the list of currently loaded group instances */
     get loaded() {
@@ -115,17 +181,25 @@ export class GroupsManager extends EventEmitter {
      * Invites a user to a group from their KeyPackage event (kind 30443).
      *
      * Resolves the committing member from the manager's signer, builds an Add
-     * commit intent via {@link createInviteIntent}, and drives it through the
-     * group session/runtime. After the commit acks, the runtime delivers a
-     * Welcome to the invitee via NIP-59 gift wrap.
+     * commit intent via {@link createInviteIntent} (gated on the same injected
+     * verifier as the 445/1059/30443 inbound boundaries — SEC-01/WIRE-01/
+     * WIRE-02), and drives it through the group session/runtime. After the
+     * commit acks, the runtime delivers a Welcome to the invitee via NIP-59
+     * gift wrap.
      *
      * @returns Per-relay publish responses for the commit group event.
-     * @throws Error if the event is not a KeyPackage kind or the credential
-     *   identity does not match the event author.
+     * @throws Error if the event is not a KeyPackage kind, fails signature
+     *   verification, has invalid required-tag cardinality, has an over-long
+     *   or not-current Lifetime, or the credential identity does not match
+     *   the event author.
      */
     async invite(groupId, keyPackageEvent) {
         const actorPubkey = await this.signer.getPublicKey();
-        const [result] = await this.send(groupId, createInviteIntent({ keyPackageEvent, actorPubkey }));
+        const [result] = await this.send(groupId, createInviteIntent({
+            keyPackageEvent,
+            actorPubkey,
+            verifyEvent: this.#verifyEvent,
+        }));
         return result.response;
     }
     /**
@@ -220,6 +294,7 @@ export class GroupsManager extends EventEmitter {
         this.on("left", disconnect);
         this.on("unloaded", disconnect);
         this.on("removed", disconnect);
+        this.on("disbanded", disconnect);
         return {
             unsubscribe: () => {
                 this.off("created", connect);
@@ -230,6 +305,7 @@ export class GroupsManager extends EventEmitter {
                 this.off("left", disconnect);
                 this.off("unloaded", disconnect);
                 this.off("removed", disconnect);
+                this.off("disbanded", disconnect);
                 for (const record of records.values()) {
                     record.cancelled = true;
                     record.sub?.unsubscribe();
@@ -241,6 +317,10 @@ export class GroupsManager extends EventEmitter {
     /** Backfill + live-subscribe a single group instance to its transport events. */
     async #connectGroup(group, options) {
         const noop = { unsubscribe: () => { } };
+        if (group.status === "removed" || group.status === "disbanded") {
+            log("connect: group %s is %s — skipping", group.idStr, group.status);
+            return noop;
+        }
         const relays = (group.relays?.length ? group.relays : options?.fallbackRelays) ?? [];
         if (!relays.length) {
             log("connect: group %s has no relays — skipping", group.idStr);
@@ -255,15 +335,45 @@ export class GroupsManager extends EventEmitter {
             return noop;
         }
         const filter = { kinds: [GROUP_EVENT_KIND], "#h": [h] };
-        const seen = new Set();
+        // Only ids of TRUSTED (verified + exact group-scoped `h`) events live here (SEC-01/
+        // WR-01): an unverified or malformed event's id must never occupy this
+        // dedup slot, or a corrupted same-id forgery could poison it and censor
+        // the genuine, validly-signed event arriving later. `seen.add` MUST stay
+        // strictly after both trust gates below — never add a rejected event's id
+        // here (T-03-24). Rejected ids have a separate bounded cache, consulted
+        // only after the current event fails validation, so a valid same-id event
+        // can never be censored by an earlier forgery.
+        const seen = new BoundedIdCache(SUBSCRIPTION_ID_CACHE_CAPACITY);
+        const rejected = new BoundedIdCache(SUBSCRIPTION_ID_CACHE_CAPACITY);
         const drain = async (events) => {
             const fresh = events.filter((event) => !seen.has(event.id));
-            for (const event of fresh)
-                seen.add(event.id);
             if (!fresh.length)
                 return;
+            // Trust boundary (SEC-01/WIRE-02): verify signature, the kind-445 tag
+            // set, and `h` tag cardinality BEFORE any event reaches group.ingest()
+            // or occupies the
+            // dedup `seen` slot. Not a cross-check of the `h` value against the
+            // subscribed group id — that is out of scope (RESEARCH Open Question 1).
+            const trusted = [];
+            for (const event of fresh) {
+                if (!safeVerifyEvent(this.#verifyEvent, event)) {
+                    rejected.add(event.id);
+                    this.emit("rejected", group.id, event, "invalid-signature");
+                    continue;
+                }
+                if (!hasOnlyGroupEventTags(event) ||
+                    getSingletonTagValue(event, "h") !== h) {
+                    rejected.add(event.id);
+                    this.emit("rejected", group.id, event, "tag-cardinality");
+                    continue;
+                }
+                seen.add(event.id);
+                trusted.push(event);
+            }
+            if (!trusted.length)
+                return;
             try {
-                for await (const result of group.ingest(fresh)) {
+                for await (const result of group.ingest(trusted)) {
                     if (result.kind === "unreadable")
                         this.emit("unreadable", group.id, result.event);
                 }
@@ -275,10 +385,21 @@ export class GroupsManager extends EventEmitter {
         // Backfill before subscribing (mirrors the proven attach order): the backlog
         // ingests as one batch so out-of-order commits resolve together.
         await drain(await this.network.request(relays, filter));
+        // Backfill may itself have selected terminal state. Never seed a live route
+        // after the durable tombstone has won.
+        if (group.session.terminalTombstone)
+            return noop;
         const sub = this.network
             .subscription(relays, filter)
             .subscribe({ next: (event) => void drain([event]) });
-        return { unsubscribe: () => sub.unsubscribe() };
+        const disbanded = () => sub.unsubscribe();
+        group.once("disbanded", disbanded);
+        return {
+            unsubscribe: () => {
+                group.off("disbanded", disbanded, undefined, true);
+                sub.unsubscribe();
+            },
+        };
     }
     /**
      * Persists and caches a group built from a {@link ClientState}, emitting
@@ -299,7 +420,7 @@ export class GroupsManager extends EventEmitter {
         // Persist initial state via the group's own save() path.
         // MarmotGroup.save() is the single writer into the group state store.
         await group.save(true);
-        this.#registry.track(group);
+        await this.#registry.track(group);
         this.emit(eventName, group);
         log("adopted group %s (emit=%s)", id, eventName);
         return group;
@@ -317,9 +438,12 @@ export class GroupsManager extends EventEmitter {
      *
      * Mirrors the darkmatter engine `do_join_welcome`: the KeyPackageRef→private
      * bundle match and the MLS join happen here, in the group layer, not in the
-     * composition root. Tries candidates in priority order, validates every leaf
-     * carries a valid account identity proof, then adopts the resulting state and
-     * emits `joined`.
+     * composition root. Tries candidates in priority order, then requires the
+     * joined GroupContext to classify as the current `0x8009` profile
+     * (rejecting legacy, mixed, and neither) and every member leaf's proof to
+     * validate against the group ciphersuite — both before adopting state, per
+     * `refs/marmot/app-components/account-identity-proof-v2.md` "Migration from
+     * v1" — then adopts the resulting state and emits `joined`.
      *
      * @returns The joined group and the KeyPackageRef that was consumed (so the
      *   caller can mark it used), or `consumedKeyPackageRef: null` if none matched.
@@ -330,20 +454,19 @@ export class GroupsManager extends EventEmitter {
             throw new Error("No matching KeyPackage found in local store. Make sure you have published a KeyPackage event.");
         }
         let clientState = null;
+        let authorLeafIndex = -1;
         let lastError = null;
         let consumedKeyPackageRef = null;
         for (const candidate of candidates) {
             try {
-                clientState = await joinGroup({
-                    context: {
-                        cipherSuite: ciphersuiteImpl,
-                        authService: marmotAuthService,
-                        externalPsks: {},
-                    },
+                const joined = await joinWelcomeWithAuthor({
                     welcome,
                     keyPackage: candidate.publicPackage,
                     privateKeys: candidate.privatePackage,
+                    ciphersuiteImpl,
                 });
+                clientState = joined.state;
+                authorLeafIndex = joined.authorLeafIndex;
                 consumedKeyPackageRef = candidate.keyPackageRef;
                 break;
             }
@@ -356,10 +479,19 @@ export class GroupsManager extends EventEmitter {
                 ? `Failed to join group with any matching key package. Last error: ${lastError.message}`
                 : "Failed to join group with any matching key package");
         }
-        // The spec requires every member leaf to carry a valid account identity
-        // proof, with no legacy fallback; reject joining a group that contains any
-        // proof-less or invalid leaf (foundation/account-identity-proof-v1.md).
-        verifyAllLeafAccountIdentityProofs(clientState, ciphersuiteImpl.id);
+        // The joined GroupContext must classify as the current 0x8009 profile
+        // (not legacy, mixed, or neither), and every member leaf's proof must
+        // validate against the group ciphersuite — both checked before
+        // adoptClientState, so a rejecting group persists nothing
+        // (refs/marmot/app-components/account-identity-proof-v2.md "Migration
+        // from v1").
+        assertCurrentGroupAccountIdentityProofProfile(clientState.groupContext.extensions);
+        validateGroupMemberAccountIdentityProofs(clientState, clientState.groupContext.cipherSuite);
+        // The rest of the Marmot group state, the capabilities this client needs,
+        // and the Welcome author's admin authority (joining.md steps 6-8). Also
+        // before adoptClientState, so a rejected Welcome persists nothing and
+        // leaves the KeyPackage unconsumed.
+        validateWelcomeGroupState({ state: clientState, authorLeafIndex });
         const group = await this.adoptClientState(clientState, { emit: "joined" });
         return { group, consumedKeyPackageRef };
     }
@@ -396,6 +528,8 @@ export class GroupsManager extends EventEmitter {
         const id = typeof groupId === "string" ? groupId : bytesToHex(groupId);
         log("leaving group %s", id);
         const group = this.#registry.peek(id) ?? (await this.#registry.load(id));
+        if (group.status === "disbanded")
+            throw new GroupTerminalError();
         const groupIdBytes = typeof groupId === "string" ? hexToBytes(groupId) : groupId;
         // "leave is a SendIntent": the session builds the self-remove proposals
         // (RFC 9420 §12.4 — a member cannot commit a Remove targeting their own
@@ -421,7 +555,7 @@ export class GroupsManager extends EventEmitter {
     async create(name, options) {
         log("creating group %o", name);
         const group = await this.#factory.create(name, options);
-        this.#registry.track(group);
+        await this.#registry.track(group);
         this.emit("created", group);
         log("created group %s", group.idStr);
         return group;
@@ -458,4 +592,3 @@ export class GroupsManager extends EventEmitter {
         }
     }
 }
-//# sourceMappingURL=groups-manager.js.map

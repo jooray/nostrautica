@@ -1,8 +1,7 @@
 /** @module @category Client - Marmot Client */
 import { Rumor } from "applesauce-common/helpers/gift-wrap";
 import { EventSigner } from "applesauce-core";
-import { Capabilities, CryptoProvider, GroupInfo, Welcome } from "ts-mls";
-import { type AccountIdentityProofSigner } from "../core/account-identity-proof.js";
+import { Capabilities, CryptoProvider, GroupInfo, Welcome } from "../vendor/ts-mls/index.js";
 import { SerializedClientState } from "../core/client-state.js";
 import type { ConvergencePolicy } from "../core/convergence.js";
 import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
@@ -14,6 +13,7 @@ import { InviteManager, StoredInviteEntry, type UnreadInvite } from "./invite-ma
 import type { StoredKeyPackage } from "./key-package-manager.js";
 import { KeyPackageManager } from "./key-package-manager.js";
 import type { NostrNetworkInterface } from "./nostr-interface.js";
+import { type VerifyEventMethod } from "./verify.js";
 /** Decrypted group metadata previewed from a Welcome before joining. */
 export interface WelcomePreviewGroup {
     name: string;
@@ -47,20 +47,31 @@ export interface AnnotatedInvite {
     /** True iff we still hold the KeyPackage the Welcome is addressed to. */
     joinable: boolean;
 }
+export type IngestPersistenceCapability = {
+    kind: "durable";
+} | {
+    kind: "ephemeral";
+    reason: "ingest_state_store_omitted";
+};
 export type MarmotClientOptions<THistory extends BaseGroupHistory | undefined = undefined, TMedia extends BaseGroupMedia | undefined = undefined> = {
-    /** The signer used for the clients identity */
-    signer: EventSigner;
     /**
-     * Optional Nostr-account proof signer. When provided, key packages this
-     * client publishes carry a `marmot.account-identity-proof.v1` LeafNode
-     * extension required for darkmatter wire interop. Supply from a signer with
-     * raw BIP-340 access (the applesauce `EventSigner` cannot sign the digest).
+     * The signer used for the client's Nostr identity. Also signs the kind-450
+     * account identity proof carried by every KeyPackage and leaf this client
+     * creates.
      */
-    accountProofSigner?: AccountIdentityProofSigner;
+    signer: EventSigner;
     /** The capabilities to use for the client */
     capabilities?: Capabilities;
     /** The backend to store and load the groups from */
     groupStateStore: GenericKeyValueStore<SerializedClientState>;
+    /**
+     * Durable backend for group lifecycle intent and terminal records. When
+     * omitted, lifecycle records share {@link groupStateStore} through a
+     * disband-key-scoped adapter.
+     */
+    lifecycleStore?: GenericKeyValueStore<Uint8Array>;
+    /** Durable terminal-wrapper and convergence-effect evidence. */
+    ingestStateStore?: GenericKeyValueStore<Uint8Array>;
     /**
      * Dedicated backend for the per-group full-fork history tree (the single
      * persisted source for fork recovery and the {@link MarmotGroup.forkTree}
@@ -70,6 +81,16 @@ export type MarmotClientOptions<THistory extends BaseGroupHistory | undefined = 
      * rebuilt from the current tip after each restart.
      */
     rewindStore?: GenericKeyValueStore<Uint8Array>;
+    /**
+     * Dedicated backend for the persisted removed-inactive marker (D-12), keyed
+     * by group-id hex like `groupStateStore`. When provided, the fact that an
+     * involuntary removal was already realized survives a restart, so the
+     * `removed` event fires exactly once across process boundaries and a
+     * re-convergence that supersedes the removing commit can clear it durably.
+     * Back it with the same durable backend as `groupStateStore`. Optional —
+     * when omitted, realization is in-memory-only and does not survive a restart.
+     */
+    removedMarkerStore?: GenericKeyValueStore<boolean>;
     /**
      * Convergence policy applied to every group: branch selection and the
      * `maxRewindCommits` rollback horizon. Set `maxRewindCommits: Infinity` to
@@ -82,7 +103,7 @@ export type MarmotClientOptions<THistory extends BaseGroupHistory | undefined = 
      * Ingestion-pool tuning applied to every group: max entries and max epoch-age
      * for undecryptable events held and retried as history grows. Defaults bound
      * it; a debugging tool that retains and processes everything can raise both
-     * (e.g. a large `maxSize` and a very large `maxEpochAge`).
+     * (e.g. a large `maxSize` and a very large `maxRewindCommits`).
      */
     ingestionPool?: IngestionPoolOptions;
     /** The backend for key package private material and publish tracking */
@@ -97,6 +118,17 @@ export type MarmotClientOptions<THistory extends BaseGroupHistory | undefined = 
     audit?: AuditSink;
     /** Required when `audit` is set; contains stable engine/account/session metadata. */
     auditContext?: AuditContextOptions;
+    /**
+     * Injectable Nostr event verifier gating the inbound trust boundary (SEC-01)
+     * across all three entry points: the 445 group-message drain, the 1059
+     * gift-wrap ingest, and the 30443 KeyPackage publish/track path. Defaults to
+     * applesauce's `verifyEvent` (real BIP-340 Schnorr signature verification).
+     * Callers that trust their event source upstream (e.g. already verified by
+     * a relay pool) may inject `fakeVerifyEvent` instead, or supply a
+     * native/WASM verifier for performance — do not introduce a separate
+     * boolean skip-verification flag.
+     */
+    verifyEvent?: VerifyEventMethod;
     /**
      * Default `d` tag value (slot identifier) for key package events.
      * Used by {@link KeyPackageManager.create} when no explicit `d` is passed.
@@ -124,6 +156,7 @@ export declare class MarmotClient<THistory extends BaseGroupHistory | undefined 
     readonly groups: GroupsManager<THistory, TMedia>;
     /** Manages invite lifecycle: ingestion, decryption, and storage */
     readonly invites: InviteManager;
+    readonly ingestPersistence: IngestPersistenceCapability;
     /** Crypto provider for cryptographic operations */
     cryptoProvider: CryptoProvider;
     constructor(options: MarmotClientOptions<THistory, TMedia>);

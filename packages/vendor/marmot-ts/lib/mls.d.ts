@@ -1,1 +1,1 @@
-export * from "ts-mls";
+export * from "./vendor/ts-mls/index.js";

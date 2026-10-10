@@ -1,5 +1,5 @@
 /** @module @category Client - Proposals */
-import { selfRemoveProposalType } from "ts-mls";
+import { selfRemoveProposalType } from "../../../vendor/ts-mls/index.js";
 import { getPubkeyLeafNodeIndexes } from "../../../core/group-members.js";
 /**
  * Proposes the caller's own departure via an MLS `self_remove` proposal
@@ -26,4 +26,3 @@ export function proposeLeaveGroup(pubkey) {
         ];
     };
 }
-//# sourceMappingURL=leave-group.js.map

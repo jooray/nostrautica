@@ -21,4 +21,3 @@ export function normalizeRelayUrl(relay) {
     const url = new URL(relay);
     return url.toString();
 }
-//# sourceMappingURL=relay-url.js.map

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import type { Event as NostrEvent } from "nostr-tools/core";
 import {
   makeCoordinate,
@@ -3364,7 +3364,65 @@ class StubMls implements ChatMls {
   async setAdmins(_g: string, adminPubkeys: string[]) {
     this.admins = adminPubkeys;
   }
+  avatar = "";
+  avatarCommits: string[] = [];
+  async getAvatar() {
+    return this.avatar;
+  }
+  async setAvatar(_g: string, url: string) {
+    if (url === this.avatar) return false;
+    this.avatar = url;
+    this.avatarCommits.push(url);
+    return true;
+  }
+  async sendText() {}
+  async destroyGroup() {}
 }
+
+describe("chat group avatar mirrors the E_id kind-0 picture (event icon)", () => {
+  const profile = (sk: Uint8Array, created_at: number, content: Record<string, unknown>) =>
+    finalizeEvent({ kind: 0, created_at, tags: [], content: JSON.stringify(content) }, sk) as unknown as NostrEvent;
+
+  it("watches the E_id kind-0 and commits only when the icon actually changes", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const eid = getPublicKey(h.eidSk);
+    const sub = h.transport.subs.find(
+      (s) => s.filter?.kinds?.includes(0) && s.filter?.authors?.includes(eid) && !s.closed,
+    );
+    expect(sub).toBeDefined();
+
+    sub!.onEvent(profile(h.eidSk, 1000, { name: "Devcon", picture: "https://img.example.com/a.png" }));
+    await vi.waitFor(() => expect(mls.avatarCommits).toEqual(["https://img.example.com/a.png"]));
+
+    // A name-only edit, an older revision, and someone else's profile: nothing.
+    sub!.onEvent(profile(h.eidSk, 1001, { name: "Devcon 2026", picture: "https://img.example.com/a.png" }));
+    sub!.onEvent(profile(h.eidSk, 900, { name: "old", picture: "https://img.example.com/old.png" }));
+    sub!.onEvent(profile(generateSecretKey(), 2000, { picture: "https://evil.example.com/x.png" }));
+    // The icon changes, then is removed (the app publishes picture: undefined).
+    sub!.onEvent(profile(h.eidSk, 1002, { name: "Devcon 2026", picture: "https://img.example.com/b.png" }));
+    sub!.onEvent(profile(h.eidSk, 1003, { name: "Devcon 2026" }));
+    await vi.waitFor(() =>
+      expect(mls.avatarCommits).toEqual(["https://img.example.com/a.png", "https://img.example.com/b.png", ""]),
+    );
+  });
+
+  it("applies the icon already published when chat comes up", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, {
+      chat: true,
+      chatMls: mls,
+      extraSeed: ({ eidPubkey }) => [
+        {
+          kind: 0, pubkey: eidPubkey, created_at: 50, id: "eid-profile", tags: [], sig: "",
+          content: JSON.stringify({ name: "Devcon", picture: "https://Img.Example.com/icon.png" }),
+        } as unknown as NostrEvent,
+      ],
+    });
+    void h;
+    expect(mls.avatarCommits).toEqual(["https://img.example.com/icon.png"]);
+  });
+});
 
 describe("audit COORD-9 — MLS membership runs through the durable job runner", () => {
   it("approval enqueues chat_sync_member; the attested device is added on drain", async () => {
@@ -4404,6 +4462,28 @@ describe("audit APPK-3 — roster advertises this event's MLS group id", () => {
     expect(device.added_at).toBe(1_760_000_000);
     // Sanity: it lands in this decade, not the year 58545.
     expect(new Date(device.added_at * 1000).getUTCFullYear()).toBe(2025);
+  });
+
+  it("flags a linked external Marmot client's key as external:true in chat_keys (NIP §10.5)", async () => {
+    const h = await setup(0, { chat: true });
+    const pubkey = await join(h, generateSecretKey(), "crypto");
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pubkey, chatPubkey: "d".repeat(64), label: "Chrome", now: 1 });
+    h.store.upsertChatKey({
+      coordinate: h.coordinate,
+      accountPubkey: pubkey,
+      chatPubkey: "e".repeat(64),
+      label: "White Noise",
+      external: true,
+      now: 2,
+    });
+    await admin(h, "approve", { pubkey });
+
+    const rosters = h.transport.published.filter((e) => e.kind === 31604);
+    const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, rosters[rosters.length - 1]!.content)));
+    const keys = roster.attendees.find((a) => a.pubkey === pubkey)!.chat_keys!;
+    expect(keys.find((k) => k.pubkey === "e".repeat(64))?.external).toBe(true);
+    // An ordinary device carries no flag at all (absent, never false).
+    expect("external" in keys.find((k) => k.pubkey === "d".repeat(64))!).toBe(false);
   });
 
   it("omits the id for a FROZEN group — members must no longer route there (§9 Q4)", async () => {

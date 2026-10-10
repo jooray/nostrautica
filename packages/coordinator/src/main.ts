@@ -27,6 +27,7 @@ import { resolveRoleRoutes, disclosureFromRoutes } from "./providers/routes.js";
 import type { LlmProvider, SttProvider } from "./providers/types.js";
 import { makeChatNetwork } from "./chat/network.js";
 import { createMarmotClientMls } from "./chat/mls.js";
+import { retireStaleGroups } from "./chat/retire.js";
 import { isCliSubcommand, runCli } from "./cli.js";
 import { releaseSummary, coordinatorRelease, provenanceIsKnown } from "./release.js";
 import { installExitLogging } from "./lifecycle.js";
@@ -225,6 +226,12 @@ async function runDaemon(): Promise<void> {
     relayPolicy,
   });
   const { mls: chatMls } = createMarmotClientMls({ store, coordSk, network: chatNetwork });
+  // Before anything loads a group: drop rooms this library generation cannot run
+  // (pre-0x8009 groups after the marmot-ts upgrade). Their events get a fresh
+  // group from the normal ensureChat path. A no-op once every group is current.
+  await retireStaleGroups({ store, mls: chatMls, log: (m) => console.log(m) }).catch((e) =>
+    console.warn("[chat] retiring stale groups failed:", e),
+  );
   await chatMls.loadAll().catch((e) => console.warn("[chat] loadAll failed:", e));
 
   const coordinator = new Coordinator({

@@ -1,5 +1,5 @@
 /** @module @category Core - Group Messages */
-import { type MlsMessage, wireformats } from "ts-mls";
+import { type MlsMessage, wireformats } from "../vendor/ts-mls/index.js";
 import type { GroupMessagePair } from "./group-message-crypto.js";
 /**
  * Orders group commits by the content-derived convergence key

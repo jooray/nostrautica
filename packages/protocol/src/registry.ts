@@ -307,7 +307,8 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "chatKeyAttestationContentSchema",
     sealing: "gift-wrap",
     author: "Attendee account → coordinator",
-    notes: "`op:\"add\"` requires a proof of possession signed by the chat device key (§10.2).",
+    notes:
+      "`op:\"add\"` requires a proof of possession signed by the chat device key (§10.2); `op:\"link\"`/`\"link_confirm\"` bind an external Marmot client's key, proven by the seal or a one-time code (§10.5).",
   },
   {
     constant: "KIND_PROFILE_CORRECTION",

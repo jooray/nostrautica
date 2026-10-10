@@ -377,6 +377,20 @@ tardar un poco, o de vez en cuando necesitar un reintento, antes de que
 empiecen a llegar los mensajes. Si la pestaña se queda atascada en
 "configurando", dale unos minutos y vuelve a abrirla.
 
+**Chatea también desde White Noise u otro cliente Marmot.** En **Dispositivos de chat** puedes
+vincular una cuenta de White Noise para leer y responder la sala también desde
+la app White Noise en tu teléfono. Escribe su npub, o toca **Usar el npub de mi
+cuenta** si White Noise usa la misma clave con la que iniciaste sesión aquí.
+Con tu propio npub, eso es todo. Con cualquier otro npub, White Noise recibe una
+invitación llamada "Nostrautica: confirm White Noise link" con un código corto.
+Acéptala, escribe el código en Nostrautica antes de 30 minutos y no se lo
+muestres a nadie. Después, el servicio del organizador invita a tu cuenta de
+White Noise al chat del evento. Aparece en tu lista de dispositivos y se quita
+como cualquier otro. Como todo dispositivo nuevo, solo ve los mensajes enviados
+después de unirse. White Noise tiene que estar en una versión actual. Si la
+vinculación se rechaza porque el coordinador no puede usar las claves de tu
+White Noise, actualiza White Noise, ábrelo una vez y vuelve a intentarlo.
+
 ## 6. Tu informe del evento
 
 En cualquier momento, antes, durante o después del evento, abre **Informe

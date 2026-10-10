@@ -89,4 +89,3 @@ export function getEncodingTag(event) {
     }
     return undefined;
 }
-//# sourceMappingURL=encoding.js.map

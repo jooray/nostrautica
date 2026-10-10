@@ -1,0 +1,67 @@
+{
+  "en": {
+    "signin.nip55": "Signer app on this phone",
+    "signin.nip55.button": "Sign in with {app}",
+    "signin.nip55.hint": "Your key stays in {app}. Once you allow Nostrautica there, signing happens in the background.",
+    "signin.nip55.none": "No signer app found on this phone. Amber is one; or use another option below.",
+    "signin.remote.showQr": "Show a QR code for a signer on another device",
+    "app.android.updateHint": "Updates arrive through Zapstore or wherever you installed the app from.",
+    "app.android.offlineCached": "Offline. Showing what is saved on this phone.",
+    "signin.paste.invalid": "That doesn't look like a key. Paste an nsec1…, ncryptsec1… or bunker:// link.",
+    "signin.paste.wrongPassphrase": "Wrong passphrase for this backup.",
+    "signin.paste.tooStrong": "This backup's encryption needs more memory than this phone gives an app. Unlock it in another app and paste the nsec instead.",
+    "home.addByLink.body.native": "Invite and event links open in this app when you tap them. You can also paste one here."
+  },
+  "sk": {
+    "signin.nip55": "Podpisovacia aplikácia v tomto telefóne",
+    "signin.nip55.button": "Prihlásiť sa cez {app}",
+    "signin.nip55.hint": "Váš kľúč zostáva v aplikácii {app}. Keď tam Nostrautice povolíte prístup, podpisovanie prebieha na pozadí.",
+    "signin.nip55.none": "V tomto telefóne sme nenašli podpisovaciu aplikáciu. Jednou z nich je Amber; alebo použite inú možnosť nižšie.",
+    "signin.remote.showQr": "Zobraziť QR kód pre podpisovač na inom zariadení",
+    "app.android.updateHint": "Aktualizácie prichádzajú cez Zapstore alebo odkiaľ ste aplikáciu nainštalovali.",
+    "app.android.offlineCached": "Ste offline. Zobrazujeme, čo je uložené v tomto telefóne.",
+    "signin.paste.invalid": "Toto nevyzerá ako kľúč. Vložte nsec1…, ncryptsec1… alebo odkaz bunker://.",
+    "signin.paste.wrongPassphrase": "Nesprávne heslo k tejto zálohe.",
+    "signin.paste.tooStrong": "Šifrovanie tejto zálohy potrebuje viac pamäte, než telefón aplikácii dovolí. Odomknite ju v inej aplikácii a vložte sem nsec.",
+    "home.addByLink.body.native": "Pozvánky a odkazy na podujatia sa po ťuknutí otvoria v tejto aplikácii. Odkaz môžete vložiť aj sem."
+  },
+  "cs": {
+    "signin.nip55": "Podepisovací aplikace v tomto telefonu",
+    "signin.nip55.button": "Přihlásit se přes {app}",
+    "signin.nip55.hint": "Váš klíč zůstává v aplikaci {app}. Jakmile tam Nostrautice povolíte přístup, podepisování probíhá na pozadí.",
+    "signin.nip55.none": "V tomto telefonu jsme nenašli podepisovací aplikaci. Jednou z nich je Amber; nebo použijte jinou možnost níže.",
+    "signin.remote.showQr": "Zobrazit QR kód pro podepisovač na jiném zařízení",
+    "app.android.updateHint": "Aktualizace přicházejí přes Zapstore nebo odkud jste aplikaci nainstalovali.",
+    "app.android.offlineCached": "Jste offline. Zobrazujeme, co je uložené v tomto telefonu.",
+    "signin.paste.invalid": "Tohle nevypadá jako klíč. Vložte nsec1…, ncryptsec1… nebo odkaz bunker://.",
+    "signin.paste.wrongPassphrase": "Nesprávné heslo k této záloze.",
+    "signin.paste.tooStrong": "Šifrování této zálohy potřebuje víc paměti, než telefon aplikaci dovolí. Odemkněte ji v jiné aplikaci a vložte sem nsec.",
+    "home.addByLink.body.native": "Pozvánky a odkazy na akce se po klepnutí otevřou v této aplikaci. Odkaz můžete vložit i sem."
+  },
+  "de": {
+    "signin.nip55": "Signer-App auf diesem Telefon",
+    "signin.nip55.button": "Mit {app} anmelden",
+    "signin.nip55.hint": "Dein Schlüssel bleibt in {app}. Sobald du Nostrautica dort erlaubst, wird im Hintergrund signiert.",
+    "signin.nip55.none": "Auf diesem Telefon wurde keine Signer-App gefunden. Amber ist eine; oder nutze eine andere Option unten.",
+    "signin.remote.showQr": "QR-Code für einen Signer auf einem anderen Gerät zeigen",
+    "app.android.updateHint": "Updates kommen über Zapstore oder dorther, wo du die App installiert hast.",
+    "app.android.offlineCached": "Offline. Angezeigt wird, was auf diesem Telefon gespeichert ist.",
+    "signin.paste.invalid": "Das sieht nicht nach einem Schlüssel aus. Füge einen nsec1…, ncryptsec1… oder bunker://-Link ein.",
+    "signin.paste.wrongPassphrase": "Falsche Passphrase für dieses Backup.",
+    "signin.paste.tooStrong": "Die Verschlüsselung dieses Backups braucht mehr Speicher, als dieses Telefon einer App gibt. Entsperre es in einer anderen App und füge den nsec ein.",
+    "home.addByLink.body.native": "Einladungs- und Event-Links öffnen sich in dieser App, wenn du sie antippst. Du kannst einen auch hier einfügen."
+  },
+  "es": {
+    "signin.nip55": "App firmante en este teléfono",
+    "signin.nip55.button": "Iniciar sesión con {app}",
+    "signin.nip55.hint": "Tu clave se queda en {app}. Cuando permitas Nostrautica allí, la firma ocurre en segundo plano.",
+    "signin.nip55.none": "No encontramos ninguna app firmante en este teléfono. Amber es una; o usa otra opción de abajo.",
+    "signin.remote.showQr": "Mostrar un código QR para un firmante en otro dispositivo",
+    "app.android.updateHint": "Las actualizaciones llegan por Zapstore o desde donde instalaste la app.",
+    "app.android.offlineCached": "Sin conexión. Se muestra lo guardado en este teléfono.",
+    "signin.paste.invalid": "Eso no parece una clave. Pega un nsec1…, ncryptsec1… o un enlace bunker://.",
+    "signin.paste.wrongPassphrase": "La frase de contraseña de esta copia no es correcta.",
+    "signin.paste.tooStrong": "El cifrado de esta copia necesita más memoria de la que este teléfono da a una app. Desbloquéala en otra app y pega el nsec.",
+    "home.addByLink.body.native": "Los enlaces de invitación y de eventos se abren en esta app al tocarlos. También puedes pegar uno aquí."
+  }
+}

@@ -1,6 +1,6 @@
 /** @module @category Client - Key Package Manager */
 import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
-import { ciphersuites, defaultCryptoProvider, } from "ts-mls";
+import { ciphersuites, defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
 import { createCredential } from "../core/credential.js";
 import { createDeleteKeyPackageEvent, createKeyPackageEvent, } from "../core/key-package-event.js";
 import { generateKeyPackage } from "../core/key-package.js";
@@ -15,13 +15,11 @@ import { logger } from "../utils/debug.js";
 export class KeyPackagePublisher {
     #signer;
     #network;
-    #accountProofSigner;
     #cryptoProvider;
     #log = logger.extend("KeyPackagePublisher");
     constructor(options) {
         this.#signer = options.signer;
         this.#network = options.network;
-        this.#accountProofSigner = options.accountProofSigner;
         this.#cryptoProvider = options.cryptoProvider ?? defaultCryptoProvider;
     }
     /** Generates a fresh random addressable slot identifier (`d` tag value). */
@@ -40,7 +38,7 @@ export class KeyPackagePublisher {
             credential,
             ciphersuiteImpl,
             isLastResort: options?.isLastResort,
-            accountProofSigner: this.#accountProofSigner,
+            signer: this.#signer,
         });
     }
     /**
@@ -77,4 +75,3 @@ export class KeyPackagePublisher {
         return this.#cryptoProvider.getCiphersuiteImpl(id);
     }
 }
-//# sourceMappingURL=key-package-publisher.js.map

@@ -1,5 +1,5 @@
 /** @module @category Engine */
-import type { MlsMessage } from "ts-mls";
+import type { MlsMessage } from "../vendor/ts-mls/index.js";
 /**
  * One application payload delivered (yielded `processed` / `accepted`) on a
  * specific branch state. Remembered so that if a later convergence rewind
@@ -27,15 +27,21 @@ export interface DeliveredAppPayload<TEnvelope> {
  * notification. This ledger lets the engine find exactly those payloads on a
  * rewind.
  *
- * It holds no protocol state of its own; entries are pruned below the retained
- * anchor (a rewind can never reach there), so it stays bounded to the rollback
- * horizon. Mirrors the bookkeeping darkmatter does in
+ * It holds no protocol state of its own; entries are pruned only below the
+ * oldest state still named by retained history or the fork tree. A finite,
+ * pruned tree can bound this ledger. With an unpruned full-history tree — and
+ * especially `maxRewindCommits: Infinity` — correctness requires unbounded
+ * retention until tree pruning exists. Mirrors the bookkeeping darkmatter does in
  * `distributed_convergence.rs` (`AppMessageInvalidated`).
  */
 export declare class DeliveredPayloadLedger<TEnvelope> {
     #private;
     /** Number of remembered payloads. */
     get size(): number;
+    /** Whether this exact MLS message is recorded against `stateTag`. */
+    has(stateTag: string, message: MlsMessage): boolean;
+    /** Retained transport envelopes used as witnesses by later fork passes. */
+    envelopes(): TEnvelope[];
     /** Remembers a delivered application payload. */
     record(entry: DeliveredAppPayload<TEnvelope>): void;
     /**
@@ -47,9 +53,9 @@ export declare class DeliveredPayloadLedger<TEnvelope> {
      */
     invalidatedByRewind(forkEpoch: number, canonicalTags: ReadonlySet<string>): DeliveredAppPayload<TEnvelope>[];
     /**
-     * Drops entries below `epoch`. A rewind can never reach below the retained
-     * anchor, so payloads older than it can never be invalidated and are dead
-     * weight; pruning them keeps the ledger bounded to the rollback horizon.
+     * Drops entries below the caller's tree-aware correctness horizon. The
+     * engine supplies `min(retained anchor, oldest tree-node epoch)` so no
+     * payload still nameable by a fork candidate loses its retraction record.
      */
     pruneBelow(epoch: number): void;
 }

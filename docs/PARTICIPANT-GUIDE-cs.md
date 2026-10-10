@@ -366,6 +366,19 @@ nespoléhejte) a připojení do skupiny může chvíli trvat, nebo občas potře
 nový pokus, než se začnou objevovat zprávy. Pokud záložka zůstane zaseknutá na
 „nastavuje se“, dejte tomu pár minut a otevřete ji znovu.
 
+**Chatujte i z White Noise nebo jiného klienta Marmot.** V části **Zařízení v chatu** můžete propojit účet
+ve White Noise a číst a odpovídat v místnosti i z aplikace White Noise v
+telefonu. Zadejte jeho npub, nebo klepněte na **Použít npub mého účtu**, pokud
+White Noise používá stejný klíč, kterým jste se přihlásili sem. U vlastního npub
+je tím hotovo. U jiného npub dostane White Noise pozvánku „Nostrautica: confirm
+White Noise link“ s krátkým kódem. Přijměte ji, do 30 minut zadejte kód do
+Nostrautiky a nikomu ho neukazujte. Potom služba organizátora pozve váš účet ve
+White Noise do chatu akce. Objeví se v seznamu zařízení a odebírá se jako každé
+jiné zařízení. Jako každé nové zařízení vidí jen zprávy odeslané po připojení.
+White Noise musí být v aktuální verzi. Pokud propojení odmítne s tím, že
+koordinátor neumí použít klíče vašeho White Noise, aktualizujte White Noise,
+jednou ho otevřete a zkuste to znovu.
+
 ## 6. Váš report z akce
 
 Kdykoli před akcí, během ní i po ní otevřete **Report akce** z menu akce a

@@ -1,5 +1,5 @@
 /** @module @category Client - Proposals */
-import { defaultProposalTypes } from "ts-mls";
+import { defaultProposalTypes } from "../../../vendor/ts-mls/index.js";
 import { getPubkeyLeafNodeIndexes } from "../../../core/group-members.js";
 /**
  * Proposes removing all leaf nodes (devices/clients) for a given Nostr user.
@@ -20,4 +20,3 @@ export function proposeRemoveUser(pubkey) {
         }));
     };
 }
-//# sourceMappingURL=remove-member.js.map

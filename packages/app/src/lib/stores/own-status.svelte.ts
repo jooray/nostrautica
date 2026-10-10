@@ -40,6 +40,10 @@ export const ownStatusStore = {
   seed(coordinate: string, statuses: CoordinatorStatusContent[]) {
     if (!byCoordinate[coordinate]) byCoordinate[coordinate] = statuses;
   },
+  /** Every notice for a coordinate, cleared ones included (latest per stage). */
+  all(coordinate: string): CoordinatorStatusContent[] {
+    return byCoordinate[coordinate] ?? [];
+  },
   /** Unresolved poison notices for a coordinate (state !== "cleared"). */
   poison(coordinate: string): CoordinatorStatusContent[] {
     return (byCoordinate[coordinate] ?? []).filter((s) => s.state === "poison");

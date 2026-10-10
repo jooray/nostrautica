@@ -1,24 +1,115 @@
 /** @module @category Engine */
-import { bytesToHex } from "@noble/hashes/utils.js";
-import { contentTypes, createApplicationMessage, createCommit, createProposal, defaultProposalTypes, getCredentialFromLeafIndex, isSelfRemoveProposal, acceptAll, nodeTypes, processMessage, selfRemoveProposalType, wireformats, } from "ts-mls";
+import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
+import { appDataDictionaryExtensionType, appDataUpdateProposalType, contentTypes, createApplicationMessage, createCommit, decode, createProposal, defaultProposalTypes, encode, getCredentialFromLeafIndex, isSelfRemoveProposal, mlsMessageEncoder, mlsMessageDecoder, nodeTypes, processMessage, proposalOrRefTypes, wireformats, } from "../vendor/ts-mls/index.js";
+import { getAppMessageExpiration } from "../core/app-message-expiration.js";
 import { marmotAuthService } from "../core/auth-service.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
 import { getMarmotGroupView } from "../core/client-state.js";
+import { deserializeClientState, serializeClientState, } from "../core/client-state.js";
+import { decideCommitAuthorization } from "../core/commit-authorization.js";
+import { encodeAdminPolicyV1 } from "../core/components/admin-policy.js";
+import { encodeComponentsList } from "../core/components/app-components-list.js";
+import { encodeGroupLifecycleV1 } from "../core/components/group-lifecycle.js";
+import { getAdminPolicy, getAppComponents, getGroupLifecycle, } from "../core/components/dictionary.js";
+import { validateAddProposalAccountIdentityProofs, validateCommitLegality, validateUpdateProposalAccountIdentityProofs, } from "../core/components/integrity.js";
+import { getGroupProfileSupport, validateKeyPackageAccountIdentityProof, } from "../core/components/account-identity-proof.js";
+import { APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT_ID, } from "../core/components/ids.js";
 import { getCredentialPubkey } from "../core/credential.js";
+import { getGroupMemberPubkeys, getPubkeyLeafNodeIndexes, } from "../core/group-members.js";
 import { decideAutoCommit } from "./auto-committer.js";
-import { deriveConvergenceStatus, } from "../core/convergence-status.js";
-import { DEFAULT_CONVERGENCE_POLICY, validateConvergencePolicy, } from "../core/convergence.js";
-import { canTransitionLifecycle, groupLifecycleStates, mayPrepareLocalCommit, transitionLifecycle, } from "../core/group-lifecycle.js";
+import { convergenceStatuses, deriveConvergenceStatus, } from "../core/convergence-status.js";
+import { commitDigest, commitOrderingPriority, DEFAULT_CONVERGENCE_POLICY, isWitnessEligible, normalizeConvergencePolicy, selectCanonicalBranch, validateConvergencePolicy, } from "../core/convergence.js";
+import { canTransitionLifecycle, groupLifecycleStates, mayApplyRetainedInbound, mayPrepareLocalCommit, transitionLifecycle, } from "../core/group-lifecycle.js";
 import { auditEpochStateName, createAuditEmitter, digestString, errorDetail, messageArtifactKindFromNostrKind, } from "../audit/index.js";
-import { framedContentType } from "./wire-format.js";
+import { framedCommitProposalsWithSender, framedContentType, framedEpoch, } from "./wire-format.js";
 import { logger } from "../utils/debug.js";
-import { createAdminCommitPolicyCallback } from "./admin-policy.js";
+import { createAdminCommitPolicyCallback, findProposalSenderViolation, requiredComponentIdsOf, validatePreApplyProposals, withCapturedProposals, } from "./admin-policy.js";
 import { DeliveredPayloadLedger } from "./delivered-payloads.js";
-import { ForkRecovery } from "./fork-recovery.js";
+import { collectWitnessesAt, ForkRecovery, resolveCandidateParent, } from "./fork-recovery.js";
 import { GroupHistoryTree } from "./history-tree.js";
+import { buildTreeBranchSet } from "./tree-convergence.js";
 import { IngestionPool } from "./ingestion-pool.js";
+import { contentDedupId } from "./message-dedup.js";
+import { deriveStateNotifications, groupWithdrawnNotificationsByCommit, StateNotificationLedger, } from "./state-notifications.js";
 import { ingestEnvelopes, isAuthenticApplicationMessage, } from "./ingest.js";
 import { ingestResultDisposition } from "./ingest-disposition.js";
 import { RetainedHistoryStore } from "./retained-store.js";
+import { openConvergencePass, refreshConvergencePass } from "./types.js";
+import { decodeDisbandConvergence, decodeDisbandRequest, disbandConvergenceKey, disbandRequestKey, encodeDisbandConvergence, encodeDisbandRequest, } from "./disband-request.js";
+/**
+ * Thrown by {@link MarmotGroupEngine.send} (`case "commit"`) when a removal
+ * commit's auto-coupled admin-policy update would leave the resulting epoch
+ * with no surviving admin account (D-07). Thrown BEFORE `createCommit` — no
+ * proposal is staged and the lifecycle stays `Stable`. The message names only
+ * the count of admins that would be orphaned, never pubkeys
+ * (diagnostics-privacy rule, `foundation/errors.md`).
+ *
+ * @see refs/mdk/crates/cgka-engine/src/message_processor/send.rs `do_send_remove_members` `AdminDepletion` guard
+ */
+export class AdminDepletionError extends Error {
+    constructor(orphanedAdminCount) {
+        super(`This commit would remove the last member leaf of ${orphanedAdminCount} admin account(s), leaving the group with no admin. Refused before staging.`);
+        this.name = "AdminDepletionError";
+    }
+}
+/**
+ * Thrown when a locally-staged commit violates a Marmot component-integrity
+ * rule. The structured violation is retained so callers can branch on its
+ * stable reason without matching the human-readable diagnostic message.
+ */
+export class CommitLegalityError extends Error {
+    violation;
+    constructor(violation) {
+        super(violation.detail);
+        this.violation = violation;
+        this.name = "CommitLegalityError";
+    }
+}
+/**
+ * Thrown before publishing a standalone proposal its sender is not authorized
+ * to make (`app-components/admin-policy-v1.md`, `protocol-core/group-messaging.md`):
+ * a non-admin's Add, Remove, Update, GroupContextExtensions or AppDataUpdate,
+ * an admin's SelfRemove, or an unsupported proposal type. Every peer would
+ * refuse it.
+ */
+export class ProposalAuthorizationError extends Error {
+    reason;
+    constructor(reason) {
+        super(`Not authorized to send this proposal: ${reason}`);
+        this.reason = reason;
+        this.name = "ProposalAuthorizationError";
+    }
+}
+/** Typed ordinary-outbound refusal while irreversible terminal intent is pending. */
+export class DisbandingError extends Error {
+    reason = "disbanding";
+    constructor() {
+        super("Cannot send ordinary outbound work while group disbanding is pending.");
+        this.name = "DisbandingError";
+    }
+}
+/**
+ * Thrown by {@link MarmotGroupEngine.send} for EVERY outbound intent kind
+ * (application message, proposal, commit, self-update) when the group's
+ * canonical GroupContext no longer classifies as the current account identity
+ * proof profile (D-11): a legacy group, a mixed legacy/current group, or a
+ * group with no `0x8009` requirement at all. Such a group loads and stays
+ * listable/`destroy()`-able (D-11), but this client never validated its
+ * members under the current profile, so all traffic is refused rather than
+ * exchanged. The message is pubkey-free (diagnostics-privacy rule,
+ * `foundation/errors.md`).
+ *
+ * @see refs/marmot/app-components/account-identity-proof-v2.md "Migration from v1"
+ */
+export class UnsupportedGroupProfileError extends Error {
+    proofReason;
+    reason = "unsupported-profile";
+    constructor(proofReason) {
+        super("Cannot send: this group is outside the current account identity proof profile (0x8009).");
+        this.proofReason = proofReason;
+        this.name = "UnsupportedGroupProfileError";
+    }
+}
 const DEFAULT_SCHEDULER = {
     setTimer: (ms, cb) => setTimeout(cb, ms),
     clearTimer: (handle) => clearTimeout(handle),
@@ -62,17 +153,48 @@ export class MarmotGroupEngine {
     #forkRecovery;
     /** App payloads delivered eagerly, retracted as `invalidated` on rewind (M7). */
     #delivered = new DeliveredPayloadLedger();
+    /**
+     * Group-state-change notifications derived from accepted commits, keyed by
+     * commit digest, withdrawn on rewind supersession (D-10/D-11, CONV-03).
+     * Structural sibling of {@link #delivered}.
+     */
+    #stateNotifications = new StateNotificationLedger();
+    /**
+     * Content ids of inbound messages already terminally processed — replay dedup
+     * (`inbound-processing.md`; reference `seen_message_ids`). Process-lifetime,
+     * in-memory; an already-applied commit also re-dedups via epoch/canonical
+     * state, so this primarily gives a clean `duplicate` disposition for re-wrapped
+     * replays and stops a duplicate application message from re-delivering.
+     */
+    #seenContentIds = new Set();
+    /**
+     * Content ids of our own sends, so an echo re-wrapped in a fresh transport
+     * envelope (new event id) is still recognized as our own (reference
+     * `sent_message_ids`). The session also strips own echoes by outer event id
+     * before ingest; this covers the re-wrapped case.
+     */
+    #sentContentIds = new Set();
     #onStateChanged;
     /** Injectable wall-clock for the convergence quiescence window (B5). */
     #now;
     /** Quiescence window (ms) before a convergence pass may be treated as settled. */
     #settlementQuiescenceMs;
     /** Wall-clock (ms) of the most recent convergence-relevant inbound input. */
-    #lastConvergenceRelevantInputMs = 0;
+    #lastConvergenceRelevantInputMs;
     /** Whether the last convergence pass left a non-proposal input undispositioned. */
     #lastPassUnresolved = false;
     /** Whether the last convergence pass hit a blocking (missing-anchor) error. */
     #lastPassBlocked = false;
+    /** Active immutable collection pass, retained until its cutoff. */
+    #convergencePass;
+    #nextPassGeneration = 1;
+    /** Input retained while lifecycle gates admission or a prior pass reaches cutoff. */
+    #retainedPassInput = [];
+    /** Fully validated terminal edges awaiting the current pass cutoff. */
+    #disbandCandidates = new Map();
+    #selectedDisbandEvidence;
+    /** Capacity-refused input retained independently so a full pool cannot deadlock it. */
+    #capacityRefusedInput = new Map();
     /** Injectable timer for the settle-check (B5). */
     #scheduler;
     /** Settle-window elapsed callback; re-checks status to release queued outbound. */
@@ -80,24 +202,37 @@ export class MarmotGroupEngine {
     /** Handle of the pending settle-check timer, if any (cleared/reset per pass). */
     #settleTimer;
     #audit;
+    #lifecycleStore;
+    #disbandRequestKey;
+    #disbandRequest;
+    #disbandHydrated;
+    #wallNow;
+    #passOpenedWallMs;
     constructor(options) {
         this.#state = options.state;
         this.ciphersuite = options.ciphersuite;
         this.peeler = options.peeler;
         this.#onStateChanged = options.onStateChanged;
-        this.#now = options.now ?? (() => Date.now());
+        this.#now = options.now ?? (() => performance.now());
+        this.#wallNow = Date.now;
         this.#settlementQuiescenceMs =
             options.settlementQuiescenceMs ??
                 DEFAULT_CONVERGENCE_POLICY.settlementQuiescenceMs;
         this.#scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
         this.#onSettleCheck = options.onSettleCheck;
-        this.#policy = options.convergencePolicy ?? DEFAULT_CONVERGENCE_POLICY;
+        this.#lifecycleStore = options.lifecycleStore;
+        this.#disbandRequestKey = disbandRequestKey(bytesToHex(options.state.groupContext.groupId));
+        this.#disbandHydrated = this.#hydrateDisbandState();
+        this.#policy = normalizeConvergencePolicy(options.convergencePolicy ?? DEFAULT_CONVERGENCE_POLICY);
         validateConvergencePolicy(this.#policy);
         this.#retained =
             options.retained ?? new RetainedHistoryStore(options.state, this.#policy);
         this.#tree = options.historyTree ?? new GroupHistoryTree(options.state);
         this.#forkRecovery = new ForkRecovery(options.ciphersuite, options.peeler, this.#policy);
-        this.#pool = new IngestionPool(options.ingestionPool);
+        this.#pool = new IngestionPool({
+            maxRewindCommits: this.#policy.maxRewindCommits,
+            ...options.ingestionPool,
+        });
         this.#audit = createAuditEmitter(options.audit && options.auditContext
             ? { ...options.auditContext, sink: options.audit }
             : undefined);
@@ -106,7 +241,17 @@ export class MarmotGroupEngine {
     }
     /** Number of undecryptable events currently held in the ingestion pool. */
     get pendingCount() {
-        return this.#pool.size;
+        return this.#pool.size + this.#capacityRefusedInput.size;
+    }
+    /**
+     * The undecryptable events currently held in the ingestion pool, oldest-first:
+     * received transport envelopes that have not yet decrypted/processed into the
+     * history tree (e.g. a newer-epoch message awaiting its commit, or a fork
+     * message awaiting its branch). They are retried as the tree grows; an entry
+     * that never clears is a received event the unlocking state never arrived for.
+     */
+    pendingEnvelopes() {
+        return [...this.#pool.envelopes(), ...this.#capacityRefusedInput.values()];
     }
     /**
      * The full-fork history tree: every group state observed — the canonical
@@ -117,20 +262,59 @@ export class MarmotGroupEngine {
         return this.#tree;
     }
     /**
+     * The retained canonical states within the rollback horizon, newest epoch
+     * first. Used for cross-epoch encrypted-media decryption: media is keyed by
+     * its source-epoch exporter secret, which is not carried on the wire, so a
+     * receiver tries each still-retained epoch's key. States older than
+     * `max_rewind_commits` are pruned (`retained-history.md`); media from a pruned
+     * epoch can no longer be decrypted.
+     */
+    retainedStates() {
+        return [...this.#retained.states()].sort((a, b) => Number(b.groupContext.epoch) - Number(a.groupContext.epoch));
+    }
+    /**
      * Records an applied commit into both retained history and the history tree.
      * The freshly-produced `newState` is captured pristine; a tree hiccup (e.g. a
      * parent not yet present) is logged and never breaks protocol processing.
      */
-    #recordCommitNode(parentState, message, newState) {
-        this.#retained.record(parentState, message, newState, this.#pinnedEpochs());
+    #recordCommitNode(parentState, message, newState, ownCommitStamp) {
+        this.#retained.record(parentState, message, newState, this.#pinnedEpochs(), ownCommitStamp);
         try {
             const parentTag = bytesToHex(parentState.confirmationTag);
             if (!this.#tree.hasNode(parentTag))
                 this.#tree.setRoot(parentState);
-            this.#tree.recordCommit(parentTag, message, newState);
+            this.#tree.recordCommit(parentTag, message, newState, undefined, ownCommitStamp);
         }
         catch (error) {
             this.#log()("history tree recordCommit failed: %o", error);
+        }
+    }
+    /**
+     * Refreshes the history-tree node snapshot for a state whose
+     * `unappliedProposals` just changed, so the persisted snapshot reflects the
+     * proposals staged against it.
+     *
+     * CR-08: this MUST run for our OWN staged proposals as well as inbound ones.
+     * A tree node snapshot is captured when its commit is recorded and is never
+     * refreshed by `recordCommit`, so a proposal staged afterwards was invisible
+     * to the persisted tree. After a restart `GroupRegistry.#retainedFromTree`
+     * rebuilds `RetainedHistoryStore` purely from those snapshots, leaving
+     * `retained.stateAt(forkEpoch).unappliedProposals === {}` — so
+     * `framedCommitProposals` could not resolve the `ProposalRef` of a commit
+     * that bundled our own staged proposal by reference, the CONV-04
+     * short-circuit fell through to replay, replaying our own commit threw
+     * (RFC 9420: an `UpdatePath` never encrypts a path secret to the committer's
+     * own leaf), and our own deeper canonical branch was dropped as a candidate
+     * entirely — handing the rewind to a shallower competitor.
+     */
+    #recordProposalStaged(state) {
+        try {
+            const tag = bytesToHex(state.confirmationTag);
+            if (this.#tree.hasNode(tag))
+                this.#tree.updateSnapshot(tag, state);
+        }
+        catch (error) {
+            this.#log()("history tree recordProposalStaged failed: %o", error);
         }
     }
     /**
@@ -141,15 +325,37 @@ export class MarmotGroupEngine {
      * synchronously and need no separate prune-time pin.
      */
     #pinnedEpochs() {
-        return this.#stagedCommitParentEpoch === undefined
-            ? []
-            : [this.#stagedCommitParentEpoch];
+        return [
+            ...this.#pool.sourceEpochs(),
+            ...(this.#stagedCommitParentEpoch === undefined
+                ? []
+                : [this.#stagedCommitParentEpoch]),
+        ];
+    }
+    /** Oldest epoch that retained history or the full-fork tree can still name. */
+    #ledgerHorizon() {
+        const anchor = this.#retained.anchorEpoch();
+        const oldestTreeEpoch = this.#tree.oldestEpoch();
+        if (anchor === undefined)
+            return oldestTreeEpoch;
+        if (oldestTreeEpoch === undefined)
+            return anchor;
+        return Math.min(anchor, oldestTreeEpoch);
     }
     get state() {
         return this.#state;
     }
     set state(newState) {
         this.#setState(newState);
+    }
+    /**
+     * Whether the group's canonical GroupContext still classifies as the
+     * current account identity proof profile (D-11). A derived read, computed
+     * fresh from `this.#state` on every access — never cached — so it always
+     * reflects the latest adopted state. Never throws.
+     */
+    get profileSupport() {
+        return getGroupProfileSupport(this.#state.groupContext.extensions);
     }
     /**
      * The group's lifecycle state (`group-state.md`). A new local commit may only
@@ -168,6 +374,12 @@ export class MarmotGroupEngine {
      * `Settled` as wall-clock time passes even with no new input.
      */
     get convergenceStatus() {
+        // A fresh engine has no pass and is settled regardless of the monotonic
+        // clock's process-relative origin. Treating an absent timestamp as `0`
+        // makes the first quiescence interval after process start spuriously
+        // Syncing and queues outbound forever because no pass exists to arm a wake.
+        if (this.#lastConvergenceRelevantInputMs === undefined)
+            return convergenceStatuses.settled;
         return deriveConvergenceStatus({
             nowMs: this.#now(),
             lastConvergenceRelevantInputMs: this.#lastConvergenceRelevantInputMs,
@@ -176,8 +388,240 @@ export class MarmotGroupEngine {
             hasBlockingError: this.#lastPassBlocked,
         });
     }
+    /** Snapshot of the active immutable pass, exposed for scheduler diagnostics. */
+    get convergencePass() {
+        return this.#convergencePass && { ...this.#convergencePass };
+    }
+    /** Canonical terminal evidence retained until the client persists its tombstone. */
+    get selectedDisbandEvidence() {
+        return this.#selectedDisbandEvidence;
+    }
+    /** Number of envelopes retained but not yet admitted to a convergence pass. */
+    get retainedConvergenceInputCount() {
+        return this.#retainedPassInput.length;
+    }
+    /** Opens or refreshes the current collection pass from the monotonic clock. */
+    admitConvergencePass() {
+        const nowMs = this.#now();
+        this.#convergencePass = this.#convergencePass
+            ? refreshConvergencePass(this.#convergencePass, nowMs)
+            : openConvergencePass(nowMs, this.#policy.maxConvergencePassMs, this.#nextPassGeneration++, Number(this.#state.groupContext.epoch));
+        return { ...this.#convergencePass };
+    }
+    /** Current durable irreversible request, hydrated before this promise resolves. */
+    async disbandRequest() {
+        await this.#disbandHydrated;
+        return this.#disbandRequest && { ...this.#disbandRequest };
+    }
+    /** Flushes restart-critical terminal candidate/pass evidence. */
+    async persistDisbandConvergence() {
+        await this.#disbandHydrated;
+        if (!this.#lifecycleStore)
+            return;
+        const key = disbandConvergenceKey(bytesToHex(this.#state.groupContext.groupId));
+        if (!this.#convergencePass || this.#disbandCandidates.size === 0) {
+            await this.#lifecycleStore.removeItem(key);
+            return;
+        }
+        const wallNow = this.#wallNow();
+        const monoNow = this.#now();
+        await this.#lifecycleStore.setItem(key, encodeDisbandConvergence({
+            generation: this.#convergencePass.generation,
+            baseEpoch: this.#convergencePass.baseEpoch,
+            openedAtWallMs: this.#passOpenedWallMs ?? wallNow,
+            deadlineWallMs: wallNow + (this.#convergencePass.deadlineMs - monoNow),
+            lastRelevantInputWallMs: wallNow + (this.#convergencePass.lastRelevantInputMs - monoNow),
+            candidates: [...this.#disbandCandidates.values()].map(({ evidence, resultingState, message }) => ({
+                commitDigest: bytesToHex(evidence.commitDigest),
+                actorPubkey: evidence.actorPubkey,
+                sourceEpoch: evidence.sourceEpoch,
+                parentTag: evidence.parentTag,
+                childTag: bytesToHex(resultingState.confirmationTag),
+                commitMessage: bytesToHex(encode(mlsMessageEncoder, message)),
+                resultingState: bytesToHex(serializeClientState(resultingState)),
+            })),
+        }));
+    }
+    /** Persist irreversible intent, then prepare its exact candidate against this epoch. */
+    async requestDisband() {
+        await this.#disbandHydrated;
+        // CR-04/D-11: refuse BEFORE any durable side effect — this method persists
+        // an irreversible pending disband request before it prepares a candidate,
+        // so checking only at #sendInner would leave a group outside the current
+        // profile with a persisted intent it can never publish.
+        //
+        // Only the profile half: the removedFromGroup case is answered a few lines
+        // below by durably failing the request (`NoLongerMember`) and returning
+        // `undefined`, which is this seam's deliberate disposition and must not be
+        // converted into a throw.
+        this.#assertOutboundProfileSupported();
+        if (!this.#lifecycleStore)
+            throw new Error("A durable lifecycleStore is required to request disbanding");
+        if (this.#state.groupActiveState.kind === "removedFromGroup") {
+            await this.#failDisbandRequest("NoLongerMember");
+            return undefined;
+        }
+        const groupData = getMarmotGroupView(this.#state);
+        const actorLeafIndex = Number(this.#state.privatePath.leafIndex);
+        const actorPubkey = getCredentialPubkey(getCredentialFromLeafIndex(this.#state.ratchetTree, this.#state.privatePath.leafIndex));
+        if (!groupData?.adminPubkeys.includes(actorPubkey)) {
+            await this.#failDisbandRequest("NoLongerAdmin");
+            return undefined;
+        }
+        if (getGroupLifecycle(this.#state.groupContext.extensions) !== "active" ||
+            !(getAppComponents(this.#state.groupContext.extensions) ?? []).includes(GROUP_LIFECYCLE_COMPONENT_ID))
+            throw new Error("Group disbanding is not enabled");
+        const epoch = Number(this.#state.groupContext.epoch);
+        if (!this.#disbandRequest) {
+            this.#disbandRequest = {
+                status: "pending",
+                requestedAtMs: Date.now(),
+                lastPreparedEpoch: null,
+            };
+            await this.#persistDisbandRequest();
+        }
+        if (this.#disbandRequest.status === "failed")
+            return undefined;
+        if (this.#disbandRequest.lastPreparedEpoch === epoch &&
+            this.#lifecycle !== groupLifecycleStates.stable)
+            return undefined;
+        this.#disbandRequest = {
+            ...this.#disbandRequest,
+            lastPreparedEpoch: epoch,
+        };
+        await this.#persistDisbandRequest();
+        const proposals = this.#occupiedLeafIndices()
+            .filter((index) => index !== actorLeafIndex)
+            .map((removed) => ({
+            proposalType: defaultProposalTypes.remove,
+            remove: { removed },
+        }));
+        proposals.push({
+            proposalType: appDataUpdateProposalType,
+            appDataUpdate: {
+                componentId: GROUP_LIFECYCLE_COMPONENT_ID,
+                operation: "update",
+                update: encodeGroupLifecycleV1("disbanded"),
+            },
+        }, {
+            proposalType: appDataUpdateProposalType,
+            appDataUpdate: {
+                componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
+                operation: "update",
+                update: encodeAdminPolicyV1([actorPubkey]),
+            },
+        });
+        const result = await this.#sendInner({
+            kind: "commit",
+            actorPubkey,
+            extraProposals: proposals,
+        });
+        if (result.kind !== "groupEvolution" || !result.pending.commitMessage)
+            throw new Error("Disband request did not produce a commit");
+        result.pending.terminalEvidence = {
+            commitDigest: commitDigest(encode(mlsMessageEncoder, result.pending.commitMessage)),
+            actorPubkey,
+            sourceEpoch: epoch,
+            parentTag: bytesToHex(this.#state.confirmationTag),
+            terminalOutcome: "disbanded",
+        };
+        return result;
+    }
+    /** Atomically enables lifecycle-v1 for a legacy group when every leaf supports it. */
+    async enableGroupDisbanding() {
+        await this.#disbandHydrated;
+        // CR-04: this seam had NO removed-from-group refusal at all, and no
+        // profile refusal, because it reaches #sendInner directly.
+        this.#assertOutboundIntentAllowed();
+        const required = getAppComponents(this.#state.groupContext.extensions) ?? [];
+        const lifecycle = getGroupLifecycle(this.#state.groupContext.extensions);
+        if (required.includes(GROUP_LIFECYCLE_COMPONENT_ID)) {
+            if (lifecycle === "active")
+                return undefined;
+            throw new Error("Lifecycle component is required but not active");
+        }
+        const actorPubkey = getCredentialPubkey(getCredentialFromLeafIndex(this.#state.ratchetTree, this.#state.privatePath.leafIndex));
+        const groupData = getMarmotGroupView(this.#state);
+        if (!groupData?.adminPubkeys.includes(actorPubkey))
+            throw new Error("Only an active group admin may enable disbanding");
+        const proposals = [
+            {
+                proposalType: appDataUpdateProposalType,
+                appDataUpdate: {
+                    componentId: APP_COMPONENTS_COMPONENT_ID,
+                    operation: "update",
+                    update: encodeComponentsList([
+                        ...required,
+                        GROUP_LIFECYCLE_COMPONENT_ID,
+                    ]),
+                },
+            },
+            {
+                proposalType: appDataUpdateProposalType,
+                appDataUpdate: {
+                    componentId: GROUP_LIFECYCLE_COMPONENT_ID,
+                    operation: "update",
+                    update: encodeGroupLifecycleV1("active"),
+                },
+            },
+        ];
+        return this.#sendInner({
+            kind: "commit",
+            actorPubkey,
+            extraProposals: proposals,
+        });
+    }
+    /**
+     * CR-04/D-11: the profile refusal, in ONE place.
+     *
+     * Every outbound intent kind is refused for a group outside the current
+     * account identity proof profile — this client never validated that group's
+     * members under the current profile, so nothing is sent.
+     *
+     * Split out from {@link #assertOutboundIntentAllowed} because
+     * `requestDisband` needs THIS half without the membership half: it answers a
+     * removed-from-group state by durably failing the irreversible request
+     * (`NoLongerMember`) and returning `undefined`, which is a deliberately
+     * different disposition from throwing. Sharing one method for both policies
+     * would have silently overridden that.
+     */
+    #assertOutboundProfileSupported() {
+        const profileSupport = this.profileSupport;
+        if (profileSupport.kind === "unsupported")
+            throw new UnsupportedGroupProfileError(profileSupport.proofReason);
+    }
+    /**
+     * CR-04: the two universal outbound refusals for seams that throw on both.
+     *
+     * D-14: once canonical state is the removedFromGroup tombstone, no outbound
+     * intent may proceed. Canonical state is serialized/persisted, so this also
+     * blocks a send on a freshly-constructed engine after a restart, not just
+     * within the process that observed the removal.
+     *
+     * D-11: see {@link #assertOutboundProfileSupported}.
+     *
+     * Called from `send()` (before any audit emit), from the top of
+     * `#sendInner` (the path EVERY outbound intent actually funnels through),
+     * and from `enableGroupDisbanding`, which had neither refusal. Previously
+     * both lived inline in `send()` alone, which `requestDisband` and
+     * `enableGroupDisbanding` bypass by calling `#sendInner` directly — so a
+     * legacy or mixed-profile group could still build, wrap and publish a
+     * disband commit.
+     */
+    #assertOutboundIntentAllowed() {
+        if (this.#state.groupActiveState.kind === "removedFromGroup") {
+            throw new Error("Cannot send: this client has been removed from the group.");
+        }
+        this.#assertOutboundProfileSupported();
+    }
     /** Executes a local send intent and returns the wrapped transport envelope. */
     async send(intent) {
+        await this.#disbandHydrated;
+        if (this.#disbandRequest?.status === "pending")
+            throw new DisbandingError();
+        // Refused before the audit `send_entry` emit, so a refused intent leaves
+        // no trace of having been attempted.
+        this.#assertOutboundIntentAllowed();
         const intentKind = auditSendIntentKind(intent);
         this.#emitAudit({ type: "send_entry", intent_kind: intentKind });
         try {
@@ -186,13 +630,21 @@ export class MarmotGroupEngine {
                 type: "send_outcome",
                 intent_kind: intentKind,
                 result_kind: auditSendResultKind(result),
-                outbound_messages: [
-                    {
-                        msg_id: this.peeler.idOf(result.envelope),
-                        artifact_kind: this.#artifactKind(result.envelope, result.kind),
-                        transport: this.#transportEnvelope(result.envelope),
-                    },
-                ],
+                // FOUND-01: `foundingGroupCreated` carries no `envelope` — no
+                // transport artifact was ever constructed for it (see the
+                // `SendResult` doc comment in types.ts). An empty `outbound_messages`
+                // list is therefore the honest audit record here; synthesizing a
+                // fabricated envelope reference would be dishonest (T-10-04) and
+                // `#transportEnvelope(undefined)` would throw at runtime (T-10-05).
+                outbound_messages: result.kind === "foundingGroupCreated"
+                    ? []
+                    : [
+                        {
+                            msg_id: this.peeler.idOf(result.envelope),
+                            artifact_kind: this.#artifactKind(result.envelope, result.kind),
+                            transport: this.#transportEnvelope(result.envelope),
+                        },
+                    ],
             });
             return result;
         }
@@ -207,26 +659,102 @@ export class MarmotGroupEngine {
         }
     }
     async #sendInner(intent) {
+        // CR-04: every outbound intent funnels through here — `send()`,
+        // `requestDisband()` and `enableGroupDisbanding()` alike — so this is the
+        // one place that can honestly claim to gate them all. `send()` also calls
+        // this before its audit emit; the repeat is a cheap pure check, not a
+        // second copy of the policy.
+        this.#assertOutboundIntentAllowed();
         switch (intent.kind) {
             case "applicationMessage": {
                 const { newState, message } = await createApplicationMessage({
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                         externalPsks: {},
                     },
                     state: this.state,
                     message: intent.payload,
                 });
-                const envelope = await this.peeler.wrapGroupMessage(message, this.state);
+                // Pinned from the source epoch: `this.state` is still the state the
+                // message was encrypted under (message-retention-v1.md).
+                const expiration = getAppMessageExpiration(this.state, intent.payload);
+                const envelope = await this.peeler.wrapGroupMessage(message, this.state, expiration === undefined ? undefined : { expiration });
+                this.#sentContentIds.add(contentDedupId(message));
                 this.#setState(newState);
+                this.#delivered.record({
+                    epoch: Number(newState.groupContext.epoch),
+                    stateTag: bytesToHex(newState.confirmationTag),
+                    envelope,
+                    message,
+                    payload: intent.payload,
+                });
+                const horizon = this.#ledgerHorizon();
+                if (horizon !== undefined)
+                    this.#delivered.pruneBelow(horizon);
                 return { kind: "applicationMessage", envelope, newState };
             }
             case "proposal": {
+                // D-09: validates any raw Add proposal before createProposal, so a
+                // hand-built ProposalAction returning an Add cannot bypass
+                // proposeInviteUser's own check -- throws the same
+                // AccountIdentityProofError either way.
+                if (intent.proposal.proposalType === defaultProposalTypes.add &&
+                    "add" in intent.proposal) {
+                    validateKeyPackageAccountIdentityProof(intent.proposal.add.keyPackage, this.ciphersuite.id);
+                }
+                // UPD-04/D-09: `SendIntent` accepts any raw `Proposal`, so without
+                // this branch a hand-built Update proposal reaches `createProposal`
+                // unchecked -- neither the Add branch above nor
+                // `validatePreApplyProposals` below inspects Updates. A locally built
+                // standalone Update's sender is always the local client itself (no
+                // resolution ambiguity), so this passes the local leaf index
+                // directly. Throws the same `CommitLegalityError` the
+                // `validatePreApplyProposals` gate below throws, since the validator
+                // returns a structured violation rather than throwing itself.
+                if (intent.proposal.proposalType === defaultProposalTypes.update &&
+                    "update" in intent.proposal) {
+                    const updateViolation = validateUpdateProposalAccountIdentityProofs([
+                        {
+                            proposal: intent.proposal,
+                            senderLeafIndex: Number(this.state.privatePath.leafIndex),
+                        },
+                    ], this.state.ratchetTree, this.ciphersuite.id);
+                    if (updateViolation)
+                        throw new CommitLegalityError(updateViolation);
+                }
+                // CR-02: the rest of the pre-apply gate — AppDataUpdate payloads and
+                // the component ids no proposal may write. Previously only Adds were
+                // checked here, so a locally built AppDataUpdate proposal whose
+                // payload does not decode was wrapped and published, then bundled by
+                // reference into the next commit, which every peer then refused.
+                // `requiredIds` is deliberately omitted: a standalone proposal is
+                // judged on its own, exactly as MDK's
+                // `validate_standalone_app_data_update` does, so a Remove that is only
+                // legal alongside an un-require in the same commit is not refused here.
+                // The Add branch above runs first, so an invalid Add still throws
+                // AccountIdentityProofError — the documented error for this seam.
+                const proposalViolation = validatePreApplyProposals([intent.proposal], this.ciphersuite.id);
+                if (proposalViolation)
+                    throw new CommitLegalityError(proposalViolation);
+                // Every peer (marmot-ts and MDK alike) refuses a standalone proposal
+                // its sender may not make, so refuse it before publishing. In v1 a
+                // non-admin may only send SelfRemove, and an admin may not send
+                // SelfRemove until it has left the admin set.
+                const senderViolation = findProposalSenderViolation([
+                    {
+                        proposal: intent.proposal,
+                        senderLeafIndex: Number(this.state.privatePath.leafIndex),
+                    },
+                ], this.state.ratchetTree, this.#adminPubkeysOf(this.state), true);
+                if (senderViolation)
+                    throw new ProposalAuthorizationError(senderViolation);
                 const { message, newState } = await createProposal({
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                         externalPsks: {},
                     },
                     state: this.state,
@@ -235,6 +763,7 @@ export class MarmotGroupEngine {
                     wireAsPublicMessage: true,
                 });
                 const envelope = await this.peeler.wrapGroupMessage(message, this.state);
+                this.#sentContentIds.add(contentDedupId(message));
                 return {
                     kind: "proposal",
                     envelope,
@@ -265,53 +794,49 @@ export class MarmotGroupEngine {
                         }
                     }
                 }
-                const selectedProposals = [];
                 if (intent.proposalRefs) {
                     for (const ref of intent.proposalRefs) {
                         const proposalWithSender = this.state.unappliedProposals[ref];
                         if (!proposalWithSender) {
                             throw new Error(`Proposal reference not found in unappliedProposals: ${ref}`);
                         }
-                        selectedProposals.push(proposalWithSender.proposal);
+                        // WR-05: an explicitly selected staged Add with an invalid proof
+                        // is refused rather than silently dropped from the commit.
+                        const refViolation = validateAddProposalAccountIdentityProofs([proposalWithSender], this.ciphersuite.id);
+                        if (refViolation)
+                            throw new CommitLegalityError(refViolation);
                     }
                 }
-                const allProposals = [...newProposals, ...selectedProposals];
-                // MIP-03 admin-only commits, with the non-admin carve-out from
-                // protocol-core/group-messaging.md: a non-admin may commit a
-                // self-update-only commit (no proposals, or only self-targeted Update
-                // proposals — an Update can only target the committer's own leaf) or a
-                // self_remove-only commit (committing peers' departures — this is the
-                // auto-committer path). Anything that changes other members or group
-                // state needs admin. This mirrors the inbound admin policy
-                // (admin-policy.ts) so a commit we emit is one a conformant peer accepts.
-                if (!groupData.adminPubkeys.includes(intent.actorPubkey)) {
-                    const selfUpdateOnly = allProposals.every((p) => p.proposalType === defaultProposalTypes.update);
-                    const selfRemoveOnly = allProposals.length > 0 &&
-                        allProposals.every((p) => p.proposalType === selfRemoveProposalType);
-                    if (!selfUpdateOnly && !selfRemoveOnly) {
-                        throw new Error("Not a group admin. Non-admins may only commit a self-update-only or self_remove-only commit.");
-                    }
-                }
+                const prepared = this.#prepareOutboundCommitProposals(this.state, groupData.adminPubkeys, newProposals);
                 const commitOptions = {
                     // Handshake content is wired as MLS PublicMessage (see wire-format.ts).
                     wireAsPublicMessage: true,
                     ratchetTreeExtension: true,
                 };
-                if (intent.extraProposals || intent.proposalRefs) {
-                    commitOptions.extraProposals = allProposals;
+                if (prepared.extraProposals.length > 0) {
+                    commitOptions.extraProposals = prepared.extraProposals;
                 }
                 const parentState = this.state;
                 const { commit, newState, welcome } = await createCommit({
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                     },
-                    state: this.state,
+                    // WR-05: staged invalid Adds pruned, so never bundled by reference.
+                    state: prepared.commitState,
                     ...commitOptions,
                 });
+                // D-01/D-02: validate the staged commit before it is wrapped or
+                // published, and before the lifecycle transitions to PendingPublish.
+                // The throw happens before the lifecycle transition below, so the
+                // engine is left in Stable with no pending state and no staged commit
+                // to roll back.
+                this.#assertStagedCommitLegal(parentState, newState, prepared.committedWithSenders, Number(parentState.privatePath.leafIndex));
+                const envelope = await this.peeler.wrapGroupMessage(commit, this.state);
                 this.#transitionLifecycle(groupLifecycleStates.pendingPublish, "begin_pending", "commit");
                 this.#stagedCommitParentEpoch = Number(parentState.groupContext.epoch);
-                const envelope = await this.peeler.wrapGroupMessage(commit, this.state);
+                this.#sentContentIds.add(contentDedupId(commit));
                 return {
                     kind: "groupEvolution",
                     envelope,
@@ -321,56 +846,509 @@ export class MarmotGroupEngine {
                         newState,
                         parentState,
                         commitMessage: commit,
+                        ownCommitStamp: this.#ownCommitStamp(commit, prepared),
+                    },
+                };
+            }
+            case "foundingAdd": {
+                // D-01/D-02, FOUND-01/02/03: a founding Current-profile Add commit
+                // (epoch 0 -> 1) merged locally with no group-message publication
+                // obligation (refs/marmot/protocol-core/joining.md lines 21-30 — "the
+                // founding-creation exception"). Modelled on `case "commit"` above:
+                // identical proposal preparation and the identical
+                // `#assertStagedCommitLegal` gate (FOUND-02), so this cannot drift
+                // from ordinary commit legality. The caller (D-01) is expected to
+                // hand `pending` straight to `confirmPublished()` in the same
+                // uninterrupted continuation, with no intervening `await` — that
+                // invariant is convention, not enforced by this method (R-01).
+                const groupData = getMarmotGroupView(this.state);
+                if (!groupData) {
+                    throw new Error("MarmotGroupData not found in ClientState.");
+                }
+                if (!mayPrepareLocalCommit(this.#lifecycle)) {
+                    throw new Error(`Cannot prepare a commit while the group is ${this.#lifecycle}`);
+                }
+                // CR-03 (10-REVIEW.md / 10-VERIFICATION.md truth 2, FOUND-02
+                // "PARTIAL"): `SendIntent` is public through the `./engine` subpath,
+                // so this cannot rely on `GroupFactory` being the only caller. Per
+                // refs/marmot/protocol-core/publish-lifecycle.md line 77, "the
+                // empty-obligation exception is limited to the epoch-0 creation and,
+                // when applicable, its immediately following founding Add Commit" --
+                // every subsequent Commit follows the normal publish-before-apply
+                // rule. MDK keeps the founding Add internal to `do_create_group`
+                // (refs/mdk/crates/cgka-engine/src/group_lifecycle.rs), so that
+                // invariant is structural there; here it must be enforced in the
+                // case itself. Every check below runs before any await, any
+                // proposal resolution and any `createCommit`, so a refusal leaves no
+                // staged state, no lifecycle transition and no
+                // `#stagedCommitParentEpoch` pin -- invoked on a live group past
+                // epoch 0, this is exactly the public-surface silent-fork hazard
+                // CR-03 closes.
+                if (this.state.groupContext.epoch !== 0n) {
+                    throw new Error(`foundingAdd: only legal at epoch 0 (the founding-creation exception); group is at epoch ${this.state.groupContext.epoch}`);
+                }
+                const occupiedLeaves = this.#occupiedLeafIndices();
+                if (occupiedLeaves.length !== 1 ||
+                    occupiedLeaves[0] !== Number(this.state.privatePath.leafIndex)) {
+                    throw new Error(`foundingAdd: requires a one-member group whose sole leaf is the local member; tree has ${occupiedLeaves.length} occupied leaves`);
+                }
+                const unappliedCount = Object.keys(this.state.unappliedProposals).length;
+                if (unappliedCount > 0) {
+                    throw new Error(`foundingAdd: requires no unapplied proposals; ${unappliedCount} staged`);
+                }
+                const context = {
+                    state: this.state,
+                    ciphersuite: this.ciphersuite,
+                    groupData,
+                };
+                const newProposals = [];
+                for (const item of intent.extraProposals.flat()) {
+                    if (typeof item === "function") {
+                        newProposals.push(await item(context));
+                    }
+                    else {
+                        newProposals.push(item);
+                    }
+                }
+                // No `proposalRefs` handling here: the intent has no such field, and
+                // this is now enforced above -- the no-unapplied-proposals check
+                // means there are no staged proposals to bundle by reference at the
+                // point a foundingAdd is legal to invoke (CR-03).
+                // CR-03: the Add-only rule applies to the intent's own, resolved
+                // proposals only -- NOT to `prepared.extraProposals` /
+                // `prepared.committedProposals` below, which may gain an
+                // engine-generated admin-policy splice (`#adminPolicySpliceFor` via
+                // `#prepareOutboundCommitProposals`). That splice is not
+                // caller-supplied and remains validated by the shared
+                // `#assertStagedCommitLegal` gate.
+                if (newProposals.length === 0) {
+                    throw new Error("foundingAdd: requires at least one Add proposal");
+                }
+                const nonAddProposal = newProposals.find((p) => p.proposalType !== defaultProposalTypes.add);
+                if (nonAddProposal) {
+                    throw new Error(`foundingAdd: may only carry Add proposals; got proposal type ${nonAddProposal.proposalType}`);
+                }
+                const prepared = this.#prepareOutboundCommitProposals(this.state, groupData.adminPubkeys, newProposals);
+                const commitOptions = {
+                    // Handshake content is wired as MLS PublicMessage (see wire-format.ts).
+                    wireAsPublicMessage: true,
+                    ratchetTreeExtension: true,
+                };
+                if (prepared.extraProposals.length > 0) {
+                    commitOptions.extraProposals = prepared.extraProposals;
+                }
+                const parentState = this.state;
+                const { commit, newState, welcome } = await createCommit({
+                    context: {
+                        cipherSuite: this.ciphersuite,
+                        authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
+                    },
+                    // WR-05: staged invalid Adds pruned, so never bundled by reference.
+                    state: prepared.commitState,
+                    ...commitOptions,
+                });
+                // D-01/D-02: validate the staged commit before any lifecycle
+                // transition — the identical FOUND-02 gate `case "commit"` and `case
+                // "selfUpdate"` call, with the same argument order. The throw
+                // happens before the lifecycle transition below, so the engine is
+                // left in Stable with no pending state and no staged commit to roll
+                // back.
+                this.#assertStagedCommitLegal(parentState, newState, prepared.committedWithSenders, Number(parentState.privatePath.leafIndex));
+                // FOUND-01: unlike `case "commit"`, the peeler's transport-envelope
+                // wrap method is deliberately never invoked for a founding Add. Per
+                // refs/marmot/protocol-core/joining.md lines 21-30, the founding Add
+                // "has no group-message publication obligation because no
+                // pre-existing peer needs it" — and per MDK's own
+                // `do_create_group` comment (refs/mdk/crates/cgka-engine/src/group_lifecycle.rs),
+                // publishing it would make every invitee's Welcome-before-commit
+                // processing bounce with `AlreadyAtEpoch`. FOUND-01 is satisfied by
+                // never constructing the transport envelope at all, not by building
+                // one and leaving it unpublished.
+                if (welcome === undefined) {
+                    throw new Error("foundingAdd: createCommit produced no Welcome for a founding Add that adds members");
+                }
+                this.#transitionLifecycle(groupLifecycleStates.pendingPublish, "begin_pending", "foundingAdd");
+                this.#stagedCommitParentEpoch = Number(parentState.groupContext.epoch);
+                this.#sentContentIds.add(contentDedupId(commit));
+                return {
+                    kind: "foundingGroupCreated",
+                    welcome,
+                    pending: {
+                        // D-01: reuses the existing "commit" literal on purpose, so
+                        // `confirmPublished()` is not modified by this plan.
+                        kind: "commit",
+                        newState,
+                        parentState,
+                        commitMessage: commit,
+                        ownCommitStamp: this.#ownCommitStamp(commit, prepared),
                     },
                 };
             }
             case "selfUpdate": {
+                const parentState = this.state;
+                // WR-17: a selfUpdate IS a commit — it advances the epoch and produces
+                // a new confirmation tag — so it runs the same lifecycle gate as
+                // `case "commit"`. Without it, a selfUpdate issued while another commit
+                // is staged in PendingPublish builds a second commit off the same
+                // parent and whichever `confirmPublished` lands second silently
+                // overwrites the other's state, forking the group against itself.
+                if (!mayPrepareLocalCommit(this.#lifecycle)) {
+                    throw new Error(`Cannot prepare a commit while the group is ${this.#lifecycle}`);
+                }
+                // CR-03: `extraProposals: []` does NOT make this a proposal-free
+                // commit. `createCommit` bundles every entry of
+                // `state.unappliedProposals` by reference in addition to
+                // `extraProposals`, so a selfUpdate can carry a peer's Remove that
+                // de-leafs the last admin account, or an AppDataUpdate rewriting the
+                // dictionary. This seam therefore runs the SAME D-05 auto-coupling
+                // splice, D-07 depletion guard, and D-01/D-02 legality check as
+                // `case "commit"` — otherwise the engine would wrap and publish a
+                // commit that its own inbound seam (`ingest.ts`) and every conformant
+                // peer reject (the mdk#707 "guard on one seam only" bug class).
+                //
+                // `MarmotGroup.selfUpdate()` is public and non-admin-callable, and
+                // per refs/marmot/protocol-core/joining.md it is called right after
+                // joining from a Welcome — a
+                // moment when staged proposals from other members are plausible.
+                const groupData = getMarmotGroupView(parentState);
+                if (!groupData) {
+                    throw new Error("MarmotGroupData not found in ClientState.");
+                }
+                const prepared = this.#prepareOutboundCommitProposals(parentState, groupData.adminPubkeys, []);
                 const { commit, newState } = await createCommit({
                     context: {
                         cipherSuite: this.ciphersuite,
                         authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
                     },
-                    state: this.state,
+                    // WR-05: staged invalid Adds pruned, so never bundled by reference.
+                    state: prepared.commitState,
                     // Handshake content is wired as MLS PublicMessage (see wire-format.ts).
                     wireAsPublicMessage: true,
                     ratchetTreeExtension: true,
-                    extraProposals: [],
+                    extraProposals: prepared.extraProposals,
                 });
+                this.#assertStagedCommitLegal(parentState, newState, prepared.committedWithSenders, Number(parentState.privatePath.leafIndex));
+                // WR-17: same post-staging bookkeeping as `case "commit"` — the
+                // throw above happens first, so a rejected selfUpdate leaves the
+                // engine Stable with nothing to roll back. The parent-epoch pin keeps
+                // retained pruning from dropping the epoch this commit branches from
+                // while its publish is unconfirmed.
                 const envelope = await this.peeler.wrapGroupMessage(commit, this.state);
+                this.#transitionLifecycle(groupLifecycleStates.pendingPublish, "begin_pending", "selfUpdate");
+                this.#stagedCommitParentEpoch = Number(parentState.groupContext.epoch);
+                this.#sentContentIds.add(contentDedupId(commit));
+                // CR-09: carry `parentState` and `commitMessage` so `confirmPublished`
+                // can record this commit into retained history and the fork tree. A
+                // selfUpdate that is only `#setState`d leaves the tree with no node for
+                // the new tip, which makes `GroupRegistry.#loadHistory` discard the
+                // whole persisted fork history on the next load.
                 return {
                     kind: "selfUpdate",
                     envelope,
-                    pending: { kind: "selfUpdate", newState },
+                    pending: {
+                        kind: "selfUpdate",
+                        newState,
+                        parentState,
+                        commitMessage: commit,
+                        ownCommitStamp: this.#ownCommitStamp(commit, prepared),
+                    },
                 };
             }
         }
     }
-    /** Applies staged state after publish confirmation (publish-before-apply). */
+    /**
+     * Resolves the exact proposal union `createCommit` will commit, applies the
+     * D-05 coupling splice once, and runs the same actor authorization callback
+     * used by inbound processing before MLS construction begins.
+     *
+     * Unapplied proposals remain references in `createCommit`; selected refs are
+     * therefore validated by the caller but are never copied into
+     * `extraProposals`. This preserves proposal identity and prevents a selected
+     * reference from being counted a second time as a by-value proposal.
+     */
+    #prepareOutboundCommitProposals(state, adminPubkeys, byValueProposals) {
+        const actorLeaf = state.privatePath.leafIndex;
+        const actorPubkey = getCredentialPubkey(getCredentialFromLeafIndex(state.ratchetTree, actorLeaf));
+        // WR-05/CR-02: `createCommit` bundles every unapplied proposal by
+        // reference, so refusing the commit over a staged inadmissible proposal
+        // would block every local commit (including selfUpdate and the
+        // self_remove auto-commit) for the rest of the epoch. Such a proposal can
+        // only be staged by an older build or a rewind onto a pre-upgrade
+        // snapshot; it is dropped from the commit instead, mirroring MDK's
+        // discard of invalid standalone proposals.
+        const commitState = withoutInadmissibleStagedProposals(state, this.ciphersuite.id);
+        const referenced = Object.values(commitState.unappliedProposals);
+        const localByValue = byValueProposals.map((proposal) => ({ proposal, senderLeafIndex: Number(actorLeaf) }));
+        const committedWithSenders = [...referenced, ...localByValue];
+        // D-08/D-04: pre-apply Add-proof symmetry with the inbound admin
+        // callback -- a raw Add this call passes by value is refused with the
+        // identical structured violation the inbound seam uses (staged references
+        // were already pruned above). #assertStagedCommitLegal remains the
+        // post-apply backstop.
+        const addViolation = validateAddProposalAccountIdentityProofs(localByValue, this.ciphersuite.id);
+        if (addViolation)
+            throw new CommitLegalityError(addViolation);
+        const committedProposals = committedWithSenders.map((p) => p.proposal);
+        const extraProposals = [...byValueProposals];
+        const adminPolicySplice = this.#adminPolicySpliceFor(state, adminPubkeys, committedProposals);
+        if (adminPolicySplice) {
+            extraProposals.push(adminPolicySplice);
+            committedProposals.push(adminPolicySplice);
+            committedWithSenders.push({
+                proposal: adminPolicySplice,
+                senderLeafIndex: Number(actorLeaf),
+            });
+        }
+        const dictionaryLast = dictionaryLastRepairFor(state, committedProposals, referenced.map((p) => p.proposal));
+        if (dictionaryLast) {
+            extraProposals.unshift(dictionaryLast);
+            committedProposals.unshift(dictionaryLast);
+            committedWithSenders.unshift({
+                proposal: dictionaryLast,
+                senderLeafIndex: Number(actorLeaf),
+            });
+        }
+        // CR-02: the SAME pre-apply payload gate every inbound seam runs, on the
+        // exact proposal union `createCommit` will bundle (staged references +
+        // by-value + the D-05 splice). Without it the send path published — and,
+        // via confirmPublished, locally applied and recorded into retained history
+        // and the fork tree — commits that its own ingest and every conformant
+        // peer reject: permanent divergence with no error surfaced. That is the
+        // mdk#707 "a guard that exists on one seam only" class this phase closes
+        // inbound. Staged proposals were pruned above, so a violation here is
+        // attributable either to what this call supplied or to a batch-level rule
+        // (for example a duplicate component id) that pruning must not decide.
+        const payloadViolation = validatePreApplyProposals(committedWithSenders, this.ciphersuite.id, requiredComponentIdsOf(state));
+        if (payloadViolation)
+            throw new CommitLegalityError(payloadViolation);
+        const authorization = decideCommitAuthorization({
+            actorPubkey,
+            actorLeafIndex: Number(actorLeaf),
+            adminPubkeys,
+            proposals: committedWithSenders,
+        });
+        if (!authorization.authorized) {
+            throw new Error("Not a group admin. Non-admins may only commit a self-update-only or self_remove-only commit. Wait for the staged proposal to be committed, or ask an admin to commit it.");
+        }
+        return {
+            extraProposals,
+            committedProposals,
+            committedWithSenders,
+            committer: actorPubkey,
+            priority: commitOrderingPriority(committedWithSenders),
+            commitState,
+        };
+    }
+    /** Captures recovery evidence from the exact staged public commit. */
+    #ownCommitStamp(commit, prepared) {
+        if (commit.wireformat !== wireformats.mls_public_message ||
+            commit.publicMessage.content.contentType !== contentTypes.commit)
+            throw new Error("Own commit stamp requires a public MLS commit");
+        const consumedProposalRefs = commit.publicMessage.content.commit.proposals
+            .filter((entry) => entry.proposalOrRefType === proposalOrRefTypes.reference)
+            .map((entry) => entry.reference.slice());
+        return {
+            committer: prepared.committer,
+            priority: prepared.priority,
+            consumedProposalRefs,
+        };
+    }
+    /**
+     * D-05/D-06/D-07/D-08: the shared admin-leaf-coupling guard both
+     * commit-producing send seams (`case "commit"` and `case "selfUpdate"`) run
+     * before `createCommit`. Returns the admin-policy `AppDataUpdate` proposal
+     * that MUST be spliced into this commit so the resulting epoch stays legal,
+     * or `undefined` when no admin account loses its last member leaf.
+     *
+     * `committedProposals` is the already-normalized exact proposal union from
+     * {@link #prepareOutboundCommitProposals}. It includes every unapplied
+     * reference exactly once plus caller-supplied by-value proposals.
+     *
+     * Deliberately EXCLUDES `selfRemoveProposalType` entries (SelfRemove
+     * carve-out, Pitfall 4): a SelfRemove must not trigger auto-coupling or the
+     * depletion guard. An admin's SelfRemove is already refused by
+     * `createAdminCommitPolicyCallback`, and a non-admin's SelfRemove cannot
+     * change the admin set.
+     *
+     * @throws AdminDepletionError when the commit would leave the resulting
+     * epoch with no surviving admin account (D-07) — refused before any staging,
+     * before `createCommit`, and before the wrong-layer `encodeAdminPolicyV1`
+     * "at least one admin" error could fire.
+     * @see refs/mdk/crates/cgka-engine/src/message_processor/send.rs `do_send_remove_members`
+     */
+    #adminPolicySpliceFor(state, currentAdmins, committedProposals) {
+        const removedLeaves = new Set();
+        for (const proposal of committedProposals) {
+            if (proposal.proposalType === defaultProposalTypes.remove &&
+                "remove" in proposal) {
+                removedLeaves.add(Number(proposal.remove.removed));
+            }
+        }
+        if (removedLeaves.size === 0)
+            return undefined;
+        // D-08: account-level survival — an account survives if at least one of
+        // its leaves is NOT in removedLeaves; leaf-level would diverge the moment
+        // an account has two leaves, which the wire format already permits.
+        const survivingAccounts = new Set();
+        for (const pubkey of getGroupMemberPubkeys(state)) {
+            const leaves = getPubkeyLeafNodeIndexes(state, pubkey);
+            if (leaves.some((leaf) => !removedLeaves.has(leaf))) {
+                survivingAccounts.add(pubkey);
+            }
+        }
+        const resultingAdmins = currentAdmins.filter((pk) => survivingAccounts.has(pk));
+        if (currentAdmins.length > 0 && resultingAdmins.length === 0) {
+            throw new AdminDepletionError(currentAdmins.length);
+        }
+        // D-05 splice: same commit — never a follow-up commit.
+        if (resultingAdmins.length === currentAdmins.length)
+            return undefined;
+        return {
+            proposalType: appDataUpdateProposalType,
+            appDataUpdate: {
+                componentId: GROUP_ADMIN_POLICY_COMPONENT_ID,
+                operation: "update",
+                update: encodeAdminPolicyV1(resultingAdmins),
+            },
+        };
+    }
+    /**
+     * D-01/D-02: the shared send/staging commit-legality gate, run by both
+     * commit-producing send seams against the SAME proposal union
+     * `createCommit` actually bundles — the by-reference unapplied proposals
+     * plus this call's `byValueProposals` (including any spliced admin-policy
+     * update).
+     *
+     * Validating only `byValueProposals` would be a false-positive generator: a
+     * caller who staged an AppDataUpdate proposal separately and committed with
+     * no explicit refs has it bundled by reference, and the integrity validator
+     * would otherwise see a dictionary change with no backing op.
+     *
+     * `committerLeafIndex` is always defined on this local send path (both
+     * callers pass `Number(parentState.privatePath.leafIndex)`), so an
+     * `undecidable` outcome (Phase 9, D-03) is unreachable in practice — every
+     * changed leaf is attributable to the committer's own index at minimum.
+     * There is no deferral disposition on a synchronous send (unlike inbound
+     * ingest or fork recovery, there is no pool to hold this in), so failing
+     * closed with the same `CommitLegalityError` is the only correct local
+     * behavior if it were ever reached.
+     *
+     * @throws CommitLegalityError carrying the structured violation.
+     */
+    #assertStagedCommitLegal(parentState, resultingState, committedProposals, committerLeafIndex) {
+        const outcome = validateCommitLegality({
+            parentState,
+            resultingState,
+            proposals: committedProposals,
+            committerLeafIndex,
+        });
+        switch (outcome.kind) {
+            case "legal":
+                return;
+            case "violation":
+                throw new CommitLegalityError(outcome.violation);
+            case "undecidable":
+                throw new CommitLegalityError({
+                    reason: "account-identity-proof",
+                    detail: outcome.detail,
+                    proofReason: "unattributable-leaf",
+                });
+        }
+    }
+    /**
+     * Applies staged state after publish confirmation (publish-before-apply).
+     *
+     * CR-09: `selfUpdate` takes the identical path to `commit` — it is a commit
+     * in every sense that matters here (it advances the epoch and produces a new
+     * confirmation tag), so it must be recorded into retained history and the
+     * fork tree. Recording it only via `#setState` left `RetainedHistoryStore`
+     * with no `stateAt(newEpoch)` (so `resolveFork` could never rebuild across a
+     * selfUpdate) and the tree with no node for the new tip (so the next
+     * `GroupRegistry.#loadHistory` discarded the entire persisted fork history).
+     * Since `refs/marmot/protocol-core/joining.md` tells clients to selfUpdate
+     * immediately after joining from a Welcome, the normal join path destroyed
+     * its own convergence persistence.
+     */
     confirmPublished(pending) {
-        if (pending.kind === "commit") {
+        if (pending.kind === "commit" || pending.kind === "selfUpdate") {
             if (!pending.parentState || !pending.commitMessage) {
                 throw new Error("Commit pending state requires parentState and commitMessage");
             }
             const fromEpoch = Number(pending.parentState.groupContext.epoch);
             const toEpoch = Number(pending.newState.groupContext.epoch);
             this.#transitionLifecycle(groupLifecycleStates.merging, "publish_confirmed", pending.kind);
-            this.#setState(pending.newState);
-            this.#recordCommitNode(pending.parentState, pending.commitMessage, pending.newState);
-            this.#emitAudit({
-                type: "epoch_confirmed",
-                from_epoch: fromEpoch,
-                to_epoch: toEpoch,
-                pending_kind: pending.kind,
-            });
-            this.#transitionLifecycle(groupLifecycleStates.stable, "merge_complete", pending.kind);
-            this.#stagedCommitParentEpoch = undefined;
-            return;
+            if (pending.terminalEvidence) {
+                try {
+                    this.#transitionLifecycle(groupLifecycleStates.stable, "terminal_publish_retained", pending.kind);
+                    this.#admitDisbandCandidate(pending.parentState, pending.commitMessage, pending.newState, pending.terminalEvidence);
+                    this.#emitAudit({
+                        type: "epoch_confirmed",
+                        from_epoch: fromEpoch,
+                        to_epoch: toEpoch,
+                        pending_kind: pending.kind,
+                    });
+                    return [];
+                }
+                finally {
+                    this.#stagedCommitParentEpoch = undefined;
+                    this.#scheduleRetainedContinuation();
+                }
+            }
+            try {
+                this.#setState(pending.newState);
+                this.#recordCommitNode(pending.parentState, pending.commitMessage, pending.newState, pending.ownCommitStamp);
+                const digest = commitDigest(encode(mlsMessageEncoder, pending.commitMessage));
+                let notifications;
+                try {
+                    notifications = deriveStateNotifications({
+                        parentState: pending.parentState,
+                        resultingState: pending.newState,
+                        commitDigest: digest,
+                    });
+                }
+                catch (error) {
+                    this.#log()("state notification derivation failed for local commit: %o", error);
+                    notifications = [];
+                }
+                this.#stateNotifications.record(digest, toEpoch, notifications);
+                const horizon = this.#ledgerHorizon();
+                if (horizon !== undefined)
+                    this.#stateNotifications.pruneBelow(horizon);
+                this.#emitAudit({
+                    type: "epoch_confirmed",
+                    from_epoch: fromEpoch,
+                    to_epoch: toEpoch,
+                    pending_kind: pending.kind,
+                });
+                return notifications;
+            }
+            finally {
+                this.#transitionLifecycle(groupLifecycleStates.stable, "merge_complete", pending.kind);
+                this.#stagedCommitParentEpoch = undefined;
+                this.#scheduleRetainedContinuation();
+            }
         }
         this.#setState(pending.newState);
+        // CR-08: a proposal WE staged must land in the tree node snapshot exactly
+        // as an inbound one does (`ingest.ts` → `recordProposalStaged`). Without
+        // this, the persisted snapshot for the current tip keeps
+        // `unappliedProposals === {}` and a later commit that bundles this
+        // proposal by reference becomes unvalidatable — and therefore unbuildable
+        // as a candidate — after a restart.
+        if (pending.kind === "proposal")
+            this.#recordProposalStaged(this.#state);
+        return [];
     }
-    /** Reverts lifecycle when a staged commit publish fails or is abandoned. */
+    /**
+     * Reverts lifecycle when a staged commit publish fails or is abandoned.
+     * Covers both commit-producing seams (CR-09/WR-17): a selfUpdate now also
+     * transitions to `PendingPublish`, so a failed publish must roll it back or
+     * the engine would be stuck unable to prepare any further commit.
+     */
     publishFailed(pending) {
-        if (pending.kind !== "commit")
+        if (pending.kind !== "commit" && pending.kind !== "selfUpdate")
             return;
         if (this.#lifecycle !== groupLifecycleStates.pendingPublish)
             return;
@@ -384,14 +1362,65 @@ export class MarmotGroupEngine {
         });
         this.#transitionLifecycle(groupLifecycleStates.stable, "publish_failed", pending.kind);
         this.#stagedCommitParentEpoch = undefined;
+        this.#scheduleRetainedContinuation();
     }
     /**
      * Ingests transport envelopes and applies MLS messages to group state.
+     *
+     * WR-04 — terminal facts after an envelope-free rewind: most results name
+     * their triggering envelope, but a rewind driven entirely by pool replay or
+     * by the persisted history tree has none. Such a rewind reports itself as
+     * `appliedNotifications` results, which now carry `selectedTerminal` and
+     * `removedFromGroup` so a consumer building its own transport can see a
+     * disband selection or its own removal without reaching into engine state.
+     *
+     * A rewind that produced NO notifications yields no result at all, so those
+     * two facts have nothing to ride on. Consumers that must not miss them —
+     * rather than merely observe them — should re-read
+     * {@link selectedDisbandEvidence} and `state.groupActiveState` after fully
+     * draining this generator. The client layer (`MarmotGroup`,
+     * `GroupSession`) already does exactly that.
      *
      * @yields DispositionedIngestResult - processing result plus inbound
      *   {@link Disposition}.
      */
     async *ingest(envelopes, options) {
+        await this.#disbandHydrated;
+        // WR-06 (D-11): the authoritative gate for direct engine callers (and
+        // `driveConvergence`). Refuse every envelope before the pool re-feed, the
+        // tree sweep, tree-fed re-convergence (whose witness gathering would peel
+        // and process these refused envelopes), and the self_remove auto-commit
+        // (whose send() would throw out of this generator). The same gate inside
+        // `ingestEnvelopes` stays as the pipeline-level backstop.
+        const profileSupport = this.profileSupport;
+        if (profileSupport.kind === "unsupported") {
+            for (const envelope of envelopes) {
+                this.#emitIngestEntry(envelope);
+                const skipped = {
+                    kind: "skipped",
+                    envelope,
+                    reason: "unsupported-profile",
+                };
+                const dispositioned = {
+                    ...skipped,
+                    disposition: ingestResultDisposition(skipped),
+                };
+                this.#emitIngestOutcome(dispositioned);
+                yield dispositioned;
+            }
+            return;
+        }
+        if (!mayApplyRetainedInbound(this.#lifecycle)) {
+            this.#retainedPassInput.push(...envelopes);
+            return;
+        }
+        if (this.#convergencePass &&
+            this.#now() >= this.#convergencePass.deadlineMs) {
+            this.#retainedPassInput.push(...envelopes);
+            this.#closeConvergencePass();
+            this.#scheduleRetainedContinuation();
+            return;
+        }
         // Track this batch's convergence signal (B5): whether it carried any
         // convergence-relevant input (commits / fork material), whether anything was
         // left undispositioned (a deferred commit ⇒ Resolving), and whether it hit a
@@ -415,12 +1444,30 @@ export class MarmotGroupEngine {
             };
             this.#emitIngestOutcome(dispositioned);
             yield dispositioned;
+            if ((result.kind === "processed" || result.kind === "removed") &&
+                result.notifications !== undefined) {
+                for (const group of groupWithdrawnNotificationsByCommit(result.notifications)) {
+                    const appliedNotifications = {
+                        kind: "appliedNotifications",
+                        commitDigest: group.commitDigest,
+                        notifications: group.withdrawn,
+                    };
+                    const appliedDispositioned = {
+                        ...appliedNotifications,
+                        disposition: ingestResultDisposition(appliedNotifications),
+                    };
+                    this.#emitIngestOutcome(appliedDispositioned);
+                    yield appliedDispositioned;
+                }
+            }
         }
         // A convergence pass ran only if convergence-relevant input arrived; a batch
         // of pure application messages or lone proposals MUST NOT reset the
         // quiescence window or overwrite the last pass's status inputs.
         if (convergenceRelevant) {
-            this.#lastConvergenceRelevantInputMs = this.#now();
+            const nowMs = this.#now();
+            this.#lastConvergenceRelevantInputMs = nowMs;
+            this.admitConvergencePass();
             this.#lastPassUnresolved = unresolved;
             this.#lastPassBlocked = blocked;
             // The window just reset; arm the settle-check so queued outbound is
@@ -431,7 +1478,18 @@ export class MarmotGroupEngine {
         // for any pending self_remove proposals, build and stage a self_remove-only
         // commit (B6, member-departure.md). It is surfaced as an `autoCommit` result;
         // the layer that owns the transport publishes it (publish-before-apply).
-        const auto = await this.#maybeAutoCommitSelfRemoves();
+        // WR-01: an auto-commit failure must never abort the public ingest()
+        // generator after results have already been yielded — the caller's
+        // trailing save() (`GroupSession.ingest`) would be skipped and the rest of
+        // the batch lost. The client layer already treats a failed auto-commit as
+        // retry-on-next-ingest, so log and continue.
+        let auto;
+        try {
+            auto = await this.#maybeAutoCommitSelfRemoves();
+        }
+        catch (error) {
+            this.#log()("auto-commit of staged self_remove proposals failed: %o", error);
+        }
         if (auto) {
             const dispositioned = {
                 ...auto,
@@ -440,6 +1498,34 @@ export class MarmotGroupEngine {
             this.#emitIngestOutcome(dispositioned);
             yield dispositioned;
         }
+    }
+    /**
+     * Admits retained input into a later pass once lifecycle and the prior fixed
+     * deadline permit it. Each call is a deterministic one-shot scheduler edge.
+     */
+    async driveConvergence() {
+        if (!mayApplyRetainedInbound(this.#lifecycle))
+            return [];
+        if (this.#convergencePass) {
+            const cutoffMs = Math.min(this.#convergencePass.deadlineMs, this.#convergencePass.lastRelevantInputMs +
+                this.#settlementQuiescenceMs);
+            if (this.#now() < cutoffMs)
+                return [];
+            this.#closeConvergencePass();
+        }
+        if (this.#disbandCandidates.size > 0) {
+            await this.#settleDisbandCandidates();
+            if (this.#lifecycle === groupLifecycleStates.disbanded)
+                return [];
+        }
+        if (this.#retainedPassInput.length === 0)
+            return [];
+        const retained = this.#retainedPassInput.splice(0);
+        this.admitConvergencePass();
+        const results = [];
+        for await (const result of this.ingest(retained))
+            results.push(result);
+        return results;
     }
     /**
      * Runs the ingest pipeline, but instead of surfacing a decrypt failure as
@@ -458,26 +1544,76 @@ export class MarmotGroupEngine {
             const tipBefore = bytesToHex(this.#state.confirmationTag);
             for await (const result of ingestEnvelopes(this.#ingestContext(), pass, options)) {
                 if (result.kind === "unreadable" && result.decryptFailure) {
-                    // Hold for retry rather than dropping; suppress the terminal yield.
-                    this.#pool.add(this.peeler.idOf(result.envelope), result.envelope, Number(this.#state.groupContext.epoch));
+                    const id = this.peeler.idOf(result.envelope);
+                    const admission = this.#pool.add(id, result.envelope);
+                    if (admission.kind === "refused") {
+                        this.#capacityRefusedInput.set(id, result.envelope);
+                        yield {
+                            kind: "refused",
+                            envelope: result.envelope,
+                            reason: "capacity",
+                        };
+                    }
                     continue;
                 }
-                if (result.kind === "processed" || result.kind === "removed")
-                    this.#pool.remove(this.peeler.idOf(result.envelope));
+                if (result.kind === "deferred") {
+                    const id = this.peeler.idOf(result.envelope);
+                    const admission = this.#pool.add(id, result.envelope, result.sourceEpoch);
+                    if (admission.kind === "refused") {
+                        this.#capacityRefusedInput.set(id, result.envelope);
+                        yield {
+                            kind: "refused",
+                            envelope: result.envelope,
+                            reason: "capacity",
+                        };
+                        continue;
+                    }
+                    // Both retained and capacity-refused work remains visibly retryable;
+                    // neither path enters terminal wrapper deduplication.
+                    yield result;
+                    continue;
+                }
+                if (result.kind === "processed" || result.kind === "removed") {
+                    const id = this.peeler.idOf(result.envelope);
+                    this.#pool.remove(id);
+                    this.#capacityRefusedInput.delete(id);
+                }
                 yield result;
             }
             const tipAfter = bytesToHex(this.#state.confirmationTag);
             // Re-feed the pool only when the tip advanced — an unchanged tip would
             // reproduce the same failures. Bounded by MAX_SWEEPS per ingest call.
-            pass =
-                tipAfter !== tipBefore && this.#pool.size > 0 && ++sweeps < MAX_SWEEPS
-                    ? this.#pool.envelopes()
-                    : [];
+            if (tipAfter !== tipBefore && ++sweeps < MAX_SWEEPS) {
+                const refused = [...this.#capacityRefusedInput.values()];
+                this.#capacityRefusedInput.clear();
+                pass = [...refused, ...this.#pool.envelopes()];
+            }
+            else
+                pass = [];
         }
         // Tree-targeted sweep: read/apply pooled events against any retained fork or
         // past-epoch node state, so late-arriving old-epoch and divergent-fork
         // messages are read and all reachable forks are grown into the tree.
         if (this.#pool.size > 0)
+            yield* this.#sweepTree();
+        // Re-score the persisted forks and switch branches if a competitor now wins
+        // — e.g. pooled/late fork material the sweep just grew into the tree, or a
+        // fork that only lived on disk. On a switch, re-sweep once so messages held
+        // on the now-canonical branch are delivered as `processed`. Witness envelopes
+        // are this batch plus the pool, so re-convergence sees at least the witnesses
+        // pool-replay recovery saw and never reverts a witness-boosted decision.
+        //
+        // Deliberate asymmetry (D-12/CONV-02, CONV-03): when canonical state is the
+        // removedFromGroup tombstone, `ingestEnvelopes` above short-circuits fresh
+        // transport input as `self-evicted` (D-13), so the pool re-feed loop is a
+        // no-op for a removed group. This tree-fed re-convergence pass must still
+        // run regardless — it evaluates already-retained/persisted fork material,
+        // not fresh input — so a later rewind can supersede the removing commit and
+        // clear the removal marker (CONV-03, plan 03-07).
+        const tipBeforeReconverge = bytesToHex(this.#state.confirmationTag);
+        yield* this.#reconvergeFromTree([...envelopes, ...this.#pool.envelopes()]);
+        if (bytesToHex(this.#state.confirmationTag) !== tipBeforeReconverge &&
+            this.#pool.size > 0)
             yield* this.#sweepTree();
         // Give up on entries aged past the retention window — surface them terminal.
         const evicted = this.#pool.evictStale(Number(this.#state.groupContext.epoch));
@@ -556,27 +1692,85 @@ export class MarmotGroupEngine {
             message.wireformat !== wireformats.mls_public_message)
             return undefined;
         const isCommit = framedContentType(message) === contentTypes.commit;
+        // D-09 symmetry: an invalid standalone Add must never be staged into a
+        // non-canonical fork snapshot either, so the admin callback (which now
+        // validates both commit-embedded and standalone Adds) runs for BOTH
+        // framed-message kinds here, not just commits. withCapturedProposals is a
+        // pure side channel -- see its docstring; no validation logic is added by
+        // wrapping it.
+        const capture = withCapturedProposals(this.#createAdminVerificationCallback(state));
+        capture.take();
         let result;
         try {
             result = await processMessage({
                 context: {
                     cipherSuite: this.ciphersuite,
                     authService: marmotAuthService,
+                    clientConfig: defaultMarmotClientConfig,
                     externalPsks: {},
                 },
                 state,
                 message,
-                callback: isCommit
-                    ? this.#createAdminVerificationCallback(state)
-                    : acceptAll,
+                callback: capture.callback,
             });
         }
         catch {
             return undefined; // decrypted but not processable against this node
         }
+        const captured = capture.take();
         if (result.kind === "newState") {
-            if (result.actionTaken === "reject")
-                return { kind: "rejected", result, envelope, message };
+            if (result.actionTaken === "reject") {
+                const violation = validatePreApplyProposals(captured.proposals, this.ciphersuite.id, requiredComponentIdsOf(state));
+                return {
+                    kind: "rejected",
+                    result,
+                    envelope,
+                    message,
+                    // WR-02: same fallback label as both ingest.ts rejection sites.
+                    reason: violation?.reason ?? "admin-policy",
+                    proofReason: violation?.proofReason,
+                };
+            }
+            if (isCommit) {
+                // CR-01: the same shared WIRE-03/CONV-01 legality adapter every other
+                // commit seam runs (ingest.ts, fork-recovery.ts `resolveCandidateParent`,
+                // the send path) — after processMessage, before the edge is grown
+                // into the persisted tree. Without it an illegal commit that only
+                // decrypts on a fork node would be recorded and reported `processed`,
+                // and its edge would then pin tree-fed branch selection.
+                let outcome;
+                try {
+                    outcome = validateCommitLegality({
+                        parentState: state,
+                        resultingState: result.newState,
+                        proposals: captured.proposals,
+                        committerLeafIndex: captured.committerLeafIndex,
+                    });
+                }
+                catch {
+                    // Mirrors resolveCandidateParent's `deferred`: keep it pooled.
+                    return undefined;
+                }
+                if (outcome.kind === "undecidable") {
+                    // Same keep-pooled idiom as the catch above: authorization cannot
+                    // yet be evaluated against this candidate parent (Phase 9, D-03).
+                    log("sweep commit undecidable at node %s detail:%s", tag, outcome.detail);
+                    return undefined;
+                }
+                if (outcome.kind === "violation") {
+                    const { violation } = outcome;
+                    log("sweep commit rejected at node %s reason:%s detail:%s", tag, violation.reason, violation.detail);
+                    return {
+                        kind: "rejected",
+                        result,
+                        envelope,
+                        message,
+                        reason: violation.reason,
+                        proofReason: violation.proofReason,
+                        leafIndex: violation.leafIndex,
+                    };
+                }
+            }
             try {
                 if (isCommit) {
                     // Grow this fork into the tree (capture it, off node `tag`).
@@ -593,29 +1787,24 @@ export class MarmotGroupEngine {
             return { kind: "processed", result, envelope, message };
         }
         if (result.kind === "applicationMessage") {
-            if (!isAuthenticApplicationMessage(result, state, log, "sweep"))
+            if (!isAuthenticApplicationMessage(result, state, log, "sweep", framedEpoch(message)))
                 return {
                     kind: "skipped",
                     envelope,
                     message,
                     reason: "invalid-app-payload",
                 };
-            // A read on the canonical path is delivered; one that only decrypts on a
-            // losing fork is reported as invalidated (M7), never delivered as accepted.
-            // The losing read still carries its fork-node identity (the node `tag` it
-            // decrypted against and that node's epoch) so a full-history consumer can
-            // attribute it; an app message does not change the epoch/confirmation tag,
-            // so `tag` is the delivery branch.
-            return onCanonical
+            // A read on the canonical path is delivered. One that only decrypts on a
+            // non-canonical fork is HELD silently — retained in the pool, not surfaced —
+            // until either we switch to that branch (a later sweep then delivers it as
+            // `processed`, after `#applyForkResolution` resets the tried-tag memo) or it
+            // ages out. Returning `undefined` keeps the entry pooled and moves on.
+            // `invalidated` is reserved for retracting a payload previously delivered as
+            // `accepted` when a rewind abandons its branch (`#applyForkResolution`).
+            return onCanonical &&
+                this.#state.groupActiveState.kind !== "removedFromGroup"
                 ? { kind: "processed", result, envelope, message }
-                : {
-                    kind: "invalidated",
-                    envelope,
-                    message,
-                    payload: result.message,
-                    tag,
-                    epoch: Number(state.groupContext.epoch),
-                };
+                : undefined;
         }
         return undefined;
     }
@@ -633,14 +1822,21 @@ export class MarmotGroupEngine {
             case "rejected":
                 return framedContentType(result.message) === contentTypes.commit;
             case "deferred":
+            case "refused":
             case "invalidated":
             case "removed":
+                return true;
+            case "stateInvalidated":
+                // A rewind retraction is convergence-relevant, matching "invalidated".
+                return true;
+            case "stateRevalidated":
                 return true;
             case "skipped":
                 return (result.reason === "past-epoch" ||
                     result.reason === "beyond-anchor" ||
                     result.reason === "missing-retained-anchor");
             case "autoCommit":
+            case "appliedNotifications":
             case "unreadable":
                 return false;
         }
@@ -658,11 +1854,39 @@ export class MarmotGroupEngine {
             this.#scheduler.clearTimer(this.#settleTimer);
             this.#settleTimer = undefined;
         }
-        const elapsed = this.#now() - this.#lastConvergenceRelevantInputMs;
-        const delay = Math.max(0, this.#settlementQuiescenceMs - elapsed);
+        const nowMs = this.#now();
+        if (this.#lastConvergenceRelevantInputMs === undefined)
+            return;
+        const quiescenceAt = this.#lastConvergenceRelevantInputMs + this.#settlementQuiescenceMs;
+        const cutoffAt = this.#convergencePass
+            ? Math.min(quiescenceAt, this.#convergencePass.deadlineMs)
+            : quiescenceAt;
+        const delay = Math.max(0, cutoffAt - nowMs);
         this.#settleTimer = this.#scheduler.setTimer(delay, () => {
             this.#settleTimer = undefined;
+            if (this.#convergencePass && this.#now() >= cutoffAt)
+                this.#closeConvergencePass();
             // Fire-and-forget; the owner's drain handles and logs its own errors.
+            void this.#onSettleCheck?.();
+        });
+    }
+    #closeConvergencePass() {
+        this.#convergencePass = undefined;
+        if (this.#lastConvergenceRelevantInputMs !== undefined)
+            this.#lastConvergenceRelevantInputMs = Math.min(this.#lastConvergenceRelevantInputMs, this.#now() - this.#settlementQuiescenceMs);
+        if (this.#settleTimer !== undefined) {
+            this.#scheduler.clearTimer(this.#settleTimer);
+            this.#settleTimer = undefined;
+        }
+    }
+    /** Wakes the owner after an unsafe publish lifecycle returns to Stable. */
+    #scheduleRetainedContinuation() {
+        if (!this.#onSettleCheck || this.#retainedPassInput.length === 0)
+            return;
+        if (this.#settleTimer !== undefined)
+            this.#scheduler.clearTimer(this.#settleTimer);
+        this.#settleTimer = this.#scheduler.setTimer(0, () => {
+            this.#settleTimer = undefined;
             void this.#onSettleCheck?.();
         });
     }
@@ -686,8 +1910,22 @@ export class MarmotGroupEngine {
     async #maybeAutoCommitSelfRemoves() {
         if (!mayPrepareLocalCommit(this.#lifecycle))
             return undefined;
+        // WR-06: send() refuses every intent for a group outside the current
+        // profile, so an elected auto-commit would only throw.
+        if (this.profileSupport.kind === "unsupported")
+            return undefined;
+        // WR-01: send() also throws DisbandingError while a disband request is
+        // pending, and publishFailed() restores Stable while LEAVING the request
+        // pending — so without this, any inbound self_remove arriving after a
+        // failed disband publish throws out of the public ingest() generator.
+        if (this.#disbandRequest?.status === "pending")
+            return undefined;
         const state = this.#state;
-        const unapplied = Object.values(state.unappliedProposals);
+        // WR-05/CR-02: a staged inadmissible proposal is pruned from every local
+        // commit, so it must not turn an otherwise self_remove-only set into a
+        // "mixed" one.
+        const unapplied = Object.values(withoutInadmissibleStagedProposals(state, this.ciphersuite.id)
+            .unappliedProposals);
         if (unapplied.length === 0)
             return undefined;
         // createCommit bundles ALL unapplied proposals by reference, so only
@@ -696,8 +1934,21 @@ export class MarmotGroupEngine {
         // self_remove-only. Mixed sets are left for an admin's explicit commit.
         if (!unapplied.every((p) => isSelfRemoveProposal(p.proposal)))
             return undefined;
-        const groupData = getMarmotGroupView(state);
-        const adminPubkeys = groupData?.adminPubkeys ?? [];
+        // WR-01: read ONLY the admin policy, exactly as the inbound admin gate
+        // does (`#createAdminVerificationCallback`). `getMarmotGroupView` decodes
+        // every cosmetic component inside one try and returns null if ANY of them
+        // is malformed — which would compute `anyLeaverIsActiveAdmin` against an
+        // EMPTY admin set, letting this client elect itself to commit an ADMIN's
+        // self_remove. `member-departure.md` forbids that, and every peer's
+        // inbound gate refuses it.
+        let adminPubkeys;
+        try {
+            adminPubkeys = getAdminPolicy(state.groupContext.extensions) ?? [];
+        }
+        catch {
+            // A departure cannot be authorized without a readable admin policy.
+            return undefined;
+        }
         const leaverLeafIndices = [];
         let anyLeaverIsActiveAdmin = false;
         for (const p of unapplied) {
@@ -755,8 +2006,89 @@ export class MarmotGroupEngine {
         return out;
     }
     #setState(newState) {
+        const epochChanged = newState.groupContext.epoch !== this.#state.groupContext.epoch;
         this.#state = newState;
+        if (epochChanged &&
+            this.#disbandRequest?.status === "pending" &&
+            getGroupLifecycle(newState.groupContext.extensions) === "active") {
+            this.#disbandRequest = {
+                ...this.#disbandRequest,
+                lastPreparedEpoch: null,
+            };
+            void this.#persistDisbandRequest();
+        }
         this.#onStateChanged?.(newState);
+    }
+    async #hydrateDisbandState() {
+        if (!this.#lifecycleStore)
+            return;
+        const encoded = await this.#lifecycleStore.getItem(this.#disbandRequestKey);
+        if (encoded)
+            this.#disbandRequest = decodeDisbandRequest(encoded);
+        const convergence = await this.#lifecycleStore.getItem(disbandConvergenceKey(bytesToHex(this.#state.groupContext.groupId)));
+        if (!convergence)
+            return;
+        const stored = decodeDisbandConvergence(convergence);
+        const monoNow = this.#now();
+        const wallNow = this.#wallNow();
+        for (const candidate of stored.candidates) {
+            const parentState = (await this.#tree.stateAt(candidate.parentTag)) ??
+                (bytesToHex(this.#state.confirmationTag) === candidate.parentTag
+                    ? this.#state
+                    : undefined);
+            const resultingState = (await this.#tree.stateAt(candidate.childTag)) ??
+                deserializeClientState(hexToBytes(candidate.resultingState));
+            const message = (await this.#tree.commitMessageOf(candidate.childTag)) ??
+                decode(mlsMessageDecoder, hexToBytes(candidate.commitMessage));
+            if (!parentState || !resultingState || !message)
+                throw new Error("Persisted disband candidate is missing history material");
+            this.#disbandCandidates.set(candidate.commitDigest, {
+                parentState,
+                resultingState,
+                message,
+                evidence: {
+                    commitDigest: hexToBytes(candidate.commitDigest),
+                    actorPubkey: candidate.actorPubkey,
+                    sourceEpoch: candidate.sourceEpoch,
+                    parentTag: candidate.parentTag,
+                    terminalOutcome: "disbanded",
+                },
+            });
+            if (!this.#tree.hasNode(candidate.childTag)) {
+                if (!this.#tree.hasNode(candidate.parentTag))
+                    this.#tree.setRoot(parentState);
+                this.#tree.recordCommit(candidate.parentTag, message, resultingState);
+            }
+        }
+        this.#convergencePass = {
+            generation: stored.generation,
+            baseEpoch: stored.baseEpoch,
+            openedAtMs: monoNow + (stored.openedAtWallMs - wallNow),
+            deadlineMs: monoNow + Math.max(0, stored.deadlineWallMs - wallNow),
+            lastRelevantInputMs: monoNow + (stored.lastRelevantInputWallMs - wallNow),
+        };
+        this.#nextPassGeneration = Math.max(this.#nextPassGeneration, stored.generation + 1);
+        this.#passOpenedWallMs = stored.openedAtWallMs;
+        this.#lastConvergenceRelevantInputMs =
+            this.#convergencePass.lastRelevantInputMs;
+        this.#transitionLifecycle(groupLifecycleStates.recovering, "disband_candidate_restored");
+        this.#scheduleSettleCheck();
+    }
+    async #persistDisbandRequest() {
+        if (!this.#lifecycleStore || !this.#disbandRequest)
+            return;
+        await this.#lifecycleStore.setItem(this.#disbandRequestKey, encodeDisbandRequest(this.#disbandRequest));
+    }
+    async #failDisbandRequest(reason) {
+        if (!this.#disbandRequest)
+            return;
+        this.#disbandRequest = {
+            status: "failed",
+            reason,
+            requestedAtMs: this.#disbandRequest.requestedAtMs,
+            lastPreparedEpoch: null,
+        };
+        await this.#persistDisbandRequest();
     }
     #emitAudit(kind) {
         this.#audit?.emit(kind, {
@@ -816,6 +2148,14 @@ export class MarmotGroupEngine {
         });
     }
     #emitIngestOutcome(result) {
+        // A withdrawal has no triggering transport envelope to attribute an audit
+        // msg_id to (D-11); audit wiring for `stateInvalidated` is deferred to the
+        // seam-wiring plan that actually produces this variant.
+        // Envelope-less state outcomes cannot be assigned a transport msg_id.
+        // Audit emission remains deferred while the schema requires msg_id; do
+        // not fabricate transport attribution for either result variant.
+        if (!("envelope" in result))
+            return;
         const msgId = this.peeler.idOf(result.envelope);
         const outcome = auditIngestOutcome(result);
         if (outcome) {
@@ -841,7 +2181,7 @@ export class MarmotGroupEngine {
             this.#emitAudit({
                 type: "rejection",
                 msg_id: msgId,
-                reason: "admin_policy",
+                reason: (result.reason ?? "admin-policy").replaceAll("-", "_"),
             });
         }
     }
@@ -882,27 +2222,39 @@ export class MarmotGroupEngine {
             maxRewindCommits: this.#policy.maxRewindCommits,
             log: this.#log(),
             getState: () => this.#state,
+            isDisbanded: () => this.#lifecycle === groupLifecycleStates.disbanded,
             setState: (state) => this.#setState(state),
             recordCommit: (parentState, message, newState) => this.#recordCommitNode(parentState, message, newState),
-            recordProposalStaged: (state) => {
-                try {
-                    const tag = bytesToHex(state.confirmationTag);
-                    if (this.#tree.hasNode(tag))
-                        this.#tree.updateSnapshot(tag, state);
-                }
-                catch (error) {
-                    this.#log()("history tree recordProposalStaged failed: %o", error);
-                }
-            },
-            createAdminCallback: () => this.#createAdminVerificationCallback(),
+            admitDisbandCandidate: (parentState, message, resultingState, evidence) => this.#admitDisbandCandidate(parentState, message, resultingState, evidence),
+            recordProposalStaged: (state) => this.#recordProposalStaged(state),
+            createAdminCallback: (state) => this.#createAdminVerificationCallback(state),
             resolveFork: (forkEpoch, pool, encrypted, witnessEnvelopes) => this.#resolveFork(forkEpoch, pool, encrypted, witnessEnvelopes),
             recordDeliveredAppPayload: (epoch, stateTag, envelope, message, payload) => {
                 this.#delivered.record({ epoch, stateTag, envelope, message, payload });
-                const anchor = this.#retained.anchorEpoch();
-                if (anchor !== undefined)
-                    this.#delivered.pruneBelow(anchor);
+                const horizon = this.#ledgerHorizon();
+                if (horizon !== undefined)
+                    this.#delivered.pruneBelow(horizon);
+            },
+            recordStateNotifications: (digest, epoch, notifications) => {
+                this.#stateNotifications.record(digest, epoch, notifications);
+                const horizon = this.#ledgerHorizon();
+                if (horizon !== undefined)
+                    this.#stateNotifications.pruneBelow(horizon);
             },
             toUnrecoverable: () => this.#toUnrecoverable(),
+            dedup: {
+                classify: (message) => {
+                    const id = contentDedupId(message);
+                    if (this.#sentContentIds.has(id))
+                        return "own-echo";
+                    if (this.#seenContentIds.has(id))
+                        return "duplicate";
+                    return undefined;
+                },
+                remember: (message) => {
+                    this.#seenContentIds.add(contentDedupId(message));
+                },
+            },
         };
     }
     /**
@@ -918,6 +2270,73 @@ export class MarmotGroupEngine {
         if (canTransitionLifecycle(this.#lifecycle, groupLifecycleStates.unrecoverable))
             this.#transitionLifecycle(groupLifecycleStates.unrecoverable, "missing_retained_anchor");
     }
+    /** Opens or joins the one immutable pass for a validated linear disband edge. */
+    #admitDisbandCandidate(parentState, message, resultingState, evidence) {
+        const key = bytesToHex(evidence.commitDigest);
+        if (this.#disbandCandidates.has(key))
+            return;
+        const currentEpoch = Number(this.#state.groupContext.epoch);
+        if (evidence.sourceEpoch !== currentEpoch ||
+            evidence.parentTag !== bytesToHex(this.#state.confirmationTag))
+            return;
+        if (this.#convergencePass &&
+            this.#convergencePass.baseEpoch !== evidence.sourceEpoch)
+            return;
+        this.#disbandCandidates.set(key, {
+            parentState,
+            message,
+            resultingState,
+            evidence,
+        });
+        try {
+            const parentTag = bytesToHex(parentState.confirmationTag);
+            if (!this.#tree.hasNode(parentTag))
+                this.#tree.setRoot(parentState);
+            this.#tree.recordCommit(parentTag, message, resultingState);
+        }
+        catch (error) {
+            this.#log()("terminal candidate tree retention failed: %o", error);
+        }
+        if (!this.#convergencePass) {
+            this.#passOpenedWallMs = this.#wallNow();
+            const pass = this.admitConvergencePass();
+            this.#lastConvergenceRelevantInputMs = pass.lastRelevantInputMs;
+        }
+        if (this.#lifecycle === groupLifecycleStates.stable)
+            this.#transitionLifecycle(groupLifecycleStates.recovering, "disband_candidate_admitted");
+        this.#scheduleSettleCheck();
+    }
+    /** Resolves admitted terminal edges with the unchanged canonical comparator. */
+    async #settleDisbandCandidates() {
+        const candidates = [...this.#disbandCandidates.values()];
+        if (candidates.length === 0)
+            return;
+        const forkEpoch = Math.min(...candidates.map(({ evidence }) => evidence.sourceEpoch));
+        const terminalCandidates = new Map(candidates.map(({ evidence }) => [
+            bytesToHex(evidence.commitDigest),
+            evidence,
+        ]));
+        const resolution = await this.#forkRecovery.resolveFork({
+            forkEpoch,
+            pool: candidates.map(({ message }) => message),
+            currentState: this.#state,
+            retained: this.#retained,
+            adminCallbackFor: (parent) => this.#createAdminVerificationCallback(parent),
+            terminalCandidates,
+            knownCandidates: new Map(candidates.map(({ evidence, resultingState }) => [
+                bytesToHex(evidence.commitDigest),
+                { parentTag: evidence.parentTag, state: resultingState },
+            ])),
+        });
+        this.#disbandCandidates.clear();
+        if (resolution.outcome === "recovered") {
+            this.#applyForkResolution(forkEpoch, resolution);
+            return;
+        }
+        if (this.#lifecycle === groupLifecycleStates.recovering)
+            this.#transitionLifecycle(groupLifecycleStates.stable, "active_selected");
+        this.#scheduleRetainedContinuation();
+    }
     /**
      * Resolves a fork via {@link ForkRecovery} and applies the rewind: on a
      * canonical-branch win, transitions through `Recovering`, adopts the winning
@@ -929,10 +2348,14 @@ export class MarmotGroupEngine {
             forkEpoch,
             pool,
             encrypted,
-            witnessEnvelopes,
+            witnessEnvelopes: [...this.#delivered.envelopes(), ...witnessEnvelopes],
             currentState: this.state,
             retained: this.#retained,
-            adminCallback: this.#createAdminVerificationCallback(),
+            adminCallbackFor: (parent) => this.#createAdminVerificationCallback(parent),
+            terminalCandidates: new Map([...this.#disbandCandidates.values()].map(({ evidence }) => [
+                bytesToHex(evidence.commitDigest),
+                evidence,
+            ])),
         });
         // Retain every branch built while resolving — the winner and every loser —
         // so the full fork tree survives even when we do not change branches. Edges
@@ -947,15 +2370,50 @@ export class MarmotGroupEngine {
             }
         }
         if (resolution.outcome !== "recovered") {
+            const decision = resolution.outcome === "superseded" ? resolution.decision : undefined;
+            const winnerTip = resolution.outcome === "superseded" ? resolution.winnerTip : undefined;
             this.#emitAudit({
                 type: "convergence_decision",
                 current_tip_epoch: Number(this.state.groupContext.epoch),
                 max_rewind_commits: finiteAuditNumber(this.#policy.maxRewindCommits),
-                candidates: [],
+                candidates: decision
+                    ? [
+                        {
+                            branch_id: decision.selectedBranchId,
+                            fork_epoch: forkEpoch,
+                            tip_epoch: Number(winnerTip.groupContext.epoch),
+                        },
+                    ]
+                    : [],
+                selected_branch_id: decision?.selectedBranchId,
+                selected_fork_epoch: decision ? forkEpoch : undefined,
+                selected_tip_epoch: winnerTip
+                    ? Number(winnerTip.groupContext.epoch)
+                    : undefined,
+                selected_tip_digest: decision?.selectedTipDigest,
+                selected_tip_committer: decision?.selectedTipCommitter,
+                decisive_rule: decision?.decisiveRule,
+                witness_quorum_met: decision?.score.witnessQuorumMet,
+                app_witness_score: decision?.score.appWitnessScore,
                 error_kinds: resolution.outcome === "skip" ? ["candidate_state_unavailable"] : [],
             });
-            return { outcome: resolution.outcome };
+            return { outcome: resolution.outcome, rejected: resolution.rejected };
         }
+        return {
+            ...this.#applyForkResolution(forkEpoch, resolution),
+            rejected: resolution.rejected,
+        };
+    }
+    /**
+     * Adopts a recovered fork resolution — the shared rewind-apply path used by
+     * both pool-replay recovery ({@link #resolveFork}) and tree-fed re-convergence
+     * ({@link #reconvergeFromTree}). Computes the abandoned app payloads to retract
+     * (M7), transitions `Recovering → setState(winner) → Stable`, records the
+     * winner chain into retained history, prunes the ledger below the new anchor,
+     * and resets the pool's tried-tag memo so a fork message previously held on the
+     * losing branch can now be delivered on the canonical one.
+     */
+    #applyForkResolution(forkEpoch, resolution) {
         // The canonical branch's state identities (root + every applied child +
         // the tip). Any app payload delivered above the fork epoch whose delivery
         // state is not on this chain decrypted only on the abandoned branch, so it
@@ -967,6 +2425,15 @@ export class MarmotGroupEngine {
             canonicalTags.add(bytesToHex(link.child.confirmationTag));
         canonicalTags.add(bytesToHex(resolution.winnerTip.confirmationTag));
         const invalidated = this.#delivered.invalidatedByRewind(forkEpoch, canonicalTags);
+        // D-11: the canonical commit digests for THIS rewind — every digest on
+        // the winning chain — so a notification recorded for a commit that is
+        // NOT among them (i.e. superseded) gets withdrawn. Computed from
+        // `resolution.winnerChain` link messages, the same bytes `commitDigest`
+        // already hashes elsewhere in this file (`fork-recovery.ts`).
+        const canonicalDigests = new Set();
+        for (const link of resolution.winnerChain)
+            canonicalDigests.add(bytesToHex(commitDigest(encode(mlsMessageEncoder, link.message))));
+        const withdrawnNotifications = this.#stateNotifications.invalidatedByRewind(forkEpoch, canonicalDigests);
         this.#emitAudit({
             type: "convergence_decision",
             current_tip_epoch: Number(this.state.groupContext.epoch),
@@ -981,19 +2448,107 @@ export class MarmotGroupEngine {
             selected_branch_id: bytesToHex(resolution.winnerTip.confirmationTag),
             selected_fork_epoch: forkEpoch,
             selected_tip_epoch: Number(resolution.winnerTip.groupContext.epoch),
+            selected_tip_digest: resolution.decision?.selectedTipDigest,
+            selected_tip_committer: resolution.decision?.selectedTipCommitter,
+            decisive_rule: resolution.decision?.decisiveRule,
+            witness_quorum_met: resolution.decision?.score.witnessQuorumMet,
+            app_witness_score: resolution.decision?.score.appWitnessScore,
         });
         this.#transitionLifecycle(groupLifecycleStates.recovering, "fork_detected");
         this.#setState(resolution.winnerTip);
         for (const link of resolution.winnerChain) {
             this.#retained.record(link.parent, link.message, link.child, this.#pinnedEpochs());
         }
-        this.#transitionLifecycle(groupLifecycleStates.stable, "branch_applied");
-        const anchor = this.#retained.anchorEpoch();
-        if (anchor !== undefined)
-            this.#delivered.pruneBelow(anchor);
+        this.#transitionLifecycle(resolution.selectedTerminal
+            ? groupLifecycleStates.disbanded
+            : groupLifecycleStates.stable, resolution.selectedTerminal ? "disband_selected" : "branch_applied");
+        if (resolution.selectedTerminal)
+            this.#selectedDisbandEvidence = resolution.selectedTerminal;
+        // The canonical path moved; let held fork messages re-decrypt on it.
+        this.#pool.resetTried();
+        // D-10/D-11: derive and ledger-record the notifications produced by EVERY
+        // commit on the winning chain — so a *later* rewind that supersedes any of
+        // them (e.g. a subsequent tree-fed switch, `#reconvergeFromTree`) can
+        // withdraw exactly what this rewind emitted, closing the loop for commits
+        // that land via a rewind rather than the direct in-order ingest branch
+        // (`ingest.ts` records notifications there; this is the rewind-landed
+        // counterpart).
+        //
+        // CR-07: a rewind that adopts an N-commit branch really does apply N
+        // commits. Diffing only the tip link dropped every intermediate commit's
+        // membership/component changes (a 3-commit branch that added Alice, then
+        // removed Bob, then rotated a key reported only the rotation, with
+        // `epochAdvanced` understating the jump) and — because
+        // `invalidatedByRewind` can only withdraw what was `record()`ed — left
+        // those notifications permanently non-withdrawable, breaking CONV-03's
+        // stated invariant.
+        //
+        // Each link is diffed parent -> child (never parent -> winnerTip), so an
+        // intermediate link reports its own transition rather than a collapsed one.
+        // `undefined` only when the winner tip is the fork root itself (no chain
+        // applied), mirroring `tipCommitMessage`.
+        let chainNotifications;
+        if (resolution.winnerChain.length > 0) {
+            chainNotifications = [];
+            for (const link of resolution.winnerChain) {
+                const linkDigest = commitDigest(encode(mlsMessageEncoder, link.message));
+                const linkEpoch = Number(link.child.groupContext.epoch);
+                // WR-14: `invalidatedByRewind` KEEPS entries whose digest is on the
+                // winning chain, so a prefix link that was already applied and
+                // ledger-recorded in-order (`ingest.ts`) is still recorded here. It
+                // must not be reported to the caller a second time — the fork root can
+                // sit below the divergence point, e.g. competing commits at epochs F
+                // and F+1 give a winner chain of [F->c1 (already applied), F+1->peer].
+                // `record` is idempotent, but the caller-facing `chainNotifications`
+                // needs the same filter or the app sees a duplicate delivery for a
+                // commit it already processed.
+                const alreadyRecorded = this.#stateNotifications.has(linkDigest, linkEpoch);
+                // WR-15: this is the ONE derivation site that runs after state has
+                // already advanced — `#setState(resolution.winnerTip)` above — so an
+                // escaping throw would abandon the rewind mid-flight, before
+                // `GroupSession.ingest` can persist it. Its sibling seams
+                // (`fork-recovery.ts`, `#treeResolution`) all wrap their validators
+                // for exactly this reason. `deriveStateNotifications` reaches
+                // `getGroupMembers` → `getCredentialPubkey`, which throws for a leaf
+                // whose identity is not a valid 32-byte hex key; that leaf is now
+                // skipped at the source, but log-and-continue here keeps one bad link
+                // from taking down the whole chain.
+                let derived;
+                try {
+                    derived =
+                        resolution.selectedTerminal &&
+                            bytesToHex(linkDigest) ===
+                                bytesToHex(resolution.selectedTerminal.commitDigest)
+                            ? []
+                            : deriveStateNotifications({
+                                parentState: link.parent,
+                                resultingState: link.child,
+                                commitDigest: linkDigest,
+                            });
+                }
+                catch (error) {
+                    this.#log()("state notification derivation failed for link %s: %o", bytesToHex(link.child.confirmationTag), error);
+                    derived = [];
+                }
+                this.#stateNotifications.record(linkDigest, linkEpoch, derived);
+                if (!alreadyRecorded)
+                    chainNotifications.push(...derived);
+            }
+        }
+        const horizon = this.#ledgerHorizon();
+        if (horizon !== undefined) {
+            this.#delivered.pruneBelow(horizon);
+            this.#stateNotifications.pruneBelow(horizon);
+        }
         return {
             outcome: "recovered",
             result: resolution.result,
+            // D-10/D-12: the winning chain's own tip commit, so a caller attributing
+            // a `selfRemoved` notification to a rewind-landed removal digests the
+            // commit that actually produced it, not an arbitrary forkPool entry.
+            tipCommitMessage: resolution.winnerChain.at(-1)?.message,
+            notifications: chainNotifications,
+            withdrawnNotifications,
             invalidated: invalidated.map(({ envelope, message, payload, stateTag, epoch }) => ({
                 envelope,
                 message,
@@ -1001,19 +2556,520 @@ export class MarmotGroupEngine {
                 tag: stateTag,
                 epoch,
             })),
+            selectedTerminal: resolution.selectedTerminal,
         };
     }
+    /**
+     * Re-scores the persisted fork history against the current tip and switches to
+     * the canonical branch when a competitor wins (`convergence.md`). Every
+     * candidate is sourced from the history tree, so a fork known only on disk is
+     * re-evaluated without the transport re-delivering it — the load-time and
+     * post-sweep path for dynamic fork switching. A switch reuses
+     * {@link #applyForkResolution}; only the resulting `invalidated` retractions are
+     * yielded (a tree-fed switch has no triggering envelope, so it is never a
+     * `processed` result — the now-canonical branch's app messages surface via a
+     * follow-up sweep). No-op unless `Stable` and the tree holds a competing tip.
+     */
+    async *#reconvergeFromTree(witnessEnvelopes) {
+        if (this.#lifecycle !== groupLifecycleStates.stable)
+            return;
+        if (this.#tree.tips().length <= 1)
+            return;
+        const currentTipTag = bytesToHex(this.#state.confirmationTag);
+        const set = buildTreeBranchSet(this.#tree, currentTipTag, this.#policy);
+        if (!set)
+            return;
+        // Witnesses are best-effort: layered on when envelopes are resident (live),
+        // absent on load where the structural keys (depth + lower tip digest) decide.
+        const witnessesByTip = witnessEnvelopes.length > 0
+            ? await this.#gatherTreeWitnesses(set, witnessEnvelopes)
+            : undefined;
+        // The tree's light index carries only epoch and digest. The tip ordering
+        // metadata (`tip_priority`, `tip_committer`) ranks above the digest, so it
+        // is read from the stored parent snapshot and commit before scoring;
+        // without it this pass and pool replay order the same branches
+        // differently and the tip flips between them.
+        const candidates = await Promise.all(set.candidates.map(async (c) => ({
+            ...c,
+            ...(await this.#treeTipOrdering(c.id)),
+            appWitnesses: witnessesByTip?.get(c.id) ?? c.appWitnesses,
+        })));
+        // CR-01: select among ADOPTABLE branches only. A permanently invalid link
+        // (an illegal edge persisted by an older build, say) is never adopted,
+        // mirroring MDK, which drops a commit invalid against its candidate state
+        // (`InvalidAgainstCandidateState`) before branches are scored.
+        // WR-02: MDK drops only that COMMIT. Its candidate-path BFS completes a
+        // path that cannot be extended, so the chain up to the last valid node
+        // stays a scored candidate — as pool replay here (`ForkRecovery`) already
+        // does. The candidate is therefore replaced by its legal prefix and
+        // selection re-runs; it is excluded outright only when its first link is
+        // invalid. A temporary refusal (`deferred`) still ends the pass: the top
+        // branch may become adoptable later, and adopting a runner-up now would be
+        // a switch spec-conformant peers do not make.
+        let remaining = candidates;
+        let selected;
+        // WR-03: every node on the current tip's own path. `buildTreeBranchSet`
+        // picks `rootTag` as the SHALLOWEST fork point across all competing tips,
+        // so with two or more competing tips the segment `rootTag → T` for a tip
+        // `T` whose own LCA with the current tip is deeper passes through nodes
+        // that are ALSO on the current tip's path. `#treeResolution` reports the
+        // last valid node of a partly-illegal branch, which can be one of those
+        // shared ancestors — and `winner.id === currentTipTag` below does not
+        // catch it, because an ancestor is not the tip. Admitting it would rewind
+        // canonical state BACKWARDS along our own path: a switch no peer makes.
+        const onCurrentPath = new Set(this.#tree.path(currentTipTag) ?? []);
+        while (selected === undefined) {
+            const winner = selectCanonicalBranch(Number(this.#state.groupContext.epoch), remaining, this.#policy);
+            if (!winner || winner.id === currentTipTag)
+                return;
+            const outcome = await this.#treeResolution(set.rootTag, winner.id);
+            if (outcome.kind === "deferred")
+                return;
+            if (outcome.kind === "resolved")
+                selected = { winner, resolution: outcome.resolution };
+            else {
+                remaining = remaining.filter((c) => c.id !== winner.id);
+                const prefix = outcome.lastValidTag === undefined ||
+                    onCurrentPath.has(outcome.lastValidTag)
+                    ? undefined
+                    : await this.#treePrefixCandidate(winner, outcome.lastValidTag);
+                if (prefix && !remaining.some((c) => c.id === prefix.id))
+                    remaining = [...remaining, prefix];
+            }
+        }
+        const { winner, resolution } = selected;
+        const forkEpoch = this.#tree.epochOf(set.rootTag) ?? winner.forkEpoch;
+        const applied = this.#applyForkResolution(forkEpoch, resolution);
+        if (applied.outcome === "recovered") {
+            // Tree-fed adoption has no transport envelope to carry notifications on.
+            // Surface each commit's already-recorded notifications as its own named
+            // result before any later withdrawal can retract the same identity.
+            // WR-04: a tree-fed switch never has a triggering envelope, so these are
+            // the only results it can carry the rewind's terminal facts on.
+            const removedFromGroup = this.#state.groupActiveState.kind === "removedFromGroup";
+            for (const group of groupWithdrawnNotificationsByCommit(applied.notifications ?? [])) {
+                yield {
+                    kind: "appliedNotifications",
+                    commitDigest: group.commitDigest,
+                    notifications: group.withdrawn,
+                    selectedTerminal: applied.selectedTerminal,
+                    removedFromGroup,
+                };
+            }
+            // D-11: withdrawn state notifications are yielded BEFORE the
+            // app-payload `invalidated` retractions below, matching the pool-replay
+            // rewind site (`ingest.ts`) so the two retraction streams have a
+            // deterministic relative order regardless of which rewind path fired.
+            for (const group of groupWithdrawnNotificationsByCommit(applied.withdrawnNotifications)) {
+                yield {
+                    kind: "stateInvalidated",
+                    commitDigest: group.commitDigest,
+                    forkEpoch,
+                    withdrawn: group.withdrawn,
+                };
+            }
+            for (const inv of applied.invalidated)
+                yield {
+                    kind: "invalidated",
+                    envelope: inv.envelope,
+                    message: inv.message,
+                    payload: inv.payload,
+                    tag: inv.tag,
+                    epoch: inv.epoch,
+                };
+        }
+    }
+    /**
+     * Drives one tree-fed re-convergence pass to completion, switching to the
+     * canonical branch if the persisted history now favors a competing fork. Public
+     * entry for the load path (after the engine hydrates from the tree) and any
+     * caller wanting an explicit re-evaluation. Witness-free — the structural keys
+     * decide; witnesses refine on the next live ingest/sweep.
+     *
+     * Returns every result the pass produced, dispositioned and audited exactly
+     * as {@link ingest} does, so a caller can route them through the identical
+     * handler.
+     *
+     * CR-06: these results MUST reach the caller. `#reconvergeFromTree` is the
+     * only site that can yield the `stateInvalidated` withdrawal proving a
+     * rewind superseded the commit that removed us, and that withdrawal is what
+     * clears the persisted removed-inactive marker (CONV-03, D-12). While this
+     * method drained into `void _`, a client that was removed on a losing fork,
+     * restarted, and re-converged onto a branch where it is still a member ended
+     * up with canonical membership restored AND a stale marker still set —
+     * silently suppressing the next genuine removal.
+     */
+    async reconvergeFromHistory() {
+        const results = [];
+        for await (const result of this.#reconvergeFromTree([])) {
+            const dispositioned = {
+                ...result,
+                disposition: ingestResultDisposition(result),
+            };
+            this.#emitIngestOutcome(dispositioned);
+            results.push(dispositioned);
+        }
+        return results;
+    }
+    /**
+     * The authenticated ordering metadata of the commit that produced tree node
+     * `tag`: the committer's account identity, resolved against the parent
+     * snapshot's ratchet tree, and the commit's `tip_priority`, classified from
+     * its inline proposals plus the parent's staged proposals it references.
+     * Fields that cannot be derived are omitted rather than guessed; the stored
+     * own-commit stamp supplies the priority when the references no longer
+     * resolve.
+     *
+     * @see refs/marmot/protocol-core/convergence.md "Candidate branches"
+     */
+    async #treeTipOrdering(tag) {
+        const parentTag = this.#tree.parentOf(tag);
+        if (parentTag === undefined)
+            return {};
+        const [parent, message] = await Promise.all([
+            this.#tree.stateAt(parentTag),
+            this.#tree.commitMessageOf(tag),
+        ]);
+        if (!parent || !message)
+            return {};
+        const framed = framedCommitProposalsWithSender(message, parent);
+        const senderLeaf = framed?.senderLeafIndex ?? this.#tree.node(tag)?.edge?.senderLeafIndex;
+        let tipCommitter;
+        if (senderLeaf !== undefined) {
+            try {
+                tipCommitter = hexToBytes(getCredentialPubkey(getCredentialFromLeafIndex(parent.ratchetTree, senderLeaf)));
+            }
+            catch {
+                tipCommitter = undefined;
+            }
+        }
+        const tipPriority = framed
+            ? commitOrderingPriority(framed.proposals)
+            : (await this.#tree.ownCommitStampOf(tag))?.priority;
+        return {
+            ...(tipCommitter ? { tipCommitter } : {}),
+            ...(tipPriority ? { tipPriority } : {}),
+        };
+    }
+    /**
+     * WR-02: `candidate` truncated to its legal prefix ending at node `tag`, with
+     * the same scoring inputs `buildTreeBranchSet` derives for a tip (the node's
+     * epoch and its own edge digest). Only witnesses that decrypt on the prefix
+     * and remain eligible for its shorter tip are kept. `undefined` when the
+     * tree lacks the node's epoch or edge.
+     */
+    async #treePrefixCandidate(candidate, tag) {
+        const tipEpoch = this.#tree.epochOf(tag);
+        const tipDigest = this.#tree.node(tag)?.edge?.commitDigest;
+        if (tipEpoch === undefined || tipDigest === undefined)
+            return undefined;
+        return {
+            id: tag,
+            forkEpoch: candidate.forkEpoch,
+            tipEpoch,
+            tipDigest,
+            ...(await this.#treeTipOrdering(tag)),
+            appWitnesses: candidate.appWitnesses.filter((witness) => witness.epoch <= tipEpoch &&
+                isWitnessEligible(witness, candidate.forkEpoch, tipEpoch, this.#policy)),
+        };
+    }
+    /**
+     * Assembles a recovered {@link ForkResolution} for a tree-fed switch directly
+     * from the persisted history tree — the path `rootTag → winnerTipTag`, with a
+     * fresh {@link ClientState} snapshot fetched per chain endpoint (so no two links
+     * alias an object) and the stored commit per edge. No `processMessage` replay
+     * for chain ASSEMBLY: the tree already holds each branch state. It DOES replay
+     * each link once, below, to re-derive the commit's own proposals and
+     * re-validate commit legality before adoption (D-04/D-09) — a persisted tree
+     * edge may have been written by a pre-upgrade build that never enforced
+     * `validateCommitLegality`, so adopting it without re-checking would be
+     * grandfathering a violation the send/inbound/replay seams would all now
+     * refuse. Fails closed: any link that cannot be re-validated abandons the
+     * whole switch, leaving the current tip in place.
+     *
+     * Returns `invalid` when a link is permanently unadoptable (illegal, fails
+     * to authenticate against its stored parent, non-framed, or replays to a
+     * different confirmation tag), with `lastValidTag` naming the node just
+     * before that link when at least one earlier link was valid — the caller
+     * replaces the candidate with that legal prefix (WR-02), or excludes it
+     * when the first link is invalid, and re-selects (CR-01). Returns
+     * `deferred` when the chain cannot be assessed
+     * right now (a missing snapshot/commit, or a temporary refusal) — the
+     * caller ends the pass without adopting anything.
+     */
+    async #treeResolution(rootTag, winnerTipTag) {
+        const fullPath = this.#tree.path(winnerTipTag);
+        if (!fullPath)
+            return { kind: "deferred" };
+        const rootIndex = fullPath.indexOf(rootTag);
+        if (rootIndex < 0)
+            return { kind: "deferred" };
+        const segment = fullPath.slice(rootIndex);
+        const winnerChain = [];
+        for (let i = 1; i < segment.length; i++) {
+            const parent = await this.#tree.stateAt(segment[i - 1]);
+            const child = await this.#tree.stateAt(segment[i]);
+            const message = await this.#tree.commitMessageOf(segment[i]);
+            if (!parent || !child || !message)
+                return { kind: "deferred" };
+            winnerChain.push({ parent, message, child });
+        }
+        const winnerTip = await this.#tree.stateAt(winnerTipTag);
+        if (!winnerTip)
+            return { kind: "deferred" };
+        // D-04/D-09: re-derive and re-validate every link's commit legality
+        // before adopting this winner chain, so a persisted tree edge written by
+        // a pre-upgrade build (before this gate existed) is never grandfathered
+        // in. Fail closed on any link.
+        for (const [index, link] of winnerChain.entries()) {
+            const childTag = bytesToHex(link.child.confirmationTag);
+            // WR-02: when this link is invalid, the chain's legal prefix ends at its
+            // parent node — unless this is the first link, which leaves no prefix.
+            const invalid = {
+                kind: "invalid",
+                lastValidTag: index > 0 ? segment[index] : undefined,
+            };
+            // Commit messages are framed (private or public); anything else stored
+            // against a chain link cannot be replayed — fail closed.
+            if (link.message.wireformat !== wireformats.mls_private_message &&
+                link.message.wireformat !== wireformats.mls_public_message) {
+                this.#log()("tree-fed re-convergence: abandoning winner chain — link %s has a non-framed stored message", childTag);
+                return invalid;
+            }
+            const stamp = await this.#tree.ownCommitStampOf(childTag);
+            const parentResolution = await resolveCandidateParent({
+                ciphersuite: this.ciphersuite,
+                parent: link.parent,
+                message: link.message,
+                callback: this.#createAdminVerificationCallback(link.parent),
+                known: stamp
+                    ? {
+                        parentTag: bytesToHex(link.parent.confirmationTag),
+                        state: link.child,
+                    }
+                    : undefined,
+            });
+            if (parentResolution.kind !== "resolved") {
+                // WR-01: a tree-fed refusal has no triggering envelope to yield a
+                // `rejected` result on, so the structured verdict is logged here.
+                const violation = parentResolution.kind === "rejected"
+                    ? parentResolution.violation
+                    : undefined;
+                this.#log()("tree-fed re-convergence: abandoning winner chain — link %s parent resolution:%s reason:%s proofReason:%s leafIndex:%s", childTag, parentResolution.kind, violation?.reason ?? "admin-policy", violation?.proofReason, violation?.leafIndex);
+                return parentResolution.kind === "deferred"
+                    ? { kind: "deferred" }
+                    : invalid;
+            }
+            const replayed = parentResolution.result;
+            if (bytesToHex(replayed.newState.confirmationTag) !==
+                bytesToHex(link.child.confirmationTag)) {
+                this.#log()("tree-fed re-convergence: abandoning winner chain — link %s replayed to a different confirmationTag than the stored snapshot", childTag);
+                return invalid;
+            }
+        }
+        return {
+            kind: "resolved",
+            resolution: {
+                outcome: "recovered",
+                winnerTip,
+                winnerChain,
+                edges: [],
+                result: {
+                    kind: "newState",
+                    newState: winnerTip,
+                    actionTaken: "accept",
+                    consumed: [],
+                    aad: new Uint8Array(),
+                },
+            },
+        };
+    }
+    /**
+     * Gathers app-payload witnesses for each tree candidate branch by re-decrypting
+     * `witnessEnvelopes` against the states on the branch path above the shared fork
+     * root, filtered to the convergence-eligible window (`convergence.md`). Keyed by
+     * candidate tip tag.
+     */
+    async #gatherTreeWitnesses(set, witnessEnvelopes) {
+        const forkEpoch = this.#tree.epochOf(set.rootTag) ?? 0;
+        const byTip = new Map();
+        for (const candidate of set.candidates) {
+            const path = this.#tree.path(candidate.id);
+            const rootIndex = path?.indexOf(set.rootTag) ?? -1;
+            if (!path || rootIndex < 0) {
+                byTip.set(candidate.id, []);
+                continue;
+            }
+            const witnesses = [];
+            // States strictly after the fork root — a witness must decrypt past it.
+            for (const tag of path.slice(rootIndex + 1)) {
+                const state = await this.#tree.stateAt(tag);
+                if (!state)
+                    continue;
+                for (const witness of await collectWitnessesAt({
+                    peeler: this.peeler,
+                    ciphersuite: this.ciphersuite,
+                    state,
+                    witnessEnvelopes,
+                    // CR-02: built from the node state itself, like every other seam.
+                    callback: this.#createAdminVerificationCallback(state),
+                }))
+                    if (isWitnessEligible(witness, forkEpoch, candidate.tipEpoch, this.#policy))
+                        witnesses.push(witness);
+            }
+            byTip.set(candidate.id, witnesses);
+        }
+        return byTip;
+    }
+    /** The admin set of `state`, or `[]` when the admin policy does not decode. */
+    #adminPubkeysOf(state) {
+        try {
+            return getAdminPolicy(state.groupContext.extensions) ?? [];
+        }
+        catch {
+            return [];
+        }
+    }
     #createAdminVerificationCallback(state = this.state) {
-        const groupData = getMarmotGroupView(state);
-        if (!groupData)
-            return acceptAll;
+        const ciphersuiteId = this.ciphersuite.id;
+        // CR-03: read ONLY the admin policy. `getMarmotGroupView` decodes every
+        // cosmetic component (profile, routing, avatar, media, retention,
+        // lifecycle) inside one `try` and returns null if any of them is
+        // malformed; keying the admin gate off it let one undecodable optional
+        // component switch admin-only-commit enforcement to accept-all for the
+        // whole group. An absent policy is an empty admin set, never accept-all —
+        // MDK `admins_of_group`.
+        let adminPubkeys;
+        try {
+            adminPubkeys = getAdminPolicy(state.groupContext.extensions);
+        }
+        catch {
+            // An undecodable admin policy cannot prove any committer is an admin, so
+            // every commit is refused (fail closed; MDK's `admins_of_group` error
+            // propagates the same way). Proposals still get pre-apply admission,
+            // including the UPD-04/D-09 standalone Update gate -- otherwise a group
+            // whose admin-policy bytes do not decode would admit an unvalidated
+            // standalone Update, exactly the seam-asymmetry class this phase exists
+            // to close (T-09-17).
+            return (incoming) => incoming.kind === "commit" ||
+                validatePreApplyProposals([incoming.proposal], ciphersuiteId) ||
+                findProposalSenderViolation([incoming.proposal], state.ratchetTree, [], true) ||
+                validateUpdateProposalAccountIdentityProofs([incoming.proposal], state.ratchetTree, ciphersuiteId)
+                ? "reject"
+                : "accept";
+        }
         return createAdminCommitPolicyCallback({
             ratchetTree: state.ratchetTree,
-            adminPubkeys: groupData.adminPubkeys,
-            ciphersuiteId: this.ciphersuite.id,
+            adminPubkeys: adminPubkeys ?? [],
+            ciphersuiteId,
             onUnverifiableCommit: "retry",
+            // CR-01: removal legality is judged against this parent's required list.
+            requiredIds: requiredComponentIdsOf(state),
         });
     }
+}
+/**
+ * WR-05/CR-02: `state` with every staged proposal that would not pass
+ * pre-apply admission removed from `unappliedProposals`, so `createCommit`
+ * never bundles it by reference. Returns `state` itself when nothing is pruned.
+ *
+ * Covers an Add whose KeyPackage lacks a valid `0x8009` proof, an
+ * `AppDataUpdate` whose payload does not decode (or that targets an id no
+ * commit may write), and — WR-01 — an Update whose replacement leaf fails the
+ * same account-identity gate the standalone Update-admission seam applies.
+ * Such a proposal can only be staged by an older build or a rewind onto a
+ * pre-upgrade snapshot; refusing the commit over it would block every local
+ * commit — including `selfUpdate` and the `self_remove` auto-commit — for the
+ * rest of the epoch, so it is dropped instead, mirroring MDK's discard of
+ * invalid standalone proposals.
+ *
+ * Omitting Updates here was a live deadlock, not a cosmetic gap: Phase 9 made
+ * a proof-invalid staged Update commit-blocking POST-apply in
+ * {@link MarmotGroupEngine.#assertStagedCommitLegal}, while `createCommit`
+ * went on bundling it by reference — so every `send({kind:"commit"})` and
+ * `send({kind:"selfUpdate"})` threw `CommitLegalityError` for the rest of an
+ * epoch that only a commit could end.
+ *
+ * Each staged proposal is validated ALONE and with no `requiredIds`, which is
+ * exactly MDK's standalone-admission semantics. Batch-level verdicts (a
+ * duplicate component id spanning two staged proposals, or a Remove of a
+ * still-required component) are deliberately NOT evaluated here — pruning on
+ * one would silently delete a proposal that is individually valid. Those are
+ * caught by the batch check in {@link MarmotGroupEngine.#prepareOutboundCommitProposals}.
+ */
+/**
+ * A `GroupContextExtensions` proposal that moves `app_data_dictionary` to the
+ * end of the GroupContext extension list, for a commit that carries an
+ * AppDataUpdate in a group whose dictionary is not already last. `undefined`
+ * when no repair is needed or allowed.
+ *
+ * GroupContext extensions are an ordered list that feeds the key schedule.
+ * ts-mls applies an AppDataUpdate by replacing the dictionary in place, while
+ * OpenMLS (MDK) removes it and re-appends it (`Extensions::add_or_replace`).
+ * Groups created before the dictionary was put last ([app_data_dictionary,
+ * required_capabilities]) therefore compute a different GroupContext for every
+ * AppDataUpdate commit on the two sides, and MDK rejects the commit with a
+ * confirmation tag mismatch. Both libraries apply a GroupContextExtensions
+ * proposal as a plain list replacement, and then update the dictionary at its
+ * new (last) position, so one commit carrying the reordered list and the
+ * AppDataUpdate is read identically by MDK, current marmot-ts and older
+ * marmot-ts. Every later AppDataUpdate then needs no repair.
+ *
+ * Lifecycle (0x800c) enablement and disband commits are left alone: both MDK
+ * and the spec allow no proposal besides their own updates in them. So is a
+ * commit that references a standalone AppDataUpdate (see below).
+ */
+function dictionaryLastRepairFor(state, committedProposals, referencedProposals) {
+    // An AppDataUpdate must follow the GroupContextExtensions proposal in the
+    // commit (draft-ietf-mls-extensions), and `createCommit` lists references
+    // before inline proposals, so an inline repair cannot precede a referenced
+    // AppDataUpdate.
+    if (referencedProposals.some((proposal) => proposal.proposalType === appDataUpdateProposalType))
+        return undefined;
+    let carriesAppDataUpdate = false;
+    for (const proposal of committedProposals) {
+        if (proposal.proposalType === defaultProposalTypes.group_context_extensions)
+            return undefined;
+        if (proposal.proposalType !== appDataUpdateProposalType ||
+            !("appDataUpdate" in proposal))
+            continue;
+        if (proposal.appDataUpdate.componentId === GROUP_LIFECYCLE_COMPONENT_ID)
+            return undefined;
+        carriesAppDataUpdate = true;
+    }
+    if (!carriesAppDataUpdate)
+        return undefined;
+    const extensions = state.groupContext.extensions;
+    const dictionaryIndex = extensions.findIndex((extension) => extension.extensionType === appDataDictionaryExtensionType);
+    if (dictionaryIndex === -1 || dictionaryIndex === extensions.length - 1)
+        return undefined;
+    return {
+        proposalType: defaultProposalTypes.group_context_extensions,
+        groupContextExtensions: {
+            extensions: [
+                ...extensions.filter((_, index) => index !== dictionaryIndex),
+                extensions[dictionaryIndex],
+            ],
+        },
+    };
+}
+function withoutInadmissibleStagedProposals(state, ciphersuiteId) {
+    const entries = Object.entries(state.unappliedProposals);
+    if (entries.length === 0)
+        return state;
+    let adminPubkeys = [];
+    try {
+        adminPubkeys = getAdminPolicy(state.groupContext.extensions) ?? [];
+    }
+    catch {
+        adminPubkeys = [];
+    }
+    const admissible = entries.filter(([, staged]) => !validatePreApplyProposals([staged], ciphersuiteId) &&
+        !findProposalSenderViolation([staged], state.ratchetTree, adminPubkeys, true) &&
+        !validateUpdateProposalAccountIdentityProofs([staged], state.ratchetTree, ciphersuiteId));
+    if (admissible.length === entries.length)
+        return state;
+    return { ...state, unappliedProposals: Object.fromEntries(admissible) };
 }
 function finiteAuditNumber(value) {
     return Number.isFinite(value) ? value : Number.MAX_SAFE_INTEGER;
@@ -1028,6 +3084,8 @@ function auditSendIntentKind(intent) {
             return "group_evolution";
         case "selfUpdate":
             return "self_update";
+        case "foundingAdd":
+            return "founding_add";
     }
 }
 function auditSendResultKind(result) {
@@ -1040,6 +3098,8 @@ function auditSendResultKind(result) {
             return "group_evolution";
         case "selfUpdate":
             return "self_update";
+        case "foundingGroupCreated":
+            return "founding_group_created";
     }
 }
 function auditIngestOutcome(result) {
@@ -1066,8 +3126,12 @@ function auditStaleReason(result) {
             return "removed";
         case "processed":
         case "deferred":
+        case "refused":
         case "invalidated":
         case "autoCommit":
+        case "appliedNotifications":
+        case "stateRevalidated":
+        case "stateInvalidated":
             return undefined;
     }
 }
@@ -1075,7 +3139,13 @@ function auditResultEpoch(result) {
     switch (result.kind) {
         case "invalidated":
             return result.epoch;
+        case "stateInvalidated":
+            return result.forkEpoch;
+        case "appliedNotifications":
+        case "stateRevalidated":
+            return undefined;
         case "deferred":
+        case "refused":
         case "processed":
         case "rejected":
         case "skipped":
@@ -1085,4 +3155,3 @@ function auditResultEpoch(result) {
             return undefined;
     }
 }
-//# sourceMappingURL=group-engine.js.map

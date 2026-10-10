@@ -1,8 +1,8 @@
 /** @module @category Extra - Audit */
 /// <reference types="node" />
 import { appendFileSync, closeSync, fsyncSync, mkdirSync, openSync, } from "node:fs";
-import { mkdir, open } from "node:fs/promises";
-import { dirname } from "node:path";
+import { mkdir, open, readFile, stat } from "node:fs/promises";
+import { basename, dirname } from "node:path";
 export class NodeJsonlAuditRecorder {
     path;
     #fd;
@@ -54,4 +54,89 @@ export class NodeJsonlAuditWriter {
         await handle.close();
     }
 }
-//# sourceMappingURL=node.js.map
+/**
+ * The Goggles tracker accepts a single audit file up to 64 MiB, matching the
+ * reference app's `post_audit_log_file` validation.
+ */
+const MAX_AUDIT_UPLOAD_BYTES = 64 * 1024 * 1024;
+/** An audit log basename must be `audit-*.jsonl`. */
+const AUDIT_FILE_NAME = /^audit-.*\.jsonl$/;
+/** True for an `http:` endpoint whose host is a loopback address. */
+function isLoopbackHttp(url) {
+    if (url.protocol !== "http:")
+        return false;
+    const host = url.hostname;
+    return (host === "localhost" ||
+        host === "::1" ||
+        host === "[::1]" ||
+        host.startsWith("127."));
+}
+/**
+ * Upload one audit JSONL file to a Goggles tracker endpoint, mirroring the
+ * reference app's `post_audit_log_file` contract: a `POST` of the raw NDJSON
+ * body with `Content-Type: application/x-ndjson`, an optional bearer token, and
+ * non-identifying `X-Goggles-*` source headers.
+ *
+ * Validation matches the reference: the basename must be `audit-*.jsonl`, the
+ * file must be at most 64 MiB, the endpoint must be `https` (or loopback `http`
+ * for local testing), and a non-loopback endpoint requires a bearer token.
+ * Throws a normalized error (`HTTP <status>`, `request timed out`, or
+ * `connection failed`) on failure.
+ */
+export async function uploadAuditLogFile(path, endpoint, options = {}) {
+    if (!path)
+        throw new Error("audit log path is empty");
+    if (!AUDIT_FILE_NAME.test(basename(path)))
+        throw new Error("audit log file name must match audit-*.jsonl");
+    let url;
+    try {
+        url = new URL(endpoint);
+    }
+    catch {
+        throw new Error("audit log tracker endpoint is not a valid URL");
+    }
+    const loopback = isLoopbackHttp(url);
+    if (url.protocol !== "https:" && !loopback)
+        throw new Error("audit log tracker endpoint must be https (or loopback http for local testing)");
+    if (!loopback && !options.bearerToken)
+        throw new Error("audit log tracker endpoint requires a bearer token");
+    const info = await stat(path);
+    if (info.size > MAX_AUDIT_UPLOAD_BYTES)
+        throw new Error(`audit log file is too large (${info.size} bytes, max ${MAX_AUDIT_UPLOAD_BYTES})`);
+    const body = await readFile(path);
+    const headers = {
+        "Content-Type": "application/x-ndjson",
+        "Content-Length": String(body.byteLength),
+    };
+    if (options.bearerToken)
+        headers["Authorization"] = `Bearer ${options.bearerToken}`;
+    if (options.source?.deviceLabel)
+        headers["X-Goggles-Device-Label"] = options.source.deviceLabel;
+    if (options.source?.platform)
+        headers["X-Goggles-Platform"] = options.source.platform;
+    if (options.source?.appVersion)
+        headers["X-Goggles-App-Version"] = options.source.appVersion;
+    const doFetch = options.fetch ?? fetch;
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), options.timeoutMs ?? 60_000);
+    let response;
+    try {
+        response = await doFetch(url, {
+            method: "POST",
+            headers,
+            body: new Uint8Array(body),
+            signal: abort.signal,
+        });
+    }
+    catch (err) {
+        if (abort.signal.aborted)
+            throw new Error("request timed out");
+        throw new Error("connection failed", { cause: err });
+    }
+    finally {
+        clearTimeout(timer);
+    }
+    if (!response.ok)
+        throw new Error(`HTTP ${response.status}`);
+    return { path, status: response.status, bytesSent: body.byteLength };
+}

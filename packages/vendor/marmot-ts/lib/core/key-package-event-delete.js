@@ -44,4 +44,3 @@ export function createDeleteKeyPackageEvent(options) {
         tags: [...kTags, ...eTags, ...aTags],
     };
 }
-//# sourceMappingURL=key-package-event-delete.js.map

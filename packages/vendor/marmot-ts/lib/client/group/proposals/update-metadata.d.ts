@@ -1,6 +1,6 @@
 /** @module @category Client - Proposals */
-import { type Proposal } from "ts-mls";
-import { type EncryptedMediaPolicyV1 } from "../../../core/components/index.js";
+import { type Proposal } from "../../../vendor/ts-mls/index.js";
+import { type EncryptedMediaPolicyV1, type GroupBlossomImageV1 } from "../../../core/components/index.js";
 import type { ProposalAction } from "../marmot-group.js";
 /** A partial update to a group's app-component metadata. */
 export interface UpdateGroupMetadata {
@@ -16,6 +16,12 @@ export interface UpdateGroupMetadata {
     nostrGroupId?: Uint8Array;
     /** New group avatar URL (group.avatar-url.v1). */
     avatarUrl?: string;
+    /**
+     * New encrypted group image (group.blossom.image.v1); pass
+     * `emptyGroupBlossomImageV1()` to clear it. Build it with
+     * `encryptGroupBlossomImage` and upload the blob first.
+     */
+    image?: GroupBlossomImageV1;
     /** New encrypted-media policy (group.encrypted-media.v1). */
     encryptedMedia?: EncryptedMediaPolicyV1;
     /**

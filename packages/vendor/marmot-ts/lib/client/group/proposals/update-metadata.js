@@ -1,6 +1,6 @@
 /** @module @category Client - Proposals */
-import { appDataUpdateProposalType, } from "ts-mls";
-import { adminPolicyEntry, encryptedMediaEntry, groupAvatarUrlEntry, groupProfileEntry, messageRetentionEntry, nostrRoutingEntry, } from "../../../core/components/index.js";
+import { appDataUpdateProposalType, } from "../../../vendor/ts-mls/index.js";
+import { adminPolicyEntry, encryptedMediaEntry, groupAvatarUrlEntry, groupBlossomImageEntry, groupProfileEntry, messageRetentionEntry, nostrRoutingEntry, } from "../../../core/components/index.js";
 /** Wraps a component entry in a full-replacement `app_data_update` proposal. */
 function componentUpdate(entry) {
     return {
@@ -42,6 +42,9 @@ export function proposeUpdateMetadata(metadata) {
         if (metadata.avatarUrl !== undefined) {
             proposals.push(componentUpdate(groupAvatarUrlEntry({ url: metadata.avatarUrl })));
         }
+        if (metadata.image !== undefined) {
+            proposals.push(componentUpdate(groupBlossomImageEntry(metadata.image)));
+        }
         if (metadata.encryptedMedia !== undefined) {
             proposals.push(componentUpdate(encryptedMediaEntry(metadata.encryptedMedia)));
         }
@@ -51,4 +54,3 @@ export function proposeUpdateMetadata(metadata) {
         return proposals;
     };
 }
-//# sourceMappingURL=update-metadata.js.map

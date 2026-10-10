@@ -9,14 +9,14 @@
  * "Unrecognized name" for them, which previously made chat setup fail before the
  * device could even publish its kind-30443 key package.
  *
- * The vendored ts-mls now probes for real support and falls back to pure-JS
+ * The ts-mls bundled in the vendored marmot-ts now probes for real support and falls back to pure-JS
  * (@noble/curves Ed25519, @hpke/dhkem-x25519). This stubs `crypto.subtle` to
  * reject exactly those two algorithm names — every other operation passes through
  * to the real implementation — and asserts the ciphersuite still fully works, and
  * that the fallback (not the blocked native path) is what ran.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { defaultCryptoProvider, ciphersuites } from "ts-mls";
+import { defaultCryptoProvider, ciphersuites } from "@internet-privacy/marmot-ts/mls";
 
 const CS = ciphersuites.MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519;
 const BLOCKED = new Set(["Ed25519", "X25519"]);

@@ -146,4 +146,3 @@ export function rejectNonRoutableHost(hostname, label) {
     if (isLocalhostDomain(host))
         throw new Error(`${label} must not point at localhost`);
 }
-//# sourceMappingURL=host-safety.js.map

@@ -8,4 +8,3 @@ export * from "./runtime/group-runtime.js";
 export * from "./session/group-effects.js";
 export * from "./session/group-session.js";
 export * from "./transport/nostr/welcome-delivery.js";
-//# sourceMappingURL=index.js.map

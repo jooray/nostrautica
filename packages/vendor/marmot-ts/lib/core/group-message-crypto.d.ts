@@ -1,6 +1,6 @@
 /** @module @category Core - Group Messages */
 import { NostrEvent } from "applesauce-core/helpers/event";
-import { ClientState, CiphersuiteImpl, type MlsMessage } from "ts-mls";
+import { ClientState, CiphersuiteImpl, type MlsMessage } from "../vendor/ts-mls/index.js";
 /**
  * Reads a {@link NostrEvent} and returns the {@link MlsMessage} it contains.
  * Decrypts group-event encrypted content using the exporter_secret from the group state.
@@ -12,7 +12,7 @@ import { ClientState, CiphersuiteImpl, type MlsMessage } from "ts-mls";
  */
 export declare function decryptGroupMessageEvent(message: NostrEvent, clientState: ClientState, ciphersuite: CiphersuiteImpl): Promise<MlsMessage>;
 /**
- * Encrypts the content of a group event using MIP-03.
+ * Encrypts the content of a kind-445 group event (`transports/nostr.md`).
  *
  * @returns The encrypted content
  */

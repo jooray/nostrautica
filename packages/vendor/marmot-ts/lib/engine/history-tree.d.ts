@@ -1,5 +1,6 @@
-import { type ClientState, type MlsMessage } from "ts-mls";
+import { type ClientState, type MlsMessage } from "../vendor/ts-mls/index.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
+import { type OwnCommitConvergenceStamp } from "./own-commit-stamp.js";
 /** The store backing a tree's heavy material. A `GenericKeyValueStore<Uint8Array>`. */
 type HistoryTreeStore = GenericKeyValueStore<Uint8Array>;
 /**
@@ -83,6 +84,8 @@ export declare class GroupHistoryTree {
     get rootTag(): string | undefined;
     /** Number of nodes (states) retained in the tree. */
     get size(): number;
+    /** Oldest epoch still named by the tree, or `undefined` when it is empty. */
+    oldestEpoch(): number | undefined;
     /** Whether unflushed changes are pending. */
     get isDirty(): boolean;
     /**
@@ -133,6 +136,8 @@ export declare class GroupHistoryTree {
     stateAt(tag: string): Promise<ClientState | undefined>;
     /** The serialized commit bytes that produced a node, or `undefined`. */
     commitBytesOf(childTag: string): Promise<Uint8Array | undefined>;
+    /** Confirmation-time evidence for a locally-authored commit, if stamped. */
+    ownCommitStampOf(childTag: string): Promise<OwnCommitConvergenceStamp | undefined>;
     /** Decodes the commit `MlsMessage` that produced a node, or `undefined`. */
     commitMessageOf(childTag: string): Promise<MlsMessage | undefined>;
     /**
@@ -143,7 +148,7 @@ export declare class GroupHistoryTree {
      *
      * @returns the child node tag.
      */
-    recordCommit(parentTag: string, commitMessage: MlsMessage, childState: ClientState, senderLeafIndex?: number): string;
+    recordCommit(parentTag: string, commitMessage: MlsMessage, childState: ClientState, senderLeafIndex?: number, ownCommitStamp?: OwnCommitConvergenceStamp): string;
     /**
      * Records an edge from a snapshot captured at branch-build time. Unlike
      * {@link recordCommit}, the child snapshot is supplied pre-serialized — fork

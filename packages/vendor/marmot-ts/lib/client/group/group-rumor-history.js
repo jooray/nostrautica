@@ -129,4 +129,3 @@ export class GroupRumorHistory extends EventEmitter {
         }
     }
 }
-//# sourceMappingURL=group-rumor-history.js.map

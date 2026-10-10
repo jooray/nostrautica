@@ -1,4 +1,10 @@
-/** The extension id for the last_resort extension for key packages */
+/**
+ * The extension id of the legacy `last_resort` KeyPackage extension.
+ *
+ * @deprecated Marmot marks last-resort KeyPackages with the
+ * `last_resort_key_package` component (`LAST_RESORT_KEY_PACKAGE_COMPONENT_ID`,
+ * `0x0004`) instead; this id is only recognized on read.
+ */
 export declare const LAST_RESORT_EXTENSION_TYPE = 10;
 /**
  * NIP-65 relay list event kind. Marmot uses an account's NIP-65 list to

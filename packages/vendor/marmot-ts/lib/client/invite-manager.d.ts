@@ -4,6 +4,7 @@ import { kinds, KnownEvent, type NostrEvent } from "applesauce-core/helpers/even
 import { EventEmitter } from "eventemitter3";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
 import type { NostrNetworkInterface, Unsubscribable } from "./nostr-interface.js";
+import { type RejectReason, type VerifyEventMethod } from "./verify.js";
 /** A received gift wrap event (kind 1059) that hasn't been decrypted yet */
 export interface ReceivedGiftWrap extends KnownEvent<kinds.GiftWrap> {
 }
@@ -40,6 +41,13 @@ export type InviteManagerEvents = {
     processed: (inviteId: string) => void;
     /** Emitted when an event fails to decrypt or parse */
     error: (error: Error, eventId: string) => void;
+    /**
+     * Emitted when an inbound kind-1059 gift wrap is rejected at the trust
+     * boundary — before it is stored or decrypted — for an invalid outer
+     * signature (SEC-01) or a repeated/absent/empty required `p` tag
+     * (WIRE-02). Client/manager scope: no group context applies here.
+     */
+    rejected: (event: NostrEvent, reason: RejectReason) => void;
 };
 export interface InviteManagerOptions {
     /** Signer for decrypting gift wraps */
@@ -48,6 +56,13 @@ export interface InviteManagerOptions {
     store: GenericKeyValueStore<StoredInviteEntry>;
     /** The nostr relay pool, used by {@link InviteManager.listen}. */
     network: NostrNetworkInterface;
+    /**
+     * Injectable Nostr event verifier gating the outer kind-1059 gift wrap
+     * before it is stored or decrypted (SEC-01). Defaults to applesauce's
+     * `verifyEvent`. `unlockGiftWrap` only verifies the inner seal — this gate
+     * closes that gap by verifying the outer event itself.
+     */
+    verifyEvent?: VerifyEventMethod;
 }
 /**
  * InviteManager orchestrates the lifecycle of reading Welcome invites.

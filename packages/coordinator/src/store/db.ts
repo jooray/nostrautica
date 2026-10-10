@@ -199,6 +199,17 @@ function applyBaselineDDL(db: DatabaseSync): void {
   } catch {
     /* column already exists */
   }
+  // Migration (NIP §10.5): external-client flag on chat-key bindings. A plain
+  // defaulted column, like `jobs.priority` below: an older binary neither reads
+  // nor writes it and its INSERTs take the DEFAULT, so no SCHEMA_VERSION bump.
+  // (An older binary would show a linked White Noise key as an ordinary device,
+  // which is cosmetic.) The `marmot_chat_links` table is CREATE IF NOT EXISTS in
+  // SCHEMA for the same reason.
+  try {
+    db.exec("ALTER TABLE marmot_chat_keys ADD COLUMN external INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
   // Migration (wire-v2 §6.2): per-direction icebreakers on cached pair rows.
   for (const col of ["icebreakers_json TEXT", "icebreakers_b_json TEXT"]) {
     try {
@@ -957,6 +968,25 @@ export interface MarmotChatKeyRow {
   label: string | null;
   status: "active" | "revoked";
   updated_at: number;
+  /** 1 when linked from an external Marmot client (NIP §10.5), else 0. */
+  external: number;
+}
+
+/** One account's external-client link request for an event (NIP §10.5). */
+export interface MarmotChatLinkRow {
+  coordinate: string;
+  account_pubkey: string;
+  chat_pubkey: string;
+  label: string | null;
+  code_hash: string;
+  attempts: number;
+  expires_at: number;
+  confirm_group_id: string | null;
+  confirm_kp_id: string | null;
+  status: "pending" | "linked" | "closed";
+  window_started_at: number;
+  window_count: number;
+  updated_at: number;
 }
 
 /** A poisoned/cleared job surfaced to the organizer (audit Q12). */
@@ -1195,7 +1225,30 @@ CREATE TABLE IF NOT EXISTS marmot_chat_keys (
   label TEXT,                             -- human device label from the 21607 add (NIP §10.2)
   status TEXT NOT NULL DEFAULT 'active',  -- 'active' | 'revoked'
   updated_at INTEGER NOT NULL,
+  external INTEGER NOT NULL DEFAULT 0,    -- 1 = linked external Marmot client (21607 op:link, NIP §10.5)
   PRIMARY KEY (coordinate, chat_pubkey)
+);
+-- External-client link requests (21607 op:"link"/"link_confirm", NIP §10.5): at
+-- most one row per (coordinate, account). Holds only a HASH of the one-time code
+-- shown inside the external client, its expiry and wrong-attempt count, the
+-- throwaway confirmation group to tear down, and the key package that group
+-- consumed. The row outlives the link (status 'linked'/'closed') because it also
+-- carries the per-account request-rate window.
+CREATE TABLE IF NOT EXISTS marmot_chat_links (
+  coordinate TEXT NOT NULL,
+  account_pubkey TEXT NOT NULL,
+  chat_pubkey TEXT NOT NULL,
+  label TEXT,
+  code_hash TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  expires_at INTEGER NOT NULL,
+  confirm_group_id TEXT,                  -- MLS group id (hex) of the confirmation group
+  confirm_kp_id TEXT,                     -- the external key's 30443 that group consumed
+  status TEXT NOT NULL,                   -- 'pending' | 'linked' | 'closed'
+  window_started_at INTEGER NOT NULL,     -- request-rate window start (ms)
+  window_count INTEGER NOT NULL,          -- link requests in that window
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (coordinate, account_pubkey)
 );
 -- Idempotency ledger for consumed key packages (§4.2): a 30443 event id is added
 -- to a group exactly once, so a re-delivered key package never re-invites.
@@ -2452,6 +2505,7 @@ export class Store {
       // — it is the replay bar that stops a re-delivered old withdrawal from undoing a
       // later reapproval (audit R2); the event is still live, so it is security state.
       this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
+      this.db.prepare("DELETE FROM marmot_chat_links WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
       this.db.exec("COMMIT");
     } catch (e) {
       // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
@@ -2498,6 +2552,7 @@ export class Store {
    *                                          would otherwise leak identities.
    *     - marmot_chat_keys                   attendee account/chat pubkeys + device
    *                                          bindings (R12)
+   *     - marmot_chat_links                  external-client link requests (NIP §10.5)
    *     - marmot_consumed_kps                consumed key-package event ids (R12)
    *     - marmot_groups                      the event's MLS group row (coordinate-keyed)
    *
@@ -2569,6 +2624,7 @@ export class Store {
         .prepare("DELETE FROM jobs WHERE json_extract(payload, '$.coordinate') = ?")
         .run(coordinate);
       this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ?").run(coordinate);
+      this.db.prepare("DELETE FROM marmot_chat_links WHERE coordinate = ?").run(coordinate);
       this.db.prepare("DELETE FROM marmot_consumed_kps WHERE coordinate = ?").run(coordinate);
       this.db.prepare("DELETE FROM marmot_groups WHERE coordinate = ?").run(coordinate);
       this.db.exec("COMMIT");
@@ -3559,6 +3615,15 @@ export class Store {
     return this.db.prepare("SELECT * FROM marmot_groups").all() as unknown as MarmotGroupRow[];
   }
 
+  /**
+   * Forget an event's MLS group row, so the next `ensureGroup` creates a fresh
+   * one. Only for a group whose state has been retired (chat/retire.ts); a live
+   * group is frozen, never deleted.
+   */
+  deleteMarmotGroup(coordinate: string): void {
+    this.db.prepare("DELETE FROM marmot_groups WHERE coordinate = ?").run(coordinate);
+  }
+
   setMarmotGroupStatus(coordinate: string, status: "active" | "frozen"): void {
     this.db.prepare("UPDATE marmot_groups SET status = ? WHERE coordinate = ?").run(status, coordinate);
   }
@@ -3613,18 +3678,21 @@ export class Store {
     clientId?: string | null;
     label?: string | null;
     status?: "active" | "revoked";
+    /** Set when binding an external Marmot client (NIP §10.5); left as-is when omitted. */
+    external?: boolean;
     now: number;
   }): boolean {
     const existing = this.getChatKey(row.coordinate, row.chatPubkey);
     if (existing && existing.account_pubkey !== row.accountPubkey) return false;
     this.db
       .prepare(
-        `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, label, status, updated_at)
-         VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, :label, COALESCE(:status, 'active'), :now)
+        `INSERT INTO marmot_chat_keys (coordinate, account_pubkey, chat_pubkey, client_id, label, status, updated_at, external)
+         VALUES (:coordinate, :accountPubkey, :chatPubkey, :clientId, :label, COALESCE(:status, 'active'), :now, COALESCE(:external, 0))
          ON CONFLICT(coordinate, chat_pubkey) DO UPDATE SET
            client_id = COALESCE(excluded.client_id, marmot_chat_keys.client_id),
            label = COALESCE(excluded.label, marmot_chat_keys.label),
            status = COALESCE(:status, marmot_chat_keys.status),
+           external = COALESCE(:external, marmot_chat_keys.external),
            updated_at = excluded.updated_at`,
       )
       .run({
@@ -3634,9 +3702,87 @@ export class Store {
         clientId: row.clientId ?? null,
         label: row.label ?? null,
         status: row.status ?? null,
+        external: row.external === undefined ? null : row.external ? 1 : 0,
         now: row.now,
       });
     return true;
+  }
+
+  // ── marmot_chat_links: external-client link requests (NIP §10.5) ────────────
+  getChatLink(coordinate: string, accountPubkey: string): MarmotChatLinkRow | undefined {
+    return this.db
+      .prepare("SELECT * FROM marmot_chat_links WHERE coordinate = ? AND account_pubkey = ?")
+      .get(coordinate, accountPubkey) as MarmotChatLinkRow | undefined;
+  }
+
+  /**
+   * Open (or replace) the account's ONE pending link. The request-rate window is
+   * carried in from the caller, which has already decided whether this request
+   * starts a new window or counts against the current one.
+   */
+  putPendingChatLink(row: {
+    coordinate: string;
+    accountPubkey: string;
+    chatPubkey: string;
+    label: string | null;
+    codeHash: string;
+    expiresAt: number;
+    confirmGroupId: string | null;
+    confirmKpId: string | null;
+    windowStartedAt: number;
+    windowCount: number;
+    now: number;
+  }): void {
+    this.db
+      .prepare(
+        `INSERT INTO marmot_chat_links (coordinate, account_pubkey, chat_pubkey, label, code_hash, attempts, expires_at,
+           confirm_group_id, confirm_kp_id, status, window_started_at, window_count, updated_at)
+         VALUES (:coordinate, :accountPubkey, :chatPubkey, :label, :codeHash, 0, :expiresAt,
+           :confirmGroupId, :confirmKpId, 'pending', :windowStartedAt, :windowCount, :now)
+         ON CONFLICT(coordinate, account_pubkey) DO UPDATE SET
+           chat_pubkey = excluded.chat_pubkey, label = excluded.label, code_hash = excluded.code_hash,
+           attempts = 0, expires_at = excluded.expires_at, confirm_group_id = excluded.confirm_group_id,
+           confirm_kp_id = excluded.confirm_kp_id, status = 'pending',
+           window_started_at = excluded.window_started_at, window_count = excluded.window_count,
+           updated_at = excluded.updated_at`,
+      )
+      .run(row);
+  }
+
+  /** Record a request that did not open a link (e.g. no key package) against the rate window. */
+  countChatLinkRequest(coordinate: string, accountPubkey: string, chatPubkey: string, windowStartedAt: number, windowCount: number, now: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO marmot_chat_links (coordinate, account_pubkey, chat_pubkey, label, code_hash, attempts, expires_at,
+           confirm_group_id, confirm_kp_id, status, window_started_at, window_count, updated_at)
+         VALUES (?, ?, ?, NULL, '', 0, 0, NULL, NULL, 'closed', ?, ?, ?)
+         ON CONFLICT(coordinate, account_pubkey) DO UPDATE SET
+           window_started_at = excluded.window_started_at, window_count = excluded.window_count,
+           updated_at = excluded.updated_at`,
+      )
+      .run(coordinate, accountPubkey, chatPubkey, windowStartedAt, windowCount, now);
+  }
+
+  setChatLinkAttempts(coordinate: string, accountPubkey: string, attempts: number, now: number): void {
+    this.db
+      .prepare("UPDATE marmot_chat_links SET attempts = ?, updated_at = ? WHERE coordinate = ? AND account_pubkey = ?")
+      .run(attempts, now, coordinate, accountPubkey);
+  }
+
+  /** End a link: 'linked' on success (keeps confirm_kp_id for the reuse grace), 'closed' otherwise. */
+  setChatLinkStatus(coordinate: string, accountPubkey: string, status: "linked" | "closed", now: number): void {
+    this.db
+      .prepare(
+        "UPDATE marmot_chat_links SET status = ?, code_hash = '', confirm_group_id = NULL, updated_at = ? WHERE coordinate = ? AND account_pubkey = ?",
+      )
+      .run(status, now, coordinate, accountPubkey);
+  }
+
+  /** Pending links whose code has expired, across all events (the teardown sweep). */
+  expiredPendingChatLinks(now: number): MarmotChatLinkRow[] {
+    return this.db
+      .prepare("SELECT * FROM marmot_chat_links WHERE status = 'pending' AND expires_at <= ?")
+      .all(now) as unknown as MarmotChatLinkRow[];
   }
 
   getChatKey(coordinate: string, chatPubkey: string): MarmotChatKeyRow | undefined {

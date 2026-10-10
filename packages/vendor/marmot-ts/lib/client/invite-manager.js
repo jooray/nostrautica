@@ -5,6 +5,8 @@ import { EventEmitter } from "eventemitter3";
 import { WELCOME_EVENT_KIND } from "../core/protocol.js";
 import { getWelcome } from "../core/welcome.js";
 import { logger } from "../utils/debug.js";
+import { getSingletonTagValue } from "../utils/tag-cardinality.js";
+import { defaultVerifyEvent, safeVerifyEvent, } from "./verify.js";
 const SEEN_KEY = "__seen";
 const RECEIVED_PREFIX = "received:";
 const UNREAD_PREFIX = "unread:";
@@ -40,12 +42,15 @@ export class InviteManager extends EventEmitter {
     store;
     network;
     seenCache = null;
+    /** The injectable event verifier gating the 1059 outer event (SEC-01). */
+    #verifyEvent;
     #log = logger.extend("InviteManager");
     constructor(options) {
         super();
         this.signer = options.signer;
         this.store = options.store;
         this.network = options.network;
+        this.#verifyEvent = options.verifyEvent ?? defaultVerifyEvent;
     }
     /**
      * Subscribes for gift-wrapped invites (kind 1059) addressed to this account on
@@ -111,6 +116,21 @@ export class InviteManager extends EventEmitter {
     async ingestEvent(event) {
         if (!isGiftWrap(event)) {
             throw new Error(`Expected kind 1059 gift wrap, got kind ${event.kind}`);
+        }
+        // Trust boundary (SEC-01): verify the OUTER kind-1059 event before it is
+        // stored or decrypted. `unlockGiftWrap` (called later, in
+        // decryptGiftWrap) only verifies the inner seal — it never checks this
+        // outer event's own id/signature, so this gate closes that gap.
+        if (!safeVerifyEvent(this.#verifyEvent, event)) {
+            this.emit("rejected", event, "invalid-signature");
+            return false;
+        }
+        // Trust boundary (WIRE-02): the routing `p` tag must be a singleton
+        // (#236 required-tag cardinality) before it is trusted or the event is
+        // stored. Runs after the signature gate above (D-01 verify-before-trust).
+        if (getSingletonTagValue(event, "p") === undefined) {
+            this.emit("rejected", event, "tag-cardinality");
+            return false;
         }
         const seen = await this.getSeenSet();
         if (seen.has(event.id))
@@ -346,4 +366,3 @@ export class InviteManager extends EventEmitter {
         this.seenCache = null;
     }
 }
-//# sourceMappingURL=invite-manager.js.map

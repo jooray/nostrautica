@@ -126,4 +126,3 @@ export function decryptBytes(payload, conversationKey) {
     const padded = chacha20(chacha_key, chacha_nonce, ciphertext);
     return unpadBytes(padded);
 }
-//# sourceMappingURL=nip44-binary.js.map

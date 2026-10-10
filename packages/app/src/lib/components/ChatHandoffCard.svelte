@@ -19,6 +19,7 @@
   import { devicesForAccount } from "$lib/chat/members.js";
   import type { EventContext } from "$lib/events/event-context.js";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import WhiteNoiseLinkCard from "$lib/components/WhiteNoiseLinkCard.svelte";
 
   let { ctx }: { ctx: EventContext } = $props();
 
@@ -30,7 +31,7 @@
   const account = $derived(session.pubkey);
   const myChatPubkey = $derived(chatSession.chatPubkey);
 
-  type Device = { pubkey: string; label?: string; added_at: number };
+  type Device = { pubkey: string; label?: string; added_at: number; external?: boolean };
   let devices = $state<Device[]>([]);
   let loading = $state(true);
   // Per-device inline UI state (rename input / revoke confirm / in-flight).
@@ -183,6 +184,7 @@
               {:else}
                 <span class="name">{labelFor(d)}</span>
                 {#if isThis}<span class="badge-you">{t("chat.devices.thisDevice")}</span>{/if}
+                {#if d.external && labelFor(d) !== t("chat.wn.badge")}<span class="badge-ext">{t("chat.wn.badge")}</span>{/if}
                 <span class="added">{addedLabel(d)}</span>
               {/if}
             </div>
@@ -217,6 +219,8 @@
   {/if}
 
   {#if notice}<p class="muted small notice" role="status">{notice}</p>{/if}
+
+  <WhiteNoiseLinkCard {ctx} onChanged={() => void refresh()} />
 </section>
 
 <style>
@@ -268,6 +272,15 @@
     text-transform: uppercase;
     letter-spacing: 0.03em;
     color: var(--accent);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 0.05rem 0.4rem;
+  }
+  .badge-ext {
+    font-size: 0.68rem;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    color: var(--text-dim);
     border: 1px solid var(--border);
     border-radius: 999px;
     padding: 0.05rem 0.4rem;

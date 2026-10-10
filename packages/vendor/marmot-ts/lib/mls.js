@@ -1,3 +1,2 @@
 // Re-export all from ts-mls so downstream apps can easily access types and methods
-export * from "ts-mls";
-//# sourceMappingURL=mls.js.map
+export * from "./vendor/ts-mls/index.js";

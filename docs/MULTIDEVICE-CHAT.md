@@ -42,6 +42,11 @@ the two nastiest chat-recovery bugs**. Per-device keys dissolve both.
 
 ## 2. Library-level feasibility (vendored marmot-ts 0.6.0 / ts-mls 2.0.0-rc.14)
 
+> Written against 0.6.0. Since the 0x8009 upgrade the leaf proof is
+> `marmot.member.account-identity-proof.v2`, a kind-450 signed by the member key
+> (see MARMOT-GROUP-CHAT.md, "Library: vendored marmot-ts and the 0x8009 flag day");
+> the conclusions below are unchanged.
+
 Facts verified in the vendored code:
 
 - The MLS credential holds **only a 32-byte x-only Nostr pubkey**
@@ -148,7 +153,10 @@ App:
   the QR "hand off shared key" flow is superseded by "add this device"; "link existing
   npub" (external Whitenoise key) must now present a proof, so it becomes a
   challenge-response QR (external client signs the challenge) or is dropped [D4-adjacent
-  sub-decision].
+  sub-decision]. *Resolved later (2026-10): neither. The external key proves possession
+  by reading a one-time code the coordinator posts in a throwaway Marmot group, or by
+  sealing the request itself when it is the account key. See PROTOCOL-NIP §10.5 and
+  MARMOT-GROUP-CHAT.md.*
 - `EventChat.svelte` / roster UI, dedupe members by roster `chat_keys`; device
   management UI in settings.
 - Multi-tab leader election (H-7), new, `navigator.locks` + BroadcastChannel.

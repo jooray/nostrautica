@@ -1,6 +1,6 @@
 import { EventSigner } from "applesauce-core";
 import { EventEmitter } from "eventemitter3";
-import { ClientState, CryptoProvider } from "ts-mls";
+import { ClientState, CryptoProvider } from "../vendor/ts-mls/index.js";
 import { SerializedClientState } from "../core/client-state.js";
 import { type ConvergencePolicy } from "../core/convergence.js";
 import { GroupHistoryTree } from "../engine/history-tree.js";
@@ -8,13 +8,21 @@ import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
 import type { AuditContextOptions, AuditSink } from "../audit/index.js";
 import { RetainedHistoryStore } from "../engine/retained-store.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
-import { BaseGroupHistory, BaseGroupMedia, GroupHistoryFactory, GroupMediaFactory, MarmotGroup } from "./group/marmot-group.js";
+import { BaseGroupHistory, BaseGroupMedia, GroupHistoryFactory, GroupMediaFactory, MarmotGroup, type GroupDisbandedEvent } from "./group/marmot-group.js";
 import type { NostrNetworkInterface } from "./nostr-interface.js";
 /** Options accepted by {@link GroupRegistry}. */
 export type GroupRegistryOptions<THistory extends BaseGroupHistory | undefined = undefined, TMedia extends BaseGroupMedia | undefined = undefined> = {
     store: GenericKeyValueStore<SerializedClientState>;
+    ingestStateStore: GenericKeyValueStore<Uint8Array>;
+    lifecycleStore: GenericKeyValueStore<Uint8Array>;
     /** Dedicated store for the per-group full-fork history tree (optional). */
     rewindStore?: GenericKeyValueStore<Uint8Array>;
+    /**
+     * Persisted removed-inactive marker store (D-12) inherited by loaded groups;
+     * see {@link MarmotGroupOptions.removedMarkerStore}. Without it, removal
+     * realization degrades to in-memory-only and cannot survive a restart.
+     */
+    removedMarkerStore?: GenericKeyValueStore<boolean>;
     signer: EventSigner;
     network: NostrNetworkInterface;
     /** Optional forensic audit sink inherited by loaded groups. */
@@ -37,6 +45,8 @@ export type GroupRegistryEvents<THistory extends BaseGroupHistory | undefined = 
     loaded: (group: MarmotGroup<THistory, TMedia>) => void;
     /** Emitted when an inbound commit removed the client from a tracked group. */
     removed: (group: MarmotGroup<THistory, TMedia>) => void;
+    /** Emitted after durable canonical disband notification delivery is recorded. */
+    disbanded: (group: MarmotGroup<THistory, TMedia>, evidence: GroupDisbandedEvent) => void;
 };
 /**
  * Owns the in-memory cache of {@link MarmotGroup} instances and the
@@ -48,7 +58,10 @@ export type GroupRegistryEvents<THistory extends BaseGroupHistory | undefined = 
 export declare class GroupRegistry<THistory extends BaseGroupHistory | undefined = any, TMedia extends BaseGroupMedia | undefined = any> extends EventEmitter<GroupRegistryEvents<THistory, TMedia>> {
     #private;
     readonly store: GenericKeyValueStore<SerializedClientState>;
+    readonly ingestStateStore: GenericKeyValueStore<Uint8Array>;
+    readonly lifecycleStore: GenericKeyValueStore<Uint8Array>;
     readonly rewindStore?: GenericKeyValueStore<Uint8Array>;
+    readonly removedMarkerStore?: GenericKeyValueStore<boolean>;
     readonly signer: EventSigner;
     readonly network: NostrNetworkInterface;
     readonly audit?: AuditSink;
@@ -67,8 +80,8 @@ export declare class GroupRegistry<THistory extends BaseGroupHistory | undefined
     build(state: ClientState, retained?: RetainedHistoryStore, historyTree?: GroupHistoryTree): Promise<MarmotGroup<THistory, TMedia>>;
     /** Loads a group from the store, hydrated but not cached. */
     load(groupId: Uint8Array | string): Promise<MarmotGroup<THistory, TMedia>>;
-    /** Caches a group instance and subscribes to its destroy event. */
-    track(group: MarmotGroup<THistory, TMedia>): void;
+    /** Caches a group, attaches lifecycle forwarders, then activates its state. */
+    track(group: MarmotGroup<THistory, TMedia>): Promise<void>;
     /** Removes a group instance from the cache and detaches its listeners. */
     untrack(groupId: Uint8Array | string): void;
     /** Lists all persisted group IDs, decoded from their hex storage keys. */

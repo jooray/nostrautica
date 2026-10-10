@@ -1,6 +1,6 @@
 /** @module @category Client - Marmot Client */
 import { isRumor } from "applesauce-common/helpers/gift-wrap";
-import { defaultCryptoProvider, } from "ts-mls";
+import { defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
 import { getMarmotGroupView, } from "../core/client-state.js";
 import { defaultCapabilities } from "../core/default-capabilities.js";
 import { getWelcome, getWelcomeGroupRelays, getWelcomeKeyPackageEventId, getWelcomeKeyPackageRefs, readWelcomeGroupInfo, } from "../core/welcome.js";
@@ -9,6 +9,7 @@ import { GroupsManager } from "./groups-manager.js";
 import { InviteManager, } from "./invite-manager.js";
 import { KeyPackageManager } from "./key-package-manager.js";
 import { InMemoryKeyValueStore } from "../extra/in-memory-key-value-store.js";
+import { defaultVerifyEvent } from "./verify.js";
 const log = logger.extend("client");
 export class MarmotClient {
     /** The signer used for the clients identity */
@@ -23,6 +24,7 @@ export class MarmotClient {
     groups;
     /** Manages invite lifecycle: ingestion, decryption, and storage */
     invites;
+    ingestPersistence;
     /** Crypto provider for cryptographic operations */
     cryptoProvider;
     constructor(options) {
@@ -30,33 +32,45 @@ export class MarmotClient {
         this.capabilities = options.capabilities ?? defaultCapabilities();
         this.network = options.network;
         this.cryptoProvider = options.cryptoProvider ?? defaultCryptoProvider;
+        const verifyEvent = options.verifyEvent ?? defaultVerifyEvent;
+        const ingestStateStore = options.ingestStateStore ?? new InMemoryKeyValueStore();
+        const lifecycleStore = options.lifecycleStore ??
+            lifecycleStoreFromGroupState(options.groupStateStore);
+        this.ingestPersistence = options.ingestStateStore
+            ? { kind: "durable" }
+            : { kind: "ephemeral", reason: "ingest_state_store_omitted" };
         this.keyPackages = new KeyPackageManager({
             store: options.keyPackageStore,
             signer: options.signer,
-            accountProofSigner: options.accountProofSigner,
             network: options.network,
             clientId: options.clientId,
+            verifyEvent,
         });
         const historyFactory = ("historyFactory" in options ? options.historyFactory : undefined);
         const mediaFactory = ("mediaFactory" in options ? options.mediaFactory : undefined);
         this.groups = new GroupsManager({
             store: options.groupStateStore,
+            ingestStateStore,
+            lifecycleStore,
+            ingestPersistence: this.ingestPersistence,
             rewindStore: options.rewindStore,
+            removedMarkerStore: options.removedMarkerStore,
             convergencePolicy: options.convergencePolicy,
             ingestionPool: options.ingestionPool,
             signer: this.signer,
-            accountProofSigner: options.accountProofSigner,
             network: this.network,
             audit: options.audit,
             auditContext: options.auditContext,
             cryptoProvider: this.cryptoProvider,
             historyFactory,
             mediaFactory,
+            verifyEvent,
         });
         this.invites = new InviteManager({
             signer: this.signer,
             store: options.inviteStore || new InMemoryKeyValueStore(),
             network: this.network,
+            verifyEvent,
         });
     }
     // ---------------------------------------------------------------------------
@@ -213,11 +227,26 @@ export class MarmotClient {
             await this.keyPackages.markUsed(consumedKeyPackageRef);
         }
         log("joined group %s", group.idStr);
-        // MIP-02 SHOULD: callers are responsible for calling group.selfUpdate() after
-        // joining to rotate leaf key material for forward secrecy. Doing it automatically
-        // here caused the joining member to fork off to a new epoch before other members
-        // could ingest the commit.
+        // refs/marmot/protocol-core/joining.md: callers are responsible for calling
+        // group.selfUpdate() after joining to rotate leaf key material for forward
+        // secrecy. Doing it automatically here caused the joining member to fork off
+        // to a new epoch before other members could ingest the commit.
         return { group };
     }
 }
-//# sourceMappingURL=marmot-client.js.map
+function lifecycleStoreFromGroupState(store) {
+    const isLifecycleKey = (key) => key.includes("/disband/");
+    return {
+        getItem: (key) => store.getItem(key),
+        setItem: (key, value) => store.setItem(key, value),
+        removeItem: (key) => store.removeItem(key),
+        async clear() {
+            for (const key of await store.keys())
+                if (isLifecycleKey(key))
+                    await store.removeItem(key);
+        },
+        async keys() {
+            return (await store.keys()).filter(isLifecycleKey);
+        },
+    };
+}

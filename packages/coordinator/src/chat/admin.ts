@@ -13,14 +13,21 @@
  * A chat-off event never reaches here: the coordinator only constructs the admin's
  * group and subscriptions when `isMarmotChatEnabled` holds.
  */
-import type { Store } from "../store/db.js";
-import type { ChatMls } from "./mls.js";
+import type { Store, MarmotChatLinkRow } from "../store/db.js";
+import { keyPackageProfile, type ChatMls } from "./mls.js";
+import { normalizeAvatarUrl } from "./avatar.js";
 import {
   verifyChatDeviceProof,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   type ChatKeyAttestationContent,
   type CoordinatorStatusContent,
 } from "@nostrautica/protocol";
+import {
+  generateChatLinkCode,
+  hashChatLinkCode,
+  chatLinkCodeMatches,
+  chatLinkCodeMessages,
+} from "./link-code.js";
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
 
@@ -104,6 +111,55 @@ export type ChatAttestationRefusal =
   | "chat_key_package_ineligible";
 
 /**
+ * External-client link (NIP §10.5) notices go out under their OWN stage, so the
+ * app's "why is setup stuck" banner (stage `chat_attestation`) and the link card
+ * never overwrite each other's latest notice. A `cleared` notice on this stage
+ * (code posted, or linked) supersedes an earlier refusal.
+ */
+export const CHAT_LINK_STAGE = "chat_link";
+export type ChatLinkRefusal =
+  | "chat_link_unavailable" // the event has no active chat group
+  | "chat_link_rate_limited"
+  | "chat_link_no_key_package" // no kind-30443 for the external key anywhere we looked
+  | "chat_link_failed" // the confirmation group could not be set up
+  | "chat_link_no_pending" // a confirm with no matching open request
+  | "chat_link_expired"
+  | "chat_link_code_wrong"
+  | "chat_link_too_many_attempts"
+  | "chat_device_cap_reached"
+  | "chat_key_bound_to_other_account"
+  | "chat_key_package_ineligible";
+
+/** How long a link code stays valid. */
+export const CHAT_LINK_TTL_MS = 30 * 60_000;
+/** Wrong codes allowed before the request is dead and must be restarted. */
+export const CHAT_LINK_MAX_ATTEMPTS = 5;
+/**
+ * Link REQUESTS per account per event per window. Each one makes the daemon
+ * create an MLS group and gift-wrap a Welcome to a key the requester chose, so it
+ * is an amplification surface (invite spam to an arbitrary npub) as much as a
+ * resource one.
+ */
+export const CHAT_LINK_MAX_REQUESTS = 5;
+export const CHAT_LINK_WINDOW_MS = 60 * 60_000;
+/**
+ * After a link is confirmed, how long the key package the CONFIRMATION group
+ * consumed is kept out of the event-group add.
+ *
+ * A Marmot client normally deletes a key package's init key once a Welcome has
+ * used it and publishes a fresh one; inviting with the spent one would send a
+ * Welcome the client can no longer decrypt while the coordinator holds a leaf for
+ * it — a member stuck "in" a room they cannot read. Waiting briefly lets the
+ * rotated key package appear. Past the grace the old one is used anyway, which is
+ * right for a client that marks its key packages last-resort (reusable).
+ */
+export const CHAT_LINK_CONFIRM_KP_GRACE_MS = 90_000;
+/** Default label for a linked external key (the request's own label wins). */
+export const EXTERNAL_CHAT_KEY_LABEL = "White Noise";
+/** Name of the throwaway confirmation group, as the external client shows it. */
+export const CHAT_LINK_GROUP_NAME = "Nostrautica: confirm White Noise link";
+
+/**
  * How long an as-yet-unauthorized kind-30443 is held while its kind-21607
  * attestation catches up (see {@link MarmotAdmin.handleKeyPackageEvent}).
  *
@@ -180,14 +236,16 @@ export class MarmotAdmin {
       await this.syncAdmins(opts.coordinate);
       return { mlsGroupIdHex: existing.mls_group_id, nostrGroupIdHex: existing.nostr_group_id };
     }
-    // Create with the coordinator + any already-approved organizer chat devices
-    // as admins (usually just the coordinator at creation time; organizers are
-    // promoted as they approve/attest — see syncAdmins).
+    // Create with the coordinator as the only admin. Organizer chat devices are
+    // not members of a brand-new group, and an admin must hold a member leaf
+    // (MDK admin-leaf coupling): listing them here made every later commit,
+    // invites included, illegal. They are promoted once their Add lands
+    // (syncAdmins after a successful add).
     const ids = await this.mls.createGroup({
       name: opts.name,
       description: opts.description,
       relays: opts.relays,
-      adminPubkeys: opts.adminPubkeys ?? this.desiredAdminPubkeys(opts.coordinate),
+      adminPubkeys: opts.adminPubkeys ?? [this.coordinatorPubkey],
     });
     this.store.upsertMarmotGroup({
       coordinate: opts.coordinate,
@@ -197,6 +255,10 @@ export class MarmotAdmin {
       now: this.now(),
     });
     this.log(`[chat] created MLS group for ${opts.coordinate} (nostr_group_id ${ids.nostrGroupIdHex.slice(0, 12)}…)`);
+    // The roster carries the room's nostr_group_id, and members bind to the group
+    // it names (NIP §10.4). A replacement group — one recreated after the old one
+    // was retired (see retire.ts) — is invisible to members until it is republished.
+    this.rosterChanged(opts.coordinate);
     return ids;
   }
 
@@ -224,6 +286,33 @@ export class MarmotAdmin {
     const group = this.activeGroup(coordinate);
     if (!group) return;
     await this.mls.ensureRelays(group.mls_group_id, relays);
+  }
+
+  /**
+   * Reconcile the group's avatar (group.avatar-url.v1) with the event's icon — the
+   * `picture` of the E_id kind-0 (see avatar.ts). Commits only when the normalized
+   * URL differs from what the group holds, so re-running it on every install and
+   * every kind-0 revision is free when nothing changed; a removed icon clears the
+   * avatar. An icon that cannot be stored validly is skipped with a log line and
+   * the avatar is left as it is — it must never break creation or reconciliation.
+   */
+  async ensureAvatar(coordinate: string, iconUrl: string | undefined): Promise<void> {
+    const group = this.activeGroup(coordinate);
+    if (!group) return;
+    const normalized = normalizeAvatarUrl(iconUrl);
+    if (!normalized.ok) {
+      this.log(
+        `[chat] event icon of ${coordinate} is not usable as the group avatar (${normalized.reason}) — avatar left unchanged`,
+      );
+      return;
+    }
+    if (await this.mls.setAvatar(group.mls_group_id, normalized.url)) {
+      this.log(
+        normalized.url
+          ? `[chat] group avatar of ${coordinate} set to ${normalized.url}`
+          : `[chat] group avatar of ${coordinate} cleared (the event has no icon)`,
+      );
+    }
   }
 
   // ── authorized chat identities ─────────────────────────────────────────────
@@ -273,12 +362,22 @@ export class MarmotAdmin {
    * members and rotate metadata when the coordinator's admin state is gone.
    * The coordinator is ALWAYS retained: dropping it would lock the running bot
    * out of admin commits.
+   *
+   * A LINKED EXTERNAL client key (NIP §10.5, e.g. an organizer's White Noise) is
+   * never promoted: it runs software we don't control, and co-admin there would
+   * let it add or remove anyone in the room. It chats as an ordinary member.
    */
   desiredAdminPubkeys(coordinate: string): string[] {
     const admins = new Set<string>([this.coordinatorPubkey]);
     for (const a of this.store.approvedAttendees(coordinate)) {
       if (a.role !== "organizer") continue;
-      for (const id of this.authorizedIdentities(coordinate, a.pubkey)) admins.add(id);
+      const external = new Set(
+        this.store
+          .chatKeysForAccount(coordinate, a.pubkey)
+          .filter((k) => k.external)
+          .map((k) => k.chat_pubkey),
+      );
+      for (const id of this.authorizedIdentities(coordinate, a.pubkey)) if (!external.has(id)) admins.add(id);
     }
     return [...admins];
   }
@@ -498,7 +597,16 @@ export class MarmotAdmin {
     const covered = !!batch && authors.every((a) => batch.forAuthors.has(a));
     const kps = covered ? batch.keyPackages : await this.fetchKeyPackages(coordinate, authors);
     const authorized = new Set(authors);
-    const candidates = [...kps.filter((kp) => authorized.has(kp.pubkey))];
+    let candidates = [...kps.filter((kp) => authorized.has(kp.pubkey))];
+    // A linked external key whose confirmation group just spent one key package
+    // (NIP §10.5): when a rotated one is ALSO visible, simply use that. Only when
+    // the spent one is all there is does tryAddKeyPackage hold off and ask for a
+    // retry (CHAT_LINK_CONFIRM_KP_GRACE_MS).
+    candidates = candidates.filter(
+      (kp) =>
+        !this.isFreshlySpentConfirmKp(coordinate, kp) ||
+        !candidates.some((other) => other.pubkey === kp.pubkey && other.id !== kp.id),
+    );
     // Fold in any key package we are HOLDING for one of this member's now-authorized
     // identities that the read above did not return. This is the payoff of
     // {@link heldKeyPackages}: the device published its 30443 before the 21607 that
@@ -600,6 +708,15 @@ export class MarmotAdmin {
     kp: AnyEvent,
     opts?: { reconcile?: boolean; reenrolling?: string },
   ): Promise<boolean> {
+    if (this.isFreshlySpentConfirmKp(coordinate, kp)) {
+      // NOT "nothing to do": the linked key IS authorized, we are just waiting for
+      // its rotated key package. False hands a deliberate sync to the durable
+      // retry; the passive watcher ignores it.
+      this.log(
+        `[chat] holding off on ${kp.pubkey.slice(0, 8)} in ${coordinate}: 30443 ${kp.id.slice(0, 8)} was just spent by its link-confirmation group — waiting for a rotated one`,
+      );
+      return false;
+    }
     const consumed = this.store.isKpConsumed(coordinate, kp.id);
     if (consumed && !opts?.reconcile) return true;
     const member = await this.mls.isMember(mlsGroupId, kp.pubkey);
@@ -671,6 +788,18 @@ export class MarmotAdmin {
     // rotated and burned another key package. The test suite did not catch it
     // because the fake MLS returned a fixed eligibility with no membership
     // awareness — it modelled a library that cannot exist.
+    // A KeyPackage from before the 0x8009 upgrade (an app tab that has not reloaded,
+    // an outdated White Noise). Not reported to the owner as a refusal: nothing is
+    // wrong with their device, it just has not published its current KeyPackage
+    // yet — and when it does, that is a new event id the watcher adds normally.
+    // Recorded as consumed so neither the watcher nor a reconcile re-decodes it.
+    if ("legacy" in evaluation && evaluation.legacy) {
+      this.store.markKpConsumed(coordinate, kp.id);
+      this.log(
+        `[chat] skipping 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} in ${coordinate}: ${evaluation.reasons.join(", ")} — waiting for a current one`,
+      );
+      return true;
+    }
     const onlyBecauseMember =
       evaluation.alreadyMember &&
       evaluation.reasons.every((r) => r.toLowerCase().includes("already a member"));
@@ -719,6 +848,12 @@ export class MarmotAdmin {
       await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
       this.store.markKpConsumed(coordinate, kp.id);
       this.log(`[chat] added ${kp.pubkey.slice(0, 8)} to ${coordinate} from 30443 ${kp.id.slice(0, 8)}`);
+      // An organizer device can only be promoted once it holds a leaf.
+      if (this.desiredAdminPubkeys(coordinate).includes(kp.pubkey)) {
+        await this.syncAdmins(coordinate).catch((e) =>
+          this.log(`[chat] promoting ${kp.pubkey.slice(0, 8)} in ${coordinate} failed: ${String(e)}`),
+        );
+      }
       return true;
     } catch (e) {
       // A single malformed/incompatible key package (e.g. a proof version our
@@ -821,6 +956,9 @@ export class MarmotAdmin {
       this.log(`[chat] REJECTED 21607 from ${accountPubkey.slice(0, 8)}: not an enrolled attendee`);
       return false;
     }
+    // External-client link (NIP §10.5): its own possession mechanism, its own path.
+    if (content.op === "link") return this.handleLinkRequest(coordinate, accountPubkey, content);
+    if (content.op === "link_confirm") return this.handleLinkConfirm(coordinate, accountPubkey, content);
     if (content.op === "add") {
       // Proof of possession (NIP §10.2): the chat DEVICE key must sign the challenge
       // that binds this (coordinate, account, chat pubkey, created_at). The schema
@@ -940,6 +1078,339 @@ export class MarmotAdmin {
     await this.maybeSyncAdmins(coordinate, accountPubkey);
     this.log(`[chat] revoked chat key ${content.chat_pubkey.slice(0, 8)} for ${accountPubkey.slice(0, 8)}`);
     return true;
+  }
+
+  // ── external-client link (21607 op:"link"/"link_confirm", NIP §10.5) ──────
+  /**
+   * Link an external Marmot client's key (`chat_pubkey`, "W") to this account as
+   * a chat device, so the person can also chat from e.g. White Noise.
+   *
+   * W cannot sign the §10.2 proof — the external client never sees our challenge —
+   * so possession is proven one of two ways:
+   *  - W IS the sealing account key: the seal itself proves it. Bound at once.
+   *  - otherwise: we invite W into a throwaway two-member group, post a one-time
+   *    code there, and bind only when {@link handleLinkConfirm} gets that code back.
+   *    Only W's holder can read the group, so only they can know the code.
+   *
+   * The coordinator, never the user, adds W to the event group afterwards — it is
+   * the one party that holds the account⇄key binding and removes the key again on
+   * revoke or withdrawal.
+   *
+   * Refusals go to the account over the 21606 channel under {@link CHAT_LINK_STAGE}.
+   * Never throws for an MLS/relay failure: that is reported, and the user retries.
+   */
+  async handleLinkRequest(
+    coordinate: string,
+    accountPubkey: string,
+    content: ChatKeyAttestationContent,
+  ): Promise<boolean> {
+    const w = content.chat_pubkey;
+    const who = `${accountPubkey.slice(0, 8)} → ${w.slice(0, 8)}`;
+    if (this.store.getAttendee(coordinate, accountPubkey)?.status !== "approved") {
+      // A pending attendee can't see the chat at all; nothing to tell them.
+      this.log(`[chat] REJECTED 21607 link ${who}: not an approved attendee`);
+      return false;
+    }
+    const group = this.activeGroup(coordinate);
+    if (!group) {
+      this.log(`[chat] REJECTED 21607 link ${who}: no active chat group for ${coordinate}`);
+      this.notifyLink(coordinate, accountPubkey, "chat_link_unavailable");
+      return false;
+    }
+    // Opportunistic: a request is a fine moment to tear down codes nobody used.
+    await this.sweepExpiredLinks();
+    const label = content.label?.trim() || EXTERNAL_CHAT_KEY_LABEL;
+
+    const bound = this.store.getChatKey(coordinate, w);
+    if (bound && bound.account_pubkey !== accountPubkey) {
+      this.log(`[chat] REJECTED 21607 link ${who}: key already bound to another account`);
+      this.notifyLink(coordinate, accountPubkey, "chat_key_bound_to_other_account");
+      return false;
+    }
+    if (bound?.status === "active") {
+      // Already this account's (a previous link, or W is one of its own devices):
+      // possession was proven when it was bound. Nothing to confirm — just make
+      // sure it is in the room.
+      this.log(`[chat] 21607 link ${who}: already an active chat key of this account — re-syncing`);
+      this.notifyLinkProgress(coordinate, accountPubkey);
+      await this.syncLinkedKey(coordinate, accountPubkey);
+      return true;
+    }
+    const active = this.store.chatKeysForAccount(coordinate, accountPubkey).filter((k) => k.status === "active");
+    if (active.length >= MAX_CHAT_KEYS_PER_ACCOUNT) {
+      this.log(`[chat] REJECTED 21607 link ${who}: account already at the ${MAX_CHAT_KEYS_PER_ACCOUNT}-device cap`);
+      this.notifyLink(coordinate, accountPubkey, "chat_device_cap_reached");
+      return false;
+    }
+
+    if (w === accountPubkey) {
+      // Self-link: the 21607 is sealed BY this key, which is the proof. The account
+      // key becomes a chat member only through this explicit, roster-visible,
+      // cap-counted, revocable binding — never implicitly (§10.2).
+      return this.bindLinkedKey(coordinate, accountPubkey, w, label);
+    }
+
+    // ── a different key: confirmation by one-time code ──
+    const now = this.now();
+    const prior = this.store.getChatLink(coordinate, accountPubkey);
+    const inWindow = !!prior && now - prior.window_started_at < CHAT_LINK_WINDOW_MS;
+    const windowStartedAt = inWindow ? prior!.window_started_at : now;
+    const windowCount = (inWindow ? prior!.window_count : 0) + 1;
+    if (windowCount > CHAT_LINK_MAX_REQUESTS) {
+      this.log(`[chat] REJECTED 21607 link ${who}: over ${CHAT_LINK_MAX_REQUESTS} link requests this hour`);
+      this.notifyLink(coordinate, accountPubkey, "chat_link_rate_limited");
+      return false;
+    }
+    // One pending link per (coordinate, account): a new request supersedes the old
+    // one — its code dies with its group.
+    if (prior?.status === "pending") await this.teardownConfirmGroup(prior);
+
+    const kps = (await this.fetchKeyPackages(coordinate, [w]).catch(() => [] as AnyEvent[]))
+      .filter((kp) => kp.pubkey === w)
+      .sort((a, b) => Number(b.created_at ?? 0) - Number(a.created_at ?? 0) || (a.id < b.id ? -1 : 1));
+    // Newest CURRENT (0x8009) KeyPackage first: one account can have several `d`
+    // slots (devices, clients), and an outdated one must not shadow a usable one.
+    // With only legacy ones, the newest still goes through and is refused below
+    // as ineligible, which tells the user to update White Noise.
+    const kp = kps.find((k) => keyPackageProfile(k).current) ?? kps[0];
+    if (!kp) {
+      this.store.countChatLinkRequest(coordinate, accountPubkey, w, windowStartedAt, windowCount, now);
+      this.log(`[chat] REJECTED 21607 link ${who}: no kind-30443 key package found for the key`);
+      this.notifyLink(coordinate, accountPubkey, "chat_link_no_key_package");
+      return false;
+    }
+
+    const code = generateChatLinkCode();
+    let confirmGroupId: string | undefined;
+    try {
+      const relays = await this.mls.getRelays(group.mls_group_id);
+      const ids = await this.mls.createGroup({
+        name: CHAT_LINK_GROUP_NAME,
+        description: "A one-time code to link this account to a Nostrautica event chat. You can leave once you're done.",
+        relays,
+        adminPubkeys: [this.coordinatorPubkey],
+      });
+      confirmGroupId = ids.mlsGroupIdHex;
+      // Persist BEFORE the network steps, so a crash mid-way still leaves a row
+      // the expiry sweep can find and tear the group down from.
+      this.store.putPendingChatLink({
+        coordinate,
+        accountPubkey,
+        chatPubkey: w,
+        label,
+        codeHash: hashChatLinkCode(code, coordinate, accountPubkey, w),
+        expiresAt: now + CHAT_LINK_TTL_MS,
+        confirmGroupId,
+        confirmKpId: kp.id,
+        windowStartedAt,
+        windowCount,
+        now,
+      });
+      const evaluation = this.mls.evaluateKeyPackage
+        ? await this.mls.evaluateKeyPackage(confirmGroupId, kp)
+        : { eligible: await this.mls.isEligible(confirmGroupId, kp), reasons: [] };
+      if (!evaluation.eligible) {
+        const why = evaluation.reasons.length ? `: ${evaluation.reasons.join(", ")}` : "";
+        this.log(`[chat] REJECTED 21607 link ${who}: key package ${kp.id.slice(0, 8)} ineligible${why}`);
+        await this.closeLink(coordinate, accountPubkey);
+        this.notifyLink(coordinate, accountPubkey, "chat_key_package_ineligible");
+        return false;
+      }
+      await this.mls.invite(confirmGroupId, kp); // Add commit + Welcome to W's 10050 inbox
+      for (const text of chatLinkCodeMessages(code, Math.round(CHAT_LINK_TTL_MS / 60_000)))
+        await this.mls.sendText(confirmGroupId, text);
+    } catch (e) {
+      this.log(`[chat] 21607 link ${who}: confirmation group setup FAILED: ${e instanceof Error ? e.message : e}`);
+      if (confirmGroupId) await this.closeLink(coordinate, accountPubkey);
+      else this.store.countChatLinkRequest(coordinate, accountPubkey, w, windowStartedAt, windowCount, now);
+      this.notifyLink(coordinate, accountPubkey, "chat_link_failed");
+      return false;
+    }
+    this.log(`[chat] 21607 link ${who}: confirmation code posted (group ${confirmGroupId.slice(0, 8)}…)`);
+    this.notifyLinkProgress(coordinate, accountPubkey);
+    return true;
+  }
+
+  /** Check the code typed into Nostrautica against the account's pending link. */
+  async handleLinkConfirm(
+    coordinate: string,
+    accountPubkey: string,
+    content: ChatKeyAttestationContent,
+  ): Promise<boolean> {
+    const w = content.chat_pubkey;
+    const who = `${accountPubkey.slice(0, 8)} → ${w.slice(0, 8)}`;
+    if (this.store.getAttendee(coordinate, accountPubkey)?.status !== "approved") {
+      this.log(`[chat] REJECTED 21607 link_confirm ${who}: not an approved attendee`);
+      return false;
+    }
+    const link = this.store.getChatLink(coordinate, accountPubkey);
+    if (!link || link.status !== "pending" || link.chat_pubkey !== w || !content.code) {
+      this.log(`[chat] REJECTED 21607 link_confirm ${who}: no pending link for this key`);
+      this.notifyLink(coordinate, accountPubkey, "chat_link_no_pending");
+      return false;
+    }
+    if (this.now() >= link.expires_at) {
+      this.log(`[chat] REJECTED 21607 link_confirm ${who}: code expired`);
+      await this.closeLink(coordinate, accountPubkey);
+      this.notifyLink(coordinate, accountPubkey, "chat_link_expired");
+      return false;
+    }
+    if (!chatLinkCodeMatches(content.code, link.code_hash, coordinate, accountPubkey, w)) {
+      const attempts = link.attempts + 1;
+      if (attempts >= CHAT_LINK_MAX_ATTEMPTS) {
+        this.log(`[chat] REJECTED 21607 link_confirm ${who}: wrong code, attempt ${attempts} — link closed`);
+        await this.closeLink(coordinate, accountPubkey);
+        this.notifyLink(coordinate, accountPubkey, "chat_link_too_many_attempts");
+      } else {
+        this.log(`[chat] REJECTED 21607 link_confirm ${who}: wrong code (attempt ${attempts}/${CHAT_LINK_MAX_ATTEMPTS})`);
+        this.store.setChatLinkAttempts(coordinate, accountPubkey, attempts, this.now());
+        this.notifyLink(coordinate, accountPubkey, "chat_link_code_wrong");
+      }
+      return false;
+    }
+    // Possession proven. The state may have moved since the request (another
+    // account bound W, or this one filled its device slots), so re-check both.
+    const bound = this.store.getChatKey(coordinate, w);
+    if (bound && bound.account_pubkey !== accountPubkey) {
+      await this.closeLink(coordinate, accountPubkey);
+      this.notifyLink(coordinate, accountPubkey, "chat_key_bound_to_other_account");
+      return false;
+    }
+    const active = this.store.chatKeysForAccount(coordinate, accountPubkey).filter((k) => k.status === "active");
+    if (!active.some((k) => k.chat_pubkey === w) && active.length >= MAX_CHAT_KEYS_PER_ACCOUNT) {
+      await this.closeLink(coordinate, accountPubkey);
+      this.notifyLink(coordinate, accountPubkey, "chat_device_cap_reached");
+      return false;
+    }
+    // 'linked' keeps confirm_kp_id for the reuse grace (isFreshlySpentConfirmKp).
+    this.store.setChatLinkStatus(coordinate, accountPubkey, "linked", this.now());
+    const ok = await this.bindLinkedKey(coordinate, accountPubkey, w, link.label?.trim() || EXTERNAL_CHAT_KEY_LABEL);
+    // Best effort, and AFTER the bind: the user is done with the code either way.
+    await this.teardownConfirmGroup(link);
+    return ok;
+  }
+
+  /** Bind W as an ACTIVE external chat key, republish the roster, add it to the room. */
+  private async bindLinkedKey(
+    coordinate: string,
+    accountPubkey: string,
+    w: string,
+    label: string,
+  ): Promise<boolean> {
+    const recorded = this.store.upsertChatKey({
+      coordinate,
+      accountPubkey,
+      chatPubkey: w,
+      label,
+      status: "active",
+      external: true,
+      now: this.now(),
+    });
+    if (!recorded) {
+      this.notifyLink(coordinate, accountPubkey, "chat_key_bound_to_other_account");
+      return false;
+    }
+    this.log(`[chat] linked external chat key ${w.slice(0, 8)} → ${accountPubkey.slice(0, 8)} (${label})`);
+    this.rosterChanged(coordinate);
+    this.notifyLinkProgress(coordinate, accountPubkey);
+    await this.syncLinkedKey(coordinate, accountPubkey);
+    return true;
+  }
+
+  /** The normal member sync, with the attestation path's durable retry on failure. */
+  private async syncLinkedKey(coordinate: string, accountPubkey: string): Promise<void> {
+    try {
+      const synced = await this.syncMember(coordinate, accountPubkey);
+      if (!synced && this.enqueueSync) {
+        this.log(`[chat] link sync for ${accountPubkey.slice(0, 8)} in ${coordinate} did not complete — queued for durable retry`);
+        this.enqueueSync(coordinate, accountPubkey);
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      this.log(`[chat] link sync for ${accountPubkey.slice(0, 8)} in ${coordinate} failed (${msg.slice(0, 120)})`);
+      this.enqueueSync?.(coordinate, accountPubkey);
+    }
+  }
+
+  /**
+   * True when `kp` is the key package a link-confirmation group spent moments ago
+   * (see {@link CHAT_LINK_CONFIRM_KP_GRACE_MS}).
+   */
+  private isFreshlySpentConfirmKp(coordinate: string, kp: AnyEvent): boolean {
+    const owner = this.store.getChatKey(coordinate, kp.pubkey);
+    if (!owner?.external) return false;
+    const link = this.store.getChatLink(coordinate, owner.account_pubkey);
+    return (
+      !!link &&
+      link.status === "linked" &&
+      link.chat_pubkey === kp.pubkey &&
+      link.confirm_kp_id === kp.id &&
+      this.now() - link.updated_at < CHAT_LINK_CONFIRM_KP_GRACE_MS
+    );
+  }
+
+  /** Close a link that did not complete, tearing its group down. */
+  private async closeLink(coordinate: string, accountPubkey: string): Promise<void> {
+    const link = this.store.getChatLink(coordinate, accountPubkey);
+    this.store.setChatLinkStatus(coordinate, accountPubkey, "closed", this.now());
+    if (link) await this.teardownConfirmGroup(link);
+  }
+
+  /**
+   * Remove W from the confirmation group (so the external client shows it as
+   * over) and drop our local state for it. Best effort on both counts: the code
+   * is already dead in the database, which is what actually matters.
+   */
+  private async teardownConfirmGroup(link: MarmotChatLinkRow): Promise<void> {
+    const id = link.confirm_group_id;
+    if (!id) return;
+    try {
+      await this.mls.removePubkeys(id, [link.chat_pubkey]);
+    } catch (e) {
+      this.log(`[chat] confirmation group ${id.slice(0, 8)}: remove failed (${e instanceof Error ? e.message : e})`);
+    }
+    try {
+      await this.mls.destroyGroup(id);
+    } catch (e) {
+      this.log(`[chat] confirmation group ${id.slice(0, 8)}: destroy failed (${e instanceof Error ? e.message : e})`);
+    }
+  }
+
+  /** Close every expired pending link and tear its group down (all events). */
+  async sweepExpiredLinks(): Promise<number> {
+    const expired = this.store.expiredPendingChatLinks(this.now());
+    for (const link of expired) {
+      this.store.setChatLinkStatus(link.coordinate, link.account_pubkey, "closed", this.now());
+      await this.teardownConfirmGroup(link);
+    }
+    if (expired.length) this.log(`[chat] closed ${expired.length} expired link request(s)`);
+    return expired.length;
+  }
+
+  private notifyLink(coordinate: string, accountPubkey: string, category: ChatLinkRefusal): void {
+    this.notifyAttendee?.(coordinate, accountPubkey, {
+      v: 2,
+      a: coordinate,
+      pubkey: accountPubkey,
+      stage: CHAT_LINK_STAGE,
+      state: "poison",
+      attempts: 0,
+      error_category: category,
+      retryable: false,
+      at: Math.floor(this.now() / 1000),
+    });
+  }
+
+  /** A `cleared` notice: supersedes an earlier refusal on the link card. */
+  private notifyLinkProgress(coordinate: string, accountPubkey: string): void {
+    this.notifyAttendee?.(coordinate, accountPubkey, {
+      v: 2,
+      a: coordinate,
+      pubkey: accountPubkey,
+      stage: CHAT_LINK_STAGE,
+      state: "cleared",
+      at: Math.floor(this.now() / 1000),
+    });
   }
 
   // ── remove path ────────────────────────────────────────────────────────────

@@ -3,7 +3,8 @@ import { isLoopbackHost, rejectNonRoutableHost } from "./host-safety.js";
 /**
  * Validates and normalizes an `https` (optionally loopback-`http`) URL the way
  * the darkmatter `validate_and_normalize_*` helpers do: no credentials, no
- * fragment, a routable host, and length bounds. Returns the WHATWG-normalized
+ * fragment, a routable host (unless `rejectUnsafeHosts` is `false`), and length
+ * bounds. Returns the WHATWG-normalized
  * URL. Both this and the Rust `url` crate implement the WHATWG URL Standard, so
  * normalized output matches across implementations for ordinary URLs.
  *
@@ -23,12 +24,16 @@ export function validateAndNormalizeHttpsUrl(raw, opts) {
     const url = new URL(trimmed);
     if (url.username !== "" || url.password !== "")
         throw new Error(`${label} must not include credentials`);
-    if (url.hash !== "")
+    // `url.hash` is "" for both "no fragment" and an empty fragment ("…/#"), but
+    // the Rust `url` crate MDK uses reports `Some("")` for the latter and rejects
+    // it. WHATWG serialization keeps the "#" in `href`, so test that instead.
+    if (url.href.includes("#"))
         throw new Error(`${label} must not include a fragment`);
     const scheme = url.protocol.replace(/:$/, "");
     const isLoopbackHttp = scheme === "http" && opts.allowLoopbackHttp && isLoopbackHost(url.hostname);
     if (scheme === "https") {
-        rejectNonRoutableHost(url.hostname, label);
+        if (opts.rejectUnsafeHosts ?? true)
+            rejectNonRoutableHost(url.hostname, label);
     }
     else if (!isLoopbackHttp) {
         throw new Error(`${label} scheme must be https`);
@@ -42,4 +47,3 @@ export function validateAndNormalizeHttpsUrl(raw, opts) {
 function utf8Len(s) {
     return new TextEncoder().encode(s).length;
 }
-//# sourceMappingURL=url.js.map

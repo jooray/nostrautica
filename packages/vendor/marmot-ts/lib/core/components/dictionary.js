@@ -1,15 +1,19 @@
 /** @module @category Core - App Components */
-import { getAppDataDictionary, makeAppDataDictionaryExtension, } from "ts-mls";
-import { UsageError } from "ts-mls";
-import { APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_PROFILE_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID, SUPPORTED_APP_COMPONENT_IDS, } from "./ids.js";
+import { getAppDataDictionary, makeAppDataDictionaryExtension, } from "../../vendor/ts-mls/index.js";
+import { UsageError } from "../../vendor/ts-mls/index.js";
+import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_BLOSSOM_IMAGE_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT_ID, GROUP_PROFILE_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, NOSTR_ROUTING_COMPONENT_ID, SAFE_AAD_COMPONENT_ID, SUPPORTED_APP_COMPONENT_IDS, } from "./ids.js";
+import { AUTHORIZATION_PROOF_LENGTH } from "../authorization-proof.js";
 import { decodeComponentsList, encodeComponentsList, } from "./app-components-list.js";
 import { decodeGroupProfileV1, encodeGroupProfileV1, } from "./group-profile.js";
 import { decodeAdminPolicyV1, encodeAdminPolicyV1 } from "./admin-policy.js";
 import { decodeNostrRoutingV1, encodeNostrRoutingV1, } from "./nostr-routing.js";
 import { decodeMessageRetentionV1, encodeMessageRetentionV1, } from "./message-retention.js";
 import { decodeGroupAvatarUrlV1, encodeGroupAvatarUrlV1, } from "./avatar-url.js";
+import { decodeGroupBlossomImageV1, encodeGroupBlossomImageV1, } from "./blossom-image.js";
 import { decodeEncryptedMediaPolicyV1, encodeEncryptedMediaPolicyV1, } from "./encrypted-media.js";
+import { decodeEncryptedMediaPolicyV2, encodeEncryptedMediaPolicyV2, } from "./encrypted-media-v2.js";
 import { decodeAgentTextStreamQuicPolicyV1, encodeAgentTextStreamQuicPolicyV1, } from "./agent-text-stream.js";
+import { decodeGroupLifecycleV1, encodeGroupLifecycleV1, } from "./group-lifecycle.js";
 /**
  * Read + build helpers over the Marmot v2 app components carried in the MLS
  * `app_data_dictionary` GroupContext extension (`0x0006`).
@@ -52,18 +56,51 @@ export function buildAppDataDictionary(entries) {
 /**
  * Builds the `app_data_dictionary` GroupContext extension from component
  * entries (sorting them first). Use at group creation to seed initial state.
+ *
+ * Also refuses a `0x8009` data entry (`ACCOUNT_IDENTITY_PROOF_COMPONENT_ID`):
+ * the account identity proof is LeafNode-only data and MUST NOT be created as
+ * GroupContext state (PROOF-06, D-08). A `0x0001` required-component-id list
+ * that merely names `0x8009` is unaffected by this guard — only a keyed data
+ * entry is rejected.
  */
 export function makeAppComponentsExtension(entries) {
+    if (entries.some((entry) => entry.componentId === SAFE_AAD_COMPONENT_ID)) {
+        throw new UsageError("SafeAAD is LeafNode-only advertisement data and is not supported as group-component state");
+    }
+    if (entries.some((entry) => entry.componentId === ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)) {
+        throw new UsageError("account identity proof (0x8009) is LeafNode-only data and is not supported as group-component state");
+    }
     return makeAppDataDictionaryExtension(buildAppDataDictionary(entries));
 }
 /**
  * Builds the `app_data_dictionary` extension carried on a key package's LeafNode
- * to advertise the component ids this member supports. The dictionary holds a
- * single `app_components` (`0x0001`) entry listing {@link SUPPORTED_APP_COMPONENT_IDS}
- * (or the given override). Mirrors darkmatter's `leaf_app_components_extension`.
+ * to advertise the component ids this member supports and carry its `0x8009`
+ * account identity proof. Mirrors MDK's `leaf_app_components_extension`
+ * (`refs/mdk/crates/cgka-engine/src/app_components.rs`): the dictionary holds
+ * exactly three entries — the `app_components` (`0x0001`) advertising list
+ * (sorted, de-duplicated, always including `0x8009` regardless of whether
+ * `supportedIds` names it), an empty SafeAAD (`0x0002`) list, and the `0x8009`
+ * proof data itself. This structure is correct by construction: one advertising
+ * list, an empty SafeAAD, and exactly one proof entry.
+ *
+ * @param proof The 104-byte encoded `0x8009` account identity proof
+ *   (see `produceAccountIdentityProof`). Throws `UsageError` if not exactly
+ *   {@link AUTHORIZATION_PROOF_LENGTH} bytes.
+ * @param supportedIds Component ids advertised in the `app_components` list,
+ *   defaulting to {@link SUPPORTED_APP_COMPONENT_IDS}.
  */
-export function makeLeafAppComponentsExtension(supportedIds = SUPPORTED_APP_COMPONENT_IDS) {
-    return makeAppComponentsExtension([appComponentsEntry([...supportedIds])]);
+export function makeLeafAppComponentsExtension(proof, supportedIds = SUPPORTED_APP_COMPONENT_IDS) {
+    if (proof.length !== AUTHORIZATION_PROOF_LENGTH)
+        throw new UsageError(`account identity proof component data must be exactly ${AUTHORIZATION_PROOF_LENGTH} bytes`);
+    return makeAppDataDictionaryExtension(buildAppDataDictionary([
+        appComponentsEntry([
+            APP_COMPONENTS_COMPONENT_ID,
+            ...supportedIds,
+            ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,
+        ]),
+        componentEntry(SAFE_AAD_COMPONENT_ID, encodeComponentsList([])),
+        componentEntry(ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, proof),
+    ]));
 }
 function defineCodec(id, decode, encode) {
     return { id, decode, encode };
@@ -77,7 +114,10 @@ const MESSAGE_RETENTION_CODEC = defineCodec(GROUP_MESSAGE_RETENTION_COMPONENT_ID
 (seconds) => encodeMessageRetentionV1(seconds));
 const AGENT_TEXT_STREAM_CODEC = defineCodec(AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, decodeAgentTextStreamQuicPolicyV1, encodeAgentTextStreamQuicPolicyV1);
 const GROUP_AVATAR_URL_CODEC = defineCodec(GROUP_AVATAR_URL_COMPONENT_ID, decodeGroupAvatarUrlV1, encodeGroupAvatarUrlV1);
+const GROUP_BLOSSOM_IMAGE_CODEC = defineCodec(GROUP_BLOSSOM_IMAGE_COMPONENT_ID, decodeGroupBlossomImageV1, encodeGroupBlossomImageV1);
 const ENCRYPTED_MEDIA_CODEC = defineCodec(GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, decodeEncryptedMediaPolicyV1, encodeEncryptedMediaPolicyV1);
+const ENCRYPTED_MEDIA_V2_CODEC = defineCodec(GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, decodeEncryptedMediaPolicyV2, encodeEncryptedMediaPolicyV2);
+const GROUP_LIFECYCLE_CODEC = defineCodec(GROUP_LIFECYCLE_COMPONENT_ID, decodeGroupLifecycleV1, encodeGroupLifecycleV1);
 /** Reads + decodes a component from the dictionary, or `undefined` if absent. */
 function getComponent(extensions, codec) {
     const data = getComponentData(extensions, codec.id);
@@ -118,9 +158,21 @@ export function getAgentTextStreamPolicy(extensions) {
 export function getGroupAvatarUrl(extensions) {
     return getComponent(extensions, GROUP_AVATAR_URL_CODEC);
 }
+/** The `group.blossom.image.v1` encrypted group image (`0x8002`). */
+export function getGroupBlossomImage(extensions) {
+    return getComponent(extensions, GROUP_BLOSSOM_IMAGE_CODEC);
+}
 /** The `group.encrypted-media.v1` policy (`0x8008`). */
 export function getEncryptedMediaPolicy(extensions) {
     return getComponent(extensions, ENCRYPTED_MEDIA_CODEC);
+}
+/** The `group.encrypted-media.v2` policy (`0x800b`). */
+export function getEncryptedMediaPolicyV2(extensions) {
+    return getComponent(extensions, ENCRYPTED_MEDIA_V2_CODEC);
+}
+/** The `group.lifecycle.v1` protocol state (`0x800c`). */
+export function getGroupLifecycle(extensions) {
+    return getComponent(extensions, GROUP_LIFECYCLE_CODEC);
 }
 // ---------------------------------------------------------------------------
 // Typed entry builders (for create-time dictionaries and updates)
@@ -153,8 +205,19 @@ export function agentTextStreamEntry(policy) {
 export function groupAvatarUrlEntry(avatar) {
     return entryFor(GROUP_AVATAR_URL_CODEC, avatar);
 }
+/** Builds the `group.blossom.image.v1` entry (an empty state clears the image). */
+export function groupBlossomImageEntry(image) {
+    return entryFor(GROUP_BLOSSOM_IMAGE_CODEC, image);
+}
 /** Builds the `group.encrypted-media.v1` entry. */
 export function encryptedMediaEntry(policy) {
     return entryFor(ENCRYPTED_MEDIA_CODEC, policy);
 }
-//# sourceMappingURL=dictionary.js.map
+/** Builds the `group.encrypted-media.v2` entry. */
+export function encryptedMediaV2Entry(policy) {
+    return entryFor(ENCRYPTED_MEDIA_V2_CODEC, policy);
+}
+/** Builds the `group.lifecycle.v1` entry. */
+export function groupLifecycleEntry(value) {
+    return entryFor(GROUP_LIFECYCLE_CODEC, value);
+}

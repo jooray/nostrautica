@@ -1,5 +1,5 @@
 /** @module @category Client - Proposals */
-import { ProposalRemove } from "ts-mls";
+import { ProposalRemove } from "../../../vendor/ts-mls/index.js";
 import { ProposalAction } from "../marmot-group.js";
 /**
  * Proposes removing all leaf nodes (devices/clients) for a given Nostr user.

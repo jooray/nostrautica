@@ -4,4 +4,3 @@
 export * from "./welcome-event.js";
 // MLS join: decrypt the group secrets/GroupInfo from a Welcome (uses joinGroup).
 export * from "./welcome-join.js";
-//# sourceMappingURL=welcome.js.map

@@ -67,4 +67,3 @@ export function decodeAdminPolicyV1(data) {
     }
     return keys.map((k) => bytesToHex(k));
 }
-//# sourceMappingURL=admin-policy.js.map

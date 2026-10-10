@@ -1,21 +1,30 @@
 import { EventSigner } from "applesauce-core";
 import { type NostrEvent } from "applesauce-core/helpers";
 import { EventEmitter } from "eventemitter3";
-import { CiphersuiteImpl, ClientState, CryptoProvider, Welcome } from "ts-mls";
+import { CiphersuiteImpl, ClientState, CryptoProvider, Welcome } from "../vendor/ts-mls/index.js";
 import { SerializedClientState } from "../core/client-state.js";
 import type { MarmotGroupInfo } from "../core/client-state.js";
-import { type AccountIdentityProofSigner } from "../core/account-identity-proof.js";
 import type { ConvergencePolicy } from "../core/convergence.js";
 import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
 import type { AuditContextOptions, AuditSink } from "../audit/index.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
-import { BaseGroupHistory, BaseGroupMedia, GroupHistoryFactory, GroupMediaFactory, MarmotGroup } from "./group/marmot-group.js";
+import type { IngestPersistenceCapability } from "./marmot-client.js";
+import { BaseGroupHistory, BaseGroupMedia, GroupHistoryFactory, GroupMediaFactory, MarmotGroup, type GroupDisbandedEvent } from "./group/marmot-group.js";
 import type { WelcomeKeyPackageCandidate } from "./key-package-store.js";
 import { type CreateGroupOptions } from "./group-factory.js";
 import type { GroupRuntime } from "./runtime/group-runtime.js";
 import type { GroupPublishResult, GroupSessionSendIntent } from "./session/group-effects.js";
 import type { DispositionedIngestResult, GroupSession } from "./session/group-session.js";
 import type { NostrNetworkInterface, PublishResponse, Unsubscribable } from "./nostr-interface.js";
+import { type RejectReason, type VerifyEventMethod } from "./verify.js";
+export declare class BoundedIdCache {
+    #private;
+    readonly capacity: number;
+    constructor(capacity: number);
+    get size(): number;
+    has(id: string): boolean;
+    add(id: string): void;
+}
 /** Options for {@link GroupsManager.connect} / {@link GroupsManager.connectAll}. */
 export interface ConnectOptions {
     /**
@@ -29,19 +38,26 @@ export interface ConnectOptions {
 export type GroupsManagerOptions<THistory extends BaseGroupHistory | undefined = undefined, TMedia extends BaseGroupMedia | undefined = undefined> = {
     /** The backend storing serialized group state bytes */
     store: GenericKeyValueStore<SerializedClientState>;
+    ingestStateStore: GenericKeyValueStore<Uint8Array>;
+    lifecycleStore: GenericKeyValueStore<Uint8Array>;
+    ingestPersistence: IngestPersistenceCapability;
     /**
      * Dedicated backend for the per-group rewind-history blob. When provided, the
      * convergence rewind window is persisted and survives a restart. Optional.
      */
     rewindStore?: GenericKeyValueStore<Uint8Array>;
+    /**
+     * Dedicated backend for the persisted removed-inactive marker (D-12), keyed
+     * by the same group-id hex as {@link store}. When provided, the fact that an
+     * involuntary removal has already been realized survives a restart, so the
+     * `removed` event fires exactly once across process boundaries and a rewind
+     * that supersedes the removal can clear it durably. Optional — when omitted,
+     * realization degrades to in-memory-only (fires once per process, does not
+     * survive a restart).
+     */
+    removedMarkerStore?: GenericKeyValueStore<boolean>;
     /** The signer used for the clients identity */
     signer: EventSigner;
-    /**
-     * Signs the account identity proof carried on the group creator's own leaf.
-     * Required for the creator to be addable to spec-conformant groups, which
-     * validate the proof on every leaf.
-     */
-    accountProofSigner?: AccountIdentityProofSigner;
     /** The nostr relay pool to use for the client */
     network: NostrNetworkInterface;
     /** Optional forensic audit sink inherited by groups. Omitted by default. */
@@ -66,6 +82,12 @@ export type GroupsManagerOptions<THistory extends BaseGroupHistory | undefined =
      * that aims to retain and process everything.
      */
     ingestionPool?: IngestionPoolOptions;
+    /**
+     * Injectable Nostr event verifier gating the 445 `#connectGroup` drain
+     * (SEC-01): every inbound group-message event is verified before it
+     * reaches `group.ingest()`. Defaults to applesauce's `verifyEvent`.
+     */
+    verifyEvent?: VerifyEventMethod;
 };
 /** Events emitted by {@link GroupsManager} */
 export type GroupsManagerEvents<THistory extends BaseGroupHistory | undefined = any, TMedia extends BaseGroupMedia | undefined = any> = {
@@ -92,6 +114,8 @@ export type GroupsManagerEvents<THistory extends BaseGroupHistory | undefined = 
      * call {@link GroupsManager.destroy} to purge it.
      */
     removed: (groupId: Uint8Array) => void;
+    /** Emitted once for the selected, durably recorded terminal commit. */
+    disbanded: (groupId: Uint8Array, evidence: GroupDisbandedEvent) => void;
     /**
      * Emitted by a {@link GroupsManager.connect} subscription when a received
      * transport event could not be read (e.g. an epoch beyond the retained
@@ -99,6 +123,13 @@ export type GroupsManagerEvents<THistory extends BaseGroupHistory | undefined = 
      * connection loop logging them.
      */
     unreadable: (groupId: Uint8Array, event: NostrEvent) => void;
+    /**
+     * Emitted by a {@link GroupsManager.connect} subscription when an inbound
+     * kind-445 event is rejected at the trust boundary — before it ever
+     * reaches `group.ingest()` — for an invalid signature or a malformed `h`
+     * tag (SEC-01/WIRE-02).
+     */
+    rejected: (groupId: Uint8Array, event: NostrEvent, reason: RejectReason) => void;
 };
 /**
  * Orchestrates the lifecycle of {@link MarmotGroup} instances. Delegates
@@ -112,12 +143,11 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
     readonly store: GenericKeyValueStore<SerializedClientState>;
     /** The signer used for the clients identity */
     readonly signer: EventSigner;
-    /** Signs the account identity proof on the group creator's own leaf */
-    readonly accountProofSigner?: AccountIdentityProofSigner;
     /** The nostr relay pool to use for the client */
     readonly network: NostrNetworkInterface;
     /** Crypto provider for cryptographic operations */
     cryptoProvider: CryptoProvider;
+    readonly ingestPersistence: IngestPersistenceCapability;
     constructor(options: GroupsManagerOptions<THistory, TMedia>);
     /** Returns the list of currently loaded group instances */
     get loaded(): MarmotGroup<THistory, TMedia>[];
@@ -144,13 +174,17 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
      * Invites a user to a group from their KeyPackage event (kind 30443).
      *
      * Resolves the committing member from the manager's signer, builds an Add
-     * commit intent via {@link createInviteIntent}, and drives it through the
-     * group session/runtime. After the commit acks, the runtime delivers a
-     * Welcome to the invitee via NIP-59 gift wrap.
+     * commit intent via {@link createInviteIntent} (gated on the same injected
+     * verifier as the 445/1059/30443 inbound boundaries — SEC-01/WIRE-01/
+     * WIRE-02), and drives it through the group session/runtime. After the
+     * commit acks, the runtime delivers a Welcome to the invitee via NIP-59
+     * gift wrap.
      *
      * @returns Per-relay publish responses for the commit group event.
-     * @throws Error if the event is not a KeyPackage kind or the credential
-     *   identity does not match the event author.
+     * @throws Error if the event is not a KeyPackage kind, fails signature
+     *   verification, has invalid required-tag cardinality, has an over-long
+     *   or not-current Lifetime, or the credential identity does not match
+     *   the event author.
      */
     invite(groupId: Uint8Array | string, keyPackageEvent: NostrEvent): Promise<Record<string, PublishResponse>>;
     /**
@@ -215,9 +249,12 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
      *
      * Mirrors the darkmatter engine `do_join_welcome`: the KeyPackageRef→private
      * bundle match and the MLS join happen here, in the group layer, not in the
-     * composition root. Tries candidates in priority order, validates every leaf
-     * carries a valid account identity proof, then adopts the resulting state and
-     * emits `joined`.
+     * composition root. Tries candidates in priority order, then requires the
+     * joined GroupContext to classify as the current `0x8009` profile
+     * (rejecting legacy, mixed, and neither) and every member leaf's proof to
+     * validate against the group ciphersuite — both before adopting state, per
+     * `refs/marmot/app-components/account-identity-proof-v2.md` "Migration from
+     * v1" — then adopts the resulting state and emits `joined`.
      *
      * @returns The joined group and the KeyPackageRef that was consumed (so the
      *   caller can mark it used), or `consumedKeyPackageRef: null` if none matched.

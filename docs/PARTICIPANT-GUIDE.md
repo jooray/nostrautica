@@ -340,6 +340,20 @@ and joining the group can take a little while, or occasionally need a retry,
 before messages start flowing. If the tab is stuck on "setting up," give it a
 few minutes and reopen it.
 
+**Also chat from White Noise or another Marmot client.** Under **Chat
+devices** you can link a White Noise account (or one in another Marmot client,
+such as Amethyst), so you can read and answer the room from your phone. Enter its npub, or tap **Use my account npub** if White Noise
+runs on the same key you signed in with here. For your own npub that's the
+whole job. For any other npub, White Noise receives an invite called
+"Nostrautica: confirm White Noise link". Its last message is the code on its
+own, so you can copy it. Accept it, enter the code in Nostrautica within 30
+minutes, and don't share it with anyone. After that the organizer's service invites your White Noise account
+into the event chat. It shows up in your device list and you remove it like
+any other device. Like any new device, it only sees messages sent after it
+joined. White Noise has to be a current version. If the link is refused
+because the coordinator can't use your White Noise keys, update White Noise,
+open it once, and try again.
+
 ## 6. Your event report
 
 Any time before, during, or after the event, open **Event report** from

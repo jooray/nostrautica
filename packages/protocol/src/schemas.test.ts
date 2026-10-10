@@ -30,6 +30,10 @@ import {
   profileCorrectionContentSchema,
   withdrawalContentSchema,
   chatKeyAttestationContentSchema,
+  rosterChatKeySchema,
+  normalizeChatLinkCode,
+  CHAT_LINK_CODE_ALPHABET,
+  CHAT_LINK_CODE_LENGTH,
   attendeeProfileSchema,
   aiProfileSchema,
   membersPostContentSchema,
@@ -387,6 +391,66 @@ describe("every §7 payload round-trips through JSON", () => {
         rogue: true, // strict → rejected
       }),
     ).toThrow();
+  });
+
+  describe("21607 external-client link ops (NIP §10.5)", () => {
+    const base = { v: 2, a: "31923:" + hex + ":ev", chat_pubkey: "c".repeat(64) } as const;
+
+    it("round-trips link (label, no proof) and link_confirm (code)", () => {
+      roundTrips(chatKeyAttestationContentSchema, { ...base, op: "link", label: "White Noise" });
+      roundTrips(chatKeyAttestationContentSchema, { ...base, op: "link_confirm", code: "ABCD-EFGH" });
+    });
+
+    it("link requires a label and refuses a §10.2 proof", () => {
+      expect(() => chatKeyAttestationContentSchema.parse({ ...base, op: "link" })).toThrow();
+      expect(() =>
+        chatKeyAttestationContentSchema.parse({ ...base, op: "link", label: "WN", proof: "a".repeat(128) }),
+      ).toThrow();
+    });
+
+    it("link_confirm requires a code; a code anywhere else is rejected", () => {
+      expect(() => chatKeyAttestationContentSchema.parse({ ...base, op: "link_confirm" })).toThrow();
+      expect(() =>
+        chatKeyAttestationContentSchema.parse({ ...base, op: "link", label: "WN", code: "ABCDEFGH" }),
+      ).toThrow();
+      expect(() =>
+        chatKeyAttestationContentSchema.parse({
+          ...base,
+          op: "add",
+          label: "Chrome",
+          proof: "a".repeat(128),
+          code: "ABCDEFGH",
+        }),
+      ).toThrow();
+      // Bounded: a code is a few characters, not a payload.
+      expect(() =>
+        chatKeyAttestationContentSchema.parse({ ...base, op: "link_confirm", code: "A".repeat(33) }),
+      ).toThrow();
+    });
+
+    it("existing add/revoke shapes are unchanged (backward compatible)", () => {
+      roundTrips(chatKeyAttestationContentSchema, { ...base, op: "revoke" });
+      roundTrips(chatKeyAttestationContentSchema, {
+        ...base,
+        op: "add",
+        label: "Chrome",
+        proof: "a".repeat(128),
+      });
+    });
+
+    it("normalizeChatLinkCode strips separators and case", () => {
+      expect(normalizeChatLinkCode(" abcd-efgh ")).toBe("ABCDEFGH");
+      expect(normalizeChatLinkCode("AB.CD EF-GH")).toBe("ABCDEFGH");
+      // The alphabet excludes the look-alikes the code is read across screens with.
+      for (const c of "01OIL") expect(CHAT_LINK_CODE_ALPHABET).not.toContain(c);
+      expect(CHAT_LINK_CODE_LENGTH).toBe(8);
+    });
+
+    it("roster chat_keys accept external:true and nothing else for the flag", () => {
+      const ok = rosterChatKeySchema.parse({ pubkey: "c".repeat(64), added_at: 1, external: true });
+      expect(ok.external).toBe(true);
+      expect(() => rosterChatKeySchema.parse({ pubkey: "c".repeat(64), added_at: 1, external: false })).toThrow();
+    });
   });
 
   it("31605 match list", () =>

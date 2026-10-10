@@ -1,12 +1,15 @@
 /** @module @category Client - Key Package Manager */
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { EventEmitter } from "eventemitter3";
-import { getKeyPackageReference, getKeyPackageRelays, } from "../core/key-package-event.js";
-import { ADDRESSABLE_KEY_PACKAGE_KIND } from "../core/protocol.js";
+import { getKeyPackageLifetime, getKeyPackageRelays, } from "../core/key-package-event.js";
+import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_MLS_VERSION_TAG, } from "../core/protocol.js";
 import { logger } from "../utils/debug.js";
+import { getSingletonTagValue } from "../utils/tag-cardinality.js";
+import { isLifetimeCurrentWithGrace, isLifetimeWithinCap, } from "../utils/timestamp.js";
 import { KeyPackageNotFoundError, KeyPackageRotatePreconditionError, MissingRelayError, MissingSlotIdentifierError, } from "./key-package-errors.js";
 import { KeyPackagePublisher } from "./key-package-publisher.js";
 import { KeyPackageStore, } from "./key-package-store.js";
+import { defaultVerifyEvent, safeVerifyEvent, } from "./verify.js";
 // Re-export the storage entry types and errors from their dedicated modules so
 // existing imports from this module keep working.
 export { KeyPackageNotFoundError, KeyPackageRotatePreconditionError, MissingRelayError, MissingSlotIdentifierError, } from "./key-package-errors.js";
@@ -29,6 +32,11 @@ export class KeyPackageManager extends EventEmitter {
     clientId;
     #store;
     #publisher;
+    /**
+     * The injectable event verifier for the 30443 trust boundary (SEC-01),
+     * consumed by {@link track}'s inbound-verify gate.
+     */
+    #verifyEvent;
     #log = logger.extend("KeyPackageManager");
     constructor(options) {
         super();
@@ -37,9 +45,10 @@ export class KeyPackageManager extends EventEmitter {
         this.#publisher = new KeyPackagePublisher({
             signer: options.signer,
             network: options.network,
-            accountProofSigner: options.accountProofSigner,
             cryptoProvider: options.cryptoProvider,
         });
+        this.#verifyEvent = options.verifyEvent ?? defaultVerifyEvent;
+        this.#log("using %s event verifier", this.#verifyEvent === defaultVerifyEvent ? "default" : "custom");
         // Re-emit storage lifecycle events so the manager's public event surface is
         // unchanged by the internal split.
         this.#store.on("added", (keyPackage) => this.emit("added", keyPackage));
@@ -87,7 +96,11 @@ export class KeyPackageManager extends EventEmitter {
             isLastResort: options.isLastResort,
         });
         // Store private material locally, including the slot identifier
-        const refHex = await this.#store.add({ ...keyPackage, identifier });
+        const refHex = await this.#store.add({
+            ...keyPackage,
+            identifier,
+            relays: options.relays,
+        });
         // Build, sign and publish the kind 30443 event
         const signed = await this.#publisher.publish({
             keyPackage: keyPackage.publicPackage,
@@ -97,7 +110,7 @@ export class KeyPackageManager extends EventEmitter {
             protected: options.protected,
         });
         // Record the published event on the stored entry
-        await this.#store.addPublished(refHex, signed);
+        await this.#store.addPublished(refHex, signed, options.relays);
         const stored = await this.#store.get(refHex);
         if (!stored)
             throw new Error("Key package not found after store operation");
@@ -110,17 +123,24 @@ export class KeyPackageManager extends EventEmitter {
         };
     }
     /**
-     * Ensures this client has at least one unused KeyPackage published, so peers
-     * can always invite it. A no-op (returning the existing unused KeyPackage)
-     * when one already exists; otherwise creates and publishes a fresh one to
-     * `options.relays` via {@link create}. Idempotent — safe to call on every
-     * startup.
+     * Ensures this client has at least one unused, current KeyPackage published,
+     * so peers can always invite it. A no-op (returning the existing unused
+     * current KeyPackage) when one already exists; otherwise creates and
+     * publishes a fresh one to `options.relays` via {@link create}. Idempotent —
+     * safe to call on every startup.
      *
-     * @returns The existing unused KeyPackage, or the freshly created one.
+     * Stored entries flagged `nonCurrent` (D-09) — for example a KeyPackage
+     * published by a pre-v2 release that lacks a valid `0x8009` proof — are
+     * skipped and left stored as-is; nothing is deleted and no relay deletion
+     * event is published. Their kind-30443 events therefore stay discoverable on
+     * relays, and a peer's invite that picks one will fail, until {@link purge}
+     * publishes a NIP-09 deletion for them — call it explicitly when migrating.
+     *
+     * @returns The existing unused current KeyPackage, or the freshly created one.
      */
     async ensurePublished(options) {
         const existing = await this.list();
-        const unused = existing.find((pkg) => !pkg.used);
+        const unused = existing.find((pkg) => !pkg.used && !pkg.nonCurrent);
         if (unused)
             return unused;
         return this.create(options);
@@ -152,9 +172,10 @@ export class KeyPackageManager extends EventEmitter {
         // Determine relays for the new key package
         const oldEvents = existing.published ?? [];
         const relaysForNew = options?.relays ??
-            (oldEvents.length > 0
-                ? getKeyPackageRelays(oldEvents[oldEvents.length - 1])
-                : undefined);
+            (existing.relays && existing.relays.length > 0
+                ? existing.relays
+                : undefined) ??
+            legacyRelaysOf(oldEvents);
         if (!relaysForNew || relaysForNew.length === 0) {
             throw new KeyPackageRotatePreconditionError();
         }
@@ -201,17 +222,20 @@ export class KeyPackageManager extends EventEmitter {
      *
      * @param refs - One or more key package references (hex string or Uint8Array)
      */
-    async purge(refs) {
+    async purge(refs, options) {
         const refList = Array.isArray(refs) ? refs : [refs];
         this.#log("purging %d key package(s)", refList.length);
         // Collect all published events and relays across the provided refs
         const allEvents = [];
-        const allRelays = new Set();
+        const allRelays = new Set(options?.relays ?? []);
         for (const ref of refList) {
             const stored = await this.#store.get(ref);
             const events = stored?.published ?? [];
+            for (const relay of stored?.relays ?? [])
+                allRelays.add(relay);
             for (const event of events) {
                 allEvents.push(event);
+                // Events published by older versions still carry a relays tag.
                 for (const relay of getKeyPackageRelays(event) ?? []) {
                     allRelays.add(relay);
                 }
@@ -230,10 +254,16 @@ export class KeyPackageManager extends EventEmitter {
     // Publish tracking
     // ---------------------------------------------------------------------------
     /**
-     * Observes a Nostr event and, if it is a kind 30443 key package event whose
-     * `i` tag (MIP-00 KeyPackageRef) matches its decoded body, records it in the
-     * store. Events with no `i` tag, an undecodable body, or an `i` tag that does
-     * not match the recomputed ref are rejected.
+     * Observes a Nostr event and, if it is a kind 30443 key package event that
+     * passes the trust boundary (SEC-01/WIRE-01/WIRE-02), records it in the
+     * store. Non-key-package events are silently ignored. Events that fail the
+     * boundary — invalid signature, non-singleton/invalid `d`/`i`/
+     * `mls_protocol_version`, an over-long or not-current KeyPackage Lifetime,
+     * an undecodable body, or an `i` tag that does not match the recomputed
+     * ref — are rejected: a `rejected` event is emitted with a typed
+     * {@link RejectReason} (except for the last two, which the underlying
+     * {@link KeyPackageStore.addPublished} chokepoint throws on and this
+     * method converts to a `false` return without an emit).
      *
      * @param event - Any Nostr event; non-key-package events are silently ignored
      * @returns `true` if the event was recorded, `false` if ignored or rejected
@@ -242,14 +272,38 @@ export class KeyPackageManager extends EventEmitter {
         if (event.kind !== ADDRESSABLE_KEY_PACKAGE_KIND) {
             return false;
         }
-        const refHex = getKeyPackageReference(event);
-        if (!refHex)
+        // Trust boundary (SEC-01/WIRE-01/WIRE-02): verify signature, required-tag
+        // cardinality, and KeyPackage Lifetime BEFORE the event is ever persisted.
+        if (!safeVerifyEvent(this.#verifyEvent, event)) {
+            this.emit("rejected", event, "invalid-signature");
             return false;
+        }
+        if (getSingletonTagValue(event, "d") === undefined) {
+            this.emit("rejected", event, "tag-cardinality");
+            return false;
+        }
+        const refHex = getSingletonTagValue(event, "i");
+        if (refHex === undefined) {
+            this.emit("rejected", event, "tag-cardinality");
+            return false;
+        }
+        if (getSingletonTagValue(event, KEY_PACKAGE_MLS_VERSION_TAG) !== "1.0") {
+            this.emit("rejected", event, "tag-cardinality");
+            return false;
+        }
+        const lifetime = getKeyPackageLifetime(event);
+        if (!lifetime ||
+            !isLifetimeWithinCap(lifetime) ||
+            !isLifetimeCurrentWithGrace(lifetime)) {
+            this.emit("rejected", event, "lifetime-cap");
+            return false;
+        }
         try {
             await this.#store.addPublished(refHex, event);
         }
         catch {
-            // Event body could not be decoded as a KeyPackage — treat as invalid
+            // Event body could not be decoded as a KeyPackage, or its `i` tag does
+            // not match the recomputed ref — treat as invalid.
             return false;
         }
         const relays = getKeyPackageRelays(event) ?? [];
@@ -261,7 +315,8 @@ export class KeyPackageManager extends EventEmitter {
     // ---------------------------------------------------------------------------
     /**
      * Lists all locally stored key packages, each enriched with their published
-     * Nostr events.
+     * Nostr events. Entries lacking a valid current account identity proof
+     * (`0x8009`) carry `nonCurrent: true` (D-09) — see {@link ensurePublished}.
      */
     async list() {
         return this.#store.snapshot();
@@ -390,4 +445,12 @@ export class KeyPackageManager extends EventEmitter {
         }
     }
 }
-//# sourceMappingURL=key-package-manager.js.map
+/**
+ * Relays named by the `relays` tag of the newest event, for key packages
+ * published by versions that still emitted that tag.
+ */
+function legacyRelaysOf(events) {
+    return events.length > 0
+        ? getKeyPackageRelays(events[events.length - 1])
+        : undefined;
+}

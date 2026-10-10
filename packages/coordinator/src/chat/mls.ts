@@ -6,27 +6,58 @@
  * The port exists so {@link MarmotAdmin}'s decision logic (who to add on approve,
  * who to remove on revoke, dedupe, chat-off inertness) is unit-testable against a
  * fake, while the one file that actually talks to the alpha marmot-ts library —
- * with its known frictions (the deep-imported `proposeRemoveUser`, whose
- * array-action result must be resolved and flattened by hand before commit) — is
- * isolated here.
+ * with its known frictions (`proposeRemoveUser`'s array-action result must be
+ * resolved and flattened by hand before commit) — is isolated here.
  */
-import { MarmotClient } from "@internet-privacy/marmot-ts/client";
 import {
+  MarmotClient,
+  Proposals,
+  createChatRumor,
+  createApplicationMessageIntent,
+} from "@internet-privacy/marmot-ts/client";
+import {
+  getKeyPackage,
   getNostrGroupIdHex,
   getPubkeyLeafNodes,
+  validateKeyPackageAccountIdentityProof,
 } from "@internet-privacy/marmot-ts/core";
-// `proposeRemoveUser`/`proposeUpdateMetadata` are NOT in marmot-ts's export map
-// (UPSTREAM U7) — deep-import them through the vendored package's `./lib/*`
-// wildcard export.
-import { proposeRemoveUser } from "@internet-privacy/marmot-ts/lib/client/group/proposals/remove-member.js";
-import { proposeUpdateMetadata } from "@internet-privacy/marmot-ts/lib/client/group/proposals/update-metadata.js";
 import type { NostrNetworkInterface } from "@internet-privacy/marmot-ts/client";
+import { getPublicKey } from "nostr-tools/pure";
 import type { Store } from "../store/db.js";
-import { makeMarmotStores } from "./stores.js";
-import {
-  makeCoordinatorSigner,
-  makeCoordinatorProofSigner,
-} from "./signer.js";
+import { makeMarmotStores, purgeGroupState } from "./stores.js";
+import { makeCoordinatorSigner } from "./signer.js";
+
+const { proposeRemoveUser, proposeUpdateMetadata } = Proposals;
+
+/**
+ * Whether a stored group can still be run by this library generation.
+ *
+ * `current` — loads, and its GroupContext is the current account-identity-proof
+ * profile (component 0x8009, which White Noise / MDK require). `unsupported` —
+ * loads, but was created under the legacy 0xF2F1 proof (marmot-ts 0.6.0) or a
+ * mixed profile: the library refuses every inbound event for it and it can never
+ * hold an MDK member. `unreadable` — the stored state does not even deserialize
+ * (or is missing), which a format change between generations can also cause.
+ */
+export type GroupProfileStatus = "current" | "unsupported" | "unreadable";
+
+/**
+ * Whether a kind-30443 carries a CURRENT KeyPackage: one with a valid 0x8009
+ * account identity proof. A KeyPackage from before the upgrade (legacy 0xF2F1
+ * proof, published by an app that has not reloaded yet, or by an outdated
+ * White Noise) can never join a current group, and is not the device's fault
+ * either — it is simply stale, and the device replaces it the next time it runs
+ * current code. Never throws.
+ */
+export function keyPackageProfile(event: AnyEvent): { current: boolean; reason?: string } {
+  try {
+    validateKeyPackageAccountIdentityProof(getKeyPackage(event as never));
+    return { current: true };
+  } catch (e) {
+    const reason = (e as { reason?: string }).reason ?? (e instanceof Error ? e.message : String(e));
+    return { current: false, reason };
+  }
+}
 
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
 
@@ -49,7 +80,7 @@ export interface ChatMls {
   evaluateKeyPackage?(
     mlsGroupIdHex: string,
     keyPackageEvent: AnyEvent,
-  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean }>;
+  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean; legacy?: boolean }>;
   /** Whether `pubkey` already holds at least one leaf in the group. */
   isMember(mlsGroupIdHex: string, pubkey: string): Promise<boolean>;
   /** Add a candidate from their key package (Add commit + Welcome delivery). */
@@ -76,6 +107,36 @@ export interface ChatMls {
    * the coordinator out of admin commits.
    */
   setAdmins(mlsGroupIdHex: string, adminPubkeys: string[]): Promise<void>;
+  /** The group's avatar URL (group.avatar-url.v1), "" when it has none. */
+  getAvatar(mlsGroupIdHex: string): Promise<string>;
+  /**
+   * Set the group's avatar URL — "" clears it (the component's empty state). The
+   * caller passes an already-normalized URL (see avatar.ts). A no-op when it is
+   * already the group's avatar; returns whether a commit was made.
+   */
+  setAvatar(mlsGroupIdHex: string, url: string): Promise<boolean>;
+  /**
+   * Post one kind-9 chat message, authored by the coordinator, to a group. Used
+   * only for the external-client link confirmation group (NIP §10.5), whose one
+   * message carries the one-time code. Convergence-gated like any send.
+   */
+  sendText(mlsGroupIdHex: string, content: string): Promise<void>;
+  /** Drop a group's local state for good (the confirmation group, after use). */
+  destroyGroup(mlsGroupIdHex: string): Promise<void>;
+  /** See {@link GroupProfileStatus}. Never throws. */
+  groupProfile?(mlsGroupIdHex: string): Promise<GroupProfileStatus>;
+  /**
+   * Every group id this client holds local state for, including ones whose state
+   * no longer loads — so retirement can find groups no `marmot_groups` row names
+   * (a link-confirmation group left behind by a crash).
+   */
+  storedGroupIds?(): Promise<string[]>;
+  /**
+   * Drop a group's local state even when it cannot be loaded. Never publishes:
+   * a retired group gets no leave/self-remove traffic, it simply stops existing
+   * here. Idempotent.
+   */
+  retireGroup?(mlsGroupIdHex: string): Promise<void>;
 }
 
 /** Build a real `MarmotClient`-backed {@link ChatMls} off the coordinator key. */
@@ -88,20 +149,35 @@ export function createMarmotClientMls(deps: {
 }): { mls: MarmotClientMls; client: MarmotClient } {
   const stores = makeMarmotStores(deps.store);
   const client = new MarmotClient({
+    // Also signs the kind-450 account identity proof (0x8009) on every
+    // KeyPackage and leaf this client creates.
     signer: makeCoordinatorSigner(deps.coordSk) as never,
-    accountProofSigner: makeCoordinatorProofSigner(deps.coordSk),
     network: deps.network,
     groupStateStore: stores.groupStateStore,
     keyPackageStore: stores.keyPackageStore,
     inviteStore: stores.inviteStore,
     rewindStore: stores.rewindStore,
+    // Durable lifecycle + ingest evidence and removal marker, so a restart does
+    // not forget a terminal commit, a convergence effect, or a realized removal.
+    lifecycleStore: stores.lifecycleStore,
+    ingestStateStore: stores.ingestStateStore,
+    removedMarkerStore: stores.removedMarkerStore,
     clientId: deps.clientId ?? "nostrautica-coordinator",
   });
-  return { mls: new MarmotClientMls(client), client };
+  return {
+    mls: new MarmotClientMls(client, getPublicKey(deps.coordSk), (id) => purgeGroupState(deps.store, id)),
+    client,
+  };
 }
 
 export class MarmotClientMls implements ChatMls {
-  constructor(private readonly client: MarmotClient) {}
+  constructor(
+    private readonly client: MarmotClient,
+    /** The coordinator's pubkey: the author of the rumors {@link sendText} posts. */
+    private readonly selfPubkey?: string,
+    /** Raw removal of one group's persisted state, for state that will not load. */
+    private readonly purgeStoredGroup?: (mlsGroupIdHex: string) => void,
+  ) {}
 
   /**
    * Per-group serialization of every STATE-MUTATING MLS op (invite / remove /
@@ -129,9 +205,41 @@ export class MarmotClientMls implements ChatMls {
     return run;
   }
 
-  /** Load persisted groups into memory (call once at startup). */
+  /**
+   * Load persisted groups into memory (call once at startup, AFTER retirement).
+   * Per group rather than the library's `loadAll`: that is a `Promise.all`, so one
+   * state that fails to load would leave every other group unloaded too.
+   */
   async loadAll(): Promise<void> {
-    await this.client.groups.loadAll();
+    for (const id of await this.storedGroupIds()) {
+      await this.client.groups.get(id).catch(() => undefined);
+    }
+  }
+
+  async storedGroupIds(): Promise<string[]> {
+    const ids = await this.client.groups.listIds();
+    return ids.map((id) => Array.from(id, (b) => b.toString(16).padStart(2, "0")).join(""));
+  }
+
+  async groupProfile(mlsGroupIdHex: string): Promise<GroupProfileStatus> {
+    try {
+      const group = await this.client.groups.get(mlsGroupIdHex);
+      return group.profileSupport.kind === "supported" ? "current" : "unsupported";
+    } catch {
+      return "unreadable";
+    }
+  }
+
+  async retireGroup(mlsGroupIdHex: string): Promise<void> {
+    await this.serialize(mlsGroupIdHex, async () => {
+      // The library's own teardown first (it also drops the cached instance and
+      // purges history); a state that will not load cannot go through it, so the
+      // raw purge below always runs too and catches whatever is left.
+      if (await this.client.groups.has(mlsGroupIdHex).catch(() => false)) {
+        await this.client.groups.destroy(mlsGroupIdHex).catch(() => undefined);
+      }
+      this.purgeStoredGroup?.(mlsGroupIdHex);
+    });
   }
 
   async createGroup(opts: {
@@ -165,7 +273,18 @@ export class MarmotClientMls implements ChatMls {
   async evaluateKeyPackage(
     mlsGroupIdHex: string,
     keyPackageEvent: AnyEvent,
-  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean }> {
+  ): Promise<{ eligible: boolean; reasons: string[]; alreadyMember: boolean; legacy?: boolean }> {
+    // Checked first and separately: a pre-upgrade KeyPackage is not "ineligible"
+    // in the sense the caller reports to the device's owner (see keyPackageProfile).
+    const profile = keyPackageProfile(keyPackageEvent);
+    if (!profile.current) {
+      return {
+        eligible: false,
+        reasons: [`not a current (0x8009) KeyPackage: ${profile.reason}`],
+        alreadyMember: false,
+        legacy: true,
+      };
+    }
     const group = await this.client.groups.get(mlsGroupIdHex);
     const result = group.evaluateKeyPackage(keyPackageEvent as never) as {
       eligible: boolean;
@@ -214,6 +333,9 @@ export class MarmotClientMls implements ChatMls {
         extraProposals.push(...removes);
       }
       if (extraProposals.length === 0) return;
+      // No admin-policy update here: the library's commit path already drops a
+      // removed admin from the policy in the same commit (adding our own made it
+      // "multiple AppDataUpdate operations for 0x8003").
       await this.client.groups.commit(mlsGroupIdHex, { extraProposals });
     });
   }
@@ -254,6 +376,25 @@ export class MarmotClientMls implements ChatMls {
     });
   }
 
+  async getAvatar(mlsGroupIdHex: string): Promise<string> {
+    const group = await this.client.groups.get(mlsGroupIdHex);
+    return group.groupData?.avatarUrl ?? "";
+  }
+
+  async setAvatar(mlsGroupIdHex: string, url: string): Promise<boolean> {
+    return this.serialize(mlsGroupIdHex, async () => {
+      const group = await this.client.groups.get(mlsGroupIdHex);
+      // Compared in normalized form on both sides: the caller normalizes, and what
+      // the group holds was normalized by whoever wrote it (decoders reject
+      // anything else). A group that never had the component reads as "".
+      if ((group.groupData?.avatarUrl ?? "") === url) return false;
+      const ctx = group.session.proposalContext();
+      const proposals = await proposeUpdateMetadata({ avatarUrl: url })(ctx);
+      await this.client.groups.commit(mlsGroupIdHex, { extraProposals: proposals });
+      return true;
+    });
+  }
+
   async getAdmins(mlsGroupIdHex: string): Promise<string[]> {
     const group = await this.client.groups.get(mlsGroupIdHex);
     return group.groupData?.adminPubkeys ?? [];
@@ -267,11 +408,35 @@ export class MarmotClientMls implements ChatMls {
       // re-encodes it whole), so `adminPubkeys` must already be the COMPLETE
       // desired set including the coordinator. No-op when it's unchanged
       // (order-insensitive) so a re-sync doesn't spend an epoch for nothing.
-      const want = [...new Set(adminPubkeys)];
+      // Only keys that hold a member leaf can be admins: the resulting epoch of
+      // any commit must not list an admin without a leaf (MDK admin-leaf
+      // coupling), so a desired-but-not-yet-joined organizer device is promoted
+      // later, after its Add lands. Listing it early made EVERY later commit
+      // illegal ("N admin key(s) have no member leaf"), including invites.
+      const want = [...new Set(adminPubkeys)].filter(
+        (k) => getPubkeyLeafNodes(group.state, k).length > 0,
+      );
       if (want.length === current.length && want.every((k) => current.includes(k))) return;
       const ctx = group.session.proposalContext();
       const proposals = await proposeUpdateMetadata({ adminPubkeys: want })(ctx);
       await this.client.groups.commit(mlsGroupIdHex, { extraProposals: proposals });
+    });
+  }
+
+  async sendText(mlsGroupIdHex: string, content: string): Promise<void> {
+    const author = this.selfPubkey;
+    if (!author) throw new Error("sendText needs the coordinator pubkey");
+    // Serialized with the group's commits: the message must be encrypted under the
+    // epoch the preceding invite produced, not race it.
+    await this.serialize(mlsGroupIdHex, async () => {
+      const rumor = createChatRumor({ pubkey: author, content });
+      await this.client.groups.send(mlsGroupIdHex, createApplicationMessageIntent(rumor));
+    });
+  }
+
+  async destroyGroup(mlsGroupIdHex: string): Promise<void> {
+    await this.serialize(mlsGroupIdHex, async () => {
+      await this.client.groups.destroy(mlsGroupIdHex);
     });
   }
 }

@@ -1,7 +1,6 @@
 import { EventSigner } from "applesauce-core";
 import { NostrEvent } from "applesauce-core/helpers/event";
-import { CiphersuiteName, CryptoProvider, KeyPackage, PrivateKeyPackage } from "ts-mls";
-import type { AccountIdentityProofSigner } from "../core/account-identity-proof.js";
+import { CiphersuiteName, CryptoProvider, KeyPackage, PrivateKeyPackage } from "../vendor/ts-mls/index.js";
 import { NostrNetworkInterface } from "./nostr-interface.js";
 /** Options for constructing a {@link KeyPackagePublisher}. */
 export type KeyPackagePublisherOptions = {
@@ -9,12 +8,6 @@ export type KeyPackagePublisherOptions = {
     signer: EventSigner;
     /** The nostr relay pool used to publish key package and deletion events */
     network: NostrNetworkInterface;
-    /**
-     * Optional Nostr-account proof signer. When provided, generated key packages
-     * carry a `marmot.account-identity-proof.v1` LeafNode extension binding the
-     * account to the leaf signature key (required for darkmatter wire interop).
-     */
-    accountProofSigner?: AccountIdentityProofSigner;
     /** The crypto provider to use for cryptographic operations */
     cryptoProvider?: CryptoProvider;
 };
@@ -27,7 +20,7 @@ export type GeneratedKeyPackage = {
 export type GenerateKeyPackageOptions = {
     /** Ciphersuite to use (default: MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519) */
     ciphersuite?: CiphersuiteName;
-    /** Whether to mark the key package with the MLS last_resort extension (default: true) */
+    /** Whether to mark the key package as last-resort (`last_resort_key_package` component; default: true) */
     isLastResort?: boolean;
 };
 /** Options for {@link KeyPackagePublisher.publish}. */

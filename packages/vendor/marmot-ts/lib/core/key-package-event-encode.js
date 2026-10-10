@@ -1,12 +1,11 @@
 /** @module @category Core - Key Package Event */
 import { bytesToHex } from "@noble/hashes/utils.js";
-import { encode, mlsMessageEncoder, protocolVersions, wireformats, } from "ts-mls";
+import { encode, mlsMessageEncoder, protocolVersions, wireformats, } from "../vendor/ts-mls/index.js";
 import { encodeContent } from "../utils/encoding.js";
 import { unixNow } from "../utils/nostr.js";
-import { isValidRelayUrl, normalizeRelayUrl } from "../utils/relay-url.js";
 import { isGreaseValue } from "./grease.js";
 import { calculateKeyPackageRef } from "./key-package.js";
-import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_APP_COMPONENTS_TAG, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, KEY_PACKAGE_RELAYS_TAG, } from "./protocol.js";
+import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_APP_COMPONENTS_TAG, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, } from "./protocol.js";
 import { SUPPORTED_APP_COMPONENT_IDS } from "./components/ids.js";
 /**
  * Creates an addressable key package event (kind 30443) from a key package.
@@ -18,7 +17,7 @@ export function createKeyPackageEvent(options) {
     return createKeyPackageEventInternal(options);
 }
 async function createKeyPackageEventInternal(options) {
-    const { keyPackage, relays, client } = options;
+    const { keyPackage, client } = options;
     // Publish the KeyPackage wrapped in an MLSMessage with wire_format
     // mls_key_package (RFC 9420 §6). The kind-30443 content is specified as the
     // serialized MLSMessage bytes (transports/nostr.md), mirroring the kind-444
@@ -43,7 +42,7 @@ async function createKeyPackageEventInternal(options) {
         return `0x${ext.extensionType.toString(16).padStart(4, "0")}`;
     });
     // Also include extensions from leaf node capabilities to signal support
-    // This ensures Marmot Group Data Extension (0xf2ee) is included in the event
+    // This ensures advertised capability extensions (e.g. app_data_dictionary) are included in the event
     if (keyPackage.leafNode.capabilities?.extensions) {
         for (const extType of keyPackage.leafNode.capabilities.extensions) {
             // Only add if not already present (avoid duplicates)
@@ -54,7 +53,11 @@ async function createKeyPackageEventInternal(options) {
         }
     }
     // Filter out GREASE values from the extension types
-    // We only want to include actual extensions (last_resort and Marmot Group Data Extension)
+    // We only want to include real extension ids (e.g. app_data_dictionary), not GREASE.
+    // MDK strips GREASE from extensions on both its publish and validate sides
+    // (refs/mdk crates/cgka-engine/src/capabilities.rs
+    // `advertised_capabilities_from_caps`), so mls_extensions stays GREASE-free.
+    // Proposals are treated differently; see the mls_proposals comment below.
     const filteredExtensionTypes = extensionTypes.filter((hexValue) => {
         // Parse the hex value back to number to check if it's a GREASE value
         const extType = parseInt(hexValue);
@@ -64,7 +67,8 @@ async function createKeyPackageEventInternal(options) {
     // NIP tag expects a display string like "1.0".
     const versionName = Object.keys(protocolVersions).find((k) => protocolVersions[k] === keyPackage.version);
     const version = versionName === "mls10" ? "1.0" : String(keyPackage.version);
-    // Build tags
+    const keyPackageRef = await calculateKeyPackageRef(keyPackage);
+    // Build tags in the canonical MDK publisher order.
     const tags = [];
     // NIP-70: protected event — relay must not serve this event to non-authors.
     // NOTE: Optional/opt-in because many popular relays reject protected events.
@@ -73,28 +77,31 @@ async function createKeyPackageEventInternal(options) {
     // Addressable identifier (required for kind 30443)
     tags.push(["d", options.identifier]);
     // Supported MLS proposal ids advertised by this leaf (e.g. app_data_update
-    // 0x0008), formatted as lowercase 0x-prefixed hex; GREASE values dropped.
-    const proposalTypes = (keyPackage.leafNode.capabilities?.proposals ?? [])
-        .filter((p) => !isGreaseValue(p))
-        .map((p) => `0x${p.toString(16).padStart(4, "0")}`);
+    // 0x0008), formatted as lowercase 0x-prefixed hex, GREASE ids INCLUDED.
+    // MDK validates the mls_proposals value set against the decoded leaf's
+    // advertised proposals without stripping GREASE (refs/mdk
+    // crates/marmot-app/src/key_package_records.rs
+    // `require_multi_value_key_package_tag_matches`, fed by
+    // crates/cgka-engine/src/capabilities.rs `advertised_capabilities_from_caps`,
+    // which strips GREASE from extensions only). Dropping GREASE here made MDK
+    // reject every KeyPackage whose leaf drew a GREASE proposal, so the tag must
+    // carry GREASE ids exactly as the leaf does. Values are deduplicated (first
+    // occurrence wins) because refs/marmot transports/nostr.md "KeyPackage
+    // publication" forbids repeated id-list values.
+    const proposalTypes = [];
+    for (const p of keyPackage.leafNode.capabilities?.proposals ?? []) {
+        const hexValue = `0x${p.toString(16).padStart(4, "0")}`;
+        if (!proposalTypes.includes(hexValue))
+            proposalTypes.push(hexValue);
+    }
     // Supported Marmot app-component ids this implementation can encode/decode.
     const appComponentIds = SUPPORTED_APP_COMPONENT_IDS.map((id) => `0x${id.toString(16).padStart(4, "0")}`);
     // The spec forbids an `encoding` tag (transports/nostr.md "Transport byte
     // encoding"); content is always standard base64.
-    tags.push([KEY_PACKAGE_MLS_VERSION_TAG, version], [KEY_PACKAGE_CIPHER_SUITE_TAG, ciphersuiteHex], [KEY_PACKAGE_EXTENSIONS_TAG, ...filteredExtensionTypes], [KEY_PACKAGE_PROPOSALS_TAG, ...proposalTypes], [KEY_PACKAGE_APP_COMPONENTS_TAG, ...appComponentIds]);
-    // MIP-00: required KeyPackageRef tag ("i")
-    const keyPackageRef = await calculateKeyPackageRef(keyPackage);
-    tags.push(["i", bytesToHex(keyPackageRef)]);
+    tags.push([KEY_PACKAGE_MLS_VERSION_TAG, version], ["i", bytesToHex(keyPackageRef)], [KEY_PACKAGE_CIPHER_SUITE_TAG, ciphersuiteHex], [KEY_PACKAGE_EXTENSIONS_TAG, ...filteredExtensionTypes], [KEY_PACKAGE_PROPOSALS_TAG, ...proposalTypes], [KEY_PACKAGE_APP_COMPONENTS_TAG, ...appComponentIds]);
     // Add client tag if provided
     if (client)
         tags.push([KEY_PACKAGE_CLIENT_TAG, client]);
-    // Add relay tags if provided
-    if (relays && relays.length > 0) {
-        const validRelays = relays.filter(isValidRelayUrl).map(normalizeRelayUrl);
-        if (validRelays.length > 0) {
-            tags.push([KEY_PACKAGE_RELAYS_TAG, ...validRelays]);
-        }
-    }
     return {
         kind: ADDRESSABLE_KEY_PACKAGE_KIND,
         created_at: unixNow(),
@@ -102,4 +109,3 @@ async function createKeyPackageEventInternal(options) {
         tags,
     };
 }
-//# sourceMappingURL=key-package-event-encode.js.map

@@ -24,4 +24,3 @@ export function decodeMessageRetentionV1(data) {
     reader.end();
     return secs;
 }
-//# sourceMappingURL=message-retention.js.map

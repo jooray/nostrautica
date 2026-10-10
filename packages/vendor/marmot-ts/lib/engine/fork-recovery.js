@@ -1,11 +1,322 @@
 /** @module @category Engine */
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
-import { encode, getCredentialFromLeafIndex, mlsMessageEncoder, processMessage, wireformats, } from "ts-mls";
+import { bytesToBase64, contentTypes, encode, getAppDataDictionary, getCredentialFromLeafIndex, mlsMessageEncoder, processMessage, proposalOrRefTypes, wireformats, senderTypes, } from "../vendor/ts-mls/index.js";
 import { marmotAuthService } from "../core/auth-service.js";
-import { commitDigest, DEFAULT_CONVERGENCE_POLICY, isWitnessEligible, selectCanonicalBranch, } from "../core/convergence.js";
+import { defaultMarmotClientConfig } from "../core/client-config.js";
+import { getAppComponents } from "../core/components/dictionary.js";
+import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, } from "../core/components/ids.js";
+import { validateAdminLeafCoupling, validateAppComponentIntegrity, validateCommitAccountIdentityProofs, validateCommitLegality, } from "../core/components/integrity.js";
+import { commitDigest, commitOrderingPriority, compareBranchScores, DEFAULT_CONVERGENCE_POLICY, isWitnessEligible, scoreBranch, selectCanonicalBranch, } from "../core/convergence.js";
 import { getCredentialPubkey } from "../core/credential.js";
-import { serializeClientState } from "../core/client-state.js";
+import { getGroupMemberPubkeys } from "../core/group-members.js";
+import { deserializeClientState, serializeClientState, } from "../core/client-state.js";
+import { requiredComponentIdsOf, validatePreApplyProposals, withCapturedProposals, } from "./admin-policy.js";
 import { framedEpoch } from "./wire-format.js";
+/**
+ * Rebuilds a PublicMessage commit's proposal list without replaying it: inline
+ * entries (sent by the committer) plus each `ProposalRef` resolved from
+ * `parent.unappliedProposals`, the same lookup ts-mls `applyProposals`
+ * performs. Returns `undefined` when that is not possible — a PrivateMessage
+ * commit (encrypted content), a non-member sender, or a reference the parent
+ * snapshot no longer stages.
+ */
+function proposalsFromPublicCommit(parent, message) {
+    if (message.wireformat !== wireformats.mls_public_message)
+        return undefined;
+    const content = message.publicMessage.content;
+    if (content.contentType !== contentTypes.commit)
+        return undefined;
+    if (content.sender.senderType !== senderTypes.member)
+        return undefined;
+    const committerLeafIndex = Number(content.sender.leafIndex);
+    const proposals = [];
+    for (const entry of content.commit.proposals) {
+        if (entry.proposalOrRefType === proposalOrRefTypes.proposal) {
+            proposals.push({
+                proposal: entry.proposal,
+                senderLeafIndex: committerLeafIndex,
+            });
+            continue;
+        }
+        const staged = parent.unappliedProposals[bytesToBase64(entry.reference)];
+        if (!staged)
+            return undefined;
+        proposals.push(staged);
+    }
+    return { proposals, committerLeafIndex };
+}
+/**
+ * The committer's MLS leaf index read straight off the wire. Factored out of
+ * {@link proposalsFromPublicCommit} because the committer stays recoverable
+ * even when that function bails — a `ProposalRef` the parent snapshot no
+ * longer stages defeats the proposal rebuild but not the sender field (CR-01).
+ *
+ * Returns `undefined` exactly where the wire genuinely carries no committer
+ * leaf index: a PrivateMessage commit (the content is encrypted) or a
+ * non-member sender.
+ */
+function committerOf(message) {
+    if (message.wireformat !== wireformats.mls_public_message)
+        return undefined;
+    const content = message.publicMessage.content;
+    if (content.contentType !== contentTypes.commit)
+        return undefined;
+    if (content.sender.senderType !== senderTypes.member)
+        return undefined;
+    return Number(content.sender.leafIndex);
+}
+/**
+ * WR-03: the part of {@link validateCommitLegality} that is decidable without
+ * the commit's own proposals, for a recorded child whose proposals cannot be
+ * rebuilt off the wire. Runs, in the shared adapter's order:
+ * 1. component integrity rules 1-2 (the dictionary and every protected id are
+ *    never dropped) and the leaf-only `0x8009` guard. Rule 3 — every changed
+ *    entry is backed by one of this commit's own AppDataUpdates — needs those
+ *    proposals, so every resulting entry is treated as backed;
+ * 2. the `0x8009` profile and changed-leaf proof check. Every changed leaf's
+ *    proof is validated regardless of classification, and `committerLeafIndex`
+ *    ({@link committerOf}, which survives an unresolvable `ProposalRef`) is
+ *    threaded in so the committer's OWN update-path leaf is still classified
+ *    and its replacement identity still compared against its prior occupant.
+ *    The proposal list is passed empty and explicitly marked INCOMPLETE, so a
+ *    changed leaf that this commit's unavailable proposals would have
+ *    explained — an added member's leaf — is reported `undecidable` rather
+ *    than `unattributable`: with no proposal list in hand, "attributable to
+ *    nobody" is not a conclusion this helper is entitled to draw, and drawing
+ *    it would terminally reject legal Add commits (D-02 vs D-03);
+ * 3. admin-leaf coupling.
+ *
+ * CR-01: a residual `undecidable` from step 2 is deliberately NOT propagated.
+ * A deferral is only correct when later protocol bytes can change the verdict,
+ * and here they never can — no future bytes can produce a proposal list for a
+ * commit whose refs the parent snapshot no longer stages. Propagating it
+ * mapped this helper's only non-violation outcome onto a permanent
+ * `temporary_refusal`, which silently dropped our own canonical branch from
+ * convergence candidacy (`#buildBranches` refuses to register a deferred node
+ * as a branch tip), aborted tree-fed re-convergence, and could drop a
+ * canonical disband edge. By that point every check this helper CAN run has
+ * run — precisely its documented contract, "every legality check that does not
+ * need those proposals" — so it returns `legal`.
+ *
+ * A definite `violation` (integrity, profile drift, an invalid leaf proof, a
+ * committer whose replacement leaf changed account identity, or admin-leaf
+ * coupling) always returns instead, and always outranks the residual: coupling
+ * is evaluated BEFORE the residual is discarded, preserving the
+ * non-short-circuiting precedence {@link validateCommitLegality} enforces
+ * internally.
+ *
+ * Disband legality classifies the commit's own proposals and cannot run here.
+ */
+function validateLegalityWithoutProposals(parentState, resultingState, committerLeafIndex) {
+    const currentExtensions = parentState.groupContext.extensions;
+    const resultingExtensions = resultingState.groupContext.extensions;
+    let requiredIds;
+    try {
+        requiredIds = getAppComponents(currentExtensions) ?? [];
+    }
+    catch {
+        return {
+            kind: "violation",
+            violation: {
+                reason: "component-integrity",
+                detail: "current app_components component did not decode",
+            },
+        };
+    }
+    // Neutralize only rule 3: an op "backing" every resulting entry (and every
+    // removal), so rules 1-2 and the leaf-only guard are the only integrity
+    // checks that can fire. 0x8009 is never synthesized, so a dictionary that
+    // carries it is still reported.
+    // WR-03: `getAppDataDictionary` throws on malformed bytes or a duplicate
+    // component id, and those bytes are attacker-influenceable (an admin can
+    // land an AppDataUpdate writing arbitrary bytes to a component id). Left
+    // unguarded, the throw escaped this helper's documented non-throwing
+    // contract and was swallowed by `resolveCandidateParent`'s blanket `catch`
+    // into a silent, never-clearing `deferred` — while the SAME class of
+    // malformed bytes reaching `getAppComponents` directly above became a typed
+    // `component-integrity` rejection. Map it to that same typed violation so
+    // one malformed dictionary cannot receive two different dispositions.
+    let resultingDictionary;
+    let currentDictionary;
+    try {
+        resultingDictionary = getAppDataDictionary(resultingExtensions);
+        currentDictionary = getAppDataDictionary(currentExtensions);
+    }
+    catch {
+        return {
+            kind: "violation",
+            violation: {
+                reason: "component-integrity",
+                detail: "app_data_dictionary did not decode",
+            },
+        };
+    }
+    const resulting = resultingDictionary ?? [];
+    const backedOps = resulting
+        .filter((entry) => entry.componentId !== ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)
+        .map((entry) => ({ componentId: entry.componentId, data: entry.data }));
+    for (const entry of currentDictionary ?? []) {
+        if (entry.componentId === ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)
+            continue;
+        if (!resulting.some((r) => r.componentId === entry.componentId))
+            backedOps.push({ componentId: entry.componentId, data: undefined });
+    }
+    const integrity = validateAppComponentIntegrity({
+        currentExtensions,
+        resultingExtensions,
+        appDataUpdateOps: backedOps,
+        requiredIds,
+    });
+    if (integrity)
+        return { kind: "violation", violation: integrity };
+    // CR-01: the committer index survives an unresolvable `ProposalRef`, so
+    // thread it in rather than skipping classification altogether. The proposal
+    // list is empty AND flagged incomplete: the committer's own update-path leaf
+    // stays decidable (and its replacement identity IS compared against its
+    // prior occupant), while a leaf that only the missing proposals could have
+    // explained stays `undecidable` instead of being wrongly condemned as
+    // `unattributable` — which would terminally reject legal Add commits. A
+    // violation returns immediately.
+    const proofOutcome = validateCommitAccountIdentityProofs({
+        parentState,
+        resultingState,
+        classification: {
+            proposals: [],
+            committerLeafIndex,
+            proposalsComplete: false,
+        },
+    });
+    if (proofOutcome.kind === "violation")
+        return proofOutcome;
+    // Runs BEFORE the residual undecidable is discarded, so a definite
+    // admin-leaf-coupling violation still outranks it (the non-short-circuiting
+    // precedence `validateCommitLegality` enforces internally).
+    const couplingViolation = validateAdminLeafCoupling({
+        currentExtensions,
+        resultingExtensions,
+        resultingMemberAccounts: getGroupMemberPubkeys(resultingState),
+    });
+    if (couplingViolation)
+        return { kind: "violation", violation: couplingViolation };
+    // CR-01: every proposal-independent check has now run and none objected. Any
+    // residual `undecidable` is structural — no future protocol bytes can supply
+    // this commit's proposals — so propagating it would defer this candidate
+    // forever and drop our own canonical branch from convergence. Decide.
+    return { kind: "legal" };
+}
+/**
+ * Authenticates a Commit against one exact parent, then applies the shared
+ * parent-relative authorization/component gate. A stamped own Commit is
+ * already authenticated and authorized and therefore uses its recorded child
+ * instead of being replayed. That child still passes the full
+ * {@link validateCommitLegality} gate when the commit's proposals can be
+ * rebuilt off the wire, and every proposal-independent legality check
+ * ({@link validateLegalityWithoutProposals}) when they cannot (WR-03).
+ */
+export async function resolveCandidateParent(params) {
+    const { ciphersuite, parent, message, callback, known } = params;
+    if (known?.parentTag === bytesToHex(parent.confirmationTag)) {
+        // WR-03: an own commit cannot be replayed (RFC 9420: an UpdatePath never
+        // encrypts a path secret to its own committer), but reusing its recorded
+        // child must not skip the legality gate — the recorded state may come
+        // from a persisted edge written by a build that never enforced it. The
+        // proposals are rebuilt off the wire for the full check; when that is
+        // impossible, every proposal-independent legality check still runs.
+        const result = {
+            kind: "newState",
+            newState: known.state,
+            actionTaken: "accept",
+            consumed: [],
+            aad: new Uint8Array(),
+        };
+        const rebuilt = proposalsFromPublicCommit(parent, message);
+        const priority = rebuilt
+            ? commitOrderingPriority(rebuilt.proposals)
+            : (known.priority ?? "ordinary");
+        let outcome;
+        try {
+            outcome = rebuilt
+                ? validateCommitLegality({
+                    parentState: parent,
+                    resultingState: known.state,
+                    proposals: rebuilt.proposals,
+                    committerLeafIndex: rebuilt.committerLeafIndex,
+                })
+                : validateLegalityWithoutProposals(parent, known.state, committerOf(message));
+        }
+        catch {
+            return { kind: "deferred", reason: "temporary_refusal" };
+        }
+        switch (outcome.kind) {
+            case "legal":
+                return { kind: "resolved", result, priority };
+            case "violation":
+                return {
+                    kind: "rejected",
+                    reason: "authorization_or_components",
+                    result,
+                    violation: outcome.violation,
+                };
+            case "undecidable":
+                return { kind: "deferred", reason: "temporary_refusal" };
+        }
+    }
+    const capture = withCapturedProposals(callback);
+    capture.take();
+    let result;
+    try {
+        result = await processMessage({
+            context: {
+                cipherSuite: ciphersuite,
+                authService: marmotAuthService,
+                clientConfig: defaultMarmotClientConfig,
+                externalPsks: {},
+            },
+            state: parent,
+            message,
+            callback: capture.callback,
+        });
+    }
+    catch {
+        return { kind: "authentication_mismatch" };
+    }
+    const capturedCommit = capture.take();
+    if (result.kind !== "newState" || result.actionTaken === "reject")
+        return {
+            kind: "rejected",
+            reason: "authorization_or_components",
+            result,
+            violation: validatePreApplyProposals(capturedCommit.proposals, ciphersuite.id, requiredComponentIdsOf(parent)),
+        };
+    try {
+        const outcome = validateCommitLegality({
+            parentState: parent,
+            resultingState: result.newState,
+            proposals: capturedCommit.proposals,
+            committerLeafIndex: capturedCommit.committerLeafIndex,
+        });
+        switch (outcome.kind) {
+            case "legal":
+                return {
+                    kind: "resolved",
+                    result,
+                    priority: commitOrderingPriority(capturedCommit.proposals),
+                };
+            case "violation":
+                return {
+                    kind: "rejected",
+                    reason: "authorization_or_components",
+                    result,
+                    violation: outcome.violation,
+                };
+            case "undecidable":
+                return { kind: "deferred", reason: "temporary_refusal" };
+        }
+    }
+    catch {
+        return { kind: "deferred", reason: "temporary_refusal" };
+    }
+}
 /**
  * Convergence fork recovery (Marmot v2 `protocol-core/convergence.md`):
  * rebuilds candidate branches by replaying retained applied commits plus
@@ -33,51 +344,46 @@ export class ForkRecovery {
     /**
      * Builds every candidate branch reachable by replaying the commit `pool` from
      * the retained `root` state (`convergence.md` "Candidate branches").
+     *
+     * `knownNextStates` (CONV-04) maps a candidate commit's hex `commitDigest` to
+     * a {@link KnownNextState} — the state already known to result from applying
+     * it, plus the confirmation tag of the parent it was applied to — supplied by
+     * {@link resolveFork} for commits on our own already-applied canonical path
+     * (`RetainedHistoryStore` already holds their resulting state; see
+     * `resolveFork`'s doc comment for why replaying them via `processMessage`
+     * cannot work). The short-circuit is taken only at the DFS node that IS that
+     * recorded parent, so an own commit's branch is buildable exactly like any
+     * other candidate's without reprocessing it, while a same-epoch node on a
+     * competing fork can never adopt it.
      */
-    async #buildBranches(root, pool, encrypted, witnessEnvelopes, callback) {
+    async #buildBranches(root, pool, encrypted, witnessEnvelopes, adminCallbackFor, knownNextStates = new Map(), terminalCandidates = new Map()) {
         const forkEpoch = Number(root.groupContext.epoch);
         const branches = [];
         const tips = new Map();
         const chains = new Map();
         const edges = [];
         let counter = 0;
-        const witnessesAt = async (state) => {
-            const epoch = Number(state.groupContext.epoch);
-            const out = [];
-            for (const envelope of witnessEnvelopes) {
-                try {
-                    const decrypted = await this.#peeler.peelGroupMessages([envelope], state);
-                    for (const pair of decrypted.read) {
-                        if (pair.message.wireformat !== wireformats.mls_private_message)
-                            continue;
-                        const r = await processMessage({
-                            context: {
-                                cipherSuite: this.#ciphersuite,
-                                authService: marmotAuthService,
-                                externalPsks: {},
-                            },
-                            state,
-                            message: pair.message,
-                            callback,
-                        });
-                        if (r.kind === "applicationMessage" &&
-                            r.senderLeafIndex !== undefined) {
-                            const credential = getCredentialFromLeafIndex(state.ratchetTree, r.senderLeafIndex);
-                            out.push({
-                                epoch,
-                                sender: hexToBytes(getCredentialPubkey(credential)),
-                            });
-                        }
-                    }
-                }
-                catch {
-                    /* not a witness on this state */
-                }
-            }
-            return out;
-        };
-        const candidatesAt = async (state) => {
-            const epoch = Number(state.groupContext.epoch);
+        // WR-01: refusals keyed by commit digest; a digest that resolves at any
+        // explored node is not reported as rejected.
+        const rejectedByDigest = new Map();
+        const resolvedDigests = new Set();
+        // CR-02: the admin callback is built from the exact node being explored,
+        // never once per resolution. A candidate at fork epoch N is authorized
+        // against the admin set and ratchet tree of ITS parent — not the canonical
+        // tip, which may sit epochs later on another branch where the committer was
+        // demoted or its leaf index reassigned. This is the same parent
+        // `#treeResolution` and the pool sweep already use, and the one MDK stages
+        // each replayed commit on (`require_admin_for_staged_commit`), so the
+        // replay seam cannot refuse an edge the tree-fed seam would adopt.
+        const witnessesAt = (state) => collectWitnessesAt({
+            peeler: this.#peeler,
+            ciphersuite: this.#ciphersuite,
+            state,
+            witnessEnvelopes,
+            callback: adminCallbackFor(state),
+        });
+        const candidatesAt = async (state, logicalEpoch) => {
+            const epoch = Math.max(Number(state.groupContext.epoch), logicalEpoch);
             const out = [];
             const seenDigests = new Set();
             const add = (m) => {
@@ -106,35 +412,86 @@ export class ForkRecovery {
             }
             return out;
         };
-        const explore = async (state, tipMessage, seen, chain, witnesses) => {
+        const explore = async (state, tipMessage, seen, chain, witnesses, tipPriority) => {
             const accumulated = [...witnesses, ...(await witnessesAt(state))];
             let extended = false;
-            for (const message of await candidatesAt(state)) {
+            let branchDeferred = false;
+            for (const message of await candidatesAt(state, forkEpoch + chain.length)) {
                 // Candidate commits are framed (private or public); skip anything else.
                 if (message.wireformat !== wireformats.mls_private_message &&
                     message.wireformat !== wireformats.mls_public_message)
                     continue;
-                let next;
-                try {
-                    next = await processMessage({
-                        context: {
-                            cipherSuite: this.#ciphersuite,
-                            authService: marmotAuthService,
-                            externalPsks: {},
-                        },
-                        state,
-                        message,
-                        callback,
-                    });
-                }
-                catch {
+                const known = knownNextStates.get(bytesToHex(this.#commitDigestOf(message)));
+                // The short-circuit is valid ONLY at the exact parent this commit was
+                // recorded against. `candidatesAt` matches purely on framed epoch, so
+                // an unqualified digest hit would also fire at a same-epoch node on a
+                // COMPETING branch and graft our canonical chain onto it (CR-01). When
+                // the parent does not match we fall through to the normal replay path,
+                // where our own commit fails to process against a foreign parent and is
+                // dropped as a candidate — which is the correct outcome.
+                //
+                // CR-04/WR-03: reusing a recorded state must NOT also skip the legality
+                // gate. `ours` comes from `RetainedHistoryStore`, which `GroupRegistry`
+                // rebuilds on load straight from the persisted history tree — the exact
+                // pre-upgrade edge class `#treeResolution` explicitly refuses to
+                // grandfather. This commit cannot be replayed, so
+                // `resolveCandidateParent` reads its proposals off the wire instead
+                // (inline entries plus the parent's staged proposal for each
+                // `ProposalRef`) and runs `validateCommitLegality` on the recorded
+                // child. When that reconstruction is not possible (a `PrivateMessage`
+                // commit, or a reference the parent snapshot no longer stages) it runs
+                // every proposal-independent legality check instead: component rules
+                // 1-2, the `0x8009` check, and admin-leaf coupling (WR-03).
+                const knownAtThisParent = known !== undefined &&
+                    known.parentTag === bytesToHex(state.confirmationTag);
+                const resolution = await resolveCandidateParent({
+                    ciphersuite: this.#ciphersuite,
+                    parent: state,
+                    message,
+                    callback: adminCallbackFor(state),
+                    known: knownAtThisParent ? known : undefined,
+                });
+                if (resolution.kind === "deferred") {
+                    branchDeferred = true;
                     continue;
                 }
-                if (next.kind !== "newState" || next.actionTaken === "reject")
+                const digestHex = bytesToHex(this.#commitDigestOf(message));
+                if (resolution.kind === "rejected") {
+                    if (!rejectedByDigest.has(digestHex))
+                        rejectedByDigest.set(digestHex, {
+                            message,
+                            result: resolution.result,
+                            violation: resolution.violation,
+                        });
                     continue;
+                }
+                if (resolution.kind !== "resolved")
+                    continue;
+                resolvedDigests.add(digestHex);
+                const next = resolution.result;
                 const tag = bytesToHex(next.newState.confirmationTag);
-                if (seen.has(tag))
+                if (seen.has(tag)) {
+                    const digest = this.#commitDigestOf(message);
+                    const terminal = terminalCandidates.get(bytesToHex(digest));
+                    if (terminal) {
+                        const branch = {
+                            id: `branch-${counter++}`,
+                            forkEpoch,
+                            tipEpoch: forkEpoch + chain.length + 1,
+                            tipDigest: digest,
+                            tipCommitter: hexToBytes(terminal.actorPubkey),
+                            tipPriority: resolution.priority,
+                            appWitnesses: accumulated,
+                        };
+                        tips.set(branch, next.newState);
+                        chains.set(branch, [
+                            ...chain,
+                            { parent: state, message, child: next.newState },
+                        ]);
+                        branches.push(branch);
+                    }
                     continue;
+                }
                 extended = true;
                 // Snapshot the child now, before recursing — exploring its children
                 // would zero this state's consumed secrets in place (ts-mls), corrupting
@@ -148,15 +505,36 @@ export class ForkRecovery {
                     commitDigest: commitDigest(commitBytes),
                     childSnapshot: serializeClientState(next.newState),
                 });
-                await explore(next.newState, message, new Set([...seen, tag]), [...chain, { parent: state, message, child: next.newState }], accumulated);
+                await explore(next.newState, message, new Set([...seen, tag]), [...chain, { parent: state, message, child: next.newState }], accumulated, resolution.priority);
             }
-            if (!extended && tipMessage !== undefined) {
-                const tipEpoch = Number(state.groupContext.epoch);
+            if (!extended && !branchDeferred && tipMessage !== undefined) {
+                // A removed receiver's ts-mls tombstone retains its parent epoch even
+                // though the authenticated Commit is one edge past the fork root.
+                const tipEpoch = Math.max(Number(state.groupContext.epoch), forkEpoch + chain.length);
                 const branch = {
                     id: `branch-${counter++}`,
                     forkEpoch,
                     tipEpoch,
                     tipDigest: this.#commitDigestOf(tipMessage),
+                    tipPriority,
+                    tipCommitter: (() => {
+                        const parent = chain.at(-1)?.parent;
+                        if (!parent)
+                            return new Uint8Array();
+                        const sender = tipMessage.wireformat === wireformats.mls_public_message &&
+                            tipMessage.publicMessage.content.sender.senderType ===
+                                senderTypes.member
+                            ? tipMessage.publicMessage.content.sender.leafIndex
+                            : undefined;
+                        if (sender === undefined)
+                            return new Uint8Array();
+                        try {
+                            return hexToBytes(getCredentialPubkey(getCredentialFromLeafIndex(parent.ratchetTree, sender)));
+                        }
+                        catch {
+                            return new Uint8Array();
+                        }
+                    })(),
                     // Drop witnesses at/before the fork epoch or outside the retained
                     // app-payload window for this candidate's tip, so stale or pre-fork
                     // app payloads cannot influence branch scores.
@@ -168,7 +546,10 @@ export class ForkRecovery {
             }
         };
         await explore(root, undefined, new Set([bytesToHex(root.confirmationTag)]), [], []);
-        return { branches, tips, chains, edges };
+        const rejected = [...rejectedByDigest]
+            .filter(([digest]) => !resolvedDigests.has(digest))
+            .map(([, candidate]) => candidate);
+        return { branches, tips, chains, edges, rejected };
     }
     /**
      * Resolves a fork at `forkEpoch` (`convergence.md`): rebuilds candidate
@@ -177,29 +558,106 @@ export class ForkRecovery {
      * caller's current tip. The caller applies the rewind (state + lifecycle).
      */
     async resolveFork(params) {
-        const { forkEpoch, pool, encrypted = [], witnessEnvelopes = [], currentState, retained, adminCallback, } = params;
+        const { forkEpoch, pool, encrypted = [], witnessEnvelopes = [], currentState, retained, adminCallbackFor, terminalCandidates = new Map(), knownCandidates = new Map(), } = params;
         const root = retained.stateAt(forkEpoch);
         if (!root)
             return { outcome: "skip" };
         const currentTipEpoch = Number(currentState.groupContext.epoch);
-        const ours = retained.appliedCommitsBetween(forkEpoch, currentTipEpoch);
-        if (ours.length === 0)
+        const retainedLinks = retained.appliedLinksBetween?.(forkEpoch, currentTipEpoch);
+        const ours = retainedLinks
+            ? retainedLinks.map((link) => link.message)
+            : retained.appliedCommitsBetween(forkEpoch, currentTipEpoch);
+        if (ours.length === 0 && pool.length === 0)
             return { outcome: "skip" };
-        const { branches, tips, chains, edges } = await this.#buildBranches(root, [...ours, ...pool], encrypted, witnessEnvelopes, adminCallback);
+        // CONV-04: every commit in `ours` already applied on our own canonical
+        // branch, so `RetainedHistoryStore` already holds the exact state it
+        // produced — `record()` stores both the parent and the resulting state
+        // for every applied commit (own-authored via `confirmPublished`, or
+        // inbound via `ctx.recordCommit`, through the identical recording path).
+        // `#buildBranches` uses this instead of replaying these commits through
+        // `processMessage`, which cannot reprocess a commit whose committer leaf
+        // is the replaying leaf itself (RFC 9420: an `UpdatePath` never encrypts a
+        // path secret to its own committer). Each state is cloned via a
+        // serialize/deserialize round trip before handing it into the DFS —
+        // continued exploration from a state consumes/derives further secrets on
+        // it, and the original must stay untouched since it is the same object
+        // `RetainedHistoryStore` (and possibly the live engine) still holds.
+        // The recorded PARENT is captured alongside the resulting state so
+        // `#buildBranches` can only take the short-circuit at the node that
+        // actually produced this child — see {@link KnownNextState}.
+        const knownNextStates = new Map(knownCandidates);
+        for (const [index, msg] of ours.entries()) {
+            const structural = retainedLinks?.[index];
+            if (!structural?.ownCommitStamp)
+                continue;
+            const sourceEpoch = Number(structural
+                ? Number(structural.parentState.groupContext.epoch)
+                : framedEpoch(msg));
+            if (!Number.isFinite(sourceEpoch))
+                continue;
+            const parent = structural?.parentState ?? retained.stateAt(sourceEpoch);
+            const next = structural?.resultingState ?? retained.stateAt(sourceEpoch + 1);
+            if (!parent || !next)
+                continue;
+            knownNextStates.set(bytesToHex(this.#commitDigestOf(msg)), {
+                parentTag: bytesToHex(parent.confirmationTag),
+                state: deserializeClientState(serializeClientState(next)),
+                priority: structural.ownCommitStamp.priority,
+            });
+        }
+        const { branches, tips, chains, edges, rejected } = await this.#buildBranches(root, [...ours, ...pool], encrypted, witnessEnvelopes, adminCallbackFor, knownNextStates, terminalCandidates);
         if (branches.length === 0)
-            return { outcome: "skip" };
+            return { outcome: "skip", rejected };
         const winner = selectCanonicalBranch(currentTipEpoch, branches, this.#policy);
         const winnerTip = winner ? tips.get(winner) : undefined;
         if (!winner || !winnerTip)
-            return { outcome: "superseded", edges };
-        if (bytesToHex(winnerTip.confirmationTag) ===
-            bytesToHex(currentState.confirmationTag))
-            return { outcome: "superseded", edges };
+            return { outcome: "superseded", edges, rejected };
+        const winnerScore = scoreBranch(winner, this.#policy);
+        const runner = branches
+            .filter((candidate) => candidate !== winner)
+            .map((candidate) => scoreBranch(candidate, this.#policy))
+            .sort((a, b) => compareBranchScores(b, a))[0];
+        const decisiveRule = runner
+            ? winnerScore.effectiveCommitDepth !== runner.effectiveCommitDepth
+                ? "effective_commit_depth"
+                : winnerScore.witnessQuorumMet !== runner.witnessQuorumMet
+                    ? "witness_quorum_met"
+                    : winnerScore.appWitnessScore !== runner.appWitnessScore
+                        ? "app_witness_score"
+                        : winnerScore.tipPriority !== runner.tipPriority
+                            ? "tip_priority"
+                            : bytesToHex(winnerScore.tipCommitter) !==
+                                bytesToHex(runner.tipCommitter)
+                                ? "tip_committer"
+                                : "tip_digest"
+            : "only_candidate";
+        const decision = {
+            selectedBranchId: bytesToHex(winnerTip.confirmationTag),
+            selectedTipDigest: bytesToHex(winner.tipDigest),
+            selectedTipCommitter: bytesToHex(winnerScore.tipCommitter),
+            decisiveRule,
+            score: winnerScore,
+        };
+        const selectedTerminal = terminalCandidates.get(bytesToHex(winner.tipDigest));
+        if (!selectedTerminal &&
+            bytesToHex(winnerTip.confirmationTag) ===
+                bytesToHex(currentState.confirmationTag))
+            return {
+                outcome: "superseded",
+                edges,
+                winnerTip,
+                decision,
+                selectedTerminal,
+                rejected,
+            };
         return {
             outcome: "recovered",
             winnerTip,
             winnerChain: chains.get(winner) ?? [],
             edges,
+            decision,
+            selectedTerminal,
+            rejected,
             result: {
                 kind: "newState",
                 newState: winnerTip,
@@ -210,4 +668,48 @@ export class ForkRecovery {
         };
     }
 }
-//# sourceMappingURL=fork-recovery.js.map
+/**
+ * Collects the {@link AppWitness}es that decrypt against a single candidate
+ * `state` (`convergence.md` "App-payload witnesses"): each witness envelope is
+ * peeled and processed, and an authenticated application message contributes a
+ * witness at `state`'s epoch keyed by the sender's account pubkey. Used by both
+ * the pool-replay branch builder ({@link ForkRecovery}) and the tree-fed
+ * re-convergence pass, which gathers witnesses per retained fork-branch node.
+ */
+export async function collectWitnessesAt(params) {
+    const { peeler, ciphersuite, state, witnessEnvelopes, callback } = params;
+    const epoch = Number(state.groupContext.epoch);
+    const out = [];
+    for (const envelope of witnessEnvelopes) {
+        try {
+            const decrypted = await peeler.peelGroupMessages([envelope], state);
+            for (const pair of decrypted.read) {
+                if (pair.message.wireformat !== wireformats.mls_private_message)
+                    continue;
+                const r = await processMessage({
+                    context: {
+                        cipherSuite: ciphersuite,
+                        authService: marmotAuthService,
+                        clientConfig: defaultMarmotClientConfig,
+                        externalPsks: {},
+                    },
+                    state,
+                    message: pair.message,
+                    callback,
+                });
+                if (r.kind === "applicationMessage" &&
+                    r.senderLeafIndex !== undefined) {
+                    const credential = getCredentialFromLeafIndex(state.ratchetTree, r.senderLeafIndex);
+                    out.push({
+                        epoch,
+                        sender: hexToBytes(getCredentialPubkey(credential)),
+                    });
+                }
+            }
+        }
+        catch {
+            /* not a witness on this state */
+        }
+    }
+    return out;
+}

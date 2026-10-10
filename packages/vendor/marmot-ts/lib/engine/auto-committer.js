@@ -40,4 +40,3 @@ export function decideAutoCommit(params) {
         return "observe";
     return ownLeafIndex === Math.min(...eligible) ? "commit" : "observe";
 }
-//# sourceMappingURL=auto-committer.js.map

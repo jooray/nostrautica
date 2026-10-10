@@ -1,6 +1,6 @@
 import { NostrEvent } from "applesauce-core/helpers/event";
 import { EventEmitter } from "eventemitter3";
-import { CryptoProvider, KeyPackage, PrivateKeyPackage } from "ts-mls";
+import { CryptoProvider, KeyPackage, PrivateKeyPackage } from "../vendor/ts-mls/index.js";
 import { GenericKeyValueStore } from "../utils/key-value.js";
 /**
  * A key package that has local private material.
@@ -20,6 +20,12 @@ export type LocalKeyPackage = {
     identifier?: string;
     /** Nostr kind-30443 events this key package has been published under */
     published?: NostrEvent[];
+    /**
+     * Relays this key package was published to. Local bookkeeping for
+     * rotation and deletion only: KeyPackage events do not carry their relays
+     * (`transports/nostr.md`, KeyPackage publication).
+     */
+    relays?: string[];
     /** Whether this key package has been consumed (e.g. used to join a group). Undefined means unused. */
     used?: boolean;
 };
@@ -44,6 +50,12 @@ export type TrackedKeyPackage = {
     identifier?: string;
     /** Nostr kind-30443 events this key package has been published under */
     published?: NostrEvent[];
+    /**
+     * Relays this key package was published to. Local bookkeeping for
+     * rotation and deletion only: KeyPackage events do not carry their relays
+     * (`transports/nostr.md`, KeyPackage publication).
+     */
+    relays?: string[];
     /** Whether this key package has been consumed (e.g. used to join a group). Undefined means unused. */
     used?: boolean;
 };
@@ -62,8 +74,21 @@ export type TrackedKeyPackage = {
  * ```
  */
 export type StoredKeyPackage = LocalKeyPackage | TrackedKeyPackage;
-/** A {@link LocalKeyPackage} without the private material, safe to expose in listings */
-export type ListedKeyPackage = Omit<StoredKeyPackage, "privatePackage">;
+/**
+ * A {@link LocalKeyPackage} without the private material, safe to expose in listings.
+ *
+ * `nonCurrent` is `true` when the stored KeyPackage lacks a valid current account identity
+ * proof (`0x8009`) — for example a package built by a pre-v2 release with the legacy proof
+ * extension. {@link KeyPackageManager.ensurePublished} does not pick such packages when
+ * deciding whether a current one is already published, but the flag is informational
+ * everywhere else: `selectForWelcome` still returns them as Welcome candidates, and
+ * `rotate()`, `remove()`, `clear()`, and `purge()` act on them like any other entry. They are
+ * never removed automatically, and their kind-30443 events stay discoverable on relays (so
+ * peers' invites that pick them will fail) until `purge()` publishes a NIP-09 deletion.
+ */
+export type ListedKeyPackage = Omit<StoredKeyPackage, "privatePackage"> & {
+    nonCurrent?: boolean;
+};
 /**
  * A locally-held key package selected as a candidate for joining from a
  * specific Welcome message. Produced by `KeyPackageManager.selectForWelcome`
@@ -104,7 +129,7 @@ export declare class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents>
      *   Optionally include `identifier` to persist the addressable slot identifier.
      * @returns The storage key (hex ref string)
      */
-    add(keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> & Partial<Pick<LocalKeyPackage, "published" | "identifier">>): Promise<string>;
+    add(keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> & Partial<Pick<LocalKeyPackage, "published" | "identifier" | "relays">>): Promise<string>;
     /**
      * Appends a kind-30443 Nostr event to the `published` list of
      * the key package identified by `ref`. If no entry exists yet, a
@@ -113,8 +138,11 @@ export declare class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents>
      *
      * Throws if the event body cannot be decoded as a valid key package, or if
      * the event's `i` tag (KeyPackageRef) does not match the decoded body.
+     *
+     * @param relays - Relays the event was published to, merged into the
+     *   entry's local `relays` record.
      */
-    addPublished(ref: string | Uint8Array, event: NostrEvent): Promise<void>;
+    addPublished(ref: string | Uint8Array, event: NostrEvent, relays?: string[]): Promise<void>;
     /**
      * Retrieves the stored key package entry.
      * Returns any entry regardless of whether it has private material.
@@ -127,6 +155,10 @@ export declare class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents>
     /**
      * Lists all {@link LocalKeyPackage} entries (those with private material),
      * without the private package itself.
+     *
+     * Classifies each entry's `nonCurrent` flag by running
+     * `validateKeyPackageAccountIdentityProof` against its `publicPackage` — one BIP-340
+     * verify per stored package.
      */
     list(): Promise<ListedKeyPackage[]>;
     /**

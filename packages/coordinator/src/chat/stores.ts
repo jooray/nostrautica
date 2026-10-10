@@ -23,13 +23,29 @@ import type { StoredKeyPackage, StoredInviteEntry } from "@internet-privacy/marm
 import type { Store } from "../store/db.js";
 import { bytesToBase64, base64ToBytes } from "@nostrautica/protocol";
 
-/** The four logical stores a `MarmotClient` needs (§4.3), one SQLite namespace each. */
+/** The logical stores a `MarmotClient` needs (§4.3), one SQLite namespace each. */
 export const MARMOT_NAMESPACES = {
   groupState: "group-state",
   keyPackage: "key-package",
   invites: "invites",
   rewind: "rewind",
+  // Durable group lifecycle intent / terminal records (disband), ingest evidence
+  // (terminal wrappers, convergence effects) and the realized-removal marker.
+  // marmot-ts falls back to in-memory or shared storage without them, which
+  // forgets them on every restart.
+  lifecycle: "lifecycle",
+  ingestState: "ingest-state",
+  removedMarker: "removed-marker",
 } as const;
+
+/** The namespaces whose keys are per group, keyed by (or prefixed with) the MLS group id hex. */
+const PER_GROUP_NAMESPACES = [
+  MARMOT_NAMESPACES.groupState,
+  MARMOT_NAMESPACES.rewind,
+  MARMOT_NAMESPACES.lifecycle,
+  MARMOT_NAMESPACES.ingestState,
+  MARMOT_NAMESPACES.removedMarker,
+];
 
 // ── structured-clone-safe string codec ───────────────────────────────────────
 // marmot's stored values contain Uint8Array (MLS private keys, group state bytes)
@@ -111,14 +127,37 @@ export interface MarmotStores {
   keyPackageStore: GenericKeyValueStore<StoredKeyPackage>;
   inviteStore: GenericKeyValueStore<StoredInviteEntry>;
   rewindStore: GenericKeyValueStore<Uint8Array>;
+  lifecycleStore: GenericKeyValueStore<Uint8Array>;
+  ingestStateStore: GenericKeyValueStore<Uint8Array>;
+  removedMarkerStore: GenericKeyValueStore<boolean>;
 }
 
-/** Build the four encrypted-at-rest marmot stores over the coordinator SQLite store. */
+/** Build the encrypted-at-rest marmot stores over the coordinator SQLite store. */
 export function makeMarmotStores(store: Store): MarmotStores {
   return {
     groupStateStore: sqliteStore(store, MARMOT_NAMESPACES.groupState),
     keyPackageStore: sqliteStore(store, MARMOT_NAMESPACES.keyPackage),
     inviteStore: sqliteStore(store, MARMOT_NAMESPACES.invites),
     rewindStore: sqliteStore(store, MARMOT_NAMESPACES.rewind),
+    lifecycleStore: sqliteStore(store, MARMOT_NAMESPACES.lifecycle),
+    ingestStateStore: sqliteStore(store, MARMOT_NAMESPACES.ingestState),
+    removedMarkerStore: sqliteStore(store, MARMOT_NAMESPACES.removedMarker),
   };
+}
+
+/**
+ * Delete every persisted key belonging to one MLS group, without loading it.
+ *
+ * `groups.destroy()` is the library's teardown, but it has to load the group
+ * first — and a state written by an older library generation may not load at
+ * all. This is the fallback that still removes it. Keys are the group id hex or
+ * start with it (`<id>/disband/terminal`, …); a 64-hex-char prefix cannot collide.
+ */
+export function purgeGroupState(store: Store, mlsGroupIdHex: string): void {
+  const id = mlsGroupIdHex.toLowerCase();
+  for (const ns of PER_GROUP_NAMESPACES) {
+    for (const key of store.marmotKvKeys(ns)) {
+      if (key.toLowerCase() === id || key.toLowerCase().startsWith(id)) store.marmotKvDelete(ns, key);
+    }
+  }
 }

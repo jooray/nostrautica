@@ -1,11 +1,45 @@
 /** @module @category Engine */
-import type { CiphersuiteImpl, ClientState, MlsMessage, MlsWelcomeMessage, ProcessMessageResult, Proposal } from "ts-mls";
+import type { CiphersuiteImpl, ClientState, MlsMessage, MlsWelcomeMessage, ProcessMessageResult, Proposal } from "../vendor/ts-mls/index.js";
+import type { AccountIdentityProofRejectReason } from "../core/components/account-identity-proof.js";
+/** Immutable timing identity for one bounded convergence collection pass. */
+export interface ConvergencePassState {
+    readonly generation: number;
+    readonly openedAtMs: number;
+    readonly deadlineMs: number;
+    readonly lastRelevantInputMs: number;
+    /** Canonical epoch sampled once when this pass opened. */
+    readonly baseEpoch: number;
+}
+/** Opens a pass from one monotonic-clock sample. */
+export declare function openConvergencePass(nowMs: number, maxDurationMs: number, generation: number, baseEpoch?: number): ConvergencePassState;
+/** Restarts quiescence without changing a pass's identity or absolute deadline. */
+export declare function refreshConvergencePass(pass: ConvergencePassState, nowMs: number): ConvergencePassState;
+/** Authenticated terminal metadata carried beside, never inside, branch scores. */
+export interface DisbandCandidateEvidence {
+    readonly commitDigest: Uint8Array;
+    readonly actorPubkey: string;
+    readonly sourceEpoch: number;
+    readonly parentTag: string;
+    readonly terminalOutcome: "disbanded";
+}
 import type { MarmotGroupView } from "../core/client-state.js";
 import type { DeferredReason, Disposition } from "../core/inbound.js";
+import type { StateNotification } from "./state-notifications.js";
+import type { OwnCommitConvergenceStamp } from "./own-commit-stamp.js";
 /** A decrypted transport envelope paired with its MLS message. */
 export type PeeledMessagePair<TEnvelope> = {
     envelope: TEnvelope;
     message: MlsMessage;
+};
+/** Transport metadata for wrapping one outbound MLS message. */
+export type GroupMessageWrapOptions = {
+    /**
+     * Relay expiry hint (Unix seconds) for an application message whose source
+     * epoch enables `message-retention.v1`. The Nostr binding writes it as the
+     * NIP-40 `expiration` tag (`transports/nostr.md` "Message expiration").
+     * Never set for commits or proposals.
+     */
+    expiration?: bigint;
 };
 /** Crypto boundary between the engine and transport-specific wrapping. */
 export interface GroupPeeler<TEnvelope> {
@@ -13,18 +47,36 @@ export interface GroupPeeler<TEnvelope> {
         read: PeeledMessagePair<TEnvelope>[];
         unreadable: TEnvelope[];
     }>;
-    wrapGroupMessage(message: MlsMessage, state: ClientState): Promise<TEnvelope>;
+    wrapGroupMessage(message: MlsMessage, state: ClientState, options?: GroupMessageWrapOptions): Promise<TEnvelope>;
     /** A stable transport id for an envelope (used to key the ingestion pool). */
     idOf(envelope: TEnvelope): string;
 }
-/** Staged state awaiting publish confirmation (publish-before-apply). */
+/**
+ * Staged state awaiting publish confirmation (publish-before-apply). The
+ * founding Add send case (D-01, `"foundingAdd"` on {@link SendIntent}) also
+ * produces a `"commit"`-kind `PendingState` — it deliberately does not get
+ * its own literal, so `confirmPublished`'s existing commit-recording branch
+ * applies unchanged.
+ */
 export type PendingState = {
     kind: "proposal" | "commit" | "selfUpdate";
     newState: ClientState;
-    /** Parent state before apply; required for commits (retained-history). */
+    /**
+     * Parent state before apply. Required for BOTH commit-producing kinds —
+     * `"commit"` and `"selfUpdate"` (CR-09) — because `confirmPublished` records
+     * the applied commit into retained history and the fork tree from it.
+     * Absent only for `"proposal"`.
+     */
     parentState?: ClientState;
-    /** Applied commit MLS message; required for commits (retained-history). */
+    /**
+     * Applied commit MLS message. Required for both `"commit"` and
+     * `"selfUpdate"`; absent only for `"proposal"`.
+     */
     commitMessage?: MlsMessage;
+    /** Confirmation-time recovery evidence captured before proposals are cleared. */
+    ownCommitStamp?: OwnCommitConvergenceStamp;
+    /** Authenticated local terminal intent retained until bounded selection. */
+    terminalEvidence?: DisbandCandidateEvidence;
 };
 export type ProposalContext = {
     state: ClientState;
@@ -46,6 +98,27 @@ export type SendIntent = {
     proposalRefs?: string[];
 } | {
     kind: "selfUpdate";
+} | {
+    /**
+     * A founding Current-profile Add commit (epoch 0 → 1) merged locally
+     * with no group-message publication obligation
+     * (`refs/marmot/protocol-core/joining.md` lines 21-30 — "the
+     * founding-creation exception"; FOUND-01). Unlike `"commit"`,
+     * `extraProposals` is required: a founding Add with no Add proposals
+     * has no reason to exist. There is no `proposalRefs` field — at epoch 0
+     * there are no staged proposals to bundle by reference.
+     *
+     * CR-03: the engine refuses this intent — throwing before any commit
+     * is built, with no state change — unless the group is at epoch 0,
+     * the local member is the sole occupied leaf, there are no unapplied
+     * proposals, and `extraProposals` resolves to at least one proposal,
+     * all of them Adds. `refs/marmot/protocol-core/publish-lifecycle.md`
+     * line 77 limits the empty-publication-obligation exception to epoch 0
+     * and its immediately following founding Add Commit.
+     */
+    kind: "foundingAdd";
+    actorPubkey: string;
+    extraProposals: (Proposal | ProposalAction<Proposal> | (Proposal | ProposalAction<Proposal>)[])[];
 };
 /** Engine response to {@link MarmotGroupEngine.send}. */
 export type SendResult<TEnvelope> = {
@@ -65,6 +138,28 @@ export type SendResult<TEnvelope> = {
     kind: "selfUpdate";
     envelope: TEnvelope;
     pending: PendingState;
+} | {
+    /**
+     * Result of a `"foundingAdd"` send. Deliberately has NO `envelope`
+     * member:
+     *
+     * (a) Per `refs/marmot/protocol-core/joining.md` lines 21-30 and
+     *     `refs/marmot/protocol-core/publish-lifecycle.md` lines 66-78, the
+     *     founding Add has an empty publication obligation, so no transport
+     *     envelope exists for it — the absence of this field is the
+     *     type-level expression of FOUND-01, not merely an unpublished
+     *     envelope.
+     * (b) The caller MUST hand `pending` straight to `confirmPublished()`
+     *     in the same uninterrupted continuation with no intervening
+     *     `await` (D-01). This invariant is convention, not enforced by
+     *     this signature (R-01) — callers must be tested, not trusted.
+     * (c) `pending.kind` is `"commit"` (see {@link PendingState}'s doc
+     *     comment), so the existing commit-recording branch of
+     *     `confirmPublished()` applies to it unchanged.
+     */
+    kind: "foundingGroupCreated";
+    welcome: MlsWelcomeMessage;
+    pending: PendingState;
 };
 /** An envelope whose MLS message was successfully processed. */
 export type ProcessedIngestResult<TEnvelope> = {
@@ -72,6 +167,23 @@ export type ProcessedIngestResult<TEnvelope> = {
     result: ProcessMessageResult;
     envelope: TEnvelope;
     message: MlsMessage;
+    /**
+     * Commit-digest-attributed group-state notifications (D-10/D-11,
+     * `convergence.md` "Applying the selected branch"). Optional — populated by
+     * the seam that wires notification derivation.
+     *
+     * ATTRIBUTION (WR-18): these are NOT always this `message`'s own
+     * notifications. In the normal in-order case they are. But when this result
+     * reports an applied fork resolution, the array is the concatenation of the
+     * notifications derived from EVERY commit on the adopted winner chain, while
+     * `message` is merely the representative fork-pool envelope the rewind was
+     * reported against — it may be unrelated to most of the entries. Never pair
+     * `message` with `notifications` positionally; each entry carries its own
+     * `commitDigest`, which is the only correct way to attribute it.
+     */
+    notifications?: StateNotification[];
+    /** Authenticated terminal evidence, present only after canonical selection. */
+    selectedTerminal?: DisbandCandidateEvidence;
 };
 /** A commit rejected by the admin-verification callback. */
 export type RejectedIngestResult<TEnvelope> = {
@@ -79,13 +191,36 @@ export type RejectedIngestResult<TEnvelope> = {
     result: ProcessMessageResult;
     envelope: TEnvelope;
     message: MlsMessage;
+    /**
+     * Additive, extensible rejection reason (D-03). The protocol-visible
+     * category stays `authorization_failed` regardless of which reason fires —
+     * `foundation/errors.md` requires pre-convergence rejections be described
+     * "by category alone".
+     */
+    reason?: "admin-policy" | "component-integrity" | "admin-leaf-coupling" | "disband-legality" | "account-identity-proof";
+    /** Pubkey-free sub-reason for `reason: "account-identity-proof"` (D-06). */
+    proofReason?: AccountIdentityProofRejectReason;
+    /**
+     * Pubkey-free failing leaf's true MLS tree leaf index for `reason:
+     * "account-identity-proof"` (D-06). Omitted for a profile-drift violation
+     * or a pre-apply Add-proposal violation, which have no single leaf.
+     */
+    leafIndex?: number;
 };
 /** An envelope skipped without processing. */
 export type SkippedIngestResult<TEnvelope> = {
     kind: "skipped";
     envelope: TEnvelope;
-    message: MlsMessage;
-    reason: "past-epoch" | "wrong-wireformat" | "self-echo" | "beyond-anchor" | "missing-retained-anchor" | "invalid-app-payload";
+    /**
+     * Absent for inactive reasons because input for a client removed from, or a
+     * group canonically disbanded is classified by its group
+     * before any peel or decrypt (`member-departure.md`: such input "need not
+     * be decrypted or authenticated"). Every other skip reason still populates
+     * this (D-13). `message` is also absent for `unsupported-profile`, which is
+     * classified from canonical GroupContext before any peel or decrypt (D-11).
+     */
+    message?: MlsMessage;
+    reason: "past-epoch" | "wrong-wireformat" | "self-echo" | "duplicate" | "beyond-anchor" | "missing-retained-anchor" | "invalid-app-payload" | "self-evicted" | "group-disbanded" | "unsupported-profile";
 };
 /** An envelope that could not be decrypted or processed after all retry attempts. */
 export type UnreadableIngestResult<TEnvelope> = {
@@ -112,6 +247,14 @@ export type DeferredIngestResult<TEnvelope> = {
     envelope: TEnvelope;
     message: MlsMessage;
     reason: DeferredReason;
+    /** MLS-authenticated source epoch used for horizon retention. */
+    sourceEpoch: number;
+};
+/** An envelope retained outside the bounded pool until admission capacity frees. */
+export type CapacityRefusedIngestResult<TEnvelope> = {
+    kind: "refused";
+    envelope: TEnvelope;
+    reason: "capacity";
 };
 /**
  * An MLS application message that decrypted only on a losing/abandoned branch
@@ -172,9 +315,65 @@ export type RemovedIngestResult<TEnvelope> = {
     result: ProcessMessageResult;
     envelope: TEnvelope;
     message: MlsMessage;
+    /**
+     * Commit-digest-attributed group-state notifications (D-10/D-11/D-12) — in
+     * particular the `selfRemoved` notification attributed to the very commit
+     * that removed us.
+     *
+     * ATTRIBUTION (WR-18): as with {@link ProcessedIngestResult.notifications},
+     * when this result reports an applied fork resolution the array spans the
+     * WHOLE adopted winner chain, not just this `message`. Attribute entries by
+     * their `commitDigest`, never by position against `message`.
+     */
+    notifications?: StateNotification[];
+};
+/**
+ * A rewind superseded a previously-accepted commit and withdrew the
+ * notifications derived from it (D-11, `convergence.md` "Applying the
+ * selected branch"). Unlike every other {@link IngestResult} variant, this
+ * carries NO `envelope` and NO `message`: a rewind supersedes a commit, and
+ * there is no triggering transport envelope to attribute the withdrawal to.
+ * It is generic-free — it is not parameterized on `TEnvelope`.
+ */
+export type StateInvalidatedIngestResult = {
+    kind: "stateInvalidated";
+    /** Digest of the superseded commit. */
+    commitDigest: Uint8Array;
+    /** Epoch the rewind selected as canonical. */
+    forkEpoch: number;
+    /** Notifications withdrawn because the commit that produced them was superseded. */
+    withdrawn: StateNotification[];
+};
+/** Notifications made observable after a commit has been confirmed locally or adopted. */
+export type AppliedNotificationsIngestResult = {
+    kind: "appliedNotifications";
+    commitDigest: Uint8Array;
+    notifications: StateNotification[];
+    /**
+     * WR-04: authenticated terminal evidence, when the envelope-free rewind
+     * that produced this result selected a disband. The envelope-carrying
+     * rewind branches report this on {@link ProcessedIngestResult}; without it
+     * here, a direct `./engine` consumer building its own transport saw a
+     * rewind onto a disband as nothing but a notification stream.
+     */
+    selectedTerminal?: DisbandCandidateEvidence;
+    /**
+     * WR-04: true when the envelope-free rewind adopted a tip on which this
+     * client is the `removedFromGroup` tombstone. The envelope-carrying path
+     * reports that as {@link RemovedIngestResult}, which has no envelope-free
+     * counterpart.
+     */
+    removedFromGroup?: boolean;
+};
+/** A previously withdrawn branch commit has become canonical again. */
+export type StateRevalidatedIngestResult = {
+    kind: "stateRevalidated";
+    commitDigest: Uint8Array;
+    effectId: Uint8Array;
+    notifications: StateNotification[];
 };
 /** Result from ingesting group transport envelopes. */
-export type IngestResult<TEnvelope> = ProcessedIngestResult<TEnvelope> | RejectedIngestResult<TEnvelope> | SkippedIngestResult<TEnvelope> | DeferredIngestResult<TEnvelope> | InvalidatedIngestResult<TEnvelope> | AutoCommitIngestResult<TEnvelope> | RemovedIngestResult<TEnvelope> | UnreadableIngestResult<TEnvelope>;
+export type IngestResult<TEnvelope> = ProcessedIngestResult<TEnvelope> | RejectedIngestResult<TEnvelope> | SkippedIngestResult<TEnvelope> | DeferredIngestResult<TEnvelope> | CapacityRefusedIngestResult<TEnvelope> | InvalidatedIngestResult<TEnvelope> | AutoCommitIngestResult<TEnvelope> | RemovedIngestResult<TEnvelope> | UnreadableIngestResult<TEnvelope> | AppliedNotificationsIngestResult | StateRevalidatedIngestResult | StateInvalidatedIngestResult;
 /** An {@link IngestResult} carrying its protocol-visible {@link Disposition}. */
 export type DispositionedIngestResult<TEnvelope> = IngestResult<TEnvelope> & {
     disposition: Disposition;

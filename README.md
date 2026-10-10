@@ -38,6 +38,7 @@ See [`docs/SPECIFICATION.md`](docs/SPECIFICATION.md) (normative), the
 |---|---|
 | `packages/protocol` | Shared kinds, zod schemas, and crypto (ECK/NIP-44, blinded d-tags, AES-GCM media, invite proofs, NIP-59 gift wrap). Zero UI/server deps. |
 | `packages/app` | The PWA — static SvelteKit (Svelte 5 runes), hash-routed, talks only to relays + Blossom. Deployable as an [nsite](https://github.com/sandwichfarm/nsyte) or any static host. |
+| `android` | The native Android app (Kotlin, Jetpack Compose): the PWA's features on the same relays and coordinator, offline-first, with group chat on MDK's MarmotKit. See [`android/README.md`](android/README.md). |
 | `packages/coordinator` | The optional headless daemon: STT → AI profiles → complementarity-aware matchmaking. Nostr-only interface; no HTTP surface. |
 
 ## Architecture

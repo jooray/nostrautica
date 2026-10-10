@@ -1,6 +1,7 @@
 /** @module @category Core - Convergence */
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
+import { selfRemoveProposalType } from "../vendor/ts-mls/index.js";
 import { isAppPayloadExpired } from "./retained-history.js";
 /**
  * The default Marmot convergence policy — profile version 1 (`convergence.md`).
@@ -11,10 +12,19 @@ export const DEFAULT_CONVERGENCE_POLICY = {
     maxRewindCommits: 5,
     appPayloadPastEpochLimit: 5,
     settlementQuiescenceMs: 1000,
+    maxConvergencePassMs: 5000,
     witnessQuorumSendersPerEpoch: 2,
     witnessQuorumEpochs: 1,
     maxWitnessOverrideDepth: 1,
 };
+/** Supplies the pinned v1 pass bound when decoding/configuring older policy input. */
+export function normalizeConvergencePolicy(policy) {
+    return {
+        ...policy,
+        maxConvergencePassMs: policy.maxConvergencePassMs ??
+            DEFAULT_CONVERGENCE_POLICY.maxConvergencePassMs,
+    };
+}
 /**
  * Validates the witness-override invariant: a witness-quorum boost must never be
  * able to push a branch past the rollback horizon, so
@@ -39,6 +49,19 @@ export function validateConvergencePolicy(policy) {
 export function isWitnessEligible(witness, forkEpoch, tipEpoch, policy) {
     return (witness.epoch > forkEpoch &&
         !isAppPayloadExpired(witness.epoch, tipEpoch, policy.appPayloadPastEpochLimit));
+}
+/**
+ * Classifies a commit by the proposals it carries (inline and by reference),
+ * mirroring MDK `commit_ordering_priority_for_staged`: a commit with no
+ * proposals (a self-update; MLS forces an UpdatePath) or with only SelfRemove
+ * proposals is `ordinary`; anything else needs an admin and is `privileged`.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/app_components.rs `is_allowed_non_admin_commit`
+ */
+export function commitOrderingPriority(proposals) {
+    return proposals.every(({ proposal }) => proposal.proposalType === selfRemoveProposalType)
+        ? "ordinary"
+        : "privileged";
 }
 function witnessesByEpoch(witnesses) {
     const byEpoch = new Map();
@@ -83,7 +106,9 @@ export function scoreBranch(branch, policy) {
         effectiveCommitDepth: validCommitDepth + witnessDepthBoost(branch, policy),
         witnessQuorumMet: witnessQuorumMet(branch.appWitnesses, policy),
         appWitnessScore: appWitnessScore(branch.appWitnesses, policy),
+        tipPriority: branch.tipPriority ?? "ordinary",
         tipDigest: branch.tipDigest,
+        tipCommitter: branch.tipCommitter ?? new Uint8Array(),
     };
 }
 /** Lexicographic comparison over raw bytes (a<b → -1, a>b → 1, equal → 0). */
@@ -95,27 +120,51 @@ function compareBytes(a, b) {
     }
     return a.length - b.length;
 }
+function priorityRank(priority) {
+    return priority === "privileged" ? 1 : 0;
+}
 function cmpNum(a, b) {
     return a < b ? -1 : a > b ? 1 : 0;
 }
 /**
  * Compares two branch scores per `convergence.md` "Branch selection": higher
  * effectiveCommitDepth, then witness quorum beats none, then higher
- * rawCommitDepth, then higher appWitnessScore, then LOWER tipDigest. Returns a
+ * rawCommitDepth, then higher appWitnessScore, then a `privileged` tip before
+ * an `ordinary` one, then LOWER tipCommitter, then LOWER tipDigest. Returns a
  * positive number when `a` ranks above `b` (so the canonical branch is the
  * maximum under this ordering).
+ *
+ * @see refs/mdk/crates/cgka-engine/src/convergence.rs `compare_scores`
  */
 export function compareBranchScores(a, b) {
     return (cmpNum(a.effectiveCommitDepth, b.effectiveCommitDepth) ||
         cmpNum(Number(a.witnessQuorumMet), Number(b.witnessQuorumMet)) ||
         cmpNum(a.validCommitDepth, b.validCommitDepth) ||
         cmpNum(a.appWitnessScore, b.appWitnessScore) ||
+        // A privileged tip (one that needed an admin) beats an ordinary one.
+        cmpNum(priorityRank(a.tipPriority), priorityRank(b.tipPriority)) ||
+        // Lower authenticated account identity wins, matching MDK.
+        compareBytes(b.tipCommitter, a.tipCommitter) ||
         // Lower tip digest wins, so invert the byte comparison.
         compareBytes(b.tipDigest, a.tipDigest));
 }
 /**
  * A branch is eligible only inside the rollback horizon:
- * `currentTipEpoch - forkEpoch <= maxRewindCommits`.
+ * `currentTipEpoch - forkEpoch <= maxRewindCommits` (`convergence.md`
+ * "Eligibility").
+ *
+ * This predicate is intentionally horizon-only and takes no retained anchor.
+ * `convergence.md` lists a second eligibility rule — "a branch that needs a
+ * retained state older than the retained anchor MUST NOT be selected" — but that
+ * guard is deliberately kept **separate** from this predicate, mirroring the
+ * reference engine's two-layer structure (`is_branch_eligible` is horizon-only;
+ * the anchor check lives in candidate admission + late-commit classification,
+ * always anchor-first). Keeping the anchor out of here lets the predicate be
+ * reused for horizon-only purposes (e.g. eligibility counts) and keeps it a pure
+ * function of policy + branch, with no dependency on retained-store state. The
+ * anchor guard is applied operationally: {@link classifyLateCommit} emits
+ * `beyond_anchor` for a sub-anchor commit (ingest), and fork recovery cannot
+ * build a branch whose `forkEpoch` state is no longer retained.
  */
 export function isBranchEligible(currentTipEpoch, branch, policy) {
     return (Math.max(0, currentTipEpoch - branch.forkEpoch) <= policy.maxRewindCommits);
@@ -152,4 +201,3 @@ export function compareCommitOrderingKeys(a, b) {
     return (cmpNum(a.sourceEpoch, b.sourceEpoch) ||
         compareBytes(a.commitDigest, b.commitDigest));
 }
-//# sourceMappingURL=convergence.js.map

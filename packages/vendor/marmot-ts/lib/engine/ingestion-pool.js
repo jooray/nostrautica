@@ -1,6 +1,5 @@
 /** @module @category Engine */
 const DEFAULT_MAX_SIZE = 1000;
-const DEFAULT_MAX_EPOCH_AGE = 256;
 /**
  * A persistent pool of incoming events that could not yet be decrypted against
  * any tried state (Marmot v2 `protocol-core/inbound-processing.md` "deferred").
@@ -16,10 +15,11 @@ const DEFAULT_MAX_EPOCH_AGE = 256;
 export class IngestionPool {
     #entries = new Map();
     #maxSize;
-    #maxEpochAge;
+    #maxRewindCommits;
     constructor(options) {
         this.#maxSize = options?.maxSize ?? DEFAULT_MAX_SIZE;
-        this.#maxEpochAge = options?.maxEpochAge ?? DEFAULT_MAX_EPOCH_AGE;
+        this.#maxRewindCommits =
+            options?.maxRewindCommits ?? Number.POSITIVE_INFINITY;
     }
     /** Number of pooled entries. */
     get size() {
@@ -30,29 +30,39 @@ export class IngestionPool {
         return this.#entries.has(id);
     }
     /**
-     * Pools an envelope (keyed by id). A re-pooled entry keeps its original
-     * `arrivalEpoch` so eviction ages from first sighting. Evicts the oldest entry
-     * when over `maxSize`.
+     * Pools an envelope (keyed by id). A peeled Commit supplies its authenticated
+     * source epoch. Capacity refusal is retryable and never evicts accepted work.
      */
-    add(id, envelope, arrivalEpoch) {
+    add(id, envelope, sourceEpoch) {
         const existing = this.#entries.get(id);
-        if (existing)
-            return; // keep original arrival epoch + tried-tag memo
+        if (existing) {
+            if (existing.sourceEpoch === undefined && sourceEpoch !== undefined)
+                existing.sourceEpoch = sourceEpoch;
+            return { kind: "accepted" };
+        }
+        if (this.#entries.size >= this.#maxSize)
+            return { kind: "refused", reason: "capacity" };
         this.#entries.set(id, {
             id,
             envelope,
-            arrivalEpoch,
+            sourceEpoch,
             triedTags: new Set(),
         });
-        if (this.#entries.size > this.#maxSize) {
-            const oldest = this.#entries.keys().next().value;
-            if (oldest !== undefined)
-                this.#entries.delete(oldest);
-        }
+        return { kind: "accepted" };
     }
     /** Removes an entry (it was read, or is being given up). */
     remove(id) {
         this.#entries.delete(id);
+    }
+    /**
+     * Clears every entry's tried-tag memo so the next tree sweep re-peels all
+     * pooled events against all node states. Called after a convergence branch
+     * switch: the canonical path changed, so a fork message previously held on a
+     * losing branch may now decrypt on the canonical one and be delivered.
+     */
+    resetTried() {
+        for (const entry of this.#entries.values())
+            entry.triedTags.clear();
     }
     /** The pooled envelopes, oldest-first. */
     envelopes() {
@@ -63,19 +73,23 @@ export class IngestionPool {
         return [...this.#entries.values()];
     }
     /**
-     * Drops and returns entries the tip has aged past `maxEpochAge` without
-     * resolving — they are unlikely to ever decrypt (foreign/garbage or an
-     * unreachably-far-future epoch), so they become terminally unreadable.
+     * Drops authenticated deferred commits only once their source epoch is
+     * strictly beyond the rollback horizon. Opaque wrappers have no trustworthy
+     * epoch and remain capacity-bounded until they authenticate or are removed.
      */
     evictStale(currentEpoch) {
         const evicted = [];
         for (const entry of this.#entries.values()) {
-            if (currentEpoch - entry.arrivalEpoch > this.#maxEpochAge)
+            if (entry.sourceEpoch !== undefined &&
+                currentEpoch - entry.sourceEpoch > this.#maxRewindCommits)
                 evicted.push(entry);
         }
         for (const entry of evicted)
             this.#entries.delete(entry.id);
         return evicted;
     }
+    /** Authenticated source epochs whose parent states remain active dependencies. */
+    sourceEpochs() {
+        return this.entries().flatMap((entry) => entry.sourceEpoch === undefined ? [] : [entry.sourceEpoch]);
+    }
 }
-//# sourceMappingURL=ingestion-pool.js.map
