@@ -25,6 +25,9 @@ import {
   rosterContentSchema,
   matchListContentSchema,
   parseCoordinate,
+  membershipAuthorities,
+  verifyMembershipProof,
+  isCommunityCoordinate,
   mergeRosterPages,
   rosterContinuationDs,
   rosterPageD,
@@ -533,6 +536,8 @@ export async function receiveGrants(
   if (!readComplete) outcome.truncated = true;
 
   const coordinates = new Set<string>();
+  // Children whose grant carried a valid community proof in this pass (§15).
+  const newProofChildren = new Set<string>();
   // Did this scan prove the SIGNER can actually read our wraps? A full-history
   // backfill that unwrapped nothing is not evidence there was nothing to find —
   // on a remote signer (Amber) every unwrap is two NIP-46 round trips, and a
@@ -724,6 +729,23 @@ export async function receiveGrants(
         grant.role === "organizer" ? "organizer" : "attendee",
       );
       coordinates.add(grant.a);
+      // §15.3: a proof to join the event's community. Kept only when it is for the
+      // community the event's newest config names and verifies as an authority's
+      // signature over THIS attendee; the community re-checks it on its side.
+      if (
+        grant.parent &&
+        config.parent === grant.parent.a &&
+        isCommunityCoordinate(grant.parent.a) &&
+        verifyMembershipProof(grant.parent, grant.parent.a, grant.a, pubkey, membershipAuthorities(grant.a, config))
+      ) {
+        try {
+          const { storeParentProof } = await import("./community-join.js");
+          storeParentProof(grant.a, grant.parent);
+          newProofChildren.add(grant.a);
+        } catch (e) {
+          console.warn("[receiveGrants] could not keep a community proof for", grant.a, e);
+        }
+      }
       memo[wrap.id] = { coordinate: grant.a, versions: grant.eck.map((v) => v.id), organizer: false };
       memoDirty = true;
       continue;
@@ -795,6 +817,16 @@ export async function receiveGrants(
       for (const k of keys) if (!keep.has(k)) delete memo[k];
     }
     cacheSet(GRANT_MEMO_KEY, memo, Math.floor(Date.now() / 1000), pubkey);
+  }
+  // §15.5: join the community of any event the person consented to, from the
+  // proofs just stored AND from earlier ones (a grant is memoized once processed,
+  // so a join that failed then would otherwise never be retried). Fail-soft: this
+  // must not be able to fail the scan.
+  try {
+    const { autoJoinCommunities, proofChildren } = await import("./community-join.js");
+    await autoJoinCommunities(signer, [...new Set([...proofChildren(), ...newProofChildren])]);
+  } catch (e) {
+    console.warn("[receiveGrants] community auto-join skipped:", e);
   }
   // Report only on the success path: a throw above reaches the caller as a
   // rejection, which is a strictly more specific signal than this outcome.

@@ -21,7 +21,9 @@ import {
   type KeyGrantContent,
   type OrganizerGrantContent,
   KIND_COMMUNITY,
+  makeMembershipProof,
 } from "@nostrautica/protocol";
+import { loadParentProof, loadParentConsent } from "./community-join.js";
 import { LocalSigner } from "$lib/signer/local.js";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
 import {
@@ -426,7 +428,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
   let attendeePk: string;
 
   /** A real, validly-signed 31600 for the event (latest-wins candidate). */
-  function signedConfig(at = 1_700_000_000) {
+  function signedConfig(at = 1_700_000_000, extraTags: string[][] = []) {
     return finalizeEvent(
       {
         kind: KIND_EVENT_CONFIG,
@@ -436,6 +438,7 @@ describe("APPK-5 — grant memoization + config relay set", () => {
           ["v", "2"],
           ["inbox", inbox],
           ["coordinator", coordinator, "1"],
+          ...extraTags,
         ],
         content: "",
       },
@@ -444,13 +447,14 @@ describe("APPK-5 — grant memoization + config relay set", () => {
   }
 
   /** A genuine 21602 key grant gift-wrapped to the attendee by the coordinator. */
-  async function keyGrantWrap(eckId = 1) {
+  async function keyGrantWrap(eckId = 1, parent?: KeyGrantContent["parent"]) {
     const grant: KeyGrantContent = {
       v: 2,
       a: coordinate,
       role: "attendee",
       eck: [{ id: eckId, key: bytesToBase64(generateEck()) }],
       granted_by: coordinator,
+      ...(parent ? { parent } : {}),
     };
     return signerWrap(new LocalSigner(coordSk), attendeePk, {
       kind: KIND_KEY_GRANT,
@@ -488,6 +492,44 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     expect(await receiveGrants(attendee)).toEqual([coordinate]);
     expect((await loadEventKeys(coordinate))?.eck.map((v) => v.id)).toEqual([1]);
     expect(memoHas(wrap.id)).toBe(true);
+  });
+
+  describe("§15 community proof in a key grant", () => {
+    const community = makeCoordinate(getPublicKey(generateSecretKey()), "btc-community", KIND_COMMUNITY);
+    const parentTag = [["parent", community]];
+
+    it("keeps a proof the event's authority signed for THIS attendee, and does not join without consent", async () => {
+      const proof = makeMembershipProof(coordSk, community, coordinate, attendeePk);
+      fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap(1, proof)]);
+      fetchEvents.mockResolvedValue([signedConfig(1_700_000_000, parentTag)]);
+
+      expect(await receiveGrants(attendee)).toEqual([coordinate]);
+
+      expect(loadParentProof(coordinate)).toEqual(proof);
+      expect(loadParentConsent(coordinate)).toBeUndefined(); // nothing was decided for them
+    });
+
+    it("drops a proof made for someone else, by a stranger, or for a community the event does not name", async () => {
+      const other = getPublicKey(generateSecretKey());
+      const forSomeoneElse = makeMembershipProof(coordSk, community, coordinate, other);
+      const byStranger = makeMembershipProof(generateSecretKey(), community, coordinate, attendeePk);
+      const stray = makeCoordinate(getPublicKey(generateSecretKey()), "other", KIND_COMMUNITY);
+      const wrongCommunity = makeMembershipProof(coordSk, stray, coordinate, attendeePk);
+      fetchEvents.mockResolvedValue([signedConfig(1_700_000_000, parentTag)]);
+      for (const proof of [forSomeoneElse, byStranger, wrongCommunity]) {
+        fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap(1, proof)]);
+        await receiveGrants(attendee, { force: true });
+        expect(loadParentProof(coordinate)).toBeUndefined();
+      }
+    });
+
+    it("keeps nothing once the event's newest config no longer names that community", async () => {
+      const proof = makeMembershipProof(coordSk, community, coordinate, attendeePk);
+      fetchEventsRelayOnly.mockResolvedValue([await keyGrantWrap(1, proof)]);
+      fetchEvents.mockResolvedValue([signedConfig(1_700_000_000, [])]);
+      await receiveGrants(attendee);
+      expect(loadParentProof(coordinate)).toBeUndefined();
+    });
   });
 
   it("can recover a grant after relay discovery has already taken longer than the signer budget", async () => {

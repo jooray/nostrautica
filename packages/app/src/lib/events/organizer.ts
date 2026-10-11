@@ -70,6 +70,7 @@ import {
   pickLatest,
   revisionSupersedes,
   supersedes,
+  parseMemberOfTags,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -83,6 +84,7 @@ import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { grantParentField } from "./hierarchy.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
 // paints instantly and refreshes in parallel (CACHING-PLAN §2.11). Wiped on
@@ -147,6 +149,11 @@ export interface PendingRequest {
   /** A plain-text intro (spec F1) from a 21601 submission — see fetchPending. */
   introText?: string;
   invite?: InviteProof;
+  /**
+   * `member_of` claims on the join (§15): "I am approved for this event of your
+   * community". Unverified here; hierarchy.ts#verifyQueueMembership checks them.
+   */
+  memberOf?: { child: string; by: string; sig: string }[];
   rumorCreatedAt: number;
   /**
    * This attendee sent a 21610 withdrawal that is NEWER than their join.
@@ -238,6 +245,7 @@ export async function fetchPending(
         continue;
       }
       const invite = parseInviteTag(rumor.tags);
+      const memberOf = parseMemberOfTags(rumor.tags);
       const prev = byAttendee.get(rumor.pubkey);
       // Join requests carry no `rev`; order them by the global event tie-break —
       // higher created_at, then lowest id on a tie (audit P4). Arrival order is
@@ -256,6 +264,7 @@ export async function fetchPending(
           message: content.message,
           rsvpPublic: content.rsvp_public,
           invite,
+          ...(memberOf.length ? { memberOf } : {}),
           rumorCreatedAt: rumor.created_at,
         });
         joinRumorId.set(rumor.pubkey, rumor.id);
@@ -402,6 +411,9 @@ export async function approveAttendee(
     role,
     eck: keys.eck,
     granted_by: getPublicKey(eidSk),
+    // §15.3: when this event belongs to a community, the grant carries the proof
+    // that lets the attendee join it. Empty for an unlinked event.
+    ...(await grantParentField(ctx, eidSk, req.attendeePubkey)),
   };
   const grantWrap = wrapRumor(eidSk, req.attendeePubkey, {
     kind: KIND_KEY_GRANT,
@@ -466,6 +478,43 @@ export async function approveAttendee(
     publishOrQueue(entryEvent, ctx.config.relays),
     ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
   ]);
+}
+
+/**
+ * Re-issue a key grant carrying the community membership proof to everyone
+ * already approved for this event (§15.3). Run once when an organizer links an
+ * event that has no coordinator: people who joined before the link would
+ * otherwise never be offered the community. The grant is the same ECK set they
+ * already hold (receivers union-merge, §6.3), plus the proof. Returns how many
+ * were sent; 0 when the roster cannot be read or the event is not linked.
+ */
+export async function reissueGrantsWithProof(ctx: EventContext): Promise<number> {
+  const keys = await loadEventKeys(ctx.coordinate);
+  if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) return 0;
+  const eck = currentEck(keys);
+  if (!eck) return 0;
+  const eidSk = hexToBytes(keys.eidNsecHex);
+  const read = await loadRoster(ctx, base64ToBytes(eck.key));
+  if (read.state !== "ok") return 0;
+  let sent = 0;
+  for (const a of read.roster.attendees) {
+    const parent = await grantParentField(ctx, eidSk, a.pubkey, { fresh: sent === 0 });
+    if (!parent.parent) return sent; // not linked (yet): nothing to send to anyone
+    const wrap = wrapRumor(eidSk, a.pubkey, {
+      kind: KIND_KEY_GRANT,
+      content: {
+        v: 2,
+        a: ctx.coordinate,
+        role: a.role,
+        eck: keys.eck,
+        granted_by: getPublicKey(eidSk),
+        ...parent,
+      },
+    });
+    await publishAccountGiftWrap(wrap as any, a.pubkey, ctx.config.relays);
+    sent++;
+  }
+  return sent;
 }
 
 /**
@@ -1241,6 +1290,7 @@ export async function revokeAttendeeClient(
         role: a.role,
         eck: keys.eck,
         granted_by: getPublicKey(eidSk),
+        ...(await grantParentField(ctx, eidSk, a.pubkey)),
       },
     });
     pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
@@ -1329,7 +1379,14 @@ async function rotateEckAndInbox(
     }
     const grantWrap = wrapRumor(eidSk, a.pubkey, {
       kind: KIND_KEY_GRANT,
-      content: { v: 2, a: ctx.coordinate, role: a.role, eck: eckAll, granted_by: eidPubkey },
+      content: {
+        v: 2,
+        a: ctx.coordinate,
+        role: a.role,
+        eck: eckAll,
+        granted_by: eidPubkey,
+        ...(await grantParentField(ctx, eidSk, a.pubkey)),
+      },
     });
     pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
   }
