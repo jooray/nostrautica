@@ -45,6 +45,8 @@ import today.cypherpunk.nostrautica.ui.components.SectionTitle
 import today.cypherpunk.nostrautica.ui.components.SmallButton
 import today.cypherpunk.nostrautica.ui.components.SoftCard
 import today.cypherpunk.nostrautica.ui.nav.Route
+import today.cypherpunk.nostrautica.ui.screens.event.CommunityEvents
+import today.cypherpunk.nostrautica.ui.screens.event.CommunityHeader
 import today.cypherpunk.nostrautica.ui.screens.event.EventPageSections
 import today.cypherpunk.nostrautica.ui.screens.event.MemberActions
 import today.cypherpunk.nostrautica.ui.screens.event.OrganizerCard
@@ -187,6 +189,8 @@ fun EventHomeScreen(naddr: String) {
             item { EventHeader(ev) }
             if (ev.ctx.summary.isNotBlank()) item { Body(ev.ctx.summary) }
             item { LogisticsBlock(ev) }
+            // Space hierarchy (§15): "Part of <community>" and the one-tap offer for a member who never answered.
+            if (ev.ctx.cfg.parent != null) item { CommunityHeader(ev) }
             when (ev.role) {
                 Role.VISITOR -> item {
                     Card {
@@ -208,6 +212,8 @@ fun EventHomeScreen(naddr: String) {
                 }
                 else -> {}
             }
+            // A community's own events, upcoming first (§15.5).
+            if (ev.isCommunity && ev.ctx.cfg.children.isNotEmpty()) item { CommunityEvents(ev) }
             if (ev.isMember) item { ReadinessCard(ev) }
             if (ev.isMember) item { MemberActions(ev) }
             // Organizers get admin/duplicate; a signed-in non-member gets the

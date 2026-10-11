@@ -31,8 +31,8 @@ android {
         targetSdk = 37
         // Bump both on every release (docs/VERSIONING.md). versionName tracks the
         // root package.json so Settings → About and bug reports line up with the PWA.
-        versionCode = 2
-        versionName = "0.10.0"
+        versionCode = 3
+        versionName = "0.10.2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Empty in every real build. For testing against the local stack the PWA's
         // e2e uses (docs/E2E-TESTING-GUIDE.md): -PdevRelays=ws://10.0.2.2:7777

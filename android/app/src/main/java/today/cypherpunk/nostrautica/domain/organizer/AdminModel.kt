@@ -26,6 +26,8 @@ data class PendingRequest(
     val media: List<MediaDescriptor>? = null,
     val introText: String? = null,
     val invite: InviteProofRef? = null,
+    /** `member_of` claims on the join (§15): unverified here, CommunityRules.verifyQueue checks them. */
+    val memberOf: List<today.cypherpunk.nostrautica.domain.MemberOfClaim> = emptyList(),
     val rumorCreatedAt: Long,
     val withdrawn: Boolean = false,
     val withdrawalRequestedPurge: Boolean = false,

@@ -42,6 +42,8 @@ import androidx.lifecycle.repeatOnLifecycle
 import coil3.compose.AsyncImage
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import today.cypherpunk.nostrautica.domain.LinkedParent
+import today.cypherpunk.nostrautica.domain.ParentConsent
 import today.cypherpunk.nostrautica.domain.ProfileMeta
 import today.cypherpunk.nostrautica.domain.Role
 import today.cypherpunk.nostrautica.domain.join.JoinInput
@@ -149,6 +151,19 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
     var skills by remember { mutableStateOf("") }
     var lookingFor by remember { mutableStateOf("") }
     var rsvpPublic by remember { mutableStateOf(false) }
+
+    // Space hierarchy (§15.5): when this event belongs to a community, joining it also makes the
+    // person a member of that community. Disclosed here, default on, and the choice is remembered
+    // so the automatic join after approval honours it. Someone already in (or waiting on) the
+    // community is not offered it again.
+    var linkedParent by remember(coord) { mutableStateOf<LinkedParent?>(null) }
+    var joinParent by remember(coord) { mutableStateOf(true) }
+    LaunchedEffect(coord, account?.pubkey) {
+        val p = if (ev.ctx.cfg.parent != null) c.communities.loadLinkedParent(ev.ctx) else null
+        val me = account?.pubkey
+        val standing = if (p != null && me != null) c.communities.standing(me, p.coordinate) else null
+        linkedParent = p?.takeIf { standing == null || (!standing.isMember && !standing.isPending) }
+    }
 
     // Intro reuse from the library (the newest intro, offered generically).
     var reusable by remember { mutableStateOf<MediaDescriptor?>(null) }
@@ -259,6 +274,10 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
                 val reuseMedia = if (reuse != null && reuseChoice != "new") {
                     runCatching { listOf(c.introMedia.prepareReuse(a.signer, ev.ctx, reuse, reuseChoice == "fresh")) }.getOrDefault(emptyList())
                 } else emptyList()
+                // Record the answer BEFORE the request goes out: with an invite code the grant can be back
+                // before this returns, and the automatic community join reads this to decide whether it
+                // may send anything.
+                linkedParent?.let { c.communities.recordConsent(coord, ParentConsent(it.coordinate, joinParent, displayName)) }
                 val published = c.joinFlow.sendJoinRequest(
                     a.signer, ev.ctx,
                     JoinInput(
@@ -424,6 +443,14 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
                         }
                         if (profileWillBeEmpty) Dim(s.t("join.empty.hint"), size = 13)
                         CheckRow(rsvpPublic, { rsvpPublic = it }, s.t("join.rsvpPublic"))
+
+                        linkedParent?.let { lp ->
+                            SoftCard(color = t.bgElev2) {
+                                Text(s.t("hierarchy.join.disclosure", "title" to lp.title), fontWeight = FontWeight.SemiBold)
+                                CheckRow(joinParent, { joinParent = it }, s.t("hierarchy.join.checkbox", "title" to lp.title))
+                                Dim(s.t("hierarchy.join.detail"), size = 13)
+                            }
+                        }
 
                         reusable?.let { m ->
                             SoftCard(color = t.bgElev2) {

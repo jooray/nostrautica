@@ -45,6 +45,8 @@ data class CreateEventInput(
     val chat: List<String> = emptyList(),
     val relays: List<String> = emptyList(),
     val blossom: List<String> = emptyList(),
+    /** The community this event belongs to (§15): only the event's half of the link. */
+    val parent: String? = null,
 )
 
 /**
@@ -134,6 +136,7 @@ object OrganizerEvents {
             blossom = input.blossom, maxVideoSec = input.maxVideoSec, maxTalkSec = input.maxTalkSec,
             matching = input.matching, matchVisibility = input.matchVisibility, approval = input.approval,
             eck = 1, nostrContext = input.nostrContext, lang = input.lang, talks = input.talks, chat = input.chat,
+            parent = input.parent?.takeIf { !input.community },
         )
         val configEvent = UnsignedEvent(eidPub, now, Kinds.EVENT_CONFIG, configTags(config), "").signWith(eidSk)
         val eckV = EckVersion(1, Bytes.toBase64(eck))

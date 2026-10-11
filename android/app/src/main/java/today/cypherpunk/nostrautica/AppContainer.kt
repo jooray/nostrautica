@@ -5,6 +5,8 @@ import today.cypherpunk.nostrautica.data.Cache
 import today.cypherpunk.nostrautica.data.EventStore
 import today.cypherpunk.nostrautica.data.db.AppDatabase
 import today.cypherpunk.nostrautica.domain.Accounts
+import today.cypherpunk.nostrautica.domain.Communities
+import today.cypherpunk.nostrautica.domain.CommunityStore
 import today.cypherpunk.nostrautica.domain.EventContexts
 import today.cypherpunk.nostrautica.domain.Grants
 import today.cypherpunk.nostrautica.domain.Members
@@ -38,8 +40,16 @@ class AppContainer(val context: Context) {
     val members = Members(nostr, cache, eventKeys)
     val profiles = Profiles(nostr, cache)
     val membership = Membership(nostr, cache, eventKeys, prefs)
-    val grants = Grants(nostr, cache, eventKeys, contexts, accounts, prefs)
+    val communityStore = CommunityStore(cache)
+    val grants = Grants(nostr, cache, eventKeys, contexts, accounts, prefs, communityStore)
+    /** Space hierarchy (§15): link reads, the attendee's offer and the consent-gated community join. */
+    val communities: Communities by lazy { Communities(this) }
     val social = Social(nostr, accounts)
+
+    init {
+        // After every grant scan, stored community proofs are re-evaluated (§15.5).
+        grants.afterScan = { signer, children, interactive -> communities.autoJoin(signer, children, interactive) }
+    }
 
     private val areas = java.util.concurrent.ConcurrentHashMap<String, Any>()
 
