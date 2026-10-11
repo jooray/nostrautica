@@ -125,3 +125,36 @@ class WireVectorsTest {
         assertEquals(enc.descriptor.ox, fresh.descriptor.ox)
     }
 }
+
+class HierarchyVectorsTest {
+    private val ts = Json.parseToJsonElement(javaClass.classLoader!!.getResource("ts-vectors.json")!!.readText()).jsonObject
+    private val h = ts["hierarchy"]!!.jsonObject
+    private fun s(k: String) = h[k]!!.jsonPrimitive.content
+    private fun tags(e: JsonArray) = e.map { t -> t.jsonArray.map { it.jsonPrimitive.content } }
+
+    @Test fun configTagsMatchTsAndParseBack() {
+        val pk = ts["pk"]!!.jsonPrimitive.content
+        val child = EventConfig.parse(pk, tags(h["childTags"]!!.jsonArray))
+        val parent = EventConfig.parse(pk, tags(h["parentTags"]!!.jsonArray))
+        assertEquals(s("community"), child.parent)
+        assertEquals(listOf(s("meetup")), parent.children)
+        assertEquals(tags(h["childTags"]!!.jsonArray), child.toTags())
+        assertEquals(tags(h["parentTags"]!!.jsonArray), parent.toTags(Kinds.COMMUNITY).map { if (it[0] == "a") listOf("a", Coordinate.make(pk, "meetups").toString()) else it })
+        assertTrue(Hierarchy.isLinked(s("community"), parent, s("meetup"), child))
+        assertTrue(!Hierarchy.isLinked(s("community"), parent.copy(children = emptyList()), s("meetup"), child))
+    }
+
+    @Test fun verifiesATsProofAndMakesOnesTheSameWay() {
+        val pk = ts["pk"]!!.jsonPrimitive.content
+        val p = h["proof"]!!.jsonObject
+        val by = p["by"]!!.jsonPrimitive.content
+        val sig = p["sig"]!!.jsonPrimitive.content
+        assertTrue(Hierarchy.verifyProof(by, sig, s("community"), s("meetup"), pk, listOf(by)))
+        assertTrue(!Hierarchy.verifyProof(by, sig, s("community"), s("meetup"), pk, listOf(pk)))
+        assertTrue(!Hierarchy.verifyProof(by, sig, s("community"), s("meetup"), "00".repeat(32), listOf(by)))
+        val mine = Hierarchy.makeProof(Bytes.fromHex("88".repeat(32)), s("community"), s("meetup"), pk)
+        assertEquals(by, mine.by)
+        assertTrue(Hierarchy.verifyProof(mine.by, mine.sig, s("community"), s("meetup"), pk, listOf(by)))
+        assertEquals(listOf(Hierarchy.MemberOf(s("meetup"), by, sig)), Hierarchy.parseMemberOf(listOf(Hierarchy.memberOfTag(s("meetup"), by, sig), listOf("member_of", "x"))))
+    }
+}

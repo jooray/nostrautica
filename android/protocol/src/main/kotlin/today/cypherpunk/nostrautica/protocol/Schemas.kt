@@ -342,12 +342,17 @@ data class EckVersion(val id: Int, val key: String) : Validated {
 }
 
 @Serializable
+data class ParentProof(val a: String, val by: String, val sig: String)
+
+@Serializable
 data class KeyGrantContent(
     val v: Int = Wire.PROTOCOL_VERSION,
     val a: String,
     val role: String,
     val eck: List<EckVersion>,
     @SerialName("granted_by") val grantedBy: String,
+    /** §15: a membership proof for the parent community, when this event has one. */
+    val parent: ParentProof? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v); check(Coordinate.isSpace(a)) { "a must be an event coordinate" }

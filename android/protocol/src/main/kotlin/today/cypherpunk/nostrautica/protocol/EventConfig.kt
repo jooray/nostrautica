@@ -26,6 +26,10 @@ data class EventConfig(
     val talks: String = "off",
     val chat: List<String> = emptyList(),
     val retentionDays: Int? = null,
+    /** §15: the community this event belongs to (a 31612 coordinate). */
+    val parent: String? = null,
+    /** §15: the events that belong to this community (31923 coordinates). */
+    val children: List<String> = emptyList(),
 ) {
     /** The coordinate of a dated event; communities are built with [coordinate] and their kind. */
     fun coordinate(kind: Int = Kinds.CALENDAR_EVENT) = Coordinate(kind, eidPubkey, d)
@@ -62,6 +66,13 @@ data class EventConfig(
             require(retentionDays >= 1) { "31600 config: retentionDays must be a positive integer" }
             tags += listOf("retention", retentionDays.toString())
         }
+        if (parent != null) {
+            require(Hierarchy.isValidParent(parent)) { "31600 config: parent must be a 31612 community coordinate" }
+            tags += listOf(Hierarchy.PARENT_TAG, parent)
+        }
+        val kids = children.distinct()
+        require(kids.size <= Hierarchy.MAX_CHILDREN) { "31600 config: at most ${Hierarchy.MAX_CHILDREN} child events" }
+        kids.forEach { require(Hierarchy.isValidChild(it)) { "31600 config: child must be a 31923 event coordinate" }; tags += listOf(Hierarchy.CHILD_TAG, it) }
         return tags
     }
 
@@ -141,6 +152,8 @@ data class EventConfig(
                 talks = first(tags, "talks").takeIf { it in TALKS_MODES } ?: "off",
                 chat = chat,
                 retentionDays = first(tags, "retention")?.toIntOrNull()?.takeIf { it >= 1 },
+                parent = first(tags, Hierarchy.PARENT_TAG)?.takeIf(Hierarchy::isValidParent),
+                children = all(tags, Hierarchy.CHILD_TAG).filter(Hierarchy::isValidChild).distinct().take(Hierarchy.MAX_CHILDREN),
             )
         }
 
