@@ -57,7 +57,11 @@ class Grants(
     private val contexts: EventContexts,
     private val accounts: Accounts,
     private val prefs: AppPrefs,
+    private val communityStore: CommunityStore,
 ) {
+    /** Run after each scan with the children whose grant just carried a valid community proof (§15.5). Set by AppContainer. */
+    var afterScan: (suspend (NostrSigner, Set<String>, Boolean) -> Unit)? = null
+
     @Serializable
     data class MemoEntry(val coordinate: String? = null, val versions: List<Int> = emptyList(), val organizer: Boolean = false, val done: Boolean = false)
 
@@ -133,6 +137,8 @@ class Grants(
         suspend fun configFor(coordinate: String, extra: List<String> = emptyList()) =
             configs.getOrPut(coordinate) { runCatching { contexts.fetchConfig(coordinate, extra) }.getOrNull() }
         val gained = LinkedHashSet<String>()
+        // Children whose grant carried a valid community proof in this pass (§15).
+        val newProofChildren = LinkedHashSet<String>()
         var unwrapped = 0
         var failed = 0
         var budget = maxUnwraps
@@ -191,6 +197,11 @@ class Grants(
                             } else {
                                 keys.addEckVersions(pubkey, g.a, g.eck, if (g.role == "organizer") "organizer" else "attendee")
                                 gained += g.a
+                                // §15.3: kept only when it is for the community the event's newest config
+                                // names and verifies as an authority's signature over THIS attendee.
+                                CommunityRules.acceptProof(g.a, g.parent, config, pubkey)?.let { proof ->
+                                    runCatching { communityStore.storeProof(pubkey, g.a, proof); newProofChildren += g.a }
+                                }
                                 memo[wrap.id] = MemoEntry(g.a, g.eck.map { it.id }); dirty = true
                             }
                         }
@@ -209,6 +220,16 @@ class Grants(
         if (dirty) {
             while (memo.size > MAX_MEMO) memo.remove(memo.keys.first())
             cache.put(pubkey, MEMO_KEY, memoSer, memo, nowSec())
+        }
+        // §15.5: join the community of any event the person consented to, from the proofs just
+        // stored AND from earlier ones (a grant is memoized once processed, so a join that failed
+        // then would otherwise never be retried). Fail-soft: it must not be able to fail the scan.
+        try {
+            afterScan?.invoke(signer, newProofChildren, signer.isLocal || interactive)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("Grants", "community auto-join skipped: ${e.javaClass.simpleName}")
         }
         gained
     }

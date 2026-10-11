@@ -56,7 +56,7 @@ import today.cypherpunk.nostrautica.ui.shell.GlobalScaffold
 import today.cypherpunk.nostrautica.ui.shell.Page
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 
-data class HomeEvent(val coordinate: String, val naddr: String, val ctx: EventContext?, val role: Role, val pendingKey: Boolean, val at: Long)
+data class HomeEvent(val coordinate: String, val naddr: String, val ctx: EventContext?, val role: Role, val pendingKey: Boolean, val at: Long, val partOf: String? = null)
 
 /** Which events to list: held keys, joins sent, self-copies found, and recently opened. */
 suspend fun loadHomeEvents(c: AppContainer, account: Session.Account?): List<HomeEvent> = coroutineScope {
@@ -75,7 +75,11 @@ suspend fun loadHomeEvents(c: AppContainer, account: Session.Account?): List<Hom
             val role = c.membership.role(owner, coord)
             val keys = owner?.let { c.eventKeys.get(it, coord) }
             val pending = role == Role.PENDING || (owner != null && keys?.current == null && c.cache.getRaw(owner, "joined:$coord") != null)
-            HomeEvent(coord, naddr, ctx, role, pending, byCoord[coord] ?: 0)
+            // §15: the community a dated event belongs to, as one quiet line on its card. A line
+            // rather than nesting: the list is flat and by recency, and a person can be in an event
+            // without being in its community (or the reverse). Cache-only so Home never waits on it.
+            val partOf = ctx?.let { runCatching { c.communities.cachedLinkedParent(it)?.title }.getOrNull() }
+            HomeEvent(coord, naddr, ctx, role, pending, byCoord[coord] ?: 0, partOf)
         }
     }.awaitAll().sortedWith(compareByDescending<HomeEvent> { it.role == Role.ORGANIZER || it.role == Role.ATTENDEE }.thenByDescending { it.ctx?.start ?: it.at })
 }
@@ -116,6 +120,14 @@ fun HomeScreen() {
     val online by c.nostr.network.collectAsState()
 
     LaunchedEffect(account, version, keysVersion) { events = loadHomeEvents(c, account) }
+    // Warm the communities of events that name one, so the card can say "Part of X" (§15).
+    LaunchedEffect(events) {
+        val missing = events.orEmpty().filter { it.partOf == null && it.ctx?.cfg?.parent != null }
+        if (missing.isEmpty()) return@LaunchedEffect
+        var found = false
+        for (e in missing) if (c.communities.loadLinkedParent(e.ctx!!) != null) found = true
+        if (found) events = loadHomeEvents(c, account)
+    }
     LaunchedEffect(account) {
         val a = account ?: return@LaunchedEffect
         scanning = true
@@ -206,6 +218,7 @@ private fun EventRow(e: HomeEvent, onClick: () -> Unit) {
             Spacer(Modifier.width(12.dp))
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(title, fontWeight = FontWeight.SemiBold, fontSize = 16.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                e.partOf?.let { Dim(s.t("hierarchy.home.partOf", "title" to it), maxLines = 1, size = 13) }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (e.pendingKey) Pill(s.t("home.role.awaitingKey"), t.warnSoft, t.warn)
                     else Pill(s.t(when (e.role) { Role.ORGANIZER -> "home.role.organizer"; Role.ATTENDEE -> "home.role.attendee"; else -> "home.role.visitor" }), t.bgElev2, t.textDim)

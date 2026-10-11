@@ -114,6 +114,8 @@ private fun SettingsBody(p: PaddingValues, naddr: String) {
         item { PageCard(ctx, { error = it }) }
         item { ThemeCard(ctx, { error = it }) }
         item { CoordinatorSettingsCard(ctx, { error = it }) { scope.launch { reload() } } }
+        // Space hierarchy (§15): which community this event belongs to, or on a community, its events.
+        if (keys?.eidNsecHex != null) item { CommunitySettingsCard(ctx) { scope.launch { reload() } } }
         item {
             var mode by remember(ctx.cfg.talks) { mutableStateOf(ctx.cfg.talks) }
             var busy by remember { mutableStateOf(false) }

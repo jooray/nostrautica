@@ -197,6 +197,17 @@ private fun CreateBody(p: androidx.compose.foundation.layout.PaddingValues) {
     var pickWhich by remember { mutableStateOf("icon") }
     var loaded by remember { mutableStateOf(false) }
 
+    // Space hierarchy (§15): a dated event can belong to a community this user organizes. Picking
+    // one defaults the event's coordinator and relays to the community's, so its members meet
+    // people through the same infrastructure; both stay changeable.
+    var organized by remember { mutableStateOf<List<today.cypherpunk.nostrautica.domain.EventContext>>(emptyList()) }
+    var parentCoordinate by rememberSaveable { mutableStateOf("") }
+    var communityDefaultsApplied by remember { mutableStateOf(false) }
+    val parentCommunity = organized.firstOrNull { it.coordinate == parentCoordinate }
+    LaunchedEffect(account?.pubkey) {
+        if (account != null) organized = runCatching { org.listOrganizedCommunities() }.getOrDefault(emptyList())
+    }
+
     // Duplicate-event prefill, then the persisted title/summary drafts.
     LaunchedEffect(Unit) {
         DuplicateDraft.take()?.let { d ->
@@ -257,6 +268,9 @@ private fun CreateBody(p: androidx.compose.foundation.layout.PaddingValues) {
         maxTalkSec = if (talkUnlimited) 0 else maxOf(1, Math.round((maxTalk.toDoubleOrNull() ?: 15.0) * 60).toInt()),
         matching = matching, matchVisibility = matchVisibility, approval = approval, community = community,
         nostrContext = 100, lang = lang, talks = if (community) "off" else talks, chat = if (chatEnabled) listOf("marmot") else emptyList(),
+        // Only the event's half of the link here; the community's half follows in createEvent.
+        parent = if (!community) parentCommunity?.coordinate else null,
+        relays = if (!community && parentCommunity != null) parentCommunity.cfg.relays else emptyList(),
     )
 
     fun submit() {
@@ -329,6 +343,12 @@ private fun CreateBody(p: androidx.compose.foundation.layout.PaddingValues) {
                             }, enabled = retrying == null)
                         }
                     }
+                    if (r.linkFailed) {
+                        ReceiptLine(CreationReceipt.State.FAILED, s.t("hierarchy.create.linkFailed.title"))
+                        Dim(s.t("hierarchy.create.linkFailed.body"), size = 13)
+                    } else if (parentCommunity != null) {
+                        ReceiptLine(CreationReceipt.State.OK, s.t("hierarchy.create.linked", "title" to parentCommunity.title))
+                    }
                     if (needsBackup) {
                         ReceiptLine(receipt.backup, s.t("create.receipt.backup"))
                         if (receipt.backup == CreationReceipt.State.PENDING) Dim(s.t("create.receipt.backup.pending.body"), size = 13)
@@ -388,6 +408,22 @@ private fun CreateBody(p: androidx.compose.foundation.layout.PaddingValues) {
                     DateTimeField(s.t("create.field.start"), start, { start = it }, error = if (showErrors) errStart else null)
                     DateTimeField(s.t("create.field.end"), end, { end = it }, error = errEnd, minSec = start)
                     Field(location, { location = it }, s.t("create.field.location"), placeholder = s.t("create.field.location.placeholder"))
+                }
+                if (!community && organized.isNotEmpty()) {
+                    ChoiceField(
+                        s.t("hierarchy.picker.label"),
+                        listOf("" to s.t("hierarchy.picker.none")) + organized.map { it.coordinate to it.title },
+                        parentCoordinate,
+                        { v ->
+                            parentCoordinate = v
+                            communityDefaultsApplied = false
+                            val co = organized.firstOrNull { it.coordinate == v }?.cfg?.coordinator
+                            if (co != null && coordinator == null) { coordinator = co; communityDefaultsApplied = true }
+                        },
+                        enabled = !busy,
+                    )
+                    Dim(s.t("hierarchy.picker.help"), size = 13)
+                    if (parentCommunity != null) Dim(if (communityDefaultsApplied) s.t("hierarchy.picker.defaults") else s.t("hierarchy.picker.relays"), size = 13)
                 }
                 LanguagePickerField(lang, { lang = it }, s.t("create.field.language"))
                 Dim(s.t("create.field.language.body"), size = 13)
