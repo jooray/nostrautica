@@ -11,6 +11,28 @@
  */
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { format } from "node:util";
+
+// Optional: tee the coordinator's console output to a file so a spec can assert on
+// what the daemon DECIDED (e.g. "AUTO-APPROVED" on a member_of join), not just on
+// what the UI later shows. Set by the orchestrator (E2E_COORDINATOR_LOG); unset for
+// manual runs, which keep plain stdout.
+const LOG_FILE = process.env.E2E_COORDINATOR_LOG;
+if (LOG_FILE) {
+  writeFileSync(LOG_FILE, "");
+  for (const level of ["log", "warn", "error"]) {
+    const orig = console[level].bind(console);
+    console[level] = (...args) => {
+      orig(...args);
+      try {
+        appendFileSync(LOG_FILE, format(...args) + "\n");
+      } catch {
+        /* a full disk must not take the double down */
+      }
+    };
+  }
+}
 
 const DIST = new URL("../../packages/coordinator/dist/", import.meta.url);
 const { Store } = await import(new URL("store/db.js", DIST));
