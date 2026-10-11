@@ -242,6 +242,8 @@ export function buildKeyGrant(
   attendeePubkey: string,
   eck: EckVersion[],
   role: "attendee" | "organizer" = "attendee",
+  /** §15: membership proof for the event's parent community, when the link holds. */
+  parent?: { a: string; by: string; sig: string },
 ): NostrEvent {
   return wrapRumor(coordSk, attendeePubkey, {
     kind: KIND_KEY_GRANT,
@@ -251,6 +253,7 @@ export function buildKeyGrant(
       role,
       eck,
       granted_by: getPublicKey(coordSk),
+      ...(parent ? { parent } : {}),
     },
   }) as unknown as NostrEvent;
 }

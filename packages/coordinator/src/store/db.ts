@@ -245,6 +245,19 @@ function applyBaselineDDL(db: DatabaseSync): void {
       last_created_at INTEGER NOT NULL
     )`,
   );
+  // Migration (§15 space hierarchy, 2026-10): which (child, parent, coordinator gen)
+  // links already had their membership proofs re-issued to the existing attendees.
+  // A new table that only this binary touches, so no SCHEMA_VERSION bump (an older
+  // binary ignores it); a rollback just means the re-issue is not remembered.
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS hierarchy_reissue (
+      child TEXT NOT NULL,
+      parent TEXT NOT NULL,
+      gen INTEGER NOT NULL,
+      done_at INTEGER NOT NULL,
+      PRIMARY KEY (child, parent, gen)
+    )`,
+  );
   db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim ON jobs (state, next_run_at, lease_until)");
   // Migration (2026-09-13): scheduling class on a job row. Deliberately a plain
   // defaulted column rather than a numbered migration — an older binary neither
@@ -1744,6 +1757,18 @@ export class Store {
       )
       .run(address, next);
     return next;
+  }
+
+  // ── §15 hierarchy: membership-proof re-issue ledger ─────────────────────────
+  hierarchyReissued(child: string, parent: string, gen: number): boolean {
+    return !!this.db
+      .prepare("SELECT 1 FROM hierarchy_reissue WHERE child = ? AND parent = ? AND gen = ?")
+      .get(child, parent, gen);
+  }
+  markHierarchyReissued(child: string, parent: string, gen: number, now: number): void {
+    this.db
+      .prepare("INSERT OR IGNORE INTO hierarchy_reissue (child, parent, gen, done_at) VALUES (?, ?, ?, ?)")
+      .run(child, parent, gen, now);
   }
 
   // ── admin-command per-subject operation state (NIP §3.4 + audit C1) ────────
