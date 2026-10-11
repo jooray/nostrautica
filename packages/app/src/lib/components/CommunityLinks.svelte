@@ -112,8 +112,13 @@
     if (mode !== "events") return;
     const c = ctx;
     let alive = true;
-    children = fromCache(c.config.children ?? []);
-    childrenLoaded = children.length > 0;
+    // Read the local, never `children` back: reading a $state this effect also
+    // writes makes the effect depend on itself, and fromCache() returns a fresh
+    // array every run, so it re-triggers until Svelte aborts the whole route with
+    // effect_update_depth_exceeded (caught by the e2e hierarchy spec).
+    const cached = fromCache(c.config.children ?? []);
+    children = cached;
+    childrenLoaded = cached.length > 0;
     void loadChildren(c.coordinate, c.config).then((list) => {
       if (!alive) return;
       children = list;

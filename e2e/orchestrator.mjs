@@ -365,6 +365,8 @@ function startWssRelayProxy() {
   });
 }
 
+const COORD_LOG = `/tmp/nostrautica-e2e-coord-${tier}.log`;
+
 function startCoordinator() {
   const db = `/tmp/nostrautica-e2e-coord-${tier}.sqlite`;
   // Wipe any prior run's DB so the double starts clean.
@@ -391,6 +393,8 @@ function startCoordinator() {
     MOCK_RELAY: RELAY_URL_FOR_APP,
     MOCK_COORD_SK: COORD_SK_HEX,
     NODE_TLS_REJECT_UNAUTHORIZED: "0",
+    // Specs read this to assert on the daemon's decisions (hierarchy.spec.ts).
+    E2E_COORDINATOR_LOG: COORD_LOG,
   };
   spawnTracked("coordinator", "node", [resolve(HERE, script)], { env });
 }
@@ -524,7 +528,9 @@ async function main() {
     BLOSSOM_PUBLIC_BASE_URL: `https://localhost:${PORTS.proxy}`,
     // The chat specs (tests/chat) attach THIS coordinator by npub; unset on tiers
     // without a coordinator, so those specs self-skip loudly-safely.
-    ...(NEEDS.coordinator ? { NOSTRAUTICA_E2E_COORDINATOR_NPUB: COORD_NPUB } : {}),
+    ...(NEEDS.coordinator
+      ? { NOSTRAUTICA_E2E_COORDINATOR_NPUB: COORD_NPUB, NOSTRAUTICA_E2E_COORDINATOR_LOG: COORD_LOG }
+      : {}),
   };
 
   if (SHOTS) return runShots(env);

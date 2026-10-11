@@ -161,6 +161,24 @@ export async function fetchNewestConfig(
   }
 }
 
+/**
+ * `cfg` with its hierarchy fields (`parent`, `children`) taken from the newest
+ * 31600 on the relays. For every config write that is built from a page's cached
+ * context (attach/detach a coordinator, live settings): the link is changed from
+ * elsewhere (the other half of the pair, another tab or device), so a spread of
+ * `ctx.config` republishes whatever the page saw at load and silently ends a link
+ * made since. Reads relays only; if the config cannot be read, `cfg` is returned
+ * as given (the publish that follows would fail on the same relays anyway).
+ */
+export async function withFreshLinks<T extends Pick<EventConfig, "parent" | "children">>(
+  ctx: Pick<EventContext, "coordinate" | "config">,
+  cfg: T,
+): Promise<T> {
+  const fresh = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(() => undefined);
+  if (!fresh) return cfg;
+  return { ...cfg, parent: fresh.parent, children: fresh.children };
+}
+
 // Link status is asked once per approval, and "Approve all" approves dozens in a
 // row: without a short memo that is one relay round-trip per attendee. Keyed by
 // child coordinate; dropped whenever this client changes a link.

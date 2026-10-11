@@ -84,7 +84,7 @@ import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
-import { grantParentField } from "./hierarchy.js";
+import { grantParentField, withFreshLinks } from "./hierarchy.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
 // paints instantly and refreshes in parallel (CACHING-PLAN §2.11). Wiped on
@@ -1472,7 +1472,9 @@ export async function updateEventConfig(
   const chatRelays = chatActive
     ? unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays))
     : chatRelaysOf(ctx.config);
-  const built = buildEventConfig({ ...ctx.config, ...changes, relays, chatRelays });
+  const built = buildEventConfig(
+    await withFreshLinks(ctx, { ...ctx.config, ...changes, relays, chatRelays }),
+  );
   // Monotonic republish (audit P3): a config change made in the same second as
   // the previous 31600 must win the §3.1 tie-break, or the stale config stays
   // authoritative and the setting silently doesn't take. Read + publish across the
@@ -1547,7 +1549,7 @@ export async function attachCoordinator(
     coordinatorGen: gen,
     eck: currentEckId,
   };
-  const built = buildEventConfig(cfg);
+  const built = buildEventConfig(await withFreshLinks(ctx, cfg));
 
   // 2. Gift-wrap the Coordinator Grant (21603) carrying the same gen, sealed by
   //    E_id so the coordinator can authenticate the install against the coordinate.
@@ -1678,7 +1680,9 @@ export async function detachCoordinator(
   void _c;
   void _g;
   const currentEckId = rotatedEck.reduce((m, v) => Math.max(m, v.id), ctx.config.eck);
-  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey, eck: currentEckId });
+  const built = buildEventConfig(
+    await withFreshLinks(ctx, { ...rest, inbox: newInboxPubkey, eck: currentEckId }),
+  );
   // Monotonic republish (audit P3): a detach in the same second as the previous
   // config must win the §3.1 tie-break, or the coordinator-bearing config can
   // stay authoritative and the detach silently doesn't take.
