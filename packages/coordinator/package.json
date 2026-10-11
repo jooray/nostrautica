@@ -1,6 +1,6 @@
 {
   "name": "@nostrautica/coordinator",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "Nostrautica coordinator — headless Nostr client: STT, AI profiles, matchmaking.",
   "license": "MIT",
   "type": "module",
