@@ -517,6 +517,70 @@ la sala funcionando mientras consigues un coordinador de reemplazo. Mantener
 al día las copias de seguridad del coordinador sigue siendo el verdadero plan
 de recuperación; esto es el respaldo para cuando ese plan falla.
 
+## 6.6 Una serie de encuentros: eventos que pertenecen a una comunidad
+
+Si organizas el mismo tipo de evento una y otra vez (un encuentro mensual de
+Bitcoin, una conferencia con edición anual), puedes agrupar los eventos con fecha
+bajo una **comunidad** permanente. Quien asista a cualquiera de los encuentros
+puede hacerse miembro de la comunidad sin una segunda aprobación, y la comunidad
+lleva su propia lista de miembros a lo largo de todos ellos.
+
+<!-- TODO screenshots: selector «Parte de una comunidad» en el formulario de creación; ajustes de la comunidad, tarjeta «Eventos de esta comunidad» -->
+
+**Configúralo en este orden:**
+
+1. **Crea primero la comunidad.** En **Crear**, ante «¿Qué estás creando?», elige
+   **Una comunidad** y toca **Crear comunidad**. No tiene fecha ni fin.
+2. **Crea cada encuentro y vincúlalo.** En el formulario del evento aparece el
+   selector **Parte de una comunidad** (solo si organizas al menos una comunidad
+   desde este dispositivo). Elige la comunidad. El coordinador y los relays se
+   toman de la comunidad, así que el encuentro usa los mismos mientras no los
+   cambies. El resto del formulario funciona igual que antes.
+3. **O vincula un evento que ya existe.** Abre **Administración → Ajustes → Parte
+   de una comunidad**, elige la comunidad y toca **Guardar comunidad**. Si ya hay
+   personas aprobadas en ese evento, la app te dice a cuántas se les envió la
+   invitación a la comunidad.
+
+Un vínculo solo vale cuando ambos lados se nombran: el evento nombra a la
+comunidad y la comunidad nombra al evento. Si vinculas desde el evento, la app
+hace las dos cosas por ti, así que un extraño no puede apropiarse de tu comunidad
+nombrándola en su propio evento.
+
+**Lo que ven los asistentes.** En el formulario para unirse a un evento vinculado
+hay una frase que dice que al unirse también se hacen miembros de la comunidad, y
+una casilla **Unirme también a la comunidad «…»**, activada por defecto. Los
+organizadores de la comunidad ven su nombre, su perfil y que se unieron a este
+evento. Quien desactiva la casilla se une solo al evento. Quienes se unieron antes
+del vínculo ven en el evento una tarjeta **También puedes unirte a «…»** con
+**Unirme** y **Ahora no**.
+
+**Lo que sigue separado.** El evento y la comunidad tienen cada uno su propia
+lista de **Personas**, sus coincidencias y su chat grupal. Unirse a un encuentro
+no mete a nadie en las listas de los demás, e irse de un encuentro no lo saca de
+la comunidad. Evento y comunidad pueden incluso usar coordinadores distintos.
+
+**Aprobar solicitudes a la comunidad.** Una solicitud que llega desde un
+encuentro lleva en la tarjeta la insignia **Miembro de «…»**: los organizadores de
+ese evento confirmaron que la persona está aprobada allí. Si la comunidad tiene un
+coordinador conectado, esas solicitudes se aprueban solas. Sin coordinador, las
+apruebas todas con un toque en **Aprobar a los miembros verificados (N)** en las
+solicitudes de unión de la comunidad. Las uniones directas siguen como siempre:
+los códigos de invitación y la aprobación manual no cambian, y alguien puede estar
+en la comunidad sin haber ido nunca a un encuentro.
+
+**Ver y cambiar la lista.** En los **Ajustes** de la comunidad, la tarjeta
+**Eventos de esta comunidad** lista los eventos vinculados, cada uno con
+**Quitar**. La página de la comunidad muestra sus eventos, los próximos primero,
+y la página de cada evento enlaza a la comunidad.
+
+**Deshacer el vínculo.** Toca **Quitar** en la comunidad, o en los ajustes del
+evento elige **No forma parte de una comunidad** y guarda. A los asistentes nuevos
+ya no se les ofrece ser miembros. No se saca a nadie: quienes ya se unieron siguen
+siendo miembros, y a un miembro de la comunidad puedes quitarlo directamente en
+ella, como a cualquier otro asistente. Si un evento apunta a una comunidad que no
+organizas desde este dispositivo, al menos puedes terminar el vínculo desde el
+lado del evento.
+
 ## 7. Durante el evento
 
 - **La lista de asistentes se completa en vivo**: los asistentes aprobados

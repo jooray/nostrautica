@@ -462,6 +462,64 @@ místnost v chodu, než si zajistíte náhradního koordinátora. Udržování
 aktuálních záloh koordinátora zůstává skutečným plánem obnovy; tohle je
 záchranná síť pro případ, že tento plán selže.
 
+## 6.6 Série srazů: akce, které patří do komunity
+
+Pokud pořádáte stejný druh akce opakovaně (měsíční bitcoinový meetup, konferenci
+s ročníky), můžete akce s datem seskupit pod jednu trvalou **komunitu**. Lidé,
+kteří přijdou na kterýkoli sraz, se mohou stát členy komunity bez dalšího
+schvalování a komunita si vede vlastní seznam členů napříč všemi srazy.
+
+<!-- TODO screenshots: výběr „Součást komunity“ ve formuláři vytvoření; nastavení komunity, karta „Akce v této komunitě“ -->
+
+**Nastavte to v tomto pořadí:**
+
+1. **Nejdřív vytvořte komunitu.** V **Vytvořit** u otázky „Co zakládáte?“ zvolte
+   **Komunitu** a klepněte na **Vytvořit komunitu**. Nemá datum ani konec.
+2. **Vytvořte každý sraz a propojte ho.** Ve formuláři akce se objeví výběr
+   **Součást komunity** (jen pokud na tomto zařízení pořádáte aspoň jednu
+   komunitu). Vyberte komunitu. Koordinátor a relays se převezmou z komunity, takže
+   sraz používá stejné, dokud je nezměníte. Zbytek formuláře funguje jako dřív.
+3. **Nebo propojte už existující akci.** Otevřete **Administrace → Nastavení →
+   Součást komunity**, vyberte komunitu a klepněte na **Uložit komunitu**. Pokud
+   jsou na akci už schválení lidé, aplikace vám řekne, kolika z nich se poslala
+   pozvánka do komunity.
+
+Propojení platí, jen když se navzájem uvádějí obě strany: akce uvádí komunitu
+a komunita uvádí akci. Při propojování z akce to udělá aplikace za vás, takže
+cizí člověk si vaši komunitu nemůže přivlastnit tím, že ji uvede u své akce.
+
+**Co uvidí účastníci.** Ve formuláři Připojení propojené akce je věta, že
+připojením se stanou i členy komunity, a zaškrtávací pole **Přidat se také do
+komunity „…“**, které je ve výchozím stavu zapnuté. Organizátoři komunity uvidí
+jejich jméno, profil a to, že se připojili na tuto akci. Kdo pole vypne, připojí
+se jen na akci. Lidé, kteří se připojili ještě před propojením, uvidí na akci
+kartu **Můžete se přidat i do komunity „…“** s tlačítky **Přidat se** a **Teď ne**.
+
+**Co zůstává oddělené.** Akce a komunita mají každá vlastní seznam **Lidé**,
+spojení a skupinový chat. Připojení na sraz nikoho nevloží do seznamů ostatních
+srazů a odchod ze srazu ho z komunity neodstraní. Akce i komunita mohou mít
+dokonce různé koordinátory.
+
+**Schvalování žádostí do komunity.** Žádost, která přichází ze srazu, má na
+kartě odznak **Člen: „…“**: organizátoři té akce potvrdili, že je tam osoba
+schválená. Pokud je ke komunitě připojený koordinátor, schvalují se takové
+žádosti automaticky. Bez koordinátora je všechny schválíte jedním klepnutím na
+**Schválit ověřené členy (N)** v Žádostech o připojení komunity. Přímá připojení
+fungují jako dosud: pozvánkové kódy a ruční schvalování se nemění a člověk může
+být v komunitě, i když nikdy nepřišel na žádný sraz.
+
+**Seznam si prohlédněte a upravte.** V **Nastavení** komunity je karta **Akce
+v této komunitě** se seznamem propojených akcí, u každé s tlačítkem **Odebrat**.
+Stránka komunity ukazuje její akce, nadcházející první, a stránka každé akce na
+komunitu odkazuje.
+
+**Zrušení propojení.** Klepněte na **Odebrat** na straně komunity, nebo
+v nastavení akce zvolte **Není součástí komunity** a uložte. Noví účastníci už
+nedostanou nabídku členství. Nikoho to neodstraní: lidé, kteří se už připojili,
+zůstávají členy, a člena komunity můžete odebrat přímo v komunitě jako každého
+jiného účastníka. Pokud akce ukazuje na komunitu, kterou z tohoto zařízení
+nespravujete, můžete propojení zrušit alespoň ze strany akce.
+
 ## 7. Během akce
 
 - **Seznam účastníků se doplňuje naživo**: schválení účastníci se objevují, jak

@@ -531,6 +531,72 @@ organisierst. Aktuelle Backups des Coordinators zu pflegen bleibt der
 eigentliche Wiederherstellungsplan, das hier ist nur das Netz für den
 Fall, dass dieser Plan versagt.
 
+## 6.6 Eine Treffen-Reihe: Events, die zu einer Community gehören
+
+Wenn du dieselbe Art Event immer wieder veranstaltest (ein monatliches
+Bitcoin-Meetup, eine Konferenz mit jährlicher Ausgabe), kannst du die Events mit
+Datum unter einer dauerhaften **Community** bündeln. Wer zu irgendeinem der
+Treffen kommt, kann ohne zweite Genehmigung Mitglied der Community werden, und
+die Community führt ihre eigene Mitgliederliste über alle Treffen hinweg.
+
+<!-- TODO screenshots: Auswahl „Teil einer Community“ im Erstellformular; Community-Einstellungen, Karte „Events in dieser Community“ -->
+
+**Richte es in dieser Reihenfolge ein:**
+
+1. **Erstelle zuerst die Community.** Wähle unter **Erstellen** bei „Was
+   erstellst du?“ **Eine Community** und tippe auf **Community erstellen**. Sie hat
+   kein Datum und kein Ende.
+2. **Erstelle jedes Treffen und verknüpfe es.** Im Erstellformular des Events
+   erscheint die Auswahl **Teil einer Community** (nur wenn du auf diesem Gerät
+   mindestens eine Community organisierst). Wähle die Community. Coordinator und
+   Relays stammen dann aus der Community, ein Treffen nutzt also dieselben, bis du
+   sie änderst. Der Rest des Formulars funktioniert wie bisher.
+3. **Oder verknüpfe ein bestehendes Event.** Öffne **Verwaltung → Einstellungen →
+   Teil einer Community**, wähle die Community und tippe auf **Community
+   speichern**. Sind für dieses Event schon Leute genehmigt, sagt dir die App,
+   wie vielen die Einladung zur Community geschickt wurde.
+
+Eine Verknüpfung zählt nur, wenn sich beide Seiten gegenseitig nennen: das Event
+nennt die Community und die Community nennt das Event. Verknüpfst du vom Event
+aus, erledigt die App beides für dich. Fremde können deine Community also nicht
+für sich beanspruchen, indem sie sie bei ihrem eigenen Event eintragen.
+
+**Was Teilnehmende sehen.** Im Beitrittsformular eines verknüpften Events steht
+ein Satz, dass sie mit der Anmeldung auch Mitglied der Community werden, und ein
+Kontrollkästchen **Auch der Community „…“ beitreten**, das standardmäßig
+eingeschaltet ist. Die Organisatoren der Community sehen Namen, Profil und dass
+die Person an diesem Event teilnimmt. Wer das Kästchen abwählt, tritt nur dem
+Event bei. Wer schon vor der Verknüpfung dabei war, sieht im Event eine Karte
+**Du kannst auch „…“ beitreten** mit **Beitreten** und **Jetzt nicht**.
+
+**Was getrennt bleibt.** Event und Community haben jeweils eine eigene Liste
+**Personen**, eigene Matches und einen eigenen Gruppenchat. Der Beitritt zu einem
+Treffen setzt niemanden in die Listen der anderen Treffen, und wer ein Treffen
+verlässt, bleibt in der Community. Event und Community können sogar
+unterschiedliche Coordinators haben.
+
+**Community-Anfragen genehmigen.** Eine Anfrage, die von einem Treffen kommt,
+trägt auf der Karte das Abzeichen **Mitglied von „…“**: Die Organisatoren dieses
+Events haben bestätigt, dass die Person dort genehmigt ist. Ist an die Community
+ein Coordinator angebunden, werden solche Anfragen automatisch genehmigt. Ohne
+Coordinator genehmigst du alle mit einem Tipp auf **Verifizierte Mitglieder
+genehmigen (N)** bei den Beitrittsanfragen der Community. Direkte Beitritte
+funktionieren wie bisher: Einladungscodes und manuelle Genehmigung ändern sich
+nicht, und man kann in der Community sein, ohne je ein Treffen besucht zu haben.
+
+**Die Liste ansehen und ändern.** In den **Einstellungen** der Community zeigt
+die Karte **Events in dieser Community** die verknüpften Events, jeweils mit
+**Entfernen**. Die Seite der Community zeigt ihre Events, kommende zuerst, und
+die Seite jedes Events verweist auf die Community.
+
+**Die Verknüpfung lösen.** Tippe auf der Community-Seite auf **Entfernen** oder
+wähle in den Einstellungen des Events **Nicht Teil einer Community** und speichere.
+Neuen Teilnehmenden wird die Mitgliedschaft dann nicht mehr angeboten. Niemand
+wird entfernt: Wer schon beigetreten ist, bleibt Mitglied, und ein Mitglied der
+Community kannst du direkt dort wie jeden anderen Teilnehmenden entziehen. Zeigt
+ein Event auf eine Community, die du von diesem Gerät aus nicht organisierst,
+kannst du die Verknüpfung wenigstens von der Event-Seite aus lösen.
+
 ## 7. Während des Events
 
 - **Die Teilnehmerliste füllt sich live**: Genehmigte Teilnehmende

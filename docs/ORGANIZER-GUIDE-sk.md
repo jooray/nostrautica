@@ -470,6 +470,67 @@ udržať miestnosť v chode, kým si zaobstaráte náhradného koordinátora.
 Udržiavanie aktuálnych záloh koordinátora zostáva skutočným plánom
 obnovy; toto je záchranná sieť pre prípad, že tento plán zlyhá.
 
+## 6.6 Séria stretnutí: podujatia, ktoré patria do komunity
+
+Ak organizujete ten istý druh podujatia opakovane (mesačný bitcoinový meetup,
+konferenciu s ročnými edíciami), môžete dátumované podujatia zoskupiť pod jednu
+trvalú **komunitu**. Ľudia, ktorí prídu na ktorékoľvek stretnutie, sa môžu stať
+členmi komunity bez ďalšieho schvaľovania a komunita si vedie vlastný zoznam
+členov naprieč všetkými stretnutiami.
+
+<!-- TODO screenshots: výber „Súčasť komunity“ vo formulári vytvorenia; nastavenia komunity, karta „Podujatia v tejto komunite“ -->
+
+**Nastavte to v tomto poradí:**
+
+1. **Najprv vytvorte komunitu.** V **Vytvoriť** pri otázke „Čo zakladáte?“
+   zvoľte **Komunitu** a klepnite na **Vytvoriť komunitu**. Nemá dátum ani koniec.
+2. **Vytvorte každé stretnutie a prepojte ho.** Vo formulári podujatia sa objaví
+   výber **Súčasť komunity** (len ak na tomto zariadení organizujete aspoň jednu
+   komunitu). Vyberte komunitu. Koordinátor a relays sa prevezmú z komunity, takže
+   stretnutie používa tie isté, kým ich nezmeníte. Zvyšok formulára funguje ako
+   predtým.
+3. **Alebo prepojte už existujúce podujatie.** Otvorte **Administrácia →
+   Nastavenia → Súčasť komunity**, vyberte komunitu a klepnite na **Uložiť
+   komunitu**. Ak sú na podujatí už schválení ľudia, aplikácia vám povie, koľkým
+   z nich sa poslala pozvánka do komunity.
+
+Prepojenie platí, len keď sa uvádzajú navzájom obe strany: podujatie uvádza
+komunitu a komunita uvádza podujatie. Pri prepájaní z podujatia to urobí
+aplikácia za vás, takže cudzí človek si vašu komunitu nemôže privlastniť tým, že
+ju uvedie vo svojom podujatí.
+
+**Čo uvidia účastníci.** Vo formulári Pripojenie prepojeného podujatia je veta,
+že pridaním sa stanú aj členmi komunity, a zaškrtávacie pole **Pridať sa aj do
+komunity „…“**, ktoré je predvolene zapnuté. Organizátori komunity uvidia ich
+meno, profil a že sa pridali na toto podujatie. Kto pole vypne, pridá sa len na
+podujatie. Ľudia, ktorí sa pridali ešte pred prepojením, uvidia na podujatí kartu
+**Môžete sa pridať aj do komunity „…“** s tlačidlami **Pridať sa** a **Teraz nie**.
+
+**Čo zostáva oddelené.** Podujatie a komunita majú každé vlastný zoznam **Ľudia**,
+spojenia a skupinový chat. Pridanie na stretnutie nevloží nikoho do zoznamov
+ostatných stretnutí a odchod zo stretnutia ho z komunity neodstráni. Podujatie aj
+komunita môžu mať dokonca rôznych koordinátorov.
+
+**Schvaľovanie žiadostí do komunity.** Žiadosť, ktorá prichádza zo stretnutia,
+má na karte odznak **Člen: „…“**: organizátori toho podujatia potvrdili, že je tam
+osoba schválená. Ak je ku komunite pripojený koordinátor, takéto žiadosti sa
+schvaľujú automaticky. Bez koordinátora ich všetky schválite jedným klepnutím na
+**Schváliť overených členov (N)** v Žiadostiach o pripojenie komunity. Priame
+pripojenia fungujú ako doteraz: pozývacie kódy a ručné schvaľovanie sa nemenia
+a človek môže byť v komunite, aj keď nikdy neprišiel na žiadne stretnutie.
+
+**Zoznam si pozrite a upravte.** V **Nastaveniach** komunity je karta **Podujatia
+v tejto komunite** so zoznamom prepojených podujatí, pri každom s tlačidlom
+**Odstrániť**. Stránka komunity ukazuje jej podujatia, nadchádzajúce prvé,
+a stránka každého podujatia na komunitu odkazuje.
+
+**Zrušenie prepojenia.** Klepnite na **Odstrániť** na strane komunity, alebo
+v nastaveniach podujatia zvoľte **Nie je súčasťou komunity** a uložte. Noví
+účastníci už nedostanú ponuku členstva. Nikoho to neodstráni: ľudia, ktorí sa už
+pridali, zostávajú členmi, a člena komunity môžete odobrať priamo v komunite ako
+každého iného účastníka. Ak podujatie ukazuje na komunitu, ktorú z tohto zariadenia
+neorganizujete, môžete prepojenie zrušiť aspoň zo strany podujatia.
+
 ## 7. Počas podujatia
 
 - **Zoznam účastníkov sa dopĺňa naživo**: schválení účastníci sa objavujú, ako

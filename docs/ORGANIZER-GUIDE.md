@@ -442,6 +442,66 @@ you sort out a replacement coordinator. Keeping the coordinator's backups
 current is still the real recovery plan; this is the backstop for when that
 plan fails.
 
+## 6.6 A meetup series: events that belong to a community
+
+If you run the same kind of event again and again (a monthly Bitcoin meetup, a
+conference with a yearly edition), you can group the dated events under one
+standing **community**. People who attend any of the meetups can become members
+of the community without a second approval, and the community keeps its own
+member list across all of them.
+
+<!-- TODO screenshots: organizer/ part-of-community picker on the create form; community settings "Events in this community" -->
+
+**Set it up in this order:**
+
+1. **Create the community first.** On **Create**, choose **A community** and tap
+   **Create community**. It has no date and no end.
+2. **Create each meetup and link it.** On the event's create form, a **Part of a
+   community** picker appears (only if you organize at least one community on this
+   device). Choose the community. The coordinator and relays are filled in from
+   the community, so a meetup uses the same ones unless you change them. Everything
+   else on the form works as before.
+3. **Or link an event that already exists.** Open **Admin → Settings → Part of a
+   community**, pick the community and tap **Save community**. If people are
+   already approved for that event, the app tells you how many were sent the
+   invitation to join the community.
+
+A link only counts when both sides list each other: the event names the community
+and the community names the event. The app does both when you link from the event,
+so a stranger cannot claim your community by naming it in their own event.
+
+**What attendees see.** On the Join form of a linked event they get a line saying
+that joining also makes them a member of the community, and a checkbox, **Also
+join the community "…"**, switched on by default. The community's organizers see
+their name, profile, and that they joined this event. People who turn the box off
+join only the event. People who joined before you linked the event see a card on
+the event, **You can join "…" too**, with **Join** and **Not now**.
+
+**What stays separate.** The event and the community each keep their own
+**People** list, matches and group chat. Joining a meetup does not put someone
+into the other meetups' lists, and leaving a meetup does not remove them from the
+community. Event and community can even use different coordinators.
+
+**Approving community requests.** A request that comes from a meetup carries a
+**Member of "…"** badge on the card, meaning the organizers of that event
+confirmed the person is approved there. With a coordinator attached to the
+community these are approved automatically. Without one, **Approve verified
+members (N)** in the community's Join requests approves all of them in one tap.
+Direct joins still work as before: invite codes and manual approval do not change,
+and someone can be in the community without ever attending a meetup.
+
+**See and change the list.** The community's **Settings** has an **Events in this
+community** card listing the linked events, each with **Remove**. The community's
+page shows its events, upcoming first, and each event's page links back to the
+community.
+
+**Unlinking.** Tap **Remove** on the community side, or choose **Not part of a
+community** in the event's settings and save. New attendees are no longer offered
+membership. Nobody is removed: people who already joined stay members, and you
+can still revoke a member in the community itself like any other attendee.
+If an event points at a community you do not organize from this device, you can
+still end the link from the event's side.
+
 ## 7. During the event
 
 - **Roster fills in live**: approved attendees appear as they join; their
