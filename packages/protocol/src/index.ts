@@ -13,4 +13,5 @@ export * from "./event-page.js";
 export * from "./roster.js";
 export * from "./media.js";
 export * from "./config.js";
+export * from "./hierarchy.js";
 export * from "./languages.js";

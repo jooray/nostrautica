@@ -522,6 +522,17 @@ Tag absent = no chat.
 
 NIP-17 and dual-backend ideas are intentionally deferred and may change before implementation.
 
+### 7.6 Space hierarchy: a community and its events
+
+A community (kind 31612) can own dated events (31923), such as a meetup series and its meetups. Membership flows **up only**: whoever is approved for one of a community's events may join the community without a second approval. Nothing flows down, and leaving an event does not leave the community. Each space keeps its own `E_id`, `E_inbox`, ECK, roster, directory, matches and group chat, and the two may use different coordinators.
+
+- **The link needs both sides.** The event's 31600 carries `["parent", <community coordinate>]` and the community's 31600 carries `["child", <event coordinate>]`, each signed by its own `E_id`. An event that names someone else's community gains nothing. Removing either tag ends the link for future joins; memberships already granted are not revoked.
+- **The proof.** An authority of the event (its `E_id` or its coordinator) signs `sha256(["nostrautica-member-of-v1", parent, child, attendee])`. It rides in the attendee's key grant (21602) as `parent: { a, by, sig }`, and the attendee's own client presents it in an ordinary join to the community as `["member_of", child, by, sig]`. Whoever approves the community's joins (coordinator or organizer client) verifies it and approves like a valid invite.
+- **Consent.** The event's Join form must disclose the community join and let the person opt out; people who joined before the link are offered it in one action rather than joined silently.
+- **Additive.** No `v` bump; older readers ignore the new tags.
+
+Normative detail: `PROTOCOL-NIP.md` §15. Organizer and participant walk-throughs: `ORGANIZER-GUIDE.md` §6.6 and `PARTICIPANT-GUIDE.md` ("If the event belongs to a community").
+
 ## 8. Flows
 
 **Create event.** Organizer client: generate `E_id`, `E_inbox`, ECK v1 → publish kind 0 for `E_id` (event name/logo) → publish 31923 + 31600 (signed `E_id`) → self-encrypt key backup (30078, includes install `gen = 0`) → optionally generate invites (31601) → optionally attach coordinator: bump `gen` to 1, add `["coordinator", <pubkey>, 1]` to 31600, gift-wrap 21603 carrying the same `gen`.

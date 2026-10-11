@@ -43,6 +43,8 @@ import {
   MAX_ROSTER_PAGES,
   NIP44_MAX_PLAINTEXT_BYTES,
   keyGrantContentSchema,
+  makeMembershipProof,
+  verifyMembershipProof,
   coordinatorStatusContentSchema,
   unwrapRumor,
   sha256Hex,
@@ -417,11 +419,17 @@ async function setup(
     transcribeError?: string;
     eventRelays?: string[];
     defaultRelays?: string[];
+    /** §15 tests: pre-made keys, a transport shared between two coordinators, and
+     *  extra tags (parent / child) on the seeded 31600. */
+    coordSk?: Uint8Array;
+    eidSk?: Uint8Array;
+    transport?: FakeTransport;
+    extraConfigTags?: string[][];
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
-  const coordSk = generateSecretKey();
-  const eidSk = generateSecretKey();
+  const coordSk = opts.coordSk ?? generateSecretKey();
+  const eidSk = opts.eidSk ?? generateSecretKey();
   const eidPubkey = getPublicKey(eidSk);
   const einboxSk = generateSecretKey();
   const d = "cypherpunk";
@@ -435,10 +443,10 @@ async function setup(
   // event-key columns (F1) — exactly like production.
   const coordPubkey = getPublicKey(coordSk);
   const store = new Store(":memory:", coordSk);
-  const transport = new FakeTransport();
+  const transport = opts.transport ?? new FakeTransport();
   transport.seed.push(
     { kind: spaceKind, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : [])], content: "", id: "e2", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : []), ...(opts.extraConfigTags ?? [])], content: "", id: "e2", sig: "" } as any,
     { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
     ...(opts.extraSeed?.({ eidPubkey, d, coordPubkey, inboxPubkey: getPublicKey(einboxSk) }) ?? []),
   );
@@ -6624,5 +6632,245 @@ describe("models.match_score — pair numbers from a decision model (2026-09-19)
     expect(plain).toBeTruthy();
     expect(decided).toBeTruthy();
     expect(decided).not.toBe(plain);
+  });
+});
+
+describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
+  /** A community coordinator and an event coordinator that are DIFFERENT daemons
+   *  sharing only the relay (a shared FakeTransport), so the community side can only
+   *  learn about the event from the event's own published 31600. */
+  async function pair(o: { parentListsChild?: boolean; childNamesParent?: boolean } = {}) {
+    const transport = new FakeTransport();
+    const pEidSk = generateSecretKey();
+    const cEidSk = generateSecretKey();
+    const pCoord = makeCoordinate(getPublicKey(pEidSk), "cypherpunk", KIND_COMMUNITY);
+    const cCoord = makeCoordinate(getPublicKey(cEidSk), "cypherpunk", KIND_CALENDAR_EVENT);
+    const parent = await setup(0, {
+      spaceKind: KIND_COMMUNITY,
+      eidSk: pEidSk,
+      transport,
+      extraConfigTags: o.parentListsChild === false ? [] : [["child", cCoord]],
+    });
+    const child = await setup(0, {
+      eidSk: cEidSk,
+      transport,
+      extraConfigTags: o.childNamesParent === false ? [] : [["parent", pCoord]],
+    });
+    child.coordinator.hierarchyReissueDelayMs = 0;
+    return { transport, parent, child, pCoord, cCoord };
+  }
+
+  /** Publish a new revision of `h`'s 31600 (created_at 1 is the seed). */
+  function reviseConfig(h: Harness, createdAt: number, mutate: (tags: string[][]) => string[][]): NostrEvent {
+    const eid = getPublicKey(h.eidSk);
+    const base = h.transport.seed
+      .filter((e) => e.kind === 31600 && e.pubkey === eid)
+      .sort((a, b) => a.created_at - b.created_at)
+      .pop()!;
+    const ev = { ...base, created_at: createdAt, id: `rev${createdAt}${eid.slice(0, 4)}`, tags: mutate(base.tags) } as NostrEvent;
+    h.transport.seed.push(ev);
+    return ev;
+  }
+
+  function grantsTo(h: Harness, sk: Uint8Array, coordinate: string) {
+    return h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, sk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_KEY_GRANT)
+      .map((r) => keyGrantContentSchema.parse(JSON.parse(r.content)))
+      .filter((g) => g.a === coordinate);
+  }
+
+  async function joinCommunity(h: Harness, sk: Uint8Array, tags: string[][]): Promise<string> {
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "Member", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ...tags],
+    });
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    return getPublicKey(sk);
+  }
+
+  const memberOf = (child: string, p: { by: string; sig: string }) => [["member_of", child, p.by, p.sig]];
+  const statusOf = (h: Harness, pk: string) => h.store.getAttendee(h.coordinate, pk)?.status;
+
+  it("a grant for a linked event carries a proof signed by the coordinator, and it is accepted by a DIFFERENT coordinator", async () => {
+    const { parent, child, pCoord, cCoord } = await pair();
+    const sk = generateSecretKey();
+    const pk = await join(child, sk, "crypto");
+    const grant = grantsTo(child, sk, cCoord).pop()!;
+    expect(grant.parent).toBeDefined();
+    expect(grant.parent!.a).toBe(pCoord);
+    expect(grant.parent!.by).toBe(getPublicKey(child.coordSk));
+
+    await joinCommunity(parent, sk, memberOf(cCoord, grant.parent!));
+    expect(statusOf(parent, pk)).toBe("approved");
+    // The community's coordinator issued its own key grant for the community.
+    expect(grantsTo(parent, sk, pCoord).length).toBe(1);
+  });
+
+  it("an event grant has no proof when the community does not list the event, or the event names no parent", async () => {
+    for (const o of [{ parentListsChild: false }, { childNamesParent: false }]) {
+      const { child, cCoord } = await pair(o);
+      const sk = generateSecretKey();
+      await join(child, sk, "crypto");
+      expect(grantsTo(child, sk, cCoord).pop()!.parent).toBeUndefined();
+    }
+  });
+
+  it("a one-sided link never admits: the proof is real but the community / event does not agree", async () => {
+    for (const o of [{ parentListsChild: false }, { childNamesParent: false }]) {
+      const { parent, child, pCoord, cCoord } = await pair(o);
+      const sk = generateSecretKey();
+      const pk = getPublicKey(sk);
+      // The proof is minted by hand: the child coordinator would not issue one.
+      const proof = makeMembershipProof(child.coordSk, pCoord, cCoord, pk);
+      await joinCommunity(parent, sk, memberOf(cCoord, proof));
+      expect(statusOf(parent, pk)).toBe("pending");
+    }
+  });
+
+  it("rejects a forged signature, a stranger's signature, and a proof replayed for another attendee", async () => {
+    const { parent, child, pCoord, cCoord } = await pair();
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const good = makeMembershipProof(child.coordSk, pCoord, cCoord, pk);
+
+    const forged = await joinCommunity(parent, generateSecretKey(), memberOf(cCoord, { by: good.by, sig: "ab".repeat(64) }));
+    expect(statusOf(parent, forged)).toBe("pending");
+
+    const strangerSk = generateSecretKey();
+    const strangerSkAttendee = generateSecretKey();
+    const byStranger = makeMembershipProof(strangerSk, pCoord, cCoord, getPublicKey(strangerSkAttendee));
+    await joinCommunity(parent, strangerSkAttendee, memberOf(cCoord, byStranger));
+    expect(statusOf(parent, getPublicKey(strangerSkAttendee))).toBe("pending");
+
+    // Someone else presenting the proof minted for `pk`.
+    const thief = generateSecretKey();
+    await joinCommunity(parent, thief, memberOf(cCoord, good));
+    expect(statusOf(parent, getPublicKey(thief))).toBe("pending");
+
+    // And the real holder is still fine.
+    await joinCommunity(parent, sk, memberOf(cCoord, good));
+    expect(statusOf(parent, pk)).toBe("approved");
+  });
+
+  it("the child's E_id may sign the proof itself (no coordinator needed)", async () => {
+    const { parent, child, pCoord, cCoord } = await pair();
+    const sk = generateSecretKey();
+    await joinCommunity(parent, sk, memberOf(cCoord, makeMembershipProof(child.eidSk, pCoord, cCoord, getPublicKey(sk))));
+    expect(statusOf(parent, getPublicKey(sk))).toBe("approved");
+  });
+
+  it("a proof signed by a coordinator the event has since replaced stops working", async () => {
+    const { parent, child, pCoord, cCoord } = await pair();
+    const early = generateSecretKey();
+    await joinCommunity(parent, early, memberOf(cCoord, makeMembershipProof(child.coordSk, pCoord, cCoord, getPublicKey(early))));
+    expect(statusOf(parent, getPublicKey(early))).toBe("approved");
+
+    // The event moves to another coordinator; the community's cached view expires.
+    const newCoord = getPublicKey(generateSecretKey());
+    reviseConfig(child, 5, (tags) => tags.map((t) => (t[0] === "coordinator" ? ["coordinator", newCoord, "2"] : t)));
+    parent.clock.t += 61_000;
+
+    const late = generateSecretKey();
+    await joinCommunity(parent, late, memberOf(cCoord, makeMembershipProof(child.coordSk, pCoord, cCoord, getPublicKey(late))));
+    expect(statusOf(parent, getPublicKey(late))).toBe("pending");
+    // Membership already granted is not revoked.
+    expect(statusOf(parent, getPublicKey(early))).toBe("approved");
+  });
+
+  it("withdrawing the link on either side ends it for future joins", async () => {
+    const { parent, child, pCoord, cCoord } = await pair();
+    reviseConfig(child, 5, (tags) => tags.filter((t) => t[0] !== "parent"));
+    parent.clock.t += 61_000;
+    const sk = generateSecretKey();
+    await joinCommunity(parent, sk, memberOf(cCoord, makeMembershipProof(child.coordSk, pCoord, cCoord, getPublicKey(sk))));
+    expect(statusOf(parent, getPublicKey(sk))).toBe("pending");
+  });
+
+  it("direct invite joins to a community with children are unchanged; a plain event ignores member_of", async () => {
+    const { parent, child, pCoord, cCoord } = await pair();
+    const pk = await join(parent, generateSecretKey(), "design");
+    expect(statusOf(parent, pk)).toBe("approved");
+
+    // member_of aimed at a dated event is simply ignored: the event has no children.
+    const sk = generateSecretKey();
+    await joinCommunity(child, sk, memberOf(cCoord, makeMembershipProof(child.coordSk, pCoord, cCoord, getPublicKey(sk))));
+    expect(statusOf(child, getPublicKey(sk))).toBe("pending");
+  });
+
+  it("re-issues a proof-bearing grant to existing attendees once when the link comes into existence", async () => {
+    const { child, pCoord, cCoord } = await pair({ childNamesParent: false });
+    const aSk = generateSecretKey();
+    const bSk = generateSecretKey();
+    const aPk = await join(child, aSk, "crypto");
+    const bPk = await join(child, bSk, "design");
+    expect(grantsTo(child, aSk, cCoord).every((g) => !g.parent)).toBe(true);
+
+    // The event's organizer adds `parent`: the link now exists on both sides.
+    const ev = reviseConfig(child, 5, (tags) => [...tags, ["parent", pCoord]]);
+    await child.coordinator.handleConfigUpdate(child.coordinate, ev);
+    await vi.waitFor(() => expect(child.store.hierarchyReissued(cCoord, pCoord, 1)).toBe(true));
+
+    for (const [sk, pk] of [[aSk, aPk], [bSk, bPk]] as const) {
+      const proofGrants = grantsTo(child, sk, cCoord).filter((g) => g.parent);
+      expect(proofGrants.length).toBe(1);
+      expect(verifyMembershipProof(proofGrants[0]!.parent!, pCoord, cCoord, pk, [getPublicKey(child.eidSk), getPublicKey(child.coordSk)])).toBe(true);
+    }
+
+    // Once: a sweep, a repeated call and an unrelated config edit add nothing.
+    const total = () => child.transport.published.filter((e) => e.kind === 1059).length;
+    const before = total();
+    await child.coordinator.hierarchySweep();
+    expect(await child.coordinator.reissueParentProofs(cCoord)).toBe(0);
+    await child.coordinator.handleConfigUpdate(child.coordinate, reviseConfig(child, 6, (tags) => [...tags, ["t", "x"]]));
+    await child.coordinator.hierarchySweep();
+    expect(total()).toBe(before);
+  });
+
+  it("re-issues when the COMMUNITY starts listing the event (picked up by the sweep, parent on another coordinator)", async () => {
+    const { parent, child, cCoord, pCoord } = await pair({ parentListsChild: false });
+    const sk = generateSecretKey();
+    await join(child, sk, "crypto");
+    await child.coordinator.hierarchySweep();
+    expect(grantsTo(child, sk, cCoord).some((g) => g.parent)).toBe(false);
+    expect(child.store.hierarchyReissued(cCoord, pCoord, 1)).toBe(false);
+
+    reviseConfig(parent, 5, (tags) => [...tags, ["child", cCoord]]);
+    child.clock.t += 61_000; // the not-listed negative/positive cache expires
+    await child.coordinator.hierarchySweep();
+    expect(grantsTo(child, sk, cCoord).filter((g) => g.parent).length).toBe(1);
+    expect(child.store.hierarchyReissued(cCoord, pCoord, 1)).toBe(true);
+  });
+
+  it("works when the event and the community are installed on the SAME coordinator", async () => {
+    const childEidSk = generateSecretKey();
+    const childEid = getPublicKey(childEidSk);
+    const cInbox = generateSecretKey();
+    const cCoord = makeCoordinate(childEid, "meetup", KIND_CALENDAR_EVENT);
+    let pCoord = "";
+    const pEidSk = generateSecretKey();
+    pCoord = makeCoordinate(getPublicKey(pEidSk), "cypherpunk", KIND_COMMUNITY);
+    const h = await setup(0, {
+      spaceKind: KIND_COMMUNITY,
+      eidSk: pEidSk,
+      extraConfigTags: [["child", cCoord]],
+      extraSeed: ({ coordPubkey }) => [
+        { kind: KIND_CALENDAR_EVENT, pubkey: childEid, created_at: 1, tags: [["d", "meetup"], ["title", "Meetup"]], content: "", id: "m1", sig: "" } as any,
+        { kind: 31600, pubkey: childEid, created_at: 1, tags: [["d", "meetup"], ["v", "2"], ["inbox", getPublicKey(cInbox)], ["matching", "off"], ["coordinator", coordPubkey, "1"], ["parent", pCoord]], content: "", id: "m2", sig: "" } as any,
+      ],
+    });
+    h.coordinator.hierarchyReissueDelayMs = 0;
+    await h.coordinator.installEvent({
+      coordinate: cCoord, inboxSkHex: bytesToHex(cInbox), eck: [{ id: 1, key: bytesToBase64(generateEck()) }], configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const fetchesBefore = h.transport.fetches.length;
+    await joinCommunity(h, sk, memberOf(cCoord, makeMembershipProof(h.coordSk, pCoord, cCoord, pk)));
+    expect(statusOf(h, pk)).toBe("approved");
+    // The installed event answers from live state: no relay read of its 31600.
+    expect(h.transport.fetches.slice(fetchesBefore).some((f) => f.kinds?.includes(31600) && f.authors?.includes(childEid))).toBe(false);
   });
 });

@@ -216,6 +216,13 @@ private fun AdminBody(p: androidx.compose.foundation.layout.PaddingValues, naddr
         else if (pendingList.size > 1) item {
             SmallButton(if (st.approvingAll) s.t("admin.requests.approving") else s.t("admin.requests.approveAll", "n" to pendingList.size), { st.approveAll() }, enabled = !st.approvingAll)
         }
+        val verifiedCount = pendingList.count { it.attendeePubkey in st.memberOfVerified }
+        if (verifiedCount > 0) item {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                SmallButton(if (st.approvingAll) s.t("admin.requests.approving") else s.t("hierarchy.admin.approveVerified", "n" to verifiedCount), { st.approveVerified() }, enabled = !st.approvingAll)
+                Dim(s.t("hierarchy.admin.verifiedHelp"), size = 13)
+            }
+        }
         val summary = AdminModel.summarizeBulk(st.bulk)
         if (st.bulkRan && summary.done && (summary.approved > 0 || summary.needRetry > 0)) item {
             Dim(s.t("admin.requests.bulkSummary", "approved" to summary.approved, "retry" to summary.needRetry))
@@ -350,6 +357,9 @@ private fun RequestCard(st: AdminState, req: today.cypherpunk.nostrautica.domain
         PersonLine(req.attendeePubkey, req.name, st.ctx.relays)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             if (req.invite != null) Pill(s.t("admin.requests.invite"), t.accentSoft, t.accent)
+            st.memberOfVerified[req.attendeePubkey]?.let { m ->
+                Pill(s.t("hierarchy.admin.memberOf", "title" to m.title.ifEmpty { s.t("hierarchy.admin.memberOf.unnamed") }), t.okSoft, t.ok)
+            }
             if (deferred) Pill(s.t("admin.requests.reviewed"), t.bgElev2, t.textDim)
             req.media?.takeIf { it.isNotEmpty() }?.let { Pill(s.tp("admin.requests.video", it.size), t.bgElev2, t.textDim) }
         }

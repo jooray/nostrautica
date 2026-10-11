@@ -98,6 +98,33 @@ where you are (Joined → Backup secured → Intro submitted → Processing →
 Matches ready) and shows you the *one* next thing to do, front and center. No
 guessing why matches haven't appeared yet: the list tells you.
 
+### If the event belongs to a community
+
+Some events are one meetup in a series, such as a monthly Bitcoin meetup. On
+those, the Join form adds a line under your profile: **Joining also makes you a
+member of "…"**, and a checkbox, **Also join the community "…"**. It is on by
+default. Below it, the form says who sees what: the community's organizers see
+your name and profile and that you joined this event. You can leave the community
+later.
+
+<!-- TODO screenshot: participant/ join form with the community checkbox -->
+
+- **Leave the box on** and, once you are approved for the event, the app sends
+  the community a request for you. It is approved without anyone reviewing it
+  again, so you are in the community too.
+- **Turn it off** and you join only the event.
+- **Changed your mind later?** On the event's Overview, a card says **You can join
+  "…" too**. Tap **Join** to send the request, or **Not now** to dismiss it. You
+  will also see this card if you joined the event before the organizer linked it
+  to a community.
+
+Your community membership stays when the meetup is over, and it carries over to
+the next one: you do not join the community again for each meetup. The event and
+the community each have their **own People list, matches and group chat**, so
+the people you meet at one meetup are not mixed into another event's list. You
+can also be in a community without ever joining one of its events, if you got a
+direct invite to it.
+
 ### Works with bad venue Wi-Fi too
 
 Further down the same Overview page, once you're approved, there's a

@@ -7,6 +7,7 @@ import kotlinx.serialization.json.Json
 import today.cypherpunk.nostrautica.domain.Accounts
 import today.cypherpunk.nostrautica.domain.EventContext
 import today.cypherpunk.nostrautica.domain.EventKeysStore
+import today.cypherpunk.nostrautica.domain.MemberOfClaim
 import today.cypherpunk.nostrautica.domain.media.BlossomClient
 import today.cypherpunk.nostrautica.domain.media.IntroMedia
 import today.cypherpunk.nostrautica.domain.media.Outcome
@@ -22,6 +23,7 @@ import today.cypherpunk.nostrautica.protocol.nowSec
 import today.cypherpunk.nostrautica.protocol.AiProfileOverride
 import today.cypherpunk.nostrautica.protocol.AttendeeProfile
 import today.cypherpunk.nostrautica.protocol.Bytes
+import today.cypherpunk.nostrautica.protocol.Hierarchy
 import today.cypherpunk.nostrautica.protocol.JoinRequestContent
 import today.cypherpunk.nostrautica.protocol.Kinds
 import today.cypherpunk.nostrautica.protocol.Limits
@@ -98,6 +100,8 @@ data class JoinInput(
     val profile: AttendeeProfile? = null,
     val media: List<MediaDescriptor> = emptyList(),
     val inviteNsec: String? = null,
+    /** §15: a membership proof from a child event of this community, sent as `["member_of", child, by, sig]`. */
+    val memberOf: MemberOfClaim? = null,
 )
 
 data class WithdrawResult(val sent: Boolean, val blobsAttempted: Int, val blobsDeleted: Int)
@@ -130,6 +134,7 @@ class JoinFlow(
         val pk = signer.pubkey
         val joinTags = mutableListOf(listOf("a", ctx.coordinate))
         input.inviteNsec?.let { joinTags += JoinRules.inviteTag(it, ctx.coordinate, pk) }
+        input.memberOf?.let { joinTags += Hierarchy.memberOfTag(it.child, it.by, it.sig) }
         val join = JoinRules.joinContent(input.name, input.message, input.rsvpPublic)
         val profile = input.profile?.let { AuthoredProfile.normalize(it).profile }
         // rev is REQUIRED on the 21601 (prod incident 2026-07-23), and shares the

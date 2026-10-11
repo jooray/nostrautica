@@ -70,6 +70,11 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     var reportBusy by mutableStateOf(false)
     var posts by mutableStateOf<List<Organizer.Post>>(emptyList())
 
+    /** Requests whose `member_of` proof verified (§15.4), by attendee pubkey. Unverified claims show nothing at all. */
+    data class VerifiedMember(val child: String, val title: String)
+    var memberOfVerified by mutableStateOf<Map<String, VerifiedMember>>(emptyMap())
+    private var verifiedFor: Int? = null
+
     private val refreshLock = Mutex()
     private fun msg(e: Throwable) = e.message ?: e.toString()
 
@@ -98,6 +103,25 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
         billingBlocked = billing != null,
     ))
 
+    /**
+     * Community join requests that carry a `member_of` proof (§15.4): verified against BOTH newest
+     * configs, the child's authorities and the signature, then shown as "Member of <event>".
+     */
+    suspend fun verifyMembership() {
+        val claimed = visiblePending.filter { it.memberOf.isNotEmpty() }
+        if (!ctx.isCommunity || claimed.isEmpty()) { if (memberOfVerified.isNotEmpty()) memberOfVerified = emptyMap(); verifiedFor = null; return }
+        val reqs = claimed.map { it.attendeePubkey to it.memberOf }
+        if (verifiedFor == reqs.hashCode()) return
+        runCatching {
+            val verified = c.communities.verifyQueueMembership(ctx, reqs)
+            val titles = verified.values.toSet().associateWith { child ->
+                runCatching { c.contexts.get(c.communities.naddrFor(child, cfg.relays)).title }.getOrDefault("")
+            }
+            memberOfVerified = verified.mapValues { (_, child) -> VerifiedMember(child, titles[child] ?: "") }
+            verifiedFor = reqs.hashCode()
+        }.onFailure { memberOfVerified = emptyMap() }
+    }
+
     suspend fun paintFromCache() {
         pending = AdminModel.mergePending(pending, org.cachedPending(coordinate))
         roster = org.cachedRoster(coordinate) ?: roster
@@ -109,6 +133,7 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
         lastSeen = org.cachedLastSeen(coordinate)
         org.cachedInviteReport(coordinate)?.let { report = it }
         posts = org.cachedPosts(coordinate)
+        scope.launch { verifyMembership() }
     }
 
     /** Pending + roster together, assigned in the same tick (so a self-request never flashes an Approve button). */
@@ -129,6 +154,7 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
             fresh.talks?.let { talks = it } ?: run { if (cfg.talks == "off" || cfg.coordinator == null) talks = emptyList() }
             lastRefreshed = nowSec()
             scope.launch { refreshInviteReport() }
+            scope.launch { verifyMembership() }
         } catch (e: Exception) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             if (e !is java.io.IOException) error = msg(e)
@@ -182,6 +208,17 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     fun approveAll() {
         approvingAll = true; bulkRan = true
         bulk = visiblePending.map { AdminModel.BulkItem(it.attendeePubkey, AdminModel.BulkState.QUEUED) }
+        scope.launch {
+            try { for (it in bulk.toList()) runBulk(it.pubkey) } finally { approvingAll = false }
+        }
+    }
+
+    /** One action for every request whose community membership proof verified (§15.4). */
+    fun approveVerified() {
+        val targets = visiblePending.filter { it.attendeePubkey in memberOfVerified }
+        if (targets.isEmpty() || approvingAll) return
+        approvingAll = true; bulkRan = true
+        bulk = targets.map { AdminModel.BulkItem(it.attendeePubkey, AdminModel.BulkState.QUEUED) }
         scope.launch {
             try { for (it in bulk.toList()) runBulk(it.pubkey) } finally { approvingAll = false }
         }

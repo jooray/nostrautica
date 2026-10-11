@@ -1,5 +1,7 @@
 package today.cypherpunk.nostrautica.domain.organizer
 
+import today.cypherpunk.nostrautica.domain.MemberOfClaim
+import today.cypherpunk.nostrautica.protocol.Hierarchy
 import kotlinx.serialization.Serializable
 import today.cypherpunk.nostrautica.protocol.JoinRequestContent
 import today.cypherpunk.nostrautica.protocol.Kinds
@@ -52,7 +54,7 @@ object InboxFold {
                         ?.let { InviteProofRef(it[1], it[2]) }
                     val prev = joins[r.pubkey]
                     if (prev == null || Ordering.compareLatest(r.id, r.createdAt, prev.id, prev.req.rumorCreatedAt) < 0) {
-                        joins[r.pubkey] = Join(PendingRequest(r.pubkey, c.name, c.message, c.rsvpPublic, invite = inv, rumorCreatedAt = r.createdAt), r.id)
+                        joins[r.pubkey] = Join(PendingRequest(r.pubkey, c.name, c.message, c.rsvpPublic, invite = inv, memberOf = Hierarchy.parseMemberOf(r.tags).map { MemberOfClaim(it.child, it.by, it.sig) }, rumorCreatedAt = r.createdAt), r.id)
                     }
                 }
                 Kinds.ATTENDEE_WITHDRAWAL -> {

@@ -6,6 +6,13 @@
 import { KIND_EVENT_CONFIG } from "./kinds.js";
 import { makeCoordinate } from "./coordinate.js";
 import {
+  CHILD_TAG,
+  MAX_CHILDREN,
+  PARENT_TAG,
+  isValidChildCoordinate,
+  isValidParentCoordinate,
+} from "./hierarchy.js";
+import {
   PROTOCOL_VERSION,
   PROTOCOL_VERSION_TAG,
   readEventVersionTag,
@@ -149,6 +156,14 @@ export interface EventConfig {
    * positive integer; absent (undefined) = indefinite retention.
    */
   retentionDays?: number;
+  /**
+   * The community this event belongs to (§15, `parent` tag): a 31612 coordinate.
+   * Only meaningful on a dated event, and only when the community's own config lists
+   * this event back in its `children`.
+   */
+  parent?: string;
+  /** The events that belong to this community (§15, `child` tags): 31923 coordinates. */
+  children?: string[];
 }
 
 export interface EventConfigTags {
@@ -213,6 +228,21 @@ export function buildEventConfig(cfg: EventConfig): EventConfigTags {
       throw new Error("31600 config: retentionDays must be a positive integer");
     }
     tags.push(["retention", String(cfg.retentionDays)]);
+  }
+  // Hierarchy (§15). Both omitted when unused, so existing configs stay byte-identical.
+  if (cfg.parent) {
+    if (!isValidParentCoordinate(cfg.parent)) {
+      throw new Error("31600 config: parent must be a 31612 community coordinate");
+    }
+    tags.push([PARENT_TAG, cfg.parent]);
+  }
+  const children = [...new Set(cfg.children ?? [])];
+  if (children.length > MAX_CHILDREN) {
+    throw new Error(`31600 config: at most ${MAX_CHILDREN} child events`);
+  }
+  for (const c of children) {
+    if (!isValidChildCoordinate(c)) throw new Error("31600 config: child must be a 31923 event coordinate");
+    tags.push([CHILD_TAG, c]);
   }
   return { kind: KIND_EVENT_CONFIG, tags, content: "" };
 }
@@ -385,6 +415,15 @@ export function parseEventConfig(
     // non-integer means indefinite retention (undefined). Fail-soft like every
     // other optional tag parsed from public relay data.
     retentionDays: retentionTag(tags),
+    // Hierarchy (§15), fail-soft like every optional tag: a malformed value is dropped.
+    parent: (() => {
+      const p = first(tags, PARENT_TAG);
+      return p && isValidParentCoordinate(p) ? p : undefined;
+    })(),
+    children: (() => {
+      const c = [...new Set(all(tags, CHILD_TAG).filter(isValidChildCoordinate))].slice(0, MAX_CHILDREN);
+      return c.length ? c : undefined;
+    })(),
   };
 }
 

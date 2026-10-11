@@ -70,6 +70,11 @@ import {
   AI_PROFILE_FIELDS,
   parseEventConfig,
   parseCoordinate,
+  KIND_COMMUNITY,
+  isLinked,
+  makeMembershipProof,
+  parseMemberOfTags,
+  type MembershipProof,
   parseEventCoordinate,
   type EckVersion,
   type EventConfig,
@@ -103,7 +108,7 @@ import type { GiftWrap, Rumor, RumorKind } from "@nostrautica/protocol";
 
 import { Store, DAEMON_PARK_REASON, EVENT_NOT_LIVE_PARK_REASON, type BillingStateRow, type EnqueueOutcome } from "./store/db.js";
 import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
-import { InviteChecker, evaluateEntitlement } from "./pipeline/entitlement.js";
+import { InviteChecker, MemberOfChecker, evaluateEntitlement, type LinkConfig } from "./pipeline/entitlement.js";
 import { processAttendee } from "./pipeline/process.js";
 import { extractProfileBio, type NostrPost } from "./pipeline/profile.js";
 import {
@@ -691,6 +696,10 @@ interface EventState {
    */
   eidProfile?: { id: string; created_at: number; picture?: string };
   scoringCtx: EventContextForScoring;
+  /** §15: the community this event names as its parent (newest applied 31600). */
+  parent?: string;
+  /** §15: the child events a community lists (newest applied 31600). */
+  children?: string[];
   /** Newest applied 31600 config event id + timestamp (audit H5 replaceable ordering). */
   configEventId?: string;
   configCreatedAt: number;
@@ -744,6 +753,17 @@ export class Coordinator {
   private readonly batchSize: number;
   private readonly matchRng: () => number;
   private readonly inviteChecker: InviteChecker;
+  /** §15: membership-by-event for joins to a community this daemon serves. */
+  private readonly memberOfChecker: MemberOfChecker;
+  /** Newest 31600 link fields of OTHER spaces (a parent we point at, a child that
+   *  points at us), short-TTL cached: the other side may be served by another
+   *  coordinator or none, so they are read from relays, never assumed installed. */
+  private linkConfigCache = new Map<string, { at: number; cfg: LinkConfig | undefined }>();
+  /** Links whose proof re-issue is running, so a sweep and a config callback never overlap. */
+  private reissuing = new Set<string>();
+  /** Pause between re-issued grants (§15.3), so a 2,000-person event is paced like
+   *  the other republish paths rather than fired as one burst. */
+  hierarchyReissueDelayMs = 100;
   /** The Marmot admin bot (§4), present only when a chat MLS layer is configured. */
   private readonly marmot?: MarmotAdmin;
   private events = new Map<string, EventState>();
@@ -852,6 +872,7 @@ export class Coordinator {
       translate: legacyRoute(deps.llm, deps.translateModel),
     };
     this.inviteChecker = new InviteChecker(deps.store);
+    this.memberOfChecker = new MemberOfChecker((child) => this.getLinkConfig(child, this.allConfigRelays()));
     if (deps.chatMls) {
       this.marmot = new MarmotAdmin({
         store: deps.store,
@@ -1465,6 +1486,8 @@ export class Coordinator {
         hashtags: (evtEvent?.tags ?? []).filter((t) => t[0] === "t").map((t) => t[1]!),
         lang: config?.lang ?? "en",
       },
+      parent: config?.parent,
+      children: config?.children,
       configEventId: cfgEvent?.id,
       configCreatedAt: cfgEvent?.created_at ?? 0,
       gen,
@@ -2622,6 +2645,26 @@ export class Coordinator {
       }
     }
 
+    // §15: a join to a community may carry `member_of` proofs from its child events.
+    // Only tried when the invite path did not already grant, and only on a community
+    // — a dated event ignores the tag (isLinked needs a 31612 parent).
+    let viaMemberOf: string | undefined;
+    if (!decision.grant && state.spaceKind === KIND_COMMUNITY && parseMemberOfTags(tags).length > 0) {
+      const memberOf = await this.memberOfChecker.check({
+        coordinate: state.coordinate,
+        attendeePubkey,
+        tags,
+        children: state.children ?? [],
+      });
+      if (memberOf.grant) {
+        decision = memberOf;
+        viaMemberOf = memberOf.reason;
+      } else {
+        // The more specific reason wins over a bare "no invite proof".
+        decision = { grant: false, reason: decision.reason === "no invite proof" ? memberOf.reason : `${decision.reason}; ${memberOf.reason}` };
+      }
+    }
+
     // The roster ceiling applies to an auto-approval exactly as it does to an
     // organizer's (audit B-8): an invite code cannot conjure space that the 31604
     // payload does not have. Refused entrants stay pending, which is the same place
@@ -2654,7 +2697,7 @@ export class Coordinator {
     });
 
     log(
-      `[join] ${short(attendeePubkey)} invite=${invite ? "yes" : "no"} → ${decision.grant ? "AUTO-APPROVED" : "manual queue (" + decision.reason + ")"}`,
+      `[join] ${short(attendeePubkey)} invite=${invite ? "yes" : "no"}${viaMemberOf ? ` ${viaMemberOf}` : ""} → ${decision.grant ? "AUTO-APPROVED" : "manual queue (" + decision.reason + ")"}`,
     );
     if (decision.grant) await this.grantAndPublish(state, attendeePubkey);
   }
@@ -2845,7 +2888,8 @@ export class Coordinator {
 
   /** Grant the ECK and publish the directory entry + roster for a new attendee. */
   async grantAndPublish(state: EventState, attendeePubkey: string): Promise<void> {
-    const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, attendeePubkey, state.eck);
+    const proof = await this.parentProofFor(state, attendeePubkey);
+    const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, attendeePubkey, state.eck, "attendee", proof);
     await this.deps.transport.publish(grant, this.accountRelays(state));
     await this.publishDirectory(state, attendeePubkey);
     await this.publishRosterCoalesced(state);
@@ -3099,7 +3143,8 @@ export class Coordinator {
 
     // Republish the full record set under THIS coordinator's key.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
-      const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck);
+      const proof = await this.parentProofFor(state, a.pubkey);
+      const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck, "attendee", proof);
       await this.deps.transport.publish(grant, this.accountRelays(state));
       await this.publishDirectory(state, a.pubkey);
       // Rebuild matches under our authorship (the prior 31605s are undecryptable to us).
@@ -4601,7 +4646,8 @@ export class Coordinator {
     //    and their matches would vanish (audit H3). Rebuilt from cached scores —
     //    zero embedding/LLM provider calls.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
-      const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck);
+      const proof = await this.parentProofFor(state, a.pubkey);
+      const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, a.pubkey, state.eck, "attendee", proof);
       await this.deps.transport.publish(grant, this.accountRelays(state));
       await this.publishDirectory(state, a.pubkey);
       if (state.matching === "on") {
@@ -5024,6 +5070,135 @@ export class Coordinator {
     log(`[retention] ${state.coordinate}: deleted ${deletions.length} member record address(es), purged local data, notified organizer`);
   }
 
+  // ── §15 space hierarchy ─────────────────────────────────────────────────────
+  private static readonly LINK_CACHE_TTL_MS = 60_000;
+  private static readonly LINK_CACHE_MISS_TTL_MS = 10_000;
+
+  /** Every relay set this daemon serves, plus the defaults: where a linked space's
+   *  own config is most likely to be found. */
+  private allConfigRelays(): string[] {
+    return [...new Set([...[...this.events.values()].flatMap((e) => e.configRelays), ...this.deps.defaultRelays])];
+  }
+
+  /**
+   * The newest 31600 link fields (`coordinator`, `parent`, `children`) of `coordinate`.
+   * A space installed on THIS daemon answers from its live state; anything else is read
+   * from relays: latest-wins (§3.1), authored by the coordinate's own E_id, and cached
+   * briefly, with a shorter negative cache so a not-yet-propagated config is retried soon.
+   */
+  private async getLinkConfig(coordinate: string, relays: string[], opts: { force?: boolean } = {}): Promise<LinkConfig | undefined> {
+    const local = this.events.get(coordinate);
+    if (local) return { coordinator: this.coordPubkey, parent: local.parent, children: local.children };
+    const hit = this.linkConfigCache.get(coordinate);
+    if (hit && !opts.force) {
+      const ttl = hit.cfg ? Coordinator.LINK_CACHE_TTL_MS : Coordinator.LINK_CACHE_MISS_TTL_MS;
+      if (this.now() - hit.at < ttl) return hit.cfg;
+    }
+    let cfg: LinkConfig | undefined;
+    try {
+      const { pubkey: eid, identifier } = parseCoordinate(coordinate);
+      const events = await this.deps.transport.fetch(
+        { kinds: [KIND_EVENT_CONFIG], authors: [eid], "#d": [identifier] },
+        [...new Set([...relays, ...this.deps.defaultRelays])],
+      );
+      const newest = pickLatest(
+        events.filter(
+          (e) => e.kind === KIND_EVENT_CONFIG && e.pubkey === eid && e.tags.some((t) => t[0] === "d" && t[1] === identifier),
+        ),
+      );
+      if (newest) {
+        const parsed = parseEventConfig(eid, newest.tags);
+        cfg = { coordinator: parsed.coordinator, parent: parsed.parent, children: parsed.children };
+      }
+    } catch {
+      cfg = undefined; // unfetchable or unparseable: no link, retried after the miss TTL
+    }
+    this.linkConfigCache.set(coordinate, { at: this.now(), cfg });
+    if (this.linkConfigCache.size > 1000) this.linkConfigCache.delete(this.linkConfigCache.keys().next().value!);
+    return cfg;
+  }
+
+  /** Whether `state`'s link to the parent it names holds (both newest configs agree). */
+  private async childLinkHolds(state: EventState, opts: { force?: boolean } = {}): Promise<boolean> {
+    if (!state.parent) return false;
+    const parentCfg = await this.getLinkConfig(state.parent, state.configRelays, opts);
+    return !!parentCfg && isLinked(state.parent, parentCfg, state.coordinate, { parent: state.parent });
+  }
+
+  /**
+   * §15.3: the membership proof to embed in a 21602 for `attendee`, or undefined when
+   * the event has no live link. Signed with the coordinator's own key, which is an
+   * authority of the child exactly because the child's newest config names it. Never
+   * throws: a grant must not fail because the parent's config is unreachable.
+   */
+  private async parentProofFor(state: EventState, attendee: string): Promise<MembershipProof | undefined> {
+    if (!state.parent) return undefined;
+    try {
+      if (!(await this.childLinkHolds(state))) return undefined;
+      return makeMembershipProof(this.deps.coordSk, state.parent, state.coordinate, attendee);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** A hierarchy field of `state` changed: drop stale cached views and re-evaluate. */
+  private onHierarchyChanged(state: EventState): void {
+    this.linkConfigCache.clear();
+    const affected = [state, ...[...this.events.values()].filter((e) => e !== state && e.parent === state.coordinate)];
+    for (const e of affected) {
+      if (!e.parent) continue;
+      void this.reissueParentProofs(e, { force: true }).catch((err) =>
+        log(`[hierarchy] ${short(e.eidPubkey)}: re-issue failed (will retry on the next sweep): ${err instanceof Error ? err.message : err}`),
+      );
+    }
+  }
+
+  /**
+   * §15.3: when a link comes into existence, re-issue a 21602 carrying the proof to
+   * every currently approved attendee, ONCE per (child, parent, coordinator gen),
+   * recorded durably so a restart does not repeat it. People approved later get the
+   * proof in their first grant. Paced by {@link hierarchyReissueDelayMs}; a failure
+   * partway leaves the ledger unmarked and the next sweep resumes (grants are
+   * idempotent for the recipient). Returns how many grants were published.
+   */
+  async reissueParentProofs(state: EventState | string, opts: { force?: boolean } = {}): Promise<number> {
+    const st = typeof state === "string" ? this.events.get(state) : state;
+    if (!st?.parent) return 0;
+    const parent = st.parent;
+    if (this.deps.store.hierarchyReissued(st.coordinate, parent, st.gen)) return 0;
+    const key = `${st.coordinate}|${parent}|${st.gen}`;
+    if (this.reissuing.has(key)) return 0;
+    this.reissuing.add(key);
+    try {
+      if (!(await this.childLinkHolds(st, opts))) return 0;
+      let n = 0;
+      for (const a of this.deps.store.approvedAttendees(st.coordinate)) {
+        const proof = makeMembershipProof(this.deps.coordSk, parent, st.coordinate, a.pubkey);
+        const role = a.role === "organizer" ? "organizer" : "attendee";
+        const grant = buildKeyGrant(this.deps.coordSk, st.coordinate, a.pubkey, st.eck, role, proof);
+        await this.deps.transport.publish(grant, this.accountRelays(st));
+        n++;
+        if (this.hierarchyReissueDelayMs > 0) await new Promise((r) => setTimeout(r, this.hierarchyReissueDelayMs));
+      }
+      this.deps.store.markHierarchyReissued(st.coordinate, parent, st.gen, this.now());
+      log(`[hierarchy] ${short(st.eidPubkey)}: linked to community ${short(parseCoordinate(parent).pubkey)}, re-issued membership proofs to ${n} attendee(s)`);
+      return n;
+    } finally {
+      this.reissuing.delete(key);
+    }
+  }
+
+  /** Periodic pass over events that name a parent: picks up a parent that started
+   *  listing the child on a coordinator we do not run, and resumes interrupted re-issues. */
+  async hierarchySweep(): Promise<void> {
+    for (const st of [...this.events.values()]) {
+      if (!st.parent) continue;
+      await this.reissueParentProofs(st).catch((e) =>
+        log(`[hierarchy] ${short(st.eidPubkey)}: sweep failed: ${e instanceof Error ? e.message : e}`),
+      );
+    }
+  }
+
   // ── context fetch ───────────────────────────────────────────────────────────
   /**
    * The event's published invite hashes, cached per event (audit COORD-29):
@@ -5405,6 +5580,14 @@ export class Coordinator {
       if (typeof (linkTimer as any).unref === "function") (linkTimer as any).unref();
       this.closers.push(() => clearInterval(linkTimer));
     }
+    // §15: events naming a parent community. Not awaited at boot, so the daemon's
+    // readiness never waits on a relay round trip per linked event.
+    const hierarchyTimer = setInterval(() => void this.hierarchySweep().catch(() => {}), 300_000);
+    if (typeof (hierarchyTimer as any).unref === "function") (hierarchyTimer as any).unref();
+    this.closers.push(() => clearInterval(hierarchyTimer));
+    const hierarchyBoot = setTimeout(() => void this.hierarchySweep().catch(() => {}), 30_000);
+    if (typeof (hierarchyBoot as any).unref === "function") (hierarchyBoot as any).unref();
+    this.closers.push(() => clearTimeout(hierarchyBoot));
     const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
     if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
     this.closers.push(() => clearInterval(relayTimer));
@@ -6053,6 +6236,11 @@ export class Coordinator {
     state.retentionDays = config.retentionDays;
     state.configEventId = event.id;
     state.configCreatedAt = event.created_at;
+    const hierarchyChanged =
+      state.parent !== config.parent || JSON.stringify(state.children ?? []) !== JSON.stringify(config.children ?? []);
+    state.parent = config.parent;
+    state.children = config.children;
+    if (hierarchyChanged) this.onHierarchyChanged(state);
     // A config edit that extends or removes the retention policy lifts a prior
     // retention expiry (NIP §6.2): if the event is no longer past its (new) deadline,
     // clear the terminal flag and resume parked work so processing can continue.

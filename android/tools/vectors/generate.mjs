@@ -64,5 +64,15 @@ out.directoryEntry = P.directoryEntryContentSchema.parse({ v: 2, pubkey: pk, nam
     "encryption-algorithm": "aes-gcm", "decryption-key": P.bytesToBase64(hexToBytes("33".repeat(32))), "decryption-nonce": P.bytesToBase64(hexToBytes("44".repeat(12))) }],
   ai_profile: { summary: "S", skills: [], interests: ["x"], offers: [], seeks: [] }, updated_at: 1700000000 });
 out.newerPayload = { v: 3, pubkey: pk, profile: {}, updated_at: 1 };
+// §15 hierarchy: a child config naming its parent, a parent listing children, a proof.
+const community = P.makeCoordinate(pk, "meetups", 31612);
+const meetup = P.makeCoordinate(pk, "meetup-12");
+out.hierarchy = {
+  community, meetup,
+  childTags: P.buildEventConfig({ ...cfg, d: "meetup-12", parent: community, chat: [], chatRelays: [] }).tags,
+  parentTags: P.buildEventConfig({ ...cfg, d: "meetups", children: [meetup], chat: [], chatRelays: [] }).tags,
+  proof: P.makeMembershipProof(hexToBytes("88".repeat(32)), community, meetup, pk),
+};
+
 writeFileSync(new URL("../../protocol/src/test/resources/ts-vectors.json", import.meta.url), JSON.stringify(out, null, 2) + "\n");
 console.log("wrote ts-vectors.json");

@@ -54,6 +54,7 @@
     type MergedSection,
   } from "@nostrautica/protocol";
   import ToggleSwitch from "$lib/components/ToggleSwitch.svelte";
+  import CommunitySettings from "$lib/components/CommunitySettings.svelte";
   import ImageCropper from "$lib/components/ImageCropper.svelte";
   import { defaultEventBanner, defaultEventIcon, uploadPublicImage } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
@@ -1114,6 +1115,12 @@
       {#if metadataSaved}<span class="muted">{t("admin.metadata.saved")}</span>{/if}
     </div>
   </div>
+
+  {#if ctx && !missingEidKey}
+    <!-- Space hierarchy (§15): which community this event belongs to, or, on a
+         community, which events belong to it. -->
+    <CommunitySettings {ctx} onChange={(updated) => (ctx = updated)} />
+  {/if}
 
   <div class="card">
     <div class="field-label">{t("admin.page.title")}</div>

@@ -8,7 +8,17 @@
  * consistent: duplicates fall back to the manual queue, never auto-reject
  * (IMPLEMENTATION_PLAN §3.12).
  */
-import { inviteHash, isInviteValid, type InvitePolicy, type InviteProof } from "@nostrautica/protocol";
+import {
+  inviteHash,
+  isInviteValid,
+  isLinked,
+  membershipAuthorities,
+  parseMemberOfTags,
+  verifyMembershipProof,
+  type EventConfig,
+  type InvitePolicy,
+  type InviteProof,
+} from "@nostrautica/protocol";
 import type { Store } from "../store/db.js";
 
 export interface EntitlementRequest {
@@ -88,4 +98,78 @@ export function evaluateEntitlement(
     if (last.grant) return last;
   }
   return last;
+}
+
+/** What a link check needs of a 31600: the fields §15 reads. */
+export type LinkConfig = Pick<EventConfig, "coordinator" | "parent" | "children">;
+
+export interface MemberOfRequest {
+  /** The community being joined (this coordinator serves it). */
+  coordinate: string;
+  attendeePubkey: string;
+  /** The 21600's tags; `member_of` entries are parsed from them. */
+  tags: string[][];
+  /** The community's own newest-config `children`. */
+  children: readonly string[];
+}
+
+export type MemberOfDecision =
+  | { grant: true; reason: string; child: string }
+  | { grant: false; reason: string };
+
+const shortPk = (pk: string) => pk.slice(0, 8);
+const shortCoord = (c: string) => shortPk(c.split(":")[1] ?? c);
+
+/**
+ * Membership-by-event checker (PROTOCOL-NIP.md §15.4). Async, unlike the invite
+ * checker, because the child's own newest 31600 has to be read from relays: the child
+ * may be served by another coordinator, or none, so nothing here assumes it is
+ * installed locally. `fetchChildConfig` returns the child's NEWEST config (latest-wins,
+ * authored by the child's E_id) or undefined when it cannot be had.
+ *
+ * Every failure is a manual-queue reason, never a rejection: a proof that fails today
+ * (child config not yet propagated, link half-published) may be fine tomorrow, and the
+ * organizer can still approve the person by hand.
+ */
+export class MemberOfChecker {
+  readonly id = "member_of";
+  constructor(private readonly fetchChildConfig: (child: string) => Promise<LinkConfig | undefined>) {}
+
+  async check(req: MemberOfRequest): Promise<MemberOfDecision> {
+    const proofs = parseMemberOfTags(req.tags);
+    if (proofs.length === 0) return { grant: false, reason: "no member_of proof" };
+    let last = "member_of proof invalid";
+    for (const p of proofs) {
+      const tag = `member_of ${shortCoord(p.child)}`;
+      if (!req.children.includes(p.child)) {
+        last = `${tag}: this community does not list that event as a child → manual queue`;
+        continue;
+      }
+      let childCfg: LinkConfig | undefined;
+      try {
+        childCfg = await this.fetchChildConfig(p.child);
+      } catch {
+        childCfg = undefined;
+      }
+      if (!childCfg) {
+        last = `${tag}: the event's config could not be fetched → manual queue`;
+        continue;
+      }
+      if (!isLinked(req.coordinate, { children: [...req.children] }, p.child, childCfg)) {
+        last = `${tag}: the event does not name this community as its parent → manual queue`;
+        continue;
+      }
+      const authorities = membershipAuthorities(p.child, childCfg);
+      if (!authorities.includes(p.by)) {
+        last = `${tag}: signer ${shortPk(p.by)} is not an authority of the event → manual queue`;
+        continue;
+      }
+      if (!verifyMembershipProof(p, req.coordinate, p.child, req.attendeePubkey, authorities)) {
+        last = `${tag}: signature does not verify → manual queue`;
+        continue;
+      }
+      return { grant: true, reason: tag, child: p.child };
+    }
+    return { grant: false, reason: last };
+  }
 }

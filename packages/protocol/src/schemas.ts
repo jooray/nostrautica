@@ -558,6 +558,17 @@ export const keyGrantContentSchema = z.object({
   role: z.enum(["attendee", "organizer"]),
   eck: z.array(eckVersionSchema),
   granted_by: hex32,
+  /**
+   * §15: when this event belongs to a community, a proof the recipient may present
+   * to join it. Optional and additive: readers that predate §15 drop it.
+   */
+  parent: z
+    .object({
+      a: z.string().max(MAX_URL),
+      by: hex32,
+      sig: z.string().regex(/^[0-9a-f]{128}$/, "expected 128-hex schnorr sig"),
+    })
+    .optional(),
 });
 export type KeyGrantContent = z.infer<typeof keyGrantContentSchema>;
 
@@ -621,7 +632,7 @@ export const talkStatusSchema = z.enum(["pending", "published", "rejected"]);
 export type TalkStatus = z.infer<typeof talkStatusSchema>;
 
 // ── 21609 Talk Submission rumor content (attendee → E_inbox) ─────────────────
-// v2 (additive, §8/§11): a talk's video can come from three sources —
+// v2 (additive, §8/§15): a talk's video can come from three sources —
 //  - "recording": recorded in-browser, encrypted, uploaded to Blossom (`media`)
 //  - "upload":    a local file, same encrypted-Blossom pipeline (`media`)
 //  - "external":  a URL the speaker hosts elsewhere (`external_url`) — an
@@ -707,7 +718,7 @@ export const talkContentSchema = z
     description: z.string().max(MAX_TALK_DESC).default(""),
     speakers: z.array(hex32).default([]),
     // Recording/upload → a Blossom `media` descriptor; external → `external_url`
-    // (+ `external_kind`). Exactly one, as on the submission (§8/§11).
+    // (+ `external_kind`). Exactly one, as on the submission (§8/§15).
     media: mediaDescriptorSchema.optional(),
     external_url: httpsUrl(2048).optional(),
     external_kind: talkExternalKindSchema.optional(),

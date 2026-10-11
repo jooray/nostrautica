@@ -101,6 +101,31 @@ odesláno → Zpracovává se → Spojení připravena), a jako první vám ukaz
 nejbližší věc, kterou je potřeba udělat. Nemusíte hádat, proč se spojení ještě
 neukázala: seznam vám to řekne.
 
+### Pokud akce patří do komunity
+
+Některé akce jsou jedním srazem ze série, třeba měsíčního bitcoinového meetupu.
+U nich formulář Připojení pod vaším profilem přidává větu **Připojením se stanete
+také členem komunity „…“** a zaškrtávací pole **Přidat se také do komunity „…“**.
+Je ve výchozím stavu zapnuté. Pod ním formulář říká, kdo co uvidí: organizátoři
+komunity uvidí vaše jméno a profil a to, že jste se připojili na tuto akci.
+Z komunity můžete později odejít.
+
+<!-- TODO screenshot: participant/ formulář Připojení se zaškrtávacím polem komunity -->
+
+- **Nechte pole zapnuté** a až vás na akci schválí, aplikace pošle komunitě
+  žádost za vás. Schválí se bez dalšího posuzování, takže jste i v komunitě.
+- **Vypněte ho** a připojíte se jen na akci.
+- **Rozmysleli jste si to později?** Na **Přehledu** akce je karta **Můžete se
+  přidat i do komunity „…“**. Klepnutím na **Přidat se** odešlete žádost,
+  klepnutím na **Teď ne** kartu skryjete. Kartu uvidíte i tehdy, pokud jste se na
+  akci připojili dřív, než ji organizátor propojil s komunitou.
+
+Členství v komunitě zůstává i po skončení srazu a platí i na dalším: do komunity
+se nepřipojujete znovu na každý sraz. Akce a komunita mají každá **vlastní
+seznam Lidé, spojení a skupinový chat**, takže lidé, které potkáte na jednom
+srazu, se nemíchají do seznamu jiné akce. V komunitě můžete být i bez toho, že
+byste se připojili na některou z jejích akcí, pokud jste dostali přímou pozvánku.
+
 ### Funguje i se špatnou Wi-Fi na místě konání
 
 Níž na téže stránce Přehled, jakmile jste schváleni, najdete kartu

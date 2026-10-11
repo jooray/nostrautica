@@ -14,23 +14,23 @@
   "aesGcm": "5df4a0fbab26ed12d4e7d731863834ce12537b2bb7cb2fe7a8dfe5",
   "inviteProof": {
     "invitePubkey": "9ac20335eb38768d2052be1dbbc3c8f6178407458e51e6b4ad22f1d91758895b",
-    "sig": "a1df90edde90f8171de37957eeed74e5ae5e37ec35d195f2d6036b4150845994735b3b18936f56fa385e907f6c5943252eba1325eb9c0cac638fcc7710bc1fed"
+    "sig": "59b3f74cc97c21062de291c04b0bec6d5033d4f2137175eef16280a1758e29c743c90853625d3e999d0691146916f5e04de8f05d3e250b515ff2c55a678ec8ae"
   },
-  "chatDeviceProof": "343060c665b5cf1ac87be46ebc438e91af40dedf6305dd00d77421dc61c00ca49edf81d903b7dcdc1de66492c43abe18fc9adbfc72df596577ac0266df52c69e",
+  "chatDeviceProof": "a67eff02295cf90f49fe18b04e46f481f20d11e68e3a6a98c2c3b381cc46be13e5f8e9fef0f51fca462cae1978c24b5a74c67d4acb890a937d5a2293d7516cff",
   "chatDevicePubkey": "5ab4689e400a4a160cf01cd44730845a54768df8547dcdf073d964f109f18c30",
   "wrap": {
     "kind": 1059,
-    "content": "AlVk5g4IJ8NPvL08MK6AbNKRMXe6E71jl6wi6fkKCyG+RokSW/pSooA+RyBmMGt9pipJ98YBYMBo6STxgQi/1cVBpk38Z3R4O/Is3YrnF8lTP5eHUkhxJ92Q9FeeBVsibvEFS7FqDvIvu4IrMMjRzFSXNbeWk8rMOV/DtTNpuxqDzm+v9CalXvB88AKSS0FZz9yCPelB046CnpvcRzMioD9pncv1A5ycGzZ8Hcb4QV4Zwvw5QzdHx1GvrXpXcwUrRlC5eJpwEsmkPeodXAhlURl7BB8KZpMHR8S+GcA1SDATCROzqiyPwTUtTEo7LCgZ/CfI81lzb4dsZDgcPTSsfSRaKx2851SxXVSfTcrYM0pPIWGn5LgeGlvLbMfA55B7B1vGtDg8FL8UhycGk+cJuWnKbo3ABy5YUScMxnDXHQNLShYrvABU4Ic4rEDVVv/WpzP98VeHCEbl1DmvSqKN1Yd7p29xl58byuxGLuoaEp5qszxogDQo/mnl+Sax5RKmrygwE4IHRjDGk63M8cqFcT2EkVeLdA/YfvjcvFZRGUMwt3kVaTopwD7onqcE5rqwUFGdyl/R8k+8W9zR0wHw10dPf9rHkuZhXvrjdPvfLrg1cM4+juBiZBRd9WznQDr0mayfyrwMRdgkJVMMuaoY90GpFpdmc65NIp87Cn3L6917YJbRoR68I+eYj5Mn8VU+jRZ2HV+mNafHsIKTEm4WAOa2UP52NNl3GQ2lxx/XyHkoYB8ovYPLU+yCWqNcLmGRK5XGc/LmeBWXwVH4YFmUz6EaZLTl39TDThcGPcaQqnVJpxJr9G8jepesXAiytz5sNT0REBeZ/Nk3draA5LRMgbWhYxG9hV5tPphaO4pzHza/NYDJHYD+TWvCSbTEOzULgZ6A03MNKlGXN83VjpDXpxj3CiQywppf8RbGdIgPszBs2pMn7WHR+RqXIFg+mHuDowt8TBVJw9HpxuDCfE3nBAtaH31THXDSiB7+/8xjK2IObUF/jNcMlsNzRxFLA1m0Eg2VSIfyM12uS1Ne2ljz1m0I55KTNdFOXIisga+DT7xZXX+PYNycgRLbKQXhJDJTuft0Zdi9Jtz3li8u1oE/O57pbqIJL3BbMhKAZcdVxisoaLCjl/pY+uNnQQ9RU25MQeUt/kkow94DTVMqWcOuK0G+Dm/fDzuMlV4zgJi9OsaqQTAs/iZAQOGyg2Nwxo6hggDluDBsE0ZXVx+5jpXkVzF6xAXBt51bO0r+i8vMjSERwxqgWPEdxpvnAqOA55k589KZAx2EAhBzuizj3zpwJgQAV/7qla9eBoKIHYr2x7eVkvpwbA4LSSavnPLeWKaO72kuuc823K6db+7VtiUftVluetkFpXmy73YxrgHUNhQ5mhYiwFVWRg7WFeOIDOq8d49sOOlna9CpnKdLZlqdHKhkzlkQxx6A7B8Ss+/x5HfPi3M=",
-    "created_at": 1791385544,
+    "content": "AmkuSyPK2NIJ8piHjxvGKH5cK0I2v6/uFj9ZsIy7vVBUzhOoE2HDIpY0FYaQrX8FO8V0lQMFqPJnvkMPRrkTL7m8xrftZ7Otk1YDhdNgHR2lwIig+mIivDJy89Y2MeHKFAhMyxixUC8rq5AdRYpJHvKow6/kyStOuAglUxSEJde8ZHa9MGltJqkpcLyfiwtkIWzH1tBeQq6JkiJ6NlqCH3Ja5fR8SrkAV5K0pYNxRsjWlVCuG7uXlTI/Vi5XoVSO0Kbjnyre2G0L08Z8Zh4qmovQ38+UuiyTqZ45bIi8xWlm1mlDKQ1QpjoIoBnjGDoun/8p+UKcJDg0lJNn7htx6Rq3EEMdDirWR4MNUjWNZCcx6vcuba5s411hYqDxdgUG61GYu0yg0PoKCDbCm7tGTHW517Q+n82GV3K7JzmeiI4MwgU9mV1Az5dWyrRdYC4M2pL6k+Kw3a9aOCcOcYusrHAEpJ4wLXQzcRjRVIprGV5Uxriy04dbXZYaa3GVOQ4/9krHN2C5LNHVHBjZtpsfXMGjxBM2KMN7uEHUdlGeQP/LJaHmnN1HAbq6rcuLNDs+8ee9QHQM30Yanef6XDVLgUTNDLD8OAoLDbGnk/Exyc/thgOwC9GoUv+utkYBtOtbXQDr4IcH76/RSBMmN8yiXQfSvlnEPTtxH4z2VYJWwfL+3os9o6sO91PB7FP5iTNm0ZOGI7jGRKaZK/H4r8N5q9YhVL0ZfK9qNXQ6pCwNpLIyAWICDOYk1ktiK6PHu9M/2R8qaf+3qTJTRct5q2LYgQdfKtlrFhivaJTyPjtnTT/uo8Z50oDJeNXa2mXJYdIp7c22N6rMoXSeAOzIMNF6iE5nQm8WSI4UYx9NXe/NM6p02Omk+JPrwBtckMY/dGnQ/ajt9XeSNypke/I0OXjxPiMqssdKLp2bm+ZgClYfh+9gXpWU0Aq1uZ0CQDJom/mmgeWMe6qTHqJ98iPf6KJIBMSPWv0PJxFbv+bEdHUo9XTi+93PYZQHSgmwAN9YygMzi0u/rdn5i/ozJrIVNvd/gE3YNJu119DZIC41xRNpSP2OYHd+gdqwJczFP8VWwLztwuzamjTmHbNtobo4WaOJoJgzVnKOOh0IOayjo67XQ4nikEHy2xLj2dznaX8KzBa5uP5APOMXTzWJnhGf22TtJrLuMIJLGEGHQnMeUBexe65zXSxbAGI6MyOwH+8bzV149AUwtCkbsUnkwP8BOIqJ3SS9JEKbjgm1kfcWcnr3IZa9HdoZxx36bNl5fwg37nzANMTO+CPXJ4eb4x5KNR7ZqSyl37UtRuoc+MNG9Uw/gGhPoLeZ1MdaKDdnQFfLxzzk7+NJwYR54UKg7CheEr4ZnK3v/nC5AipBSl9d2VC27Xq7m2Ri0knU6XktLGxEyb3d0Q3bTY20pZdu5KO8F2qeh8cFGfi5qS3V8JGD0rIaeprot34=",
+    "created_at": 1791723375,
     "tags": [
       [
         "p",
         "7962d45b38e8bcf82fa8efa8432a01f20c9a53e24c7d3f11df197cb8e70926da"
       ]
     ],
-    "pubkey": "8badfc0b86dcab4fb73b613b4d07374a075da27eca927500af72d5c08c444927",
-    "id": "a38e9350735128a0cc26858a7ab40634c5f74d92bcedcbd6be513406d85d2eed",
-    "sig": "33d0d4c5e2f80355b2cc798a9069c69fd7e8a391cc933131adc6c14d946e6cb05d864b9e95136bbfed8f9024150047cbcbfdccd9155b592576368cd37504339f"
+    "pubkey": "ddfa9f5b4fd838a2f24fbb13014e5c3bf76b56f5d5d8075c5890dd53f6b6d4fc",
+    "id": "9b729459d2a18772c342b94a48abb9875120d58464194543570f6cd0b950922a",
+    "sig": "80c637e43c17fbccea1eeb609c88a7753d5a4bca8c76a7c83438920114515ca7f250e3b55e3ab4480ba2e92614ef59802fba202bfe7f2cb5178cb496233ad551"
   },
   "wrapRecipientSk": "7777777777777777777777777777777777777777777777777777777777777777",
   "configTags": [
@@ -4671,5 +4671,164 @@
     "pubkey": "e05ce435e462ec503143305feb6c00e06a3ad52fbf939e85c65f3a765bb7baac",
     "profile": {},
     "updated_at": 1
+  },
+  "hierarchy": {
+    "community": "31612:e05ce435e462ec503143305feb6c00e06a3ad52fbf939e85c65f3a765bb7baac:meetups",
+    "meetup": "31923:e05ce435e462ec503143305feb6c00e06a3ad52fbf939e85c65f3a765bb7baac:meetup-12",
+    "childTags": [
+      [
+        "d",
+        "meetup-12"
+      ],
+      [
+        "a",
+        "31923:e05ce435e462ec503143305feb6c00e06a3ad52fbf939e85c65f3a765bb7baac:meetup-12"
+      ],
+      [
+        "v",
+        "2"
+      ],
+      [
+        "inbox",
+        "abababababababababababababababababababababababababababababababab"
+      ],
+      [
+        "coordinator",
+        "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "3"
+      ],
+      [
+        "relay",
+        "wss://nos.lol"
+      ],
+      [
+        "blossom",
+        "https://blossom.band"
+      ],
+      [
+        "max_video_sec",
+        "0"
+      ],
+      [
+        "max_talk_sec",
+        "900"
+      ],
+      [
+        "matching",
+        "on"
+      ],
+      [
+        "match_visibility",
+        "pair"
+      ],
+      [
+        "approval",
+        "manual+invite"
+      ],
+      [
+        "eck",
+        "4"
+      ],
+      [
+        "nostr_context",
+        "100"
+      ],
+      [
+        "lang",
+        "sk"
+      ],
+      [
+        "talks",
+        "prerecord-first"
+      ],
+      [
+        "retention",
+        "30"
+      ],
+      [
+        "parent",
+        "31612:e05ce435e462ec503143305feb6c00e06a3ad52fbf939e85c65f3a765bb7baac:meetups"
+      ]
+    ],
+    "parentTags": [
+      [
+        "d",
+        "meetups"
+      ],
+      [
+        "a",
+        "31923:e05ce435e462ec503143305feb6c00e06a3ad52fbf939e85c65f3a765bb7baac:meetups"
+      ],
+      [
+        "v",
+        "2"
+      ],
+      [
+        "inbox",
+        "abababababababababababababababababababababababababababababababab"
+      ],
+      [
+        "coordinator",
+        "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "3"
+      ],
+      [
+        "relay",
+        "wss://nos.lol"
+      ],
+      [
+        "blossom",
+        "https://blossom.band"
+      ],
+      [
+        "max_video_sec",
+        "0"
+      ],
+      [
+        "max_talk_sec",
+        "900"
+      ],
+      [
+        "matching",
+        "on"
+      ],
+      [
+        "match_visibility",
+        "pair"
+      ],
+      [
+        "approval",
+        "manual+invite"
+      ],
+      [
+        "eck",
+        "4"
+      ],
+      [
+        "nostr_context",
+        "100"
+      ],
+      [
+        "lang",
+        "sk"
+      ],
+      [
+        "talks",
+        "prerecord-first"
+      ],
+      [
+        "retention",
+        "30"
+      ],
+      [
+        "child",
+        "31923:e05ce435e462ec503143305feb6c00e06a3ad52fbf939e85c65f3a765bb7baac:meetup-12"
+      ]
+    ],
+    "proof": {
+      "a": "31612:e05ce435e462ec503143305feb6c00e06a3ad52fbf939e85c65f3a765bb7baac:meetups",
+      "by": "1617d38ed8d8657da4d4761e8057bc396ea9e4b9d29776d4be096016dbd2509b",
+      "sig": "5d5d9ef7cf488dfdeb34032d77f8502b3a29e14ded1f91beeeac0a400b131271b9c27806e6a1a24c56c792b5b0d1291a94df5f8bbe5b3dfb35f115e65edd10f2"
+    }
   }
 }

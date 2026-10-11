@@ -104,6 +104,33 @@ Spracúva sa → Spojenia pripravené), a ukazuje vám na prvom mieste *jednu*
 najbližšiu vec, ktorú treba urobiť. Netreba hádať, prečo sa spojenia ešte
 neukázali: zoznam vám to povie.
 
+### Ak podujatie patrí do komunity
+
+Niektoré podujatia sú jedným stretnutím zo série, napríklad mesačného
+bitcoinového meetupu. Na nich formulár Pripojenie pod vaším profilom pridáva vetu
+**Pridaním sa stanete aj členom komunity „…“** a zaškrtávacie pole **Pridať sa aj
+do komunity „…“**. Je predvolene zapnuté. Pod ním formulár hovorí, kto čo uvidí:
+organizátori komunity uvidia vaše meno a profil a že ste sa pridali na toto
+podujatie. Z komunity môžete neskôr odísť.
+
+<!-- TODO screenshot: participant/ formulár Pripojenie so zaškrtávacím poľom komunity -->
+
+- **Nechajte pole zapnuté** a keď vás na podujatie schvália, aplikácia pošle
+  komunite žiadosť za vás. Schváli sa bez ďalšieho posudzovania, takže ste aj v
+  komunite.
+- **Vypnite ho** a pripojíte sa len na podujatie.
+- **Rozmysleli ste sa neskôr?** Na **Prehľade** podujatia je karta **Môžete sa
+  pridať aj do komunity „…“**. Klepnutím na **Pridať sa** odošlete žiadosť,
+  klepnutím na **Teraz nie** kartu skryjete. Kartu uvidíte aj vtedy, ak ste sa na
+  podujatie pridali ešte predtým, než ho organizátor prepojil s komunitou.
+
+Členstvo v komunite zostáva aj po skončení stretnutia a platí aj na ďalšom:
+do komunity sa nepridávate znova na každé stretnutie. Podujatie a komunita majú
+každé **vlastný zoznam Ľudia, spojenia a skupinový chat**, takže ľudia, ktorých
+stretnete na jednom stretnutí, sa nemiešajú do zoznamu iného podujatia. V komunite
+môžete byť aj bez toho, aby ste sa pridali na niektoré z jej podujatí, ak ste
+dostali priamu pozvánku.
+
 ### Funguje aj so zlým Wi-Fi na mieste konania
 
 Nižšie na tej istej stránke Prehľad, keď ste už schválení, nájdete kartu

@@ -18,6 +18,9 @@ import kotlinx.serialization.json.JsonPrimitive
 import today.cypherpunk.nostrautica.AppContainer
 import today.cypherpunk.nostrautica.data.Cache
 import today.cypherpunk.nostrautica.domain.Accounts
+import today.cypherpunk.nostrautica.domain.Communities
+import today.cypherpunk.nostrautica.domain.CommunityRules
+import today.cypherpunk.nostrautica.domain.SerializableConfig
 import today.cypherpunk.nostrautica.domain.EventContext
 import today.cypherpunk.nostrautica.domain.EventContexts
 import today.cypherpunk.nostrautica.domain.EventKeys
@@ -39,6 +42,7 @@ import today.cypherpunk.nostrautica.protocol.CoordinatorStatusContent
 import today.cypherpunk.nostrautica.protocol.DirectoryEntryContent
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.EventConfig
+import today.cypherpunk.nostrautica.protocol.Hierarchy
 import today.cypherpunk.nostrautica.protocol.EventKeysBackup
 import today.cypherpunk.nostrautica.protocol.GiftWrap
 import today.cypherpunk.nostrautica.protocol.InviteEntry
@@ -71,7 +75,7 @@ import today.cypherpunk.nostrautica.ui.nav.Route
 /** The organizer area's services, registered lazily from this file. */
 val AppContainer.organizer: Organizer
     get() = area("organizer") {
-        Organizer(nostr, cache, eventKeys, contexts, accounts, members, profiles, grants, OrganizerBlossom(http, nostr, cache))
+        Organizer(nostr, cache, eventKeys, contexts, accounts, members, profiles, grants, communities, OrganizerBlossom(http, nostr, cache))
     }
 
 class NotOrganizer(message: String = "organizer E_id key not available") : Exception(message)
@@ -94,6 +98,7 @@ class Organizer(
     private val members: Members,
     private val profiles: Profiles,
     private val grants: Grants,
+    private val communities: Communities,
     val blossom: OrganizerBlossom,
 ) {
     private val owner: String get() = accounts.pubkey
@@ -158,7 +163,8 @@ class Organizer(
 
     // ── Create (create.ts) ──────────────────────────────────────────────────
 
-    data class CreateResult(val created: OrganizerEvents.Created, val naddr: String, val published: Boolean)
+    /** [linkFailed]: the event exists but the community did not list it back (Settings can finish the link). */
+    data class CreateResult(val created: OrganizerEvents.Created, val naddr: String, val published: Boolean, val linkFailed: Boolean = false)
 
     suspend fun createEvent(input: CreateEventInput): CreateResult {
         val signer = accounts.signer
@@ -180,7 +186,11 @@ class Organizer(
             ).awaitAll()
         }
         runCatching { contexts.get(c.naddr, force = true) }
-        return CreateResult(c, c.naddr, results.all { it })
+        // §15.1: the community must list the event back or the link does not exist. Best-effort
+        // like enrollment: the event exists either way, and Settings can finish the link.
+        val linkFailed = input.parent != null && !input.community &&
+            runCatching { setCommunityChild(input.parent, c.coordinate, true, relays) }.isFailure
+        return CreateResult(c, c.naddr, results.all { it }, linkFailed)
     }
 
     /**
@@ -351,7 +361,7 @@ class Organizer(
         val eidSk = eidSk(keys)
         val eid = Secp.pubkeyHex(eidSk)
         val eckBytes = eck.bytes()
-        val grant = Wire.encode(KeyGrantContent.serializer(), KeyGrantContent(a = ctx.coordinate, role = role, eck = keys.eck, grantedBy = eid))
+        val grant = Wire.encode(KeyGrantContent.serializer(), KeyGrantContent(a = ctx.coordinate, role = role, eck = keys.eck, grantedBy = eid, parent = communities.grantParentField(ctx, eidSk, req.attendeePubkey)))
         val grantWrap = wrapFromEid(eidSk, req.attendeePubkey, Kinds.KEY_GRANT, grant)
         val entryD = ProtocolCrypto.blindedD(eckBytes, ctx.coordinate, req.attendeePubkey)
         val now = nowSec()
@@ -378,6 +388,101 @@ class Organizer(
                 rosterEvents.map { async { publish(it, ctx.relays, "roster") } }).awaitAll()
         }
         Unit
+    }
+
+    // ── Space hierarchy (events/hierarchy.ts, §15) ──────────────────────────
+
+    private fun cfgOf(ctx: EventContext, cfg: EventConfig) = ctx.copy(config = SerializableConfig(cfg.eidPubkey, OrganizerEvents.configTags(cfg)))
+
+    /**
+     * Republish a space's own 31600 with [mutate] applied to the NEWEST config. The read is
+     * fresh from relays: a republish built on a cached config would silently drop whatever
+     * another device changed since. Null when nothing would change.
+     */
+    private suspend fun republishConfig(coordinate: String, relays: List<String>, mutate: (EventConfig) -> EventConfig): EventConfig? {
+        val keys = keysFor(coordinate)
+        if (keys == null || keys.role != "organizer" || keys.eidNsecHex == null) throw NotOrganizer()
+        val current = contexts.fetchConfig(coordinate, relays) ?: throw IllegalStateException("Event config (31600) not found")
+        val next = mutate(current)
+        if (next.children == current.children && next.parent == current.parent) return null
+        val publishRelays = (OrganizerEvents.unionRelays(relays, current.relays) + Relays.DEFAULT).distinct()
+        publishMonotonic(eidSk(keys), Kinds.EVENT_CONFIG, next.d, publishRelays, "config") { at ->
+            UnsignedEvent(next.eidPubkey, at, Kinds.EVENT_CONFIG, OrganizerEvents.configTags(next), "")
+        }
+        communities.clearLinkMemo()
+        runCatching { contexts.invalidate(communities.naddrFor(coordinate, current.relays)) }
+        return next
+    }
+
+    /** Add (or remove) a child on the community's 31600. Needs the community's E_id. */
+    suspend fun setCommunityChild(community: String, child: String, present: Boolean, relays: List<String> = emptyList()): EventConfig? {
+        require(Hierarchy.isValidParent(community)) { "not a community" }
+        return republishConfig(community, relays) { cfg ->
+            cfg.copy(children = CommunityRules.withChild(cfg.children, child, present))
+        }
+    }
+
+    /** Set (or clear) the parent on the event's own 31600. Needs the event's E_id. */
+    suspend fun setEventParent(ctx: EventContext, parent: String?): EventConfig? {
+        val out = republishConfig(ctx.coordinate, ctx.cfg.relays) { cfg -> cfg.copy(parent = parent) }
+        runCatching { contexts.invalidate(ctx.naddr) }
+        return out
+    }
+
+    /** Communities whose E_id this device holds, with titles, for a picker. Best effort per entry. */
+    suspend fun listOrganizedCommunities(): List<EventContext> =
+        keyStore.list(owner)
+            .filter { it.role == "organizer" && it.eidNsecHex != null && Coordinate.parseOrNull(it.coordinate)?.isCommunity == true }
+            .mapNotNull { k -> runCatching { contexts.forCoordinate(k.coordinate) }.getOrNull() }
+            .sortedBy { it.title.lowercase() }
+
+    /**
+     * Link [child] to [community] (§15.1): the community lists it, then the event names the
+     * community. In that order, so there is never a moment where the event advertises a
+     * community that has not agreed. For an event with no coordinator, everyone already
+     * approved gets a fresh grant carrying the proof (§15.3); with a coordinator the
+     * coordinator holds the roster and the grant path. Returns how many were re-sent.
+     */
+    suspend fun linkEventToCommunity(child: EventContext, community: EventContext): Int {
+        setCommunityChild(community.coordinate, child.coordinate, true, community.cfg.relays)
+        val cfg = setEventParent(child, community.coordinate)
+        if (child.cfg.coordinator != null) return 0
+        return runCatching { reissueGrantsWithProof(cfgOf(child, cfg ?: child.cfg.copy(parent = community.coordinate))) }.getOrDefault(0)
+    }
+
+    /**
+     * End the link from the event's side, and from the community's too when this device
+     * organizes it. Memberships already granted are not revoked (§15.1).
+     */
+    suspend fun unlinkEventFromCommunity(child: EventContext) {
+        val parent = child.cfg.parent
+        setEventParent(child, null)
+        if (parent == null) return
+        val keys = keysFor(parent)
+        if (keys?.role == "organizer" && keys.eidNsecHex != null) runCatching { setCommunityChild(parent, child.coordinate, false) }
+    }
+
+    /**
+     * Re-issue a key grant carrying the community membership proof to everyone already approved
+     * (§15.3). Run once when an organizer links an event that has no coordinator: people who joined
+     * before the link would otherwise never be offered the community. The grant is the same ECK set
+     * they already hold (receivers union-merge, §6.3), plus the proof. 0 when the roster cannot be
+     * read or the event is not linked.
+     */
+    suspend fun reissueGrantsWithProof(ctx: EventContext): Int {
+        val keys = keysFor(ctx.coordinate)
+        if (keys == null || keys.role != "organizer" || keys.eidNsecHex == null || keys.current == null) return 0
+        val eidSk = eidSk(keys)
+        val read = loadRoster(ctx, keys) as? OrganizerEvents.RosterRead.Ok ?: return 0
+        var sent = 0
+        for (a in read.roster.attendees) {
+            // Not linked (yet): nothing to send to anyone.
+            val proof = communities.grantParentField(ctx, eidSk, a.pubkey, fresh = sent == 0) ?: return sent
+            val grant = Wire.encode(KeyGrantContent.serializer(), KeyGrantContent(a = ctx.coordinate, role = a.role, eck = keys.eck, grantedBy = Secp.pubkeyHex(eidSk), parent = proof))
+            sendWrap(wrapFromEid(eidSk, a.pubkey, Kinds.KEY_GRANT, grant), a.pubkey, ctx, "grant")
+            sent++
+        }
+        return sent
     }
 
     // ── Revoke and rotation (organizer.ts revokeAttendeeClient / rotateEckAndInbox) ──
@@ -411,7 +516,7 @@ class Organizer(
                     listOf(listOf("d", newD), listOf("a", ctx.coordinate), listOf("eck", next.id.toString()), listOf("v", "2")),
                     Nip44.eckEncrypt(newBytes, json)).signWith(eidSk)
             }
-            val grant = Wire.encode(KeyGrantContent.serializer(), KeyGrantContent(a = ctx.coordinate, role = a.role, eck = eckAll, grantedBy = eid))
+            val grant = Wire.encode(KeyGrantContent.serializer(), KeyGrantContent(a = ctx.coordinate, role = a.role, eck = eckAll, grantedBy = eid, parent = communities.grantParentField(ctx, eidSk, a.pubkey)))
             grantWraps += a.pubkey to wrapFromEid(eidSk, a.pubkey, Kinds.KEY_GRANT, grant)
         }
         events += OrganizerEvents.buildRosterEvents(ctx.coordinate, eidSk, newBytes, next.id, RosterContent(2, next.id, nostrGroupId, null, newRoster), rosterAt)
@@ -540,7 +645,11 @@ class Organizer(
         return publishConfig(ctx, eidSk(keys), next, OrganizerEvents.unionRelays(cfg.relays, relays))
     }
 
-    private suspend fun publishConfig(ctx: EventContext, eidSk: ByteArray, cfg: EventConfig, relays: List<String>): Boolean {
+    private suspend fun publishConfig(ctx: EventContext, eidSk: ByteArray, base: EventConfig, relays: List<String>): Boolean {
+        // The space hierarchy (§15) is edited from other screens and devices: a settings change built
+        // on a cached context must not roll back a link made since. Carry the newest parent/children.
+        val fresh = runCatching { contexts.fetchConfig(ctx.coordinate, ctx.cfg.relays) }.getOrNull()
+        val cfg = if (fresh != null) base.copy(parent = fresh.parent, children = fresh.children) else base
         val tags = OrganizerEvents.configTags(cfg)
         val all = (relays + Relays.DEFAULT).distinct()
         val (_, ok) = publishMonotonic(eidSk, Kinds.EVENT_CONFIG, cfg.d, all, "config") { at -> UnsignedEvent(cfg.eidPubkey, at, Kinds.EVENT_CONFIG, tags, "") }

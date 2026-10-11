@@ -66,6 +66,11 @@ export interface CreateEventInput {
   chat?: ChatBackend[]; // group-chat backends (Marmot); default [] (chat off)
   relays?: string[];
   blossom?: string[];
+  /**
+   * The community this event belongs to (§15). Only the event's side of the link:
+   * the community must also list the event (hierarchy.ts#setCommunityChild).
+   */
+  parent?: string;
 }
 
 export interface CreatedEvent {
@@ -217,6 +222,7 @@ export async function createEvent(
     lang: input.lang ?? "en",
     talks: input.talks ?? "off",
     chat: input.chat ?? [],
+    ...(input.parent ? { parent: input.parent } : {}),
   };
   const cfg = buildEventConfig(config);
   const event31600 = finalizeEvent(

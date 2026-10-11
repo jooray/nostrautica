@@ -115,6 +115,35 @@ Intro eingereicht → Wird verarbeitet → Matches bereit), und zeigt dir ganz
 vorne die *eine* nächste Sache, die ansteht. Kein Rätselraten, warum noch
 keine Matches da sind: die Liste sagt es dir.
 
+### Wenn das Event zu einer Community gehört
+
+Manche Events sind ein Treffen aus einer Reihe, etwa eines monatlichen
+Bitcoin-Meetups. Bei ihnen ergänzt das Beitrittsformular unter deinem Profil einen
+Satz: **Mit der Anmeldung wirst du auch Mitglied von „…“**, und ein
+Kontrollkästchen **Auch der Community „…“ beitreten**. Es ist standardmäßig
+eingeschaltet. Darunter steht, wer was sieht: Die Organisatoren der Community sehen
+deinen Namen, dein Profil und dass du an diesem Event teilnimmst. Du kannst die
+Community später wieder verlassen.
+
+<!-- TODO screenshot: participant/ Beitrittsformular mit dem Community-Kontrollkästchen -->
+
+- **Lass das Kästchen an**, und sobald du für das Event genehmigt bist, schickt die
+  App der Community eine Anfrage für dich. Sie wird genehmigt, ohne dass jemand
+  noch einmal prüft, und du bist auch in der Community.
+- **Schalte es aus**, und du trittst nur dem Event bei.
+- **Später umentschieden?** Auf der **Übersicht** des Events steht eine Karte **Du
+  kannst auch „…“ beitreten**. Tippe auf **Beitreten**, um die Anfrage zu senden,
+  oder auf **Jetzt nicht**, um die Karte auszublenden. Die Karte siehst du auch,
+  wenn du dem Event beigetreten bist, bevor der Veranstalter es mit einer Community
+  verknüpft hat.
+
+Deine Mitgliedschaft in der Community bleibt nach dem Treffen bestehen und gilt
+auch beim nächsten: Du trittst nicht für jedes Treffen neu bei. Event und
+Community haben jeweils **eine eigene Personenliste, eigene Matches und einen
+eigenen Gruppenchat**, die Leute vom einen Treffen landen also nicht in der Liste
+eines anderen Events. In einer Community kannst du auch sein, ohne je einem ihrer
+Events beigetreten zu sein, wenn du direkt eingeladen wurdest.
+
 ### Funktioniert auch mit schlechtem WLAN vor Ort
 
 Weiter unten auf derselben Übersichtsseite gibt es, sobald du genehmigt

@@ -388,6 +388,10 @@ silently drop them.
     time, and clients **MUST** surface the declared retention at join time. Absent =
     indefinite retention. Deletion remains best-effort (relays may not honor NIP-09); the
     privacy model never depends on it succeeding, and client wording must not overpromise.
+  - `["parent", <31612-coordinate>]`: optional, on a dated event only: the community
+    this event belongs to (§15). At most one.
+  - `["child", <31923-coordinate>]` × N: optional, on a community only: the events that
+    belong to it (§15), at most 500. Omitted entirely when there are none.
 - Readers apply §3.1 to find the current config; it is the root of trust for every other
   kind on the event.
 
@@ -786,7 +790,9 @@ relay-visible event on its own.
 
 - **Seal author → recipient:** attendee account → `E_inbox`.
 - **Tags:** `["a", <coordinate>]`; optionally
-  `["invite", <invite-pubkey-hex>, <schnorr-sig-hex>]` (§7).
+  `["invite", <invite-pubkey-hex>, <schnorr-sig-hex>]` (§7); optionally, on a join to a
+  community, `["member_of", <child-31923-coordinate>, <signer-hex>, <schnorr-sig-hex>]`
+  (§15), at most 8 considered.
 - **Content:**
   ```
   { v: 2, name: string ≤200, message: string ≤2000 (default ""), rsvp_public: bool (default false) }
@@ -823,10 +829,13 @@ relay-visible event on its own.
     a: <coordinate>,
     role: "attendee" | "organizer",
     eck: [{ id: int >0, key: base64(32 bytes) }],
-    granted_by: hex32
+    granted_by: hex32,
+    parent?: { a: <31612-coordinate>, by: hex32, sig: hex64 }
   }
   ```
-  `granted_by` **MUST** equal the seal author. Receivers **union-merge** the granted ECK
+  `granted_by` **MUST** equal the seal author. `parent` (§15) is present only when the
+  event belongs to a community; it is a membership proof the recipient may present to
+  join that community. Receivers **union-merge** the granted ECK
   versions into local custody: a stale grant never removes or downgrades a newer known
   version, and an attendee-role grant never downgrades a stored organizer role.
 
@@ -1340,3 +1349,90 @@ neighboring modules, tunable per deployment, not part of interop compatibility):
   Whitenoise relays (`wss://relay.us.whitenoise.chat`, `wss://relay.eu.whitenoise.chat`)
   are the chat interop set: carried in the config's `chat_relay` tags and in the
   group's own MLS routing state, never in the event's `relay` set.
+
+## 15. Space hierarchy: a community and its events
+
+A community (`31612`, §1.1) can own dated events (`31923`): a meetup series and its
+meetups. Membership flows **up only**. Whoever is approved for one of a community's
+events may join the community without a second approval; nothing flows down, so a
+community member is not a member of any event they did not join, and leaving an event
+does not leave the community. Each space keeps everything it has today: its own `E_id`,
+`E_inbox`, ECK, roster, directory, matches and group chat.
+
+### 15.1 The link
+
+A link exists between community `P` and event `C` iff, in the **newest** configs (§3.1):
+
+- `C`'s `31600` carries `["parent", P]`, **and**
+- `P`'s `31600` carries `["child", C]`.
+
+Both sides are required. Each is signed by its own `E_id`, so the community's organizer
+decides which events confer membership (an unrelated event naming someone else's
+community as its parent gains nothing), and the event's organizer decides which
+community its attendees are offered. A parent **MUST** be a `31612` coordinate and a
+child a `31923` coordinate; readers drop any other value fail-soft. Removing either tag
+ends the link for every future join; memberships already granted are not revoked.
+
+The two spaces need not share a coordinator, nor have one at all. Organizer clients
+SHOULD default a child event to its community's coordinator and relays.
+
+### 15.2 Membership proof
+
+A signature by an **authority of the child**, which is `C`'s `E_id` or the coordinator
+named in `C`'s newest `31600`, over:
+
+```
+challenge = sha256( utf8( JSON.stringify(
+    ["nostrautica-member-of-v1", <P coordinate>, <C coordinate>, <attendee-pubkey-hex>] ) ) )
+```
+
+The domain tag and the JSON array follow §7's construction. The proof binds the
+attendee, the child and the parent, so it cannot be replayed for another person, event
+or community. Authority is evaluated at verification time against `C`'s newest config:
+a proof signed by a coordinator `C` has since replaced stops verifying.
+
+### 15.3 Carrying the proof
+
+- **In the child's key grant.** When `C` is linked to `P`, an authority issuing a
+  `21602` for `C` **SHOULD** include `parent: { a: P, by, sig }`. When a link comes into
+  existence for an event that already has approved attendees, `C`'s coordinator (or,
+  without one, an organizer client) **SHOULD** re-issue a `21602` carrying the proof to
+  each of them once, so that people who joined before the link can join the community
+  too. Receivers union-merge as usual (§6.3); the proof field is independent of custody.
+- **In the community join.** The attendee's client sends an ordinary `21600` to `P`'s
+  `E_inbox` (plus a `21601` profile, typically a copy of the one it gave `C`) with
+  `["member_of", C, by, sig]`. The attendee's own signer seals it: no party joins
+  anyone to a community on their behalf.
+
+### 15.4 Verification and approval
+
+Whoever approves joins to `P` (its coordinator, or an organizer client in manual mode)
+accepts a `member_of` tag iff:
+
+1. `C` is linked to `P` (§15.1), checked against both newest configs;
+2. `by` is an authority of `C` (§15.2); and
+3. the signature verifies.
+
+A coordinator that accepts it auto-approves the join exactly as for a valid invite
+(§7): same roster ceiling, same grant path. Without a coordinator, an organizer client
+SHOULD show the verified membership next to the request and MAY approve it in one
+action. Direct joins to the community (invite or manual approval) are unaffected.
+
+### 15.5 Clients
+
+- The join form of a child event **MUST** disclose that joining also makes the person
+  a member of `P`, with its title, and SHOULD let them opt out. With consent, the client
+  sends the community join itself once the child's grant (carrying the proof) arrives.
+- Holding a proof for `P` without being a member or a pending applicant of `P` (for
+  example after a re-issued grant), a client SHOULD offer joining `P` in one action
+  rather than join silently.
+- A child event's page links to `P`; a community's page lists its children (§3.1-newest
+  config), upcoming first.
+
+### 15.6 Compatibility
+
+Additive only, no `v` bump. Readers that predate this section ignore the `parent` and
+`child` tags and drop the grant's `parent` field. A coordinator that predates it
+treats a `member_of` join as having no invite and queues it for manual approval, which
+is stricter than intended rather than looser.
+

@@ -108,6 +108,33 @@ Presentación enviada → Procesando → Coincidencias listas) y te muestra, en
 primer plano, la *única* siguiente cosa por hacer. Nada de adivinar por qué
 no aparecieron las coincidencias todavía: la lista te lo dice.
 
+### Si el evento pertenece a una comunidad
+
+Algunos eventos son un encuentro dentro de una serie, por ejemplo un encuentro
+mensual de Bitcoin. En ellos, el formulario para unirte añade bajo tu perfil una
+frase: **Al unirte, también te haces miembro de «…»**, y una casilla **Unirme
+también a la comunidad «…»**. Viene activada por defecto. Debajo, el formulario
+dice quién ve qué: los organizadores de la comunidad ven tu nombre y tu perfil, y
+que te uniste a este evento. Puedes salir de la comunidad más adelante.
+
+<!-- TODO screenshot: participant/ formulario para unirse con la casilla de la comunidad -->
+
+- **Deja la casilla activada** y, cuando te aprueben en el evento, la app envía
+  por ti una solicitud a la comunidad. Se aprueba sin que nadie la revise otra
+  vez, así que quedas también en la comunidad.
+- **Desactívala** y te unes solo al evento.
+- **¿Cambiaste de idea después?** En el **Resumen** del evento hay una tarjeta
+  **También puedes unirte a «…»**. Toca **Unirme** para enviar la solicitud, o
+  **Ahora no** para ocultar la tarjeta. También verás esta tarjeta si te uniste al
+  evento antes de que el organizador lo vinculara a una comunidad.
+
+Tu pertenencia a la comunidad se queda cuando termina el encuentro y vale también
+para el siguiente: no te unes de nuevo a la comunidad en cada encuentro. El evento
+y la comunidad tienen cada uno **su propia lista de Personas, sus coincidencias y
+su chat grupal**, así que la gente que conoces en un encuentro no se mezcla en la
+lista de otro evento. También puedes estar en una comunidad sin haberte unido
+nunca a ninguno de sus eventos, si recibiste una invitación directa.
+
 ### También funciona con mal Wi-Fi en el lugar del evento
 
 Más abajo, en esa misma página de Resumen, una vez que te aprobaron, hay una

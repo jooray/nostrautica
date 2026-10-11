@@ -426,6 +426,17 @@ spends is a failed drill.
 - Prefer a controlled maintenance window for restarts: a restart drops in-flight
   jobs and re-subscribes from stored state; the retry/resume logic handles it, but
   avoid restarting during an active matching/transcription run for a live event.
+- Space hierarchy (PROTOCOL-NIP.md §15): a community and its events may be served by
+  different coordinators, or none. Events that name a parent get membership proofs in
+  their key grants once the community lists them back; when a link appears for an event
+  that already has attendees, one proof-bearing grant is re-issued to each (paced,
+  once per child/parent/coordinator generation, remembered in the `hierarchy_reissue`
+  table, so a restart does not repeat it). Log lines: `[hierarchy] … re-issued
+  membership proofs to N attendee(s)` and, on the community side, `[join] … member_of
+  <event> → AUTO-APPROVED` or `manual queue (member_of …: reason)`. The other space's
+  config is read from relays and cached for about a minute, so a link edit takes up to
+  a minute (community side) or one 5-minute sweep (event side) to be noticed. No schema
+  bump: the table is additive.
 
 ## 11. Incident response
 

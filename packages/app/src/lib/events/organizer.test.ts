@@ -43,7 +43,11 @@ import {
   type ChatBackend,
   wrapRumor,
   KIND_JOIN_REQUEST,
-  KIND_ATTENDEE_WITHDRAWAL,} from "@nostrautica/protocol";
+  KIND_ATTENDEE_WITHDRAWAL,
+  KIND_COMMUNITY,
+  KIND_EVENT_CONFIG,
+  buildEventConfig,
+} from "@nostrautica/protocol";
 import { WHITENOISE_RELAYS } from "$lib/nostr/relays.js";
 
 const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
@@ -928,6 +932,24 @@ describe("updateEventConfig relay editing", () => {
       "wss://chat.example",
       ...WHITENOISE_RELAYS,
     ]);
+  });
+
+  // The page that calls updateEventConfig built its ctx when it LOADED. Another tab,
+  // device, or the other half of a community/event pair may have linked the space
+  // since; spreading that stale ctx republished a config without the link, ending
+  // it with no error anywhere. Found by the hierarchy e2e (S7).
+  it("keeps a link made after the caller's context was loaded (hierarchy fields come from the relays)", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const parent = makeCoordinate(getPublicKey(generateSecretKey()), "some-community", KIND_COMMUNITY);
+    const newest = buildEventConfig({ ...fullConfig, parent } as never);
+    fetchEventsRelayOnly.mockResolvedValue([
+      { id: "cfg", kind: KIND_EVENT_CONFIG, pubkey: EID_PUBKEY, created_at: 1000, tags: newest.tags, content: "" },
+    ]);
+
+    await updateEventConfig(ctxWith({}), { retentionDays: 30 }); // ctx has no parent
+
+    expect(publishedTags("parent")).toEqual([parent]);
+    expect(publishedTags("retention")).toEqual(["30"]);
   });
 
   it("dedupes/trims the set and rejects an all-empty relay list", async () => {
