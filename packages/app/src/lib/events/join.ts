@@ -14,6 +14,7 @@ import {
   KIND_MY_PROFILE,
   KIND_CALENDAR_RSVP,
   makeInviteProof,
+  memberOfTag,
   blindedD,
   MAX_SUBMISSION_MEDIA,
   MAX_MESSAGE,
@@ -101,6 +102,12 @@ export interface JoinInput {
    *  same 21601 + 31602 as the profile so there's no second racing submission. */
   media?: MediaDescriptor[];
   inviteNsec?: string; // from #/e/:naddr/join?code=<invite-nsec>
+  /**
+   * §15: a membership proof from a child event of this community. Rides on the
+   * 21600 as `["member_of", child, by, sig]`; the community's coordinator (or its
+   * organizer, in manual mode) accepts it in place of an invite.
+   */
+  memberOf?: { child: string; by: string; sig: string };
 }
 
 function inviteSkFromCode(code: string): Uint8Array {
@@ -129,6 +136,7 @@ export async function sendJoinRequest(
     );
     joinTags.push(["invite", proof.invitePubkey, proof.sig]);
   }
+  if (input.memberOf) joinTags.push(memberOfTag(input.memberOf.child, input.memberOf));
 
   // Bound what the join carries to what joinRequestContentSchema accepts. The
   // penalty for overshooting is not a truncated name — the coordinator treats a

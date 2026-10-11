@@ -26,6 +26,11 @@
   import FileButton from "$lib/components/FileButton.svelte";
   import CoordinatorPicker from "$lib/components/CoordinatorPicker.svelte";
   import { attachCoordinator } from "$lib/events/organizer.js";
+  import {
+    listOrganizedCommunities,
+    setCommunityChild,
+    type OrganizedCommunity,
+  } from "$lib/events/hierarchy.js";
   import { buildReceipt, type CreationReceipt } from "$lib/events/creation-outcomes.js";
   import { UNLIMITED_SEC } from "@nostrautica/protocol";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -79,6 +84,29 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let created = $state<CreatedEvent | null>(null);
+
+  // Space hierarchy (§15): a dated event can belong to a community this user
+  // organizes. Picking one defaults the event's coordinator and relays to the
+  // community's, so its members meet people through the same infrastructure; both
+  // stay changeable.
+  let organizedCommunities = $state<OrganizedCommunity[]>([]);
+  let parentCoordinate = $state("");
+  const parentCommunity = $derived(organizedCommunities.find((c) => c.coordinate === parentCoordinate));
+  let communityDefaultsApplied = $state(false);
+  let linkFailed = $state(false);
+  $effect(() => {
+    if (!session.pubkey) return;
+    void listOrganizedCommunities().then((list) => (organizedCommunities = list));
+  });
+  function onParentChange() {
+    communityDefaultsApplied = false;
+    const c = parentCommunity;
+    if (!c) return;
+    if (c.config.coordinator && !coordinatorPubkey) {
+      coordinatorPubkey = c.config.coordinator;
+      communityDefaultsApplied = true;
+    }
+  }
 
   // Draft-safe auto-refresh (App-2): the title/summary an organizer is composing
   // must not be lost to a mid-typing deploy. Persist them (owner-scoped once the
@@ -311,8 +339,29 @@
         // even if the control was left on before the kind was switched.
         talks: isCommunity ? "off" : talks,
         chat: chatEnabled ? ["marmot"] : [],
+        // Only the event's half of the link here; the community's half follows.
+        ...(!isCommunity && parentCommunity
+          ? { parent: parentCommunity.coordinate, relays: parentCommunity.config.relays }
+          : {}),
       };
       const result = await createEvent(signer, createInput, blindingKey);
+      if (createInput.parent) {
+        // The community must list the event back or the link does not exist
+        // (§15.1). Best-effort like enrollment: the event exists either way, and
+        // Settings can finish the link.
+        linkFailed = await setCommunityChild(
+          createInput.parent,
+          result.coordinate,
+          true,
+          parentCommunity?.config.relays,
+        ).then(
+          () => false,
+          (e) => {
+            console.warn("adding the event to its community failed:", e);
+            return true;
+          },
+        );
+      }
       recentEvents.record({
         coordinate: result.coordinate,
         naddr: result.naddr,
@@ -502,6 +551,17 @@
           {/if}
         </li>
       {/if}
+      {#if linkFailed}
+        <li>
+          <span class="badge warn">{t("create.receipt.failed")}</span> {t("hierarchy.create.linkFailed.title")}
+          <p class="muted" style="margin:0.25rem 0">{t("hierarchy.create.linkFailed.body")}</p>
+        </li>
+      {:else if parentCommunity}
+        <li>
+          <span class="badge ok">{t("create.receipt.ok")}</span>
+          {t("hierarchy.create.linked", { title: parentCommunity.title })}
+        </li>
+      {/if}
       {#if receipt.coordinatorGrant !== "skipped"}
         <li>
           {#if receipt.coordinatorGrant === "ok"}
@@ -682,6 +742,23 @@
       <label for="loc">{t("create.field.location")}</label>
       <input id="loc" bind:value={locationStr} placeholder={t("create.field.location.placeholder")} />
     </div>
+    {/if}
+    {#if !isCommunity && organizedCommunities.length > 0}
+      <div>
+        <label for="parent">{t("hierarchy.picker.label")}</label>
+        <select id="parent" bind:value={parentCoordinate} onchange={onParentChange} disabled={busy}>
+          <option value="">{t("hierarchy.picker.none")}</option>
+          {#each organizedCommunities as c (c.coordinate)}
+            <option value={c.coordinate}>{c.title}</option>
+          {/each}
+        </select>
+        <p class="muted" style="margin:0.25rem 0 0">{t("hierarchy.picker.help")}</p>
+        {#if parentCommunity}
+          <p class="muted" style="margin:0.25rem 0 0" role="status">
+            {communityDefaultsApplied ? t("hierarchy.picker.defaults") : t("hierarchy.picker.relays")}
+          </p>
+        {/if}
+      </div>
     {/if}
     <div>
       <label for="lang">{t("create.field.language")}</label>

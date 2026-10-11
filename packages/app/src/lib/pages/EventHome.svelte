@@ -58,6 +58,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import LogisticsBlock from "$lib/components/LogisticsBlock.svelte";
+  import CommunityLinks from "$lib/components/CommunityLinks.svelte";
   import PostCard from "$lib/components/PostCard.svelte";
   import ReadinessJourney from "$lib/components/ReadinessJourney.svelte";
   import { readinessStore } from "$lib/events/readiness.svelte.js";
@@ -912,6 +913,10 @@
        add-to-calendar (.ics), directions. -->
   <LogisticsBlock {ctx} />
 
+  <!-- Space hierarchy (§15): "Part of <community>" and, for a member who has not
+       yet answered, the one-tap offer to join it. -->
+  <CommunityLinks {ctx} mode="header" member={effApproved || effOrganizer} />
+
   <!-- Own-pipeline failure notices (21606 → attendee, NIP §6.3): modest, per stage. -->
   {#each ownPoison as st (st.stage)}
     <!-- The stage decides the sentence. A chat-device refusal ("chat_attestation")
@@ -980,6 +985,9 @@
       </button>
     {/if}
   </nav>
+
+  <!-- A community's own events, upcoming first (§15.5). -->
+  <CommunityLinks {ctx} mode="events" />
 
   <!-- Readiness journey (§4.1): one honest next action, derived from real state.
        Visitors see the Join CTA as step 1; approved members see intro/matches.

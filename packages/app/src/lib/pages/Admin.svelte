@@ -71,7 +71,8 @@
   import { fetchPendingTalks, cachedPendingTalks, type PendingTalk } from "$lib/events/talks.js";
   import { perfMark } from "$lib/perf.js";
   import type { CoordinatorStatusContent } from "@nostrautica/protocol";
-  import { INVITE_USES_UNLIMITED } from "@nostrautica/protocol";
+  import { INVITE_USES_UNLIMITED, isCommunityCoordinate, coordinateToNaddr } from "@nostrautica/protocol";
+  import { fetchNewestConfig, verifyQueueMembership } from "$lib/events/hierarchy.js";
   import QrCode from "$lib/components/QrCode.svelte";
   import SecretSurface from "$lib/components/SecretSurface.svelte";
   import InviteSheet from "$lib/components/InviteSheet.svelte";
@@ -147,6 +148,40 @@
   // in the roster / approved just now / revoked) and local rejections (UX-A7).
   // The merge never drops a known request (UX-A2).
   const pendingRequests = $derived(visiblePending(pending, isApprovedNow, revokedSet, rejectedSet));
+
+  // Community join requests that carry a `member_of` proof (§15.4): verified
+  // against BOTH newest configs, the child's authorities and the signature, then
+  // shown as "Member of <event>". Unverified claims show nothing at all.
+  let memberOfVerified = $state<Map<string, { coordinate: string; title: string }>>(new Map());
+  $effect(() => {
+    const c = ctx;
+    const reqs = pendingRequests;
+    if (!c || !isCommunityCoordinate(c.coordinate) || !reqs.some((r) => r.memberOf?.length)) {
+      if (memberOfVerified.size) memberOfVerified = new Map();
+      return;
+    }
+    let alive = true;
+    void (async () => {
+      try {
+        const parentCfg = (await fetchNewestConfig(c.coordinate, c.config.relays)) ?? c.config;
+        const verified = await verifyQueueMembership(c.coordinate, parentCfg, reqs);
+        const titles = new Map<string, string>();
+        for (const child of new Set(verified.values())) {
+          const ctxChild = await loadEventContext(coordinateToNaddr(child, parentCfg.relays), { adoptLang: false }).catch(() => undefined);
+          titles.set(child, ctxChild?.title ?? "");
+        }
+        if (!alive) return;
+        memberOfVerified = new Map(
+          [...verified].map(([pk, child]) => [pk, { coordinate: child, title: titles.get(child) ?? "" }]),
+        );
+      } catch {
+        if (alive) memberOfVerified = new Map();
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  });
 
   function review(pubkey: string, state: ReviewState | undefined) {
     if (!ctx) return;
@@ -935,6 +970,20 @@
     }
   }
 
+  /** One action for every request whose community membership proof verified (§15.4). */
+  async function approveVerified() {
+    const targets = pendingRequests.filter((r) => memberOfVerified.has(r.attendeePubkey));
+    if (!targets.length) return;
+    approvingAll = true;
+    bulkRan = true;
+    bulkItems = targets.map((r) => ({ pubkey: r.attendeePubkey, state: "queued" as const }));
+    try {
+      for (const it of bulkItems) await runBulkItem(it.pubkey);
+    } finally {
+      approvingAll = false;
+    }
+  }
+
   async function runBulkItem(pubkey: string) {
     setBulk(pubkey, "publishing");
     try {
@@ -1226,6 +1275,8 @@
     {bulkItemState}
     onApprove={approve}
     onApproveAll={approveAll}
+    {memberOfVerified}
+    onApproveVerified={approveVerified}
     onReview={review}
     onRetryBulk={(pk) => void retryBulkItem(pk)}
     onDetails={(pk) => (detailPubkey = pk)}

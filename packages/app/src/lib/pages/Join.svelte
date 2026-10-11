@@ -10,6 +10,8 @@
   } from "$lib/events/event-context.js";
   import { sendJoinRequest, joinPollGapMs, joinLanding } from "$lib/events/join.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
+  import { loadLinkedParent, type LinkedParent } from "$lib/events/hierarchy.js";
+  import { communityStanding, recordParentConsent } from "$lib/events/community-join.js";
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import { parseCoordinate, MAX_ABOUT } from "@nostrautica/protocol";
@@ -177,6 +179,12 @@
   let lookingFor = $state("");
   let rsvpPublic = $state(false);
 
+  // Space hierarchy (§15.5): when this event belongs to a community, joining it
+  // also makes the person a member of that community. Disclosed here, default on,
+  // and the choice is remembered so the automatic join after approval honours it.
+  let linkedParent = $state<LinkedParent | undefined>(undefined);
+  let joinParent = $state(true);
+
   /**
    * The submission would carry nothing to match on. Not an error — joining with
    * an empty profile is allowed and always was — but it is the single biggest
@@ -245,6 +253,15 @@
       // screens render: organizer profiles here, EventHome after joining.
       prefetchOrganizerProfiles(ctx);
       prefetchJoinLanding(ctx);
+      // Community disclosure. Not awaited: the form must not wait on a second
+      // event's relay round-trip, and it only matters by the time they submit.
+      // Someone already in (or waiting on) the community is not offered it again.
+      const loadedCtx = ctx;
+      void loadLinkedParent(loadedCtx).then(async (p) => {
+        if (!p || ctx !== loadedCtx) return;
+        const standing = await communityStanding(p.coordinate);
+        if (!standing.isMember && !standing.isPending) linkedParent = p;
+      });
       // Restore the "request sent" waiting state across reloads (P2): if we
       // recorded a join marker for this event and aren't approved yet, show the
       // waiting screen instead of a pristine form. If approval already landed,
@@ -480,6 +497,17 @@
         } catch (e) {
           console.warn("intro reuse at join failed:", e);
         }
+      }
+
+      // Record the answer BEFORE the request goes out: with an invite code the
+      // grant can be back before this function returns, and the automatic
+      // community join reads this to decide whether it may send anything.
+      if (linkedParent) {
+        recordParentConsent(ctx.coordinate, {
+          parent: linkedParent.coordinate,
+          consent: joinParent,
+          name: displayName,
+        });
       }
 
       const published = await sendJoinRequest(
@@ -796,6 +824,21 @@
       <input type="checkbox" bind:checked={rsvpPublic} style="width:auto" />
       {t("join.rsvpPublic")}
     </label>
+
+    {#if linkedParent}
+      <!-- §15.5: the join also makes them a member of the community. Said plainly,
+           with the community's name, before they submit, and easy to decline. -->
+      <div class="card" style="background:var(--bg-elev2)" role="group" aria-labelledby="hier-join-title">
+        <div class="field-label" id="hier-join-title">
+          {t("hierarchy.join.disclosure", { title: linkedParent.title })}
+        </div>
+        <label class="row" style="font-weight:400">
+          <input type="checkbox" bind:checked={joinParent} style="width:auto" />
+          {t("hierarchy.join.checkbox", { title: linkedParent.title })}
+        </label>
+        <p class="muted" style="margin:0.25rem 0 0">{t("hierarchy.join.detail")}</p>
+      </div>
+    {/if}
 
     {#if reusableIntro}
       <!-- Intro reuse (UI-SUGGESTIONS #11): the library has no source-event label,

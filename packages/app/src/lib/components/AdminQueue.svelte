@@ -26,6 +26,8 @@
     bulkItemState,
     onApprove,
     onApproveAll,
+    memberOfVerified = new Map(),
+    onApproveVerified,
     onReview,
     onRetryBulk,
     onDetails,
@@ -46,10 +48,15 @@
     bulkItemState: (pubkey: string) => BulkItem["state"] | undefined;
     onApprove: (req: PendingRequest) => void;
     onApproveAll: () => void;
+    /** Requests whose `member_of` proof verified (§15.4), by attendee pubkey. */
+    memberOfVerified?: Map<string, { coordinate: string; title: string }>;
+    onApproveVerified?: () => void;
     onReview: (pubkey: string, state: ReviewState | undefined) => void;
     onRetryBulk: (pubkey: string) => void;
     onDetails: (pubkey: string) => void;
   } = $props();
+
+  const verifiedCount = $derived(requests.filter((r) => memberOfVerified.has(r.attendeePubkey)).length);
 
   // Owned interaction state: which request is showing its reject confirmation.
   let confirmingReject = $state<string | null>(null);
@@ -72,6 +79,17 @@
       {approvingAll ? t("admin.requests.approving") : t("admin.requests.approveAll", { n: requests.length })}
     </button>
   {/if}
+  {#if verifiedCount > 0 && onApproveVerified}
+    <button
+      class="btn"
+      onclick={onApproveVerified}
+      disabled={approvingAll}
+      aria-label={t("hierarchy.admin.approveVerified.aria", { n: verifiedCount })}
+    >
+      {approvingAll ? t("admin.requests.approving") : t("hierarchy.admin.approveVerified", { n: verifiedCount })}
+    </button>
+    <p class="muted" style="margin:0.25rem 0;font-size:0.8rem">{t("hierarchy.admin.verifiedHelp")}</p>
+  {/if}
   {#if bulkRan && bulkSummary.done && (bulkSummary.approved > 0 || bulkSummary.needRetry > 0)}
     <!-- UX-A4 final tally after a bulk run: N approved, M need retry. -->
     <p class="muted" role="status" aria-live="polite" style="margin:0.25rem 0">
@@ -84,6 +102,10 @@
     <div class="card">
       <PersonId pubkey={req.attendeePubkey} name={req.name} {relays} />
       {#if req.invite}<span class="badge">{t("admin.requests.invite")}</span>{/if}
+      {#if memberOfVerified.get(req.attendeePubkey)}
+        {@const m = memberOfVerified.get(req.attendeePubkey)!}
+        <span class="badge ok">{t("hierarchy.admin.memberOf", { title: m.title || t("hierarchy.admin.memberOf.unnamed") })}</span>
+      {/if}
       {#if deferred}<span class="badge">{t("admin.requests.reviewed")}</span>{/if}
       <!-- A 21610 withdrawal newer than this person's join. Only the coordinator
            consumes that kind, so on a coordinator-less event nothing acted on it

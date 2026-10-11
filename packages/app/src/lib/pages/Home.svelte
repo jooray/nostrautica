@@ -32,6 +32,7 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
   import { perfMark } from "$lib/perf.js";
+  import { cachedLinkedParent, loadLinkedParent } from "$lib/events/hierarchy.js";
   import { t, tp, tcp } from "$lib/i18n/i18n.svelte.js";
 
   const events = $derived(recentEvents.list);
@@ -56,6 +57,21 @@
     const community = isCommunityCoordinate(coordinate);
     const people = cachedDirectory(coordinate)?.length;
     return { community, people, fresh: whatsNew.peopleBadge(coordinate) };
+  }
+
+  /**
+   * The community a dated event belongs to (§15), as one quiet line on its card.
+   *
+   * A line on the card rather than events nested under their community: the list
+   * is flat and ordered by recency, which is how people look for a meetup, and a
+   * person can be in an event without being in its community (or the reverse).
+   * Nesting would have to pick one of those to hide. Cache-only, like cardFacts.
+   */
+  let partOfTick = $state(0); // bumped when a community context lands in the cache
+  function partOfTitle(naddr: string): string | undefined {
+    void partOfTick;
+    const ctx = cachedEventContext(naddr);
+    return ctx ? cachedLinkedParent(ctx)?.title : undefined;
   }
 
   // "No events yet" is only the truth once the relay scans have SETTLED. On a
@@ -348,6 +364,12 @@
         const ctx =
           cachedEventContext(e.naddr) ??
           (await loadEventContext(e.naddr, { adoptLang: false }));
+        // Warm the community's context so the card can name it (§15).
+        if (ctx.config.parent && !cachedLinkedParent(ctx)) {
+          void loadLinkedParent(ctx).then((p) => {
+            if (p) partOfTick++;
+          });
+        }
         if (ctx.title !== e.title || (ctx.icon && ctx.icon !== e.icon)) {
           recentEvents.record({
             coordinate: e.coordinate,
@@ -435,6 +457,9 @@
           <strong style="display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
             {e.title}
           </strong>
+          {#if partOfTitle(e.naddr)}
+            <span class="muted partof">{t("hierarchy.home.partOf", { title: partOfTitle(e.naddr)! })}</span>
+          {/if}
           <span class="cardmeta">
             {#if e.pendingKey}
               <!-- Not "viewed". The one thing this device knows about this space
@@ -587,6 +612,13 @@
   /* The return signal. A word, not a coloured dot: it has to survive forced
      colours and greyscale, and for a community it is the only reason anyone
      comes back — there is no date to do it for them. */
+  .partof {
+    display: block;
+    font-size: 0.8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
   .fresh {
     font-weight: 700;
     color: var(--accent);
