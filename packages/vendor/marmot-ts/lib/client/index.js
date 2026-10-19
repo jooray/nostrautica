@@ -6,5 +6,6 @@ export * from "./group/index.js";
 export * from "./invite-manager.js";
 export * from "./runtime/group-runtime.js";
 export * from "./session/group-effects.js";
-export * from "./session/group-session.js";
+// Storage-key helpers stay internal; expose the session API and its signatures.
+export { GroupSession, ingestResultDisposition, } from "./session/group-session.js";
 export * from "./transport/nostr/welcome-delivery.js";

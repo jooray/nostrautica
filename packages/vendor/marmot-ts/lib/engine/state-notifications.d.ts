@@ -67,7 +67,7 @@ export declare function groupWithdrawnNotificationsByCommit(notifications: reado
 /**
  * A bounded ledger of {@link StateNotification}s derived from accepted
  * commits, keyed by the producing commit's hex digest — NOT by the delivery
- * state's confirmation tag as {@link DeliveredPayloadLedger} is. CONV-03
+ * state's confirmation tag as the internal `DeliveredPayloadLedger` is. CONV-03
  * attributes notifications to the commit that produced them, so the commit
  * digest (rather than a branch/state tag) is the natural withdrawal key.
  *

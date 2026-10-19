@@ -82,7 +82,7 @@ describe("0x8009 flag day — retiring legacy MLS groups", () => {
       network,
       groupStateStore: stores.groupStateStore,
       keyPackageStore: stores.keyPackageStore,
-      clientId: "fresh-device",
+      clientId: "f".repeat(64),
     });
     await member.keyPackages.ensurePublished({ relays: RELAYS });
     expect(keyPackageProfile(network.events[0] as never)).toEqual({ current: true });
@@ -101,12 +101,12 @@ describe("0x8009 flag day — retiring legacy MLS groups", () => {
       network,
       groupStateStore: stores.groupStateStore,
       keyPackageStore: stores.keyPackageStore,
-      clientId: "web-legacy",
+      clientId: "e".repeat(64),
     });
     const listed = await device.keyPackages.list();
     expect(listed).toHaveLength(1);
     expect(listed[0]!.nonCurrent).toBe(true);
-    await device.keyPackages.ensurePublished({ relays: RELAYS, identifier: "web-legacy" });
+    await device.keyPackages.ensurePublished({ relays: RELAYS, identifier: "e".repeat(64) });
     expect(network.events).toHaveLength(1);
     expect(keyPackageProfile(network.events[0] as never).current).toBe(true);
   });

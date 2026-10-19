@@ -1,4 +1,5 @@
 /** @module @category Client - Marmot Client */
+import { bytesToHex } from "@noble/hashes/utils.js";
 import { isRumor } from "applesauce-common/helpers/gift-wrap";
 import { defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
 import { getMarmotGroupView, } from "../core/client-state.js";
@@ -7,7 +8,7 @@ import { getWelcome, getWelcomeGroupRelays, getWelcomeKeyPackageEventId, getWelc
 import { logger } from "../utils/debug.js";
 import { GroupsManager } from "./groups-manager.js";
 import { InviteManager, } from "./invite-manager.js";
-import { KeyPackageManager } from "./key-package-manager.js";
+import { KeyPackageManager, } from "./key-package-manager.js";
 import { InMemoryKeyValueStore } from "../extra/in-memory-key-value-store.js";
 import { defaultVerifyEvent } from "./verify.js";
 const log = logger.extend("client");
@@ -44,7 +45,11 @@ export class MarmotClient {
             signer: options.signer,
             network: options.network,
             clientId: options.clientId,
+            cryptoProvider: this.cryptoProvider,
+            capabilities: options.capabilities,
+            getSignatureKeyPair: options.getSignatureKeyPair,
             verifyEvent,
+            hasAdoptedGroup: async (groupId) => (await options.groupStateStore.getItem(bytesToHex(groupId))) !== null,
         });
         const historyFactory = ("historyFactory" in options ? options.historyFactory : undefined);
         const mediaFactory = ("mediaFactory" in options ? options.mediaFactory : undefined);
@@ -194,7 +199,8 @@ export class MarmotClient {
      * 2. Finds the matching local KeyPackage private material from the store
      * 3. Calls ts-mls joinGroup() to create a new ClientState
      * 4. Persists the resulting ClientState via `this.groups.adoptClientState()`
-     * 5. Marks the consumed key package as used via `this.keyPackages.markUsed()`
+     * 5. Finalizes a durable consumption receipt: retires single-use private
+     *    material and retains reusable packages marked as used
      * 6. Returns a MarmotGroup instance
      *
      * After joining, callers can list used key packages with
@@ -214,18 +220,18 @@ export class MarmotClient {
         // layer; the MLS join + leaf-proof validation + persistence live in the
         // group layer — mirroring darkmatter's engine `do_join_welcome` rather than
         // doing protocol matching here in the composition root.
+        await this.keyPackages.finalizeConsumptions();
         const candidates = await this.keyPackages.selectForWelcome(welcome);
         const { group, consumedKeyPackageRef } = await this.groups.joinFromWelcome({
             welcome,
             candidates,
             ciphersuiteImpl,
+            beforeAdopt: (groupId, ref) => this.keyPackages.recordConsumption(groupId, ref),
         });
-        // Mark the consumed key package as used. Callers can later list used packages
-        // with (await client.keyPackages.list()).filter(p => p.used) and rotate them
-        // via client.keyPackages.rotate(ref) to publish fresh ones to relays.
-        if (consumedKeyPackageRef) {
-            await this.keyPackages.markUsed(consumedKeyPackageRef);
-        }
+        // Receipt retirement follows durable group adoption. A crash between stores
+        // delays cleanup until manager startup/retry; it never consumes rejected keys.
+        if (consumedKeyPackageRef)
+            await this.keyPackages.finalizeConsumptions();
         log("joined group %s", group.idStr);
         // refs/marmot/protocol-core/joining.md: callers are responsible for calling
         // group.selfUpdate() after joining to rotate leaf key material for forward

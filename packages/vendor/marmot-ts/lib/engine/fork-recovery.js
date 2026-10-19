@@ -4,14 +4,84 @@ import { bytesToBase64, contentTypes, encode, getAppDataDictionary, getCredentia
 import { marmotAuthService } from "../core/auth-service.js";
 import { defaultMarmotClientConfig } from "../core/client-config.js";
 import { getAppComponents } from "../core/components/dictionary.js";
+import { validateGroupImageLegality } from "../core/components/image-validation.js";
 import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, } from "../core/components/ids.js";
 import { validateAdminLeafCoupling, validateAppComponentIntegrity, validateCommitAccountIdentityProofs, validateCommitLegality, } from "../core/components/integrity.js";
 import { commitDigest, commitOrderingPriority, compareBranchScores, DEFAULT_CONVERGENCE_POLICY, isWitnessEligible, scoreBranch, selectCanonicalBranch, } from "../core/convergence.js";
 import { getCredentialPubkey } from "../core/credential.js";
 import { getGroupMemberPubkeys } from "../core/group-members.js";
 import { deserializeClientState, serializeClientState, } from "../core/client-state.js";
-import { requiredComponentIdsOf, validatePreApplyProposals, withCapturedProposals, } from "./admin-policy.js";
-import { framedEpoch } from "./wire-format.js";
+import { requiredComponentIdsOf, resolveCapturedCommitLegality, validatePreApplyProposals, withCapturedProposals, } from "./admin-policy.js";
+import { framedCommitProposalsWithSender, framedEpoch } from "./wire-format.js";
+/** Enumerate descendants of one exact retained active parent, never a tombstone. */
+export async function buildRemovalBranchSet(tree, attribution) {
+    const candidates = [];
+    for (const tip of tree.tips()) {
+        const path = tree.path(tip);
+        const epoch = tree.epochOf(tip);
+        const digest = tree.node(tip)?.edge?.commitDigest;
+        if (!path?.includes(attribution.parentTag) ||
+            tip === attribution.parentTag ||
+            epoch === undefined ||
+            !digest)
+            continue;
+        const tipCommitter = await treeTipCommitter(tree, tip);
+        if (!tipCommitter)
+            return undefined;
+        const tipPriority = await treeTipPriority(tree, tip);
+        candidates.push({
+            id: tip,
+            forkEpoch: attribution.parentEpoch,
+            tipEpoch: epoch,
+            tipDigest: digest,
+            tipCommitter,
+            ...(tipPriority ? { tipPriority } : {}),
+            appWitnesses: [],
+        });
+    }
+    return candidates;
+}
+/** Scoring identity from the exact authenticated tip message and its parent. */
+export function tipCommitterOf(parent, message) {
+    if (message.wireformat !== wireformats.mls_public_message)
+        return new Uint8Array();
+    const sender = message.publicMessage.content.sender;
+    if (sender.senderType !== senderTypes.member)
+        return new Uint8Array();
+    try {
+        return hexToBytes(getCredentialPubkey(getCredentialFromLeafIndex(parent.ratchetTree, sender.leafIndex)));
+    }
+    catch {
+        return new Uint8Array();
+    }
+}
+/** Missing retained material cannot silently remove a competing scoring input. */
+export async function treeTipCommitter(tree, tag) {
+    const parentTag = tree.node(tag)?.parentTag;
+    if (!parentTag)
+        return undefined;
+    const parent = await tree.stateAt(parentTag);
+    const message = await tree.commitMessageOf(tag);
+    return parent && message ? tipCommitterOf(parent, message) : undefined;
+}
+/**
+ * The `tip_priority` of the commit that produced tree node `tag`, classified
+ * from its proposals against the stored parent, or from the own-commit stamp
+ * when they cannot be rebuilt. `undefined` when neither is available.
+ */
+export async function treeTipPriority(tree, tag) {
+    const parentTag = tree.node(tag)?.parentTag;
+    if (!parentTag)
+        return undefined;
+    const parent = await tree.stateAt(parentTag);
+    const message = await tree.commitMessageOf(tag);
+    const framed = parent && message
+        ? framedCommitProposalsWithSender(message, parent)
+        : undefined;
+    return framed
+        ? commitOrderingPriority(framed.proposals)
+        : (await tree.ownCommitStampOf(tag))?.priority;
+}
 /**
  * Rebuilds a PublicMessage commit's proposal list without replaying it: inline
  * entries (sent by the committer) plus each `ProposalRef` resolved from
@@ -169,6 +239,17 @@ function validateLegalityWithoutProposals(parentState, resultingState, committer
     });
     if (integrity)
         return { kind: "violation", violation: integrity };
+    // The stamped child retains a trustworthy parent-relative dictionary diff.
+    // Check encoding and any recoverable committer against the immutable parent;
+    // unavailable original proposal authors follow the residual policy below.
+    const imageOutcome = validateGroupImageLegality({
+        parentState,
+        resultingState,
+        proposals: [],
+        committerLeafIndex,
+    });
+    if (imageOutcome.kind === "violation")
+        return imageOutcome;
     // CR-01: the committer index survives an unresolvable `ProposalRef`, so
     // thread it in rather than skipping classification altogether. The proposal
     // list is empty AND flagged incomplete: the committer's own update-path leaf
@@ -211,11 +292,17 @@ function validateLegalityWithoutProposals(parentState, resultingState, committer
  * instead of being replayed. That child still passes the full
  * {@link validateCommitLegality} gate when the commit's proposals can be
  * rebuilt off the wire, and every proposal-independent legality check
- * ({@link validateLegalityWithoutProposals}) when they cannot (WR-03).
+ * (internal `validateLegalityWithoutProposals`) when they cannot (WR-03).
  */
 export async function resolveCandidateParent(params) {
     const { ciphersuite, parent, message, callback, known } = params;
     if (known?.parentTag === bytesToHex(parent.confirmationTag)) {
+        // A matching parent tag does not make a mismatched record an immediate
+        // edge. These epochs are independently decidable even when the original
+        // proposals cannot be rebuilt; reject the record before reusing its child.
+        if (framedEpoch(message) !== parent.groupContext.epoch ||
+            known.state.groupContext.epoch !== parent.groupContext.epoch + 1n)
+            return { kind: "authentication_mismatch" };
         // WR-03: an own commit cannot be replayed (RFC 9420: an UpdatePath never
         // encrypts a path secret to its own committer), but reusing its recorded
         // child must not skip the legality gate — the recorded state may come
@@ -289,12 +376,12 @@ export async function resolveCandidateParent(params) {
             violation: validatePreApplyProposals(capturedCommit.proposals, ciphersuite.id, requiredComponentIdsOf(parent)),
         };
     try {
-        const outcome = validateCommitLegality({
+        const outcome = resolveCapturedCommitLegality(validateCommitLegality({
             parentState: parent,
             resultingState: result.newState,
             proposals: capturedCommit.proposals,
             committerLeafIndex: capturedCommit.committerLeafIndex,
-        });
+        }), capturedCommit);
         switch (outcome.kind) {
             case "legal":
                 return {
@@ -517,24 +604,7 @@ export class ForkRecovery {
                     tipEpoch,
                     tipDigest: this.#commitDigestOf(tipMessage),
                     tipPriority,
-                    tipCommitter: (() => {
-                        const parent = chain.at(-1)?.parent;
-                        if (!parent)
-                            return new Uint8Array();
-                        const sender = tipMessage.wireformat === wireformats.mls_public_message &&
-                            tipMessage.publicMessage.content.sender.senderType ===
-                                senderTypes.member
-                            ? tipMessage.publicMessage.content.sender.leafIndex
-                            : undefined;
-                        if (sender === undefined)
-                            return new Uint8Array();
-                        try {
-                            return hexToBytes(getCredentialPubkey(getCredentialFromLeafIndex(parent.ratchetTree, sender)));
-                        }
-                        catch {
-                            return new Uint8Array();
-                        }
-                    })(),
+                    tipCommitter: tipCommitterOf(chain.at(-1).parent, tipMessage),
                     // Drop witnesses at/before the fork epoch or outside the retained
                     // app-payload window for this candidate's tip, so stale or pre-fork
                     // app payloads cannot influence branch scores.

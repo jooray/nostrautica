@@ -1,6 +1,7 @@
 import { EventSigner } from "applesauce-core";
 import { NostrEvent } from "applesauce-core/helpers/event";
-import { CiphersuiteName, CryptoProvider, KeyPackage, PrivateKeyPackage } from "../vendor/ts-mls/index.js";
+import { Capabilities, CiphersuiteImpl, CiphersuiteName, CryptoProvider, KeyPackage, PrivateKeyPackage } from "../vendor/ts-mls/index.js";
+import { type SignatureKeyPair } from "../core/key-package.js";
 import { NostrNetworkInterface } from "./nostr-interface.js";
 /** Options for constructing a {@link KeyPackagePublisher}. */
 export type KeyPackagePublisherOptions = {
@@ -10,6 +11,10 @@ export type KeyPackagePublisherOptions = {
     network: NostrNetworkInterface;
     /** The crypto provider to use for cryptographic operations */
     cryptoProvider?: CryptoProvider;
+    /** Capabilities to advertise in generated key packages; Marmot's required ones are always added. */
+    capabilities?: Capabilities;
+    /** Load a persisted signing identity for the selected ciphersuite. */
+    getSignatureKeyPair?: (ciphersuite: CiphersuiteImpl) => Promise<SignatureKeyPair>;
 };
 /** A freshly generated key package and its private material. */
 export type GeneratedKeyPackage = {
@@ -20,7 +25,7 @@ export type GeneratedKeyPackage = {
 export type GenerateKeyPackageOptions = {
     /** Ciphersuite to use (default: MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519) */
     ciphersuite?: CiphersuiteName;
-    /** Whether to mark the key package as last-resort (`last_resort_key_package` component; default: true) */
+    /** Whether to include the canonical reusable KeyPackage component (default: true) */
     isLastResort?: boolean;
 };
 /** Options for {@link KeyPackagePublisher.publish}. */

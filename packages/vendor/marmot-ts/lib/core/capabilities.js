@@ -1,5 +1,6 @@
 /** @module @category Core - Capabilities */
 import { appDataDictionaryExtensionType, appDataUpdateProposalType, defaultExtensionTypes, selfRemoveProposalType, } from "../vendor/ts-mls/index.js";
+import { LAST_RESORT_EXTENSION_TYPE } from "./protocol.js";
 import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agent-text-stream.js";
 /**
  * Ensures a {@link Capabilities} object advertises the MLS code points a Marmot
@@ -10,12 +11,8 @@ import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agen
  * `app_data_dictionary` GroupContext extension (`0x0006`) and mutates them with
  * `app_data_update` proposals (`0x0008`), both from draft-ietf-mls-extensions-09.
  * Every member MUST advertise support for the extension and the proposal type.
- * The `self_remove` proposal (`0x000a`) is advertised for member departure
- * (`protocol-core/member-departure.md`). Last-resort status is not advertised:
- * it is a `last_resort_key_package` component in the KeyPackage's own
- * `app_data_dictionary`, "not an MLS capability or extension type"
- * (`foundation/key-packages.md`), so the legacy `last_resort` extension type
- * (`0x000a`) is not listed, matching MDK's `leaf_capabilities`. The account identity proof (`0x8009`)
+ * The `self_remove` proposal (`0x000a` proposal type) is advertised for member departure
+ * (`protocol-core/member-departure.md`). The account identity proof (`0x8009`)
  * is a required app component (see `DEFAULT_GROUP_COMPONENT_IDS`), not an MLS
  * required capability, so it is not advertised here.
  *
@@ -36,7 +33,7 @@ import { AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE } from "./components/agen
  * originate or relay live QUIC streams it cannot fulfill.
  */
 export function ensureMarmotCapabilities(capabilities) {
-    const extensions = Array.from(capabilities.extensions);
+    const extensions = capabilities.extensions.filter((type) => type !== LAST_RESORT_EXTENSION_TYPE);
     const proposals = Array.from(capabilities.proposals);
     // app_data_dictionary extension carrying the group's app components.
     if (!extensions.includes(appDataDictionaryExtensionType))

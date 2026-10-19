@@ -4,6 +4,7 @@ import { Hash } from "./crypto/hash.js";
 import { GroupContextExtension, GroupInfoExtension } from "./extension.js";
 import { FramedContentCommit } from "./framedContent.js";
 import { GroupContext } from "./groupContext.js";
+import { GroupInfo } from "./groupInfo.js";
 import { KeyPackage, PrivateKeyPackage } from "./keyPackage.js";
 import { KeySchedule } from "./keySchedule.js";
 import { PskId } from "./presharedkey.js";
@@ -117,6 +118,8 @@ export declare function joinGroup(params: {
 export interface JoinGroupResult {
     state: ClientState;
     groupInfoExtensions: GroupInfoExtension[];
+    /** Decrypted GroupInfo, exposed only after signature, tree, and confirmation validation. */
+    groupInfo: GroupInfo;
 }
 export declare function joinGroupInternal(params: {
     context: MlsContext;

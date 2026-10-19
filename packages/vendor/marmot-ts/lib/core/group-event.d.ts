@@ -8,11 +8,10 @@ export type CreateGroupEventOptions = {
     state: ClientState;
     /** The ciphersuite implementation */
     ciphersuite: CiphersuiteImpl;
-    /**
-     * NIP-40 `expiration` (Unix seconds). Only for application messages whose
-     * source epoch enables message retention; never for commits or proposals.
-     */
-    expiration?: bigint;
+    /** Application-only source metadata. Encrypted bytes alone imply no expiry. */
+    metadata?: {
+        readonly expiration?: bigint;
+    };
 };
 /**
  * Creates a Nostr event containing an encrypted MLS message.

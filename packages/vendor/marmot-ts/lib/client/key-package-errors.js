@@ -33,11 +33,11 @@ export class KeyPackageNotFoundError extends Error {
 /**
  * Thrown by {@link KeyPackageManager.rotate} when no relay URLs can be
  * determined for the replacement key package — neither passed explicitly
- * nor recoverable from the old package's publish records.
+ * nor recoverable from the old package's local publication routes.
  */
 export class KeyPackageRotatePreconditionError extends Error {
     constructor() {
-        super("Cannot rotate: no relay URLs available. Pass relays in options or ensure the old key package has published events.");
+        super("Cannot rotate: no relay URLs available. Pass relays in options or retain local publication routes for the old key package.");
         this.name = "KeyPackageRotatePreconditionError";
     }
 }

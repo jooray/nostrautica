@@ -1,15 +1,15 @@
 {
   "name": "@internet-privacy/marmot-ts",
-  "version": "0.6.0",
-  "description": "Vendored build of @internet-privacy/marmot-ts 0.6.0 (https://github.com/jooray/marmot-ts.git @ 0ab8336), bundling its ts-mls fork under lib/vendor/ts-mls. Committed pre-built and re-generated only by scripts/vendor-marmot.mjs — see packages/vendor/README.md.",
+  "version": "0.7.0",
+  "description": "Vendored build of @internet-privacy/marmot-ts 0.7.0 (https://github.com/jooray/marmot-ts.git @ 7c2725d), bundling its ts-mls fork under lib/vendor/ts-mls. Committed pre-built and re-generated only by scripts/vendor-marmot.mjs — see packages/vendor/README.md.",
   "type": "module",
   "private": true,
   "license": "MIT",
   "vendoredFrom": {
     "repo": "https://github.com/jooray/marmot-ts.git",
-    "ref": "nostrautica-vendor",
-    "commit": "0ab8336aea322dba8b4fa57697e9cdf686292a9b",
-    "tsMlsCommit": "af6d1c599f2912fda5fbcac1b461fdd3013e37c7"
+    "ref": "7c2725d",
+    "commit": "7c2725d13a3a001c0802ca098737a4a2ed51c2ca",
+    "tsMlsCommit": "57a732cec758a2e14ec987589bc23ae9d2fa9768"
   },
   "exports": {
     ".": {

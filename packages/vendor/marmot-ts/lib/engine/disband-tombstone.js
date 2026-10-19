@@ -3,6 +3,27 @@ import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 export function disbandTombstoneKey(groupIdHex) {
     return `${groupIdHex}/disband/terminal`;
 }
+export function disbandTerminalIntentKey(groupIdHex) {
+    return `${groupIdHex}/disband/intent/v1`;
+}
+export function encodeDisbandTerminalIntent(intent) {
+    return new TextEncoder().encode(JSON.stringify({
+        version: 1,
+        tombstone: JSON.parse(new TextDecoder().decode(encodeDisbandTombstone(intent.tombstone))),
+        registryState: bytesToHex(intent.registryState),
+    }));
+}
+export function decodeDisbandTerminalIntent(data) {
+    const record = JSON.parse(new TextDecoder().decode(data));
+    if (record?.version !== 1 ||
+        typeof record.registryState !== "string" ||
+        !record.registryState.length)
+        throw new Error("Invalid disband terminal intent");
+    return {
+        tombstone: decodeDisbandTombstone(new TextEncoder().encode(JSON.stringify(record.tombstone))),
+        registryState: hexToBytes(record.registryState),
+    };
+}
 /** Non-secret, scrubbed MLS shell used only to construct the terminal facade. */
 export function disbandRegistryStateKey(groupIdHex) {
     return `${groupIdHex}/disband/registry-state`;

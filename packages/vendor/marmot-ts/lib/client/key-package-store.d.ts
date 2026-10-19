@@ -2,6 +2,13 @@ import { NostrEvent } from "applesauce-core/helpers/event";
 import { EventEmitter } from "eventemitter3";
 import { CryptoProvider, KeyPackage, PrivateKeyPackage } from "../vendor/ts-mls/index.js";
 import { GenericKeyValueStore } from "../utils/key-value.js";
+/** Local transport destinations, never derived from signed event tags. */
+export declare function normalizeKeyPackageRelays(relays: readonly string[]): string[];
+/** Durable intent; never contains another copy of secret material. */
+export type KeyPackageConsumptionReceipt = {
+    groupId: Uint8Array;
+    keyPackageRef: Uint8Array;
+};
 /**
  * A key package that has local private material.
  *
@@ -20,14 +27,11 @@ export type LocalKeyPackage = {
     identifier?: string;
     /** Nostr kind-30443 events this key package has been published under */
     published?: NostrEvent[];
-    /**
-     * Relays this key package was published to. Local bookkeeping for
-     * rotation and deletion only: KeyPackage events do not carry their relays
-     * (`transports/nostr.md`, KeyPackage publication).
-     */
-    relays?: string[];
+    /** Normalized local publication/observation destinations. Older entries omit this field. */
+    publicationRelays?: string[];
     /** Whether this key package has been consumed (e.g. used to join a group). Undefined means unused. */
     used?: boolean;
+    consumptionReceipts?: KeyPackageConsumptionReceipt[];
 };
 /**
  * A key package observed on relays for which no private material is held locally.
@@ -50,14 +54,11 @@ export type TrackedKeyPackage = {
     identifier?: string;
     /** Nostr kind-30443 events this key package has been published under */
     published?: NostrEvent[];
-    /**
-     * Relays this key package was published to. Local bookkeeping for
-     * rotation and deletion only: KeyPackage events do not carry their relays
-     * (`transports/nostr.md`, KeyPackage publication).
-     */
-    relays?: string[];
+    /** Normalized local publication/observation destinations. Older entries omit this field. */
+    publicationRelays?: string[];
     /** Whether this key package has been consumed (e.g. used to join a group). Undefined means unused. */
     used?: boolean;
+    consumptionReceipts?: KeyPackageConsumptionReceipt[];
 };
 /**
  * A stored key package — either a locally-held one (with private material) or
@@ -129,7 +130,7 @@ export declare class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents>
      *   Optionally include `identifier` to persist the addressable slot identifier.
      * @returns The storage key (hex ref string)
      */
-    add(keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> & Partial<Pick<LocalKeyPackage, "published" | "identifier" | "relays">>): Promise<string>;
+    add(keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> & Partial<Pick<LocalKeyPackage, "published" | "identifier" | "publicationRelays">>): Promise<string>;
     /**
      * Appends a kind-30443 Nostr event to the `published` list of
      * the key package identified by `ref`. If no entry exists yet, a
@@ -138,11 +139,8 @@ export declare class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents>
      *
      * Throws if the event body cannot be decoded as a valid key package, or if
      * the event's `i` tag (KeyPackageRef) does not match the decoded body.
-     *
-     * @param relays - Relays the event was published to, merged into the
-     *   entry's local `relays` record.
      */
-    addPublished(ref: string | Uint8Array, event: NostrEvent, relays?: string[]): Promise<void>;
+    addPublished(ref: string | Uint8Array, event: NostrEvent, relays?: readonly string[]): Promise<void>;
     /**
      * Retrieves the stored key package entry.
      * Returns any entry regardless of whether it has private material.
@@ -185,6 +183,13 @@ export declare class KeyPackageStore extends EventEmitter<KeyPackageStoreEvents>
      * @param ref - The key package reference
      */
     markUsed(ref: Uint8Array | string): Promise<void>;
+    /** Records validated intent before adoption, without altering private material. */
+    recordConsumption(groupId: Uint8Array, ref: Uint8Array): Promise<void>;
+    /**
+     * Separate stores are not atomic: a crash may delay retirement until recovery.
+     * Pre-adoption receipts remain harmless until their group actually exists.
+     */
+    finalizeConsumptions(hasAdoptedGroup: (groupId: Uint8Array) => Promise<boolean>): Promise<void>;
     /** Clears all entries (local and tracked) from the store. */
     clear(): Promise<void>;
 }

@@ -42,7 +42,7 @@ export declare function decodeVarint(data: Uint8Array, offset?: number): {
 };
 /** Number of bytes a value would occupy when encoded as a QUIC varint. */
 export declare function varintSize(value: number | bigint): number;
-interface OpaqueBounds {
+export interface OpaqueBounds {
     /** Minimum decoded byte length (inclusive). Defaults to `0`. */
     min?: number;
     /** Maximum decoded byte length (inclusive). Defaults to unbounded. */
@@ -136,4 +136,3 @@ export declare class BinaryReader {
 export declare function encodeUtf8(text: string): Uint8Array;
 /** UTF-8 decodes bytes without Unicode normalization. */
 export declare function decodeUtf8(bytes: Uint8Array): string;
-export {};

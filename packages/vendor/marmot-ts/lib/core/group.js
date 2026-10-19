@@ -1,13 +1,30 @@
 /** @module @category Core - Group */
 import { randomBytes } from "@noble/hashes/utils.js";
-import { createGroup as MLSCreateGroup, } from "../vendor/ts-mls/index.js";
+import { appDataDictionaryExtensionType, createGroup as MLSCreateGroup, } from "../vendor/ts-mls/index.js";
 import { marmotAuthService } from "./auth-service.js";
 import { defaultMarmotClientConfig } from "./client-config.js";
 import { marmotRequiredCapabilitiesExtension } from "./capabilities.js";
 import { adminPolicyEntry, appComponentsEntry, DEFAULT_ENCRYPTED_MEDIA_BLOB_ENDPOINTS, DEFAULT_GROUP_COMPONENT_IDS, encryptedMediaV2BlossomDefault, encryptedMediaV2Entry, GROUP_LIFECYCLE_COMPONENT_ID, groupLifecycleEntry, groupProtocolLifecycleValues, groupProfileEntry, makeAppComponentsExtension, nostrRoutingEntry, } from "./components/index.js";
 import { getCredentialPubkey } from "./credential.js";
+/** Thrown when caller-supplied GroupContext extensions are invalid. */
+export class InvalidGroupContextExtensionError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = "InvalidGroupContextExtensionError";
+    }
+}
 export async function createGroup(params) {
     const { creatorKeyPackage, components, requiredComponentIds, extensions = [], ciphersuiteImpl, } = params;
+    const extensionTypes = new Set();
+    for (const extension of extensions) {
+        if (extension.extensionType === appDataDictionaryExtensionType) {
+            throw new InvalidGroupContextExtensionError("app_data_dictionary must not be supplied in extensions; put dictionary data in components");
+        }
+        if (extensionTypes.has(extension.extensionType)) {
+            throw new InvalidGroupContextExtensionError(`Duplicate group context extension type: ${extension.extensionType}`);
+        }
+        extensionTypes.add(extension.extensionType);
+    }
     // The MLS group_id MUST be private and distinct from the public
     // nostr_group_id carried by the transport.nostr.routing component.
     const groupId = randomBytes(32);
@@ -30,14 +47,8 @@ export async function createGroup(params) {
     // MLS enforces them on every add (capability-negotiation.md §5.2). A caller
     // may override by supplying their own required_capabilities in `extensions`.
     const hasRequiredCapabilities = extensions.some((e) => e.extensionType === marmotRequiredCapabilitiesExtension().extensionType);
-    // app_data_dictionary MUST be the last GroupContext extension. GroupContext
-    // extensions are an ordered list that feeds the key schedule, and OpenMLS
-    // (MDK) applies an AppDataUpdate by removing the dictionary and re-appending
-    // it (`Extensions::add_or_replace`), while ts-mls replaces it in place. If the
-    // dictionary is not already last, the two compute different GroupContexts for
-    // the same AppDataUpdate commit and MDK rejects it with a confirmation tag
-    // mismatch. MDK itself creates groups as [required_capabilities,
-    // app_data_dictionary] (cgka-engine/src/group_lifecycle.rs).
+    // Keep the dictionary last, matching MDK: app_data_update replaces it in
+    // place in ts-mls, while OpenMLS removes it and appends it to the end.
     const groupExtensions = [
         ...(hasRequiredCapabilities ? [] : [marmotRequiredCapabilitiesExtension()]),
         ...extensions,

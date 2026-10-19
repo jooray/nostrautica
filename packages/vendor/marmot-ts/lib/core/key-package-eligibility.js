@@ -1,6 +1,7 @@
 import { getAppDataDictionary, } from "../vendor/ts-mls/index.js";
 import { getMarmotGroupInfo } from "./client-state.js";
 import { getCredentialPubkey } from "./credential.js";
+import { isReusableKeyPackage } from "./key-package.js";
 import { AGENT_TEXT_STREAM_QUIC_FANOUT_EXTENSION_TYPE, AGENT_TEXT_STREAM_QUIC_RECEIVE_EXTENSION_TYPE, AGENT_TEXT_STREAM_QUIC_SEND_EXTENSION_TYPE, AGENT_TEXT_STREAM_ROLE_FANOUT, AGENT_TEXT_STREAM_ROLE_RECEIVE, AGENT_TEXT_STREAM_ROLE_SEND, decodeAgentTextStreamQuicPolicyV1, } from "./components/agent-text-stream.js";
 import { decodeComponentsList } from "./components/app-components-list.js";
 import { getAppComponents } from "./components/dictionary.js";
@@ -121,6 +122,7 @@ export function evaluateKeyPackageForGroup(state, keyPackageEvent) {
     let cipherSuite = -1;
     try {
         const keyPackage = getKeyPackage(keyPackageEvent);
+        isReusableKeyPackage(keyPackage);
         cipherSuite = keyPackage.cipherSuite;
         const memberPubkey = getCredentialPubkey(keyPackage.leafNode.credential);
         if (members.has(memberPubkey)) {

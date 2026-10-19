@@ -1,5 +1,6 @@
 import { DEFAULT_CONVERGENCE_POLICY, } from "../core/convergence.js";
-import { prunableRetainedEpochs } from "../core/retained-history.js";
+import { bytesToHex } from "@noble/hashes/utils.js";
+import { deserializeClientState } from "../core/client-state.js";
 /**
  * The bounded convergence window — the recent canonical states + applied commits
  * the convergence hot path needs to rebuild candidate branches and recover from
@@ -12,7 +13,7 @@ import { prunableRetainedEpochs } from "../core/retained-history.js";
  *    current canonical branch.
  *
  * Both maps are bounded to the rollback horizon (`max_rewind_commits`): material
- * older than `tip - maxRewindCommits` is pruned on every {@link record}. This is
+ * older than `tip - maxRewindCommits` is released after durable tree retention. This is
  * a purely **in-memory, derived** index: it is never persisted (the full-fork
  * {@link GroupHistoryTree} is the single persisted source) and is rebuilt from
  * the tree's canonical path on load.
@@ -22,9 +23,7 @@ export class RetainedHistoryStore {
     #states = new Map();
     /** Commit applied to advance *from* each source epoch on our branch. */
     #appliedLinks = new Map();
-    #policy;
-    constructor(init, policy = DEFAULT_CONVERGENCE_POLICY) {
-        this.#policy = policy;
+    constructor(init, _policy = DEFAULT_CONVERGENCE_POLICY) {
         this.#states.set(Number(init.groupContext.epoch), init);
     }
     /** The retained canonical state at `epoch`, if still held. */
@@ -74,8 +73,8 @@ export class RetainedHistoryStore {
     }
     /**
      * Records the retained parent state and the applied commit message after
-     * advancing an epoch, then prunes retained material beyond the rollback
-     * horizon (`retained-history.md`).
+     * advancing an epoch. Release is separate: only a durable tree checkpoint
+     * authorizes internal `commitRetention` (`retained-history.md`).
      *
      * `pinnedEpochs` are epochs the caller's active lifecycle still needs and that
      * MUST NOT be pruned even when older than the horizon (`retained-history.md`
@@ -83,7 +82,7 @@ export class RetainedHistoryStore {
      * Recovering / Unrecoverable). The engine supplies them; e.g. the source epoch
      * of a staged local commit the canonical tip has since advanced past.
      */
-    record(parentState, appliedMessage, newState, pinnedEpochs = [], ownCommitStamp) {
+    record(parentState, appliedMessage, newState, _pinnedEpochs = [], ownCommitStamp) {
         const parentEpoch = Number(parentState.groupContext.epoch);
         const newEpoch = Number(newState.groupContext.epoch);
         const preceding = this.#appliedLinks.get(parentEpoch - 1);
@@ -97,12 +96,30 @@ export class RetainedHistoryStore {
             resultingState: newState,
             ownCommitStamp,
         });
-        const max = this.#policy.maxRewindCommits;
-        const pins = new Set(pinnedEpochs);
-        for (const epoch of prunableRetainedEpochs(this.#states.keys(), newEpoch, max, pins))
-            this.#states.delete(epoch);
-        for (const epoch of prunableRetainedEpochs(this.#appliedLinks.keys(), newEpoch, max, pins))
-            this.#appliedLinks.delete(epoch);
+    }
+    /** @internal Apply membership and receiver projection after durable adoption. */
+    commitRetention(plan) {
+        const keep = new Set(plan.retainedTags);
+        const projected = new Map();
+        for (const [tag, bytes] of plan.snapshots)
+            projected.set(tag, deserializeClientState(bytes));
+        for (const [epoch, state] of this.#states) {
+            const tag = bytesToHex(state.confirmationTag);
+            if (!keep.has(tag))
+                this.#states.delete(epoch);
+            else
+                this.#states.set(epoch, projected.get(tag) ?? state);
+        }
+        for (const [epoch, link] of this.#appliedLinks) {
+            const parentTag = bytesToHex(link.parentState.confirmationTag);
+            const childTag = bytesToHex(link.resultingState.confirmationTag);
+            if (!keep.has(parentTag) || !keep.has(childTag))
+                this.#appliedLinks.delete(epoch);
+            else {
+                link.parentState = projected.get(parentTag) ?? link.parentState;
+                link.resultingState = projected.get(childTag) ?? link.resultingState;
+            }
+        }
     }
     /** The highest retained epoch (the canonical tip), or undefined if empty. */
     tipEpoch() {

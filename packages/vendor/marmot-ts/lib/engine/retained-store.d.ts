@@ -1,6 +1,7 @@
 /** @module @category Engine */
 import { type ClientState, type MlsMessage } from "../vendor/ts-mls/index.js";
 import { type ConvergencePolicy } from "../core/convergence.js";
+import type { HistoryRetentionPlan } from "./retention.js";
 import type { OwnCommitConvergenceStamp } from "./own-commit-stamp.js";
 /** Parent-bound evidence for one already-applied canonical commit. */
 export interface RetainedAppliedLink {
@@ -22,14 +23,14 @@ export interface RetainedAppliedLink {
  *    current canonical branch.
  *
  * Both maps are bounded to the rollback horizon (`max_rewind_commits`): material
- * older than `tip - maxRewindCommits` is pruned on every {@link record}. This is
+ * older than `tip - maxRewindCommits` is released after durable tree retention. This is
  * a purely **in-memory, derived** index: it is never persisted (the full-fork
  * {@link GroupHistoryTree} is the single persisted source) and is rebuilt from
  * the tree's canonical path on load.
  */
 export declare class RetainedHistoryStore {
     #private;
-    constructor(init: ClientState, policy?: ConvergencePolicy);
+    constructor(init: ClientState, _policy?: ConvergencePolicy);
     /** The retained canonical state at `epoch`, if still held. */
     stateAt(epoch: number): ClientState | undefined;
     /** Whether a canonical state is retained at `epoch`. */
@@ -53,8 +54,8 @@ export declare class RetainedHistoryStore {
     appliedLinksBetween(forkEpoch: number, tipEpoch: number): RetainedAppliedLink[];
     /**
      * Records the retained parent state and the applied commit message after
-     * advancing an epoch, then prunes retained material beyond the rollback
-     * horizon (`retained-history.md`).
+     * advancing an epoch. Release is separate: only a durable tree checkpoint
+     * authorizes internal `commitRetention` (`retained-history.md`).
      *
      * `pinnedEpochs` are epochs the caller's active lifecycle still needs and that
      * MUST NOT be pruned even when older than the horizon (`retained-history.md`
@@ -62,7 +63,9 @@ export declare class RetainedHistoryStore {
      * Recovering / Unrecoverable). The engine supplies them; e.g. the source epoch
      * of a staged local commit the canonical tip has since advanced past.
      */
-    record(parentState: ClientState, appliedMessage: MlsMessage, newState: ClientState, pinnedEpochs?: Iterable<number>, ownCommitStamp?: OwnCommitConvergenceStamp): void;
+    record(parentState: ClientState, appliedMessage: MlsMessage, newState: ClientState, _pinnedEpochs?: Iterable<number>, ownCommitStamp?: OwnCommitConvergenceStamp): void;
+    /** @internal Apply membership and receiver projection after durable adoption. */
+    commitRetention(plan: Pick<HistoryRetentionPlan, "retainedTags" | "snapshots">): void;
     /** The highest retained epoch (the canonical tip), or undefined if empty. */
     tipEpoch(): number | undefined;
 }

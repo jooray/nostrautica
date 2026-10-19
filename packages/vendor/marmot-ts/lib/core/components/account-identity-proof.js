@@ -1,3 +1,4 @@
+import { isReusableKeyPackage } from "../key-package-dictionary.js";
 /**
  * @module @category Core - App Components
  *
@@ -342,6 +343,7 @@ export function validateKeyPackageAccountIdentityProof(keyPackage, expectedCiphe
         throw new AccountIdentityProofError("KeyPackage-level extensions carry the legacy 0xf2f1 proof extension", "legacy-extension-present");
     assertNoAccountIdentityProofComponent(keyPackage.extensions, "key-package");
     validateLeafAccountIdentityProof(keyPackage.leafNode, keyPackage.cipherSuite);
+    isReusableKeyPackage(keyPackage);
 }
 /**
  * Validates the `0x8009` account identity proof of every member leaf in `state`. Throws on

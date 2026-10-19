@@ -1,8 +1,7 @@
 import { type ClientState, type MlsMessage } from "../vendor/ts-mls/index.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
 import { type OwnCommitConvergenceStamp } from "./own-commit-stamp.js";
-/** The store backing a tree's heavy material. A `GenericKeyValueStore<Uint8Array>`. */
-type HistoryTreeStore = GenericKeyValueStore<Uint8Array>;
+import { type HistoryRetentionOptions, type HistoryRetentionPlan } from "./retention.js";
 /**
  * Protocol-level metadata for one edge — the commit that produced a node from
  * its parent. The decrypted commit bytes themselves are retained separately
@@ -53,14 +52,14 @@ export interface HistoryNode {
     parentTag?: string;
     /** Child node tags. More than one means a fork was observed at this node. */
     childTags: string[];
-    /** The commit edge from the parent. `undefined` only for the root. */
+    /** Producing commit evidence; a logical boundary retains its original edge. */
     edge?: HistoryEdge;
 }
 /**
  * The retained group history tree (Marmot v2 full-fork history). Holds every
- * group state ever observed — the canonical branch and every fork — as a tree
- * of {@link ClientState} snapshots linked by commit edges. No pruning is
- * performed: the tree retains everything.
+ * retained group state — the canonical branch and eligible forks — as a tree
+ * of {@link ClientState} snapshots linked by commit edges. Settled retention
+ * publishes authoritative membership before removing obsolete physical keys.
  *
  * The **light index** (per-node epoch/parent/edge metadata) is always resident.
  * **Heavy material** (serialized snapshots + commit bytes) is kept in a bounded
@@ -80,7 +79,7 @@ export declare class GroupHistoryTree {
     constructor(root?: ClientState, options?: {
         snapshotCacheSize?: number;
     });
-    /** The root node tag (the welcome/creation state), or `undefined` if empty. */
+    /** Logical retained root tag, or `undefined` if empty. */
     get rootTag(): string | undefined;
     /** Number of nodes (states) retained in the tree. */
     get size(): number;
@@ -171,7 +170,7 @@ export declare class GroupHistoryTree {
      * dirty so the first {@link flush} persists the whole tree. A no-op if the
      * same store is already bound (e.g. on a tree loaded via {@link load}).
      */
-    bindStore(store: HistoryTreeStore): void;
+    bindStore(store: GenericKeyValueStore<Uint8Array>): void;
     /**
      * Persists all unflushed nodes incrementally: each dirty node's light edge
      * record, snapshot, and commit bytes are written under its own keys, plus the
@@ -184,10 +183,26 @@ export declare class GroupHistoryTree {
      * `undefined` if no tree is persisted under `gid`. The store stays bound, so
      * snapshots/commit bytes are fetched on demand.
      */
-    static load(store: HistoryTreeStore, gid: string, options?: {
+    static load(store: GenericKeyValueStore<Uint8Array>, gid: string, options?: {
         snapshotCacheSize?: number;
     }): Promise<GroupHistoryTree | undefined>;
     /** Removes every persisted key for a group's tree from the store. */
-    static purge(store: HistoryTreeStore, gid: string): Promise<void>;
+    static purge(store: GenericKeyValueStore<Uint8Array>, gid: string): Promise<void>;
+    /**
+     * Captures one settled keep decision. Callers fence dependency admission until cleanup ends.
+     * @internal
+     */
+    prepareRetention(options: HistoryRetentionOptions): Promise<HistoryRetentionPlan>;
+    /**
+     * Flush required bytes, publish authority, then adopt; never delete before publication.
+     * @internal
+     */
+    publishRetention(plan: HistoryRetentionPlan): Promise<void>;
+    /** @internal Exact local plan adopted from durable authority, including after-forward rejection. */
+    isRetentionPublished(plan: HistoryRetentionPlan): boolean;
+    /**
+     * Restart-safe, idempotent exact-key cleanup of the currently durable authority.
+     * @internal
+     */
+    resumeRetentionCleanup(): Promise<void>;
 }
-export {};

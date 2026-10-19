@@ -3,8 +3,9 @@ import { appDataDictionaryExtensionType, appDataUpdateProposalType, defaultExten
 import { getAdminPolicy, getAppComponents } from "./dictionary.js";
 import { getGroupMemberPubkeys } from "../group-members.js";
 import { getCredentialPubkey } from "../credential.js";
-import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, } from "./ids.js";
+import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT_ID, SAFE_AAD_COMPONENT_ID, } from "./ids.js";
 import { bytesEqual } from "./bytes.js";
+import { validateGroupImageLegality } from "./image-validation.js";
 import { decodeComponentsList } from "./app-components-list.js";
 import { AccountIdentityProofError, getGroupProfileSupport, validateKeyPackageAccountIdentityProof, validateLeafAccountIdentityProof, } from "./account-identity-proof.js";
 import { diffChangedLeaves } from "./tree-diff.js";
@@ -53,17 +54,11 @@ export function collectAppDataUpdateOps(proposals) {
  * Enforced rules, in order (mirrors the MDK rustdoc numbering):
  * 1. the `app_data_dictionary` extension itself may never be dropped if it was
  *    present before;
- * 2. the `app_components` id (`0x0001`) and every id in the CURRENT epoch's
+ * 2. structural nonremovable ids and every id in the RESULTING epoch's
  *    required-component-id list may never be dropped;
  * 3. every dictionary entry that changes relative to the current epoch —
  *    added, rewritten, or removed — must match one of this commit's own
  *    `AppDataUpdate` operations.
- *
- * @param args.requiredIds MUST be derived by the caller from the CURRENT
- * (pre-commit) extensions — see Pitfall 2 in 03-RESEARCH.md. Deriving this
- * from `resultingExtensions` would let a commit add an id to `app_components`
- * and thereby protect that same id in the same commit, which is the exact bug
- * class this validator exists to close.
  *
  * Additionally, per account-identity-proof-v2.md "Lifecycle, authorization, and
  * removal" ("It is not GroupContext state and MUST NOT be created, replaced, or
@@ -120,14 +115,39 @@ export function validateAppComponentIntegrity(args) {
             detail: "resulting GroupContext carries leaf-only app component 0x8009",
         };
     }
-    // Rule 2: the protected set (current required ids + 0x0001) may never be
-    // dropped.
-    const protectedIds = new Set(args.requiredIds);
-    protectedIds.add(APP_COMPONENTS_COMPONENT_ID);
+    let resultingRequired;
+    try {
+        resultingRequired = getAppComponents(args.resultingExtensions);
+    }
+    catch {
+        return {
+            reason: "component-integrity",
+            detail: "resulting app_components component did not decode",
+        };
+    }
+    // Rule 2: resulting requirements govern optional removal, while structural
+    // ids remain nonremovable even when an AppDataUpdate unrequires them.
+    const structuralIds = [
+        APP_COMPONENTS_COMPONENT_ID,
+        SAFE_AAD_COMPONENT_ID,
+        GROUP_LIFECYCLE_COMPONENT_ID,
+    ];
+    if (args.appDataUpdateOps.some((op) => op.data === undefined && structuralIds.includes(op.componentId)))
+        return {
+            reason: "component-integrity",
+            detail: "AppDataUpdate removes a structural app component",
+        };
+    const protectedIds = new Set([
+        ...(resultingRequired ?? args.requiredIds),
+        ...structuralIds,
+    ]);
     for (const id of protectedIds) {
+        if (id === ACCOUNT_IDENTITY_PROOF_COMPONENT_ID)
+            continue;
         const currentlyPresent = current?.some((c) => c.componentId === id) ?? false;
         const stillPresent = resulting?.some((c) => c.componentId === id) ?? false;
-        if (currentlyPresent && !stillPresent) {
+        if (!stillPresent &&
+            (currentlyPresent || resultingRequired?.includes(id))) {
             return {
                 reason: "component-integrity",
                 detail: `drops required app component 0x${id.toString(16)}`,
@@ -584,48 +604,6 @@ export function validateUpdateProposalAccountIdentityProofs(proposals, ratchetTr
     return undefined;
 }
 /**
- * The single shared seam adapter for commit legality: derives every argument
- * {@link validateAppComponentIntegrity}, {@link validateCommitAccountIdentityProofs},
- * {@link classifyDisbandCommit}, and {@link validateAdminLeafCoupling} need
- * from `parentState`/`resultingState`/`proposals`, so no seam re-derives them
- * independently (the mdk#707 bug class — "a guard that exists on one seam
- * only is a documented bug").
- *
- * Runs four checks, in this fixed order (D-07):
- * 1. `validateAppComponentIntegrity` — component-integrity (WIRE-03). A
- *    violation here returns immediately.
- * 2. `validateCommitAccountIdentityProofs` — account-identity-proof profile
- *    drift, changed-leaf proof validity, and replacement-leaf identity
- *    binding (D-01/D-02/D-03, UPD-01). Runs before disband/admin-leaf-coupling
- *    reasoning, so an invalid identity blocks a commit before any admin-set
- *    reasoning does. `0x8009` data appearing in the GroupContext dictionary
- *    itself still reports `component-integrity` (rejected earlier by step
- *    1), so Phase 7 expectations hold. A `violation` here returns
- *    immediately; an `undecidable` outcome (Phase 9, D-03) is NOT returned
- *    yet — it is remembered and checks 3-4 still run, so a definite
- *    violation there still outranks it (the same precedence rule this
- *    function's own changed-leaf loop enforces internally).
- * 3. `classifyDisbandCommit` — disband-legality.
- * 4. `validateAdminLeafCoupling` — admin-leaf-coupling (CONV-01).
- *
- * The remembered undecidable detail from step 2, if any, is returned only
- * after steps 3-4 both find no violation.
- *
- * Stays pure: reads two `ClientState` values, performs no I/O, and calls
- * nothing from `src/engine` or `src/client`.
- *
- * Returns a {@link CommitLegalityOutcome}. Each calling seam supplies its own
- * disposition: `violation` throws on send (D-02), yields `rejected` with the
- * violation's `reason` on inbound (D-03), or drops the candidate edge on
- * convergence/replay (D-04/D-09); `undecidable` MUST map to that seam's own
- * existing deferral idiom, never to a terminal rejection (Phase 9, D-03,
- * `refs/marmot/foundation/errors.md` lines 63-68). This adapter itself is
- * seam-agnostic.
- *
- * @see refs/mdk/crates/cgka-engine/src/account_identity_proof.rs `validate_staged_commit_account_identity_proofs`
- * @see refs/marmot/app-components/account-identity-proof-v2.md "Validation"
- */
-/**
  * The GroupContext extensions a commit produces, rebuilt from its proposals,
  * for a receiver the commit removes.
  *
@@ -682,6 +660,48 @@ function projectedRemovedReceiverExtensions(parentExtensions, proposals) {
         ? [...extensions, replacement]
         : extensions.map((extension, i) => i === position ? replacement : extension);
 }
+/**
+ * The single shared seam adapter for commit legality: derives every argument
+ * {@link validateAppComponentIntegrity}, {@link validateCommitAccountIdentityProofs},
+ * {@link classifyDisbandCommit}, and {@link validateAdminLeafCoupling} need
+ * from `parentState`/`resultingState`/`proposals`, so no seam re-derives them
+ * independently (the mdk#707 bug class — "a guard that exists on one seam
+ * only is a documented bug").
+ *
+ * Runs four checks, in this fixed order (D-07):
+ * 1. `validateAppComponentIntegrity` — component-integrity (WIRE-03). A
+ *    violation here returns immediately.
+ * 2. `validateCommitAccountIdentityProofs` — account-identity-proof profile
+ *    drift, changed-leaf proof validity, and replacement-leaf identity
+ *    binding (D-01/D-02/D-03, UPD-01). Runs before disband/admin-leaf-coupling
+ *    reasoning, so an invalid identity blocks a commit before any admin-set
+ *    reasoning does. `0x8009` data appearing in the GroupContext dictionary
+ *    itself still reports `component-integrity` (rejected earlier by step
+ *    1), so Phase 7 expectations hold. A `violation` here returns
+ *    immediately; an `undecidable` outcome (Phase 9, D-03) is NOT returned
+ *    yet — it is remembered and checks 3-4 still run, so a definite
+ *    violation there still outranks it (the same precedence rule this
+ *    function's own changed-leaf loop enforces internally).
+ * 3. `classifyDisbandCommit` — disband-legality.
+ * 4. `validateAdminLeafCoupling` — admin-leaf-coupling (CONV-01).
+ *
+ * The remembered undecidable detail from step 2, if any, is returned only
+ * after steps 3-4 both find no violation.
+ *
+ * Stays pure: reads two `ClientState` values, performs no I/O, and calls
+ * nothing from `src/engine` or `src/client`.
+ *
+ * Returns a {@link CommitLegalityOutcome}. Each calling seam supplies its own
+ * disposition: `violation` throws on send (D-02), yields `rejected` with the
+ * violation's `reason` on inbound (D-03), or drops the candidate edge on
+ * convergence/replay (D-04/D-09); `undecidable` MUST map to that seam's own
+ * existing deferral idiom, never to a terminal rejection (Phase 9, D-03,
+ * `refs/marmot/foundation/errors.md` lines 63-68). This adapter itself is
+ * seam-agnostic.
+ *
+ * @see refs/mdk/crates/cgka-engine/src/account_identity_proof.rs `validate_staged_commit_account_identity_proofs`
+ * @see refs/marmot/app-components/account-identity-proof-v2.md "Validation"
+ */
 /** MLS default extension (1..=5) and proposal (1..=7) types every leaf supports implicitly. */
 const isDefaultMlsExtensionType = (type) => type >= 1 && type <= 5;
 const isDefaultMlsProposalType = (type) => type >= 1 && type <= 7;
@@ -836,6 +856,9 @@ export function validateCommitLegality(args) {
     });
     if (integrityViolation)
         return { kind: "violation", violation: integrityViolation };
+    const imageOutcome = validateGroupImageLegality(args);
+    if (imageOutcome.kind === "violation")
+        return imageOutcome;
     const accountIdentityProofOutcome = validateCommitAccountIdentityProofs({
         parentState: args.parentState,
         resultingState: args.resultingState,
@@ -853,7 +876,9 @@ export function validateCommitLegality(args) {
     // rather than pooled.
     const undecidableDetail = accountIdentityProofOutcome.kind === "undecidable"
         ? accountIdentityProofOutcome.detail
-        : undefined;
+        : imageOutcome.kind === "undecidable"
+            ? imageOutcome.detail
+            : undefined;
     const disband = classifyDisbandCommit({
         parentState: args.parentState,
         resultingState: args.resultingState,

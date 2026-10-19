@@ -4,12 +4,12 @@
 # The archive is ~180 MB unpacked, so it is never committed.
 #
 #   android/tools/marmotkit/fetch.sh            # pinned version
-#   MARMOTKIT_VERSION=0.12.1 MARMOTKIT_SHA256=… android/tools/marmotkit/fetch.sh
+#   MARMOTKIT_VERSION=0.13.1 MARMOTKIT_SHA256=… android/tools/marmotkit/fetch.sh
 #
 # Bumping MDK: read every integration guide between the two versions
 # (marmot-protocol/mdk docs/integration/), then update both pins below.
 set -eu
-VERSION="${MARMOTKIT_VERSION:-0.12.0}"
+VERSION="${MARMOTKIT_VERSION:-0.13.0}"
 SHA256="${MARMOTKIT_SHA256:-$(cat "$(dirname "$0")/marmotkit-$VERSION.sha256" 2>/dev/null | cut -d' ' -f1)}"
 HERE="$(cd "$(dirname "$0")/../.." && pwd)"
 DEST="$HERE/app/src/marmotkit"

@@ -22,7 +22,8 @@ import {
   validateKeyPackageAccountIdentityProof,
 } from "@internet-privacy/marmot-ts/core";
 import type { NostrNetworkInterface } from "@internet-privacy/marmot-ts/client";
-import { getPublicKey } from "nostr-tools/pure";
+import { bytesToHex } from "@nostrautica/protocol";
+import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { Store } from "../store/db.js";
 import { makeMarmotStores, purgeGroupState } from "./stores.js";
 import { makeCoordinatorSigner } from "./signer.js";
@@ -139,12 +140,32 @@ export interface ChatMls {
   retireGroup?(mlsGroupIdHex: string): Promise<void>;
 }
 
+/** marmot_kv row holding the coordinator's own KeyPackage slot id. */
+const SLOT_NAMESPACE = "client_meta";
+const SLOT_KEY = "key_package_slot";
+
+/**
+ * The coordinator's 30443 slot id: 32 random bytes as lowercase hex, generated
+ * once and persisted. marmot-ts 0.7.0 refuses any other `d` — a `MarmotClient`
+ * built with a label like the old `nostrautica-coordinator` throws in its
+ * constructor — and the spec forbids deriving the slot from the account key.
+ * The coordinator founds groups and never publishes a KeyPackage, so the slot
+ * only has to be valid and stable, not announced anywhere.
+ */
+export function coordinatorKeyPackageSlot(store: Store): string {
+  const existing = store.marmotKvGet(SLOT_NAMESPACE, SLOT_KEY);
+  if (existing && /^[0-9a-f]{64}$/.test(existing)) return existing;
+  const slot = bytesToHex(generateSecretKey());
+  store.marmotKvSet(SLOT_NAMESPACE, SLOT_KEY, slot);
+  return slot;
+}
+
 /** Build a real `MarmotClient`-backed {@link ChatMls} off the coordinator key. */
 export function createMarmotClientMls(deps: {
   store: Store;
   coordSk: Uint8Array;
   network: NostrNetworkInterface;
-  /** Stable per-device slot for the coordinator's own 30443 key packages. */
+  /** Stable 64-hex slot for the coordinator's own 30443 key packages. */
   clientId?: string;
 }): { mls: MarmotClientMls; client: MarmotClient } {
   const stores = makeMarmotStores(deps.store);
@@ -162,7 +183,7 @@ export function createMarmotClientMls(deps: {
     lifecycleStore: stores.lifecycleStore,
     ingestStateStore: stores.ingestStateStore,
     removedMarkerStore: stores.removedMarkerStore,
-    clientId: deps.clientId ?? "nostrautica-coordinator",
+    clientId: deps.clientId ?? coordinatorKeyPackageSlot(deps.store),
   });
   return {
     mls: new MarmotClientMls(client, getPublicKey(deps.coordSk), (id) => purgeGroupState(deps.store, id)),

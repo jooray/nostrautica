@@ -1,10 +1,11 @@
 /** @module @category Engine */
 import { appDataUpdateProposalType, defaultProposalTypes, getCredentialFromLeafIndex, selfRemoveProposalType, } from "../vendor/ts-mls/index.js";
 import { decodeAdminPolicyV1 } from "../core/components/admin-policy.js";
+import { decodeGroupBlossomImage } from "../core/components/blossom-image.js";
+import { validateGroupImageProposals } from "../core/components/image-validation.js";
 import { decodeAgentTextStreamQuicPolicyV1 } from "../core/components/agent-text-stream.js";
 import { decodeComponentsList } from "../core/components/app-components-list.js";
 import { decodeGroupAvatarUrlV1 } from "../core/components/avatar-url.js";
-import { decodeGroupBlossomImageV1 } from "../core/components/blossom-image.js";
 import { decodeEncryptedMediaPolicyV1 } from "../core/components/encrypted-media.js";
 import { decodeEncryptedMediaPolicyV2 } from "../core/components/encrypted-media-v2.js";
 import { decodeGroupLifecycleV1 } from "../core/components/group-lifecycle.js";
@@ -22,8 +23,10 @@ function toLeafIndex(index) {
  * Payload decoders for every app component whose format this library knows.
  * An AppDataUpdate for an id outside this table is opaque to the library and
  * left to the application (`app-components/README.md` "Unknown Data").
+ * Advertised image support (0x8002) depends on its strict present/empty decoder
+ * here; capability negotiation must never precede known payload admission.
  */
-export const COMPONENT_PAYLOAD_DECODERS = new Map([
+const COMPONENT_PAYLOAD_DECODERS = new Map([
     [APP_COMPONENTS_COMPONENT_ID, decodeComponentsList],
     [GROUP_PROFILE_COMPONENT_ID, decodeGroupProfileV1],
     [GROUP_ADMIN_POLICY_COMPONENT_ID, decodeAdminPolicyV1],
@@ -31,7 +34,7 @@ export const COMPONENT_PAYLOAD_DECODERS = new Map([
     [GROUP_MESSAGE_RETENTION_COMPONENT_ID, decodeMessageRetentionV1],
     [AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, decodeAgentTextStreamQuicPolicyV1],
     [GROUP_AVATAR_URL_COMPONENT_ID, decodeGroupAvatarUrlV1],
-    [GROUP_BLOSSOM_IMAGE_COMPONENT_ID, decodeGroupBlossomImageV1],
+    [GROUP_BLOSSOM_IMAGE_COMPONENT_ID, decodeGroupBlossomImage],
     [GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, decodeEncryptedMediaPolicyV1],
     [GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, decodeEncryptedMediaPolicyV2],
     [GROUP_LIFECYCLE_COMPONENT_ID, decodeGroupLifecycleV1],
@@ -108,13 +111,13 @@ export function requiredComponentIdsOf(state) {
  * 2. no component id carries more than one `AppDataUpdate` operation in the
  *    batch, and `app_components` (`0x0001`) is never removed (MDK batch loop 1);
  * 3. every `update` targets an id that is legal GroupContext state
- *    ({@link NON_GROUP_CONTEXT_COMPONENT_IDS}) and, for a known component id,
+ *    (the internal `NON_GROUP_CONTEXT_COMPONENT_IDS` check) and, for a known component id,
  *    carries a payload that decodes with that component's codec. Without this,
  *    one AppDataUpdate — which the admin gate admits from any member as a
  *    standalone proposal, and which a later commit bundles by reference —
  *    could poison the group dictionary with bytes no member can decode;
  * 4. every `remove` targets an id that is neither structurally unremovable
- *    ({@link UNREMOVABLE_COMPONENT_IDS}) nor present in the RESULTING required
+ *    (the internal `UNREMOVABLE_COMPONENT_IDS` set) nor present in the RESULTING required
  *    list (MDK batch loop 2).
  *
  * `requiredIds` is the PARENT epoch's required-component list
@@ -304,11 +307,24 @@ export function createAdminCommitPolicyCallback(args) {
             // as defence in depth.
             return validatePreApplyProposals([incoming.proposal], ciphersuiteId) ||
                 findProposalSenderViolation([incoming.proposal], ratchetTree, adminPubkeys, true) ||
-                validateUpdateProposalAccountIdentityProofs([incoming.proposal], ratchetTree, ciphersuiteId)
+                validateUpdateProposalAccountIdentityProofs([incoming.proposal], ratchetTree, ciphersuiteId) ||
+                validateGroupImageProposals({
+                    ratchetTree,
+                    adminPubkeys,
+                    proposals: [incoming.proposal],
+                }).kind !== "legal"
                 ? "reject"
                 : "accept";
         }
         if (validatePreApplyProposals(incoming.proposals, ciphersuiteId, requiredIds))
+            return "reject";
+        if (validateGroupImageProposals({
+            ratchetTree,
+            adminPubkeys,
+            proposals: incoming.proposals,
+            committerLeafIndex: incoming.senderLeafIndex,
+            requireCommitter: true,
+        }).kind !== "legal")
             return "reject";
         // Every carried proposal is re-authorized against its OWN sender in the
         // parent epoch (MDK `authorize_staged_commit_proposals`): a by-reference
@@ -348,6 +364,22 @@ export function createAdminCommitPolicyCallback(args) {
         }
     };
 }
+/** Share the terminal attribution rule across ingest, replay, and tree sweep. */
+export function resolveCapturedCommitLegality(outcome, captured) {
+    if (outcome.kind === "undecidable" &&
+        captured.complete &&
+        captured.committerLeafIndex === undefined) {
+        return {
+            kind: "violation",
+            violation: {
+                reason: "account-identity-proof",
+                proofReason: "unattributable-leaf",
+                detail: outcome.detail,
+            },
+        };
+    }
+    return outcome;
+}
 /**
  * A pure side-channel decorator around an `IncomingMessageCallback`, used to
  * capture a commit's own proposals for the WIRE-03/CONV-01 commit-legality
@@ -380,7 +412,9 @@ export function createAdminCommitPolicyCallback(args) {
  * (Pitfall 1 — validating inside the callback runs before the resulting
  * `GroupContext` exists and would produce wrong verdicts or throw mid-apply).
  *
- * Contract: `take()` returns the buffered proposals and clears the buffer.
+ * Contract: `take()` returns the buffered proposals, committer, and whether a
+ * commit callback completed the capture, then resets all three. A standalone
+ * proposal does not complete a commit capture.
  * Callers MUST call `take()` immediately before each `processMessage` call
  * (discarding the result, to clear any stale proposals left over from a
  * prior message) and again immediately after `processMessage` returns (to
@@ -391,10 +425,12 @@ export function createAdminCommitPolicyCallback(args) {
 export function withCapturedProposals(inner) {
     let buffered = [];
     let committerLeafIndex;
+    let complete = false;
     const callback = (incoming) => {
         if (incoming.kind === "commit") {
             buffered = buffered.concat(incoming.proposals);
             committerLeafIndex = incoming.senderLeafIndex;
+            complete = true;
         }
         else if (incoming.kind === "proposal") {
             buffered = buffered.concat(incoming.proposal);
@@ -402,9 +438,10 @@ export function withCapturedProposals(inner) {
         return inner(incoming);
     };
     const take = () => {
-        const result = { proposals: buffered, committerLeafIndex };
+        const result = { proposals: buffered, committerLeafIndex, complete };
         buffered = [];
         committerLeafIndex = undefined;
+        complete = false;
         return result;
     };
     return { callback, take };
