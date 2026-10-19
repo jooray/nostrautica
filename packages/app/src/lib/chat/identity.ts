@@ -69,8 +69,14 @@ export interface ChatIdentity {
    * and leaf.
    */
   eventSigner: ChatEventSigner;
-  /** Stable per-install 30443 slot id (`clientId`). */
+  /** Stable per-install 30443 slot id (`clientId`): 64 lowercase hex characters. */
   clientId: string;
+  /**
+   * The device-label slot this install published under before marmot-ts 0.7.0
+   * required a 64-hex one (`web-…`), until its kind-30443 has been deleted from
+   * the relays. See {@link clearLegacyClientId}.
+   */
+  legacyClientId?: string;
   /** The chat identity's raw secret key (held locally; never leaves the device unencrypted). */
   secretKey: Uint8Array;
 }
@@ -78,6 +84,7 @@ export interface ChatIdentity {
 // ── Persistence (IndexedDB via the shared marmot KV backend) ──────────────────
 const DEVICE_KEY_NS = "__chat_device_key__";
 const CLIENT_ID_NS = "__chat_client_id__";
+const LEGACY_CLIENT_ID_NS = "__chat_legacy_client_id__";
 const DEVICE_LABEL_NS = "__chat_device_label__";
 
 function deviceKeyKey(account: string): string {
@@ -85,6 +92,9 @@ function deviceKeyKey(account: string): string {
 }
 function clientIdKey(chatPubkey: string): string {
   return `${CLIENT_ID_NS}\x1f${chatPubkey}`;
+}
+function legacyClientIdKey(chatPubkey: string): string {
+  return `${LEGACY_CLIENT_ID_NS}\x1f${chatPubkey}`;
 }
 function deviceLabelKey(chatPubkey: string): string {
   return `${DEVICE_LABEL_NS}\x1f${chatPubkey}`;
@@ -198,15 +208,41 @@ async function ensureChatDeviceKeyInner(account: string): Promise<Uint8Array> {
   return sk;
 }
 
-/** A stable per-install slot id for this chat identity's 30443 events. */
-async function ensureClientId(chatPubkey: string): Promise<string> {
+const SLOT_ID = /^[0-9a-f]{64}$/;
+
+/**
+ * A stable per-install slot id for this chat identity's 30443 events: 32 random
+ * bytes as lowercase hex, which the Marmot transport spec requires and marmot-ts
+ * 0.7.0 enforces (it refuses to create, publish or store a KeyPackage under any
+ * other `d`).
+ *
+ * Installs from before 0.7.0 hold a `web-<16 hex>` label instead. That one is
+ * replaced once, and remembered as the legacy slot until its relay copy is
+ * deleted: a new `d` is a new address, so the old 30443 would otherwise stay
+ * discoverable next to the new one.
+ */
+async function ensureClientId(
+  chatPubkey: string,
+): Promise<{ clientId: string; legacyClientId?: string }> {
   const backend = marmotKvBackend();
   const existing = await backend.get(clientIdKey(chatPubkey));
-  if (typeof existing === "string" && existing) return existing;
-  // Short random slot id — one addressable 30443 `d` per install/device.
-  const id = "web-" + bytesToHex(generateSecretKey()).slice(0, 16);
+  const legacy = await backend.get(legacyClientIdKey(chatPubkey));
+  const legacyClientId = typeof legacy === "string" && legacy ? legacy : undefined;
+  if (typeof existing === "string" && SLOT_ID.test(existing)) {
+    return { clientId: existing, ...(legacyClientId ? { legacyClientId } : {}) };
+  }
+  const id = bytesToHex(generateSecretKey());
+  if (typeof existing === "string" && existing) {
+    await backend.set(legacyClientIdKey(chatPubkey), existing);
+  }
   await backend.set(clientIdKey(chatPubkey), id);
-  return id;
+  const previous = typeof existing === "string" && existing ? existing : legacyClientId;
+  return { clientId: id, ...(previous ? { legacyClientId: previous } : {}) };
+}
+
+/** Forget the legacy slot once its kind-30443 has been deleted from the relays. */
+export async function clearLegacyClientId(chatPubkey: string): Promise<void> {
+  await marmotKvBackend().del(legacyClientIdKey(chatPubkey));
 }
 
 const LOCKED_NS = "__chat_locked__";
@@ -288,6 +324,7 @@ async function chatKeysFor(account: string): Promise<string[]> {
     for (const k of await backend.keysWithPrefix(identityPrefix(chatPubkey))) keys.add(k);
     keys.add(deviceKeyKey(account));
     keys.add(clientIdKey(chatPubkey));
+    keys.add(legacyClientIdKey(chatPubkey));
     // Not a secret (the label is published in the roster for members to read), but
     // it belongs to this account's chat identity, so it rides the same snapshot —
     // otherwise a logout/login would silently revert a rename the way the missing
@@ -451,7 +488,7 @@ export async function resolveChatIdentity(accountSigner: AppSigner): Promise<Cha
   const sk = await ensureChatDeviceKey(account);
   const pubkey = getPublicKey(sk);
   const isAccountKey = pubkey === account; // always false under per-device keys
-  const clientId = await ensureClientId(pubkey);
+  const { clientId, legacyClientId } = await ensureClientId(pubkey);
 
   return {
     pubkey,
@@ -459,6 +496,7 @@ export async function resolveChatIdentity(accountSigner: AppSigner): Promise<Cha
     isAccountKey,
     eventSigner: eventSignerFromKey(sk),
     clientId,
+    ...(legacyClientId ? { legacyClientId } : {}),
     secretKey: sk,
   };
 }

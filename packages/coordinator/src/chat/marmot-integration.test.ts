@@ -89,7 +89,7 @@ function makeMemberClient(sk: Uint8Array, network: NostrNetworkInterface): Marmo
     keyPackageStore: stores.keyPackageStore,
     inviteStore: stores.inviteStore,
     rewindStore: stores.rewindStore,
-    clientId: "member-device",
+    clientId: "d".repeat(64),
   });
 }
 

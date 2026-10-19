@@ -50,6 +50,8 @@ const shared = vi.hoisted(() => ({
   liveFetchCount: new Map<string, number>(),
   /** Ordered trace of the publish-side calls a rejoin makes (order is the point). */
   calls: [] as string[],
+  /** The pre-0.7.0 `web-` slot the identity still remembers, if any. */
+  legacyClientId: undefined as string | undefined,
   /** The label the user last chose for this device, if any (identity.ts store). */
   savedLabel: undefined as string | undefined,
   /** The 21607 `label` each attestation actually carried, newest last. */
@@ -168,6 +170,9 @@ class FakeMarmotClient {
       shared.calls.push("kp:rotate");
       return {};
     }),
+    remove: vi.fn(async () => {
+      shared.calls.push("kp:remove");
+    }),
   };
   joinedFrom: string[] = [];
   async canJoinInvite(inv: { joinable?: boolean }) {
@@ -234,10 +239,19 @@ vi.mock("./identity.js", () => ({
     // Per-device keys (D3): the chat key is never the account key, so every account
     // type attests and publishes a device kind-0 on bootstrap.
     isAccountKey: false,
-    eventSigner: { getPublicKey: () => "c".repeat(64), signEvent: () => ({}), nip44: {} },
+    eventSigner: {
+      getPublicKey: () => "c".repeat(64),
+      signEvent: (draft: object) => ({ ...draft, pubkey: "c".repeat(64) }),
+      nip44: {},
+    },
     clientId: "web-test",
+    ...(shared.legacyClientId ? { legacyClientId: shared.legacyClientId } : {}),
     secretKey: new Uint8Array(32),
   }),
+  clearLegacyClientId: async () => {
+    shared.calls.push("legacy:cleared");
+    shared.legacyClientId = undefined;
+  },
   buildChatKeyProfile: () => ({ kind: 0, pubkey: "c".repeat(64), content: "{}", tags: [], sig: "" }),
   defaultDeviceLabel: () => "Test device",
   // A user-chosen device label, when one was saved. `undefined` here means "never
@@ -311,6 +325,7 @@ beforeEach(() => {
   shared.liveFetchCount.clear();
   shared.calls.length = 0;
   shared.savedLabel = undefined;
+  shared.legacyClientId = undefined;
   shared.attestedLabels.length = 0;
   shared.relayKeyPackages = null;
 });
@@ -1423,5 +1438,65 @@ describe("MarmotChat.retireLegacyState() — pre-0x8009 state", () => {
     await chat.retireLegacyState();
     expect(purge).not.toHaveBeenCalled();
     expect(lastClient.groups.destroy).not.toHaveBeenCalled();
+  });
+});
+
+describe("MarmotChat — retiring the pre-0.7.0 KeyPackage slot", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  // marmot-ts 0.7.0 only accepts a 64-hex `d`, so an older install moves to a new
+  // slot. A new `d` is a new address: the old 30443 stays discoverable unless it
+  // is deleted, and an inviter could still pick it.
+  it("deletes the old address after publishing, drops spent packages, keeps unused ones", async () => {
+    shared.legacyClientId = "web-0123456789abcdef";
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    lastClient.storedKeyPackages = [
+      { keyPackageRef: new Uint8Array([1]), identifier: "web-0123456789abcdef", used: true },
+      // Possibly what an in-flight Welcome was encrypted to: its private key stays.
+      { keyPackageRef: new Uint8Array([2]), identifier: "web-0123456789abcdef" },
+      { keyPackageRef: new Uint8Array([3]), identifier: "web-test" },
+    ] as never;
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+
+    await chat.ensurePublished();
+
+    const deletion = vi
+      .mocked(publishSigned)
+      .mock.calls.map(([ev]) => ev as unknown as { kind: number; tags: string[][] })
+      .find((ev) => ev.kind === 5);
+    expect(deletion?.tags).toContainEqual(["a", `30443:${"c".repeat(64)}:web-0123456789abcdef`]);
+    expect(lastClient.keyPackages.remove).toHaveBeenCalledTimes(1);
+    expect(lastClient.keyPackages.remove).toHaveBeenCalledWith(new Uint8Array([1]));
+    expect(shared.calls.indexOf("kp:ensurePublished")).toBeLessThan(shared.calls.indexOf("kp:remove"));
+    expect(shared.calls).toContain("legacy:cleared");
+    expect(chat.identity.legacyClientId).toBeUndefined();
+  });
+
+  it("keeps the legacy slot for a retry when the deletion reaches no relay", async () => {
+    shared.legacyClientId = "web-0123456789abcdef";
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+    vi.mocked(publishSigned).mockImplementation(async (ev) => {
+      if ((ev as unknown as { kind: number }).kind === 5) throw new Error("no relay accepted it");
+      return [];
+    });
+    try {
+      await chat.ensurePublished();
+    } finally {
+      vi.mocked(publishSigned).mockImplementation(async () => []);
+    }
+
+    expect(shared.calls).not.toContain("legacy:cleared");
+    expect(chat.identity.legacyClientId).toBe("web-0123456789abcdef");
+  });
+
+  it("does nothing for an install that never had a legacy slot", async () => {
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+
+    await chat.ensurePublished();
+
+    expect(vi.mocked(publishSigned).mock.calls.some(([ev]) => (ev as unknown as { kind: number }).kind === 5)).toBe(false);
+    expect(shared.calls).not.toContain("legacy:cleared");
   });
 });
