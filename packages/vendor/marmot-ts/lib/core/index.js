@@ -1,4 +1,5 @@
 export * from "./authorization-proof.js";
+export * from "./auth-service.js";
 export * from "./binary.js";
 export * from "./components/index.js";
 export * from "./capabilities.js";
@@ -12,6 +13,7 @@ export * from "./group-lifecycle.js";
 export * from "./inbound.js";
 export * from "./group-members.js";
 export * from "./group-message.js";
+export * from "./group-image.js";
 export * from "./group.js";
 export * from "./key-package-event.js";
 export * from "./key-package-eligibility.js";

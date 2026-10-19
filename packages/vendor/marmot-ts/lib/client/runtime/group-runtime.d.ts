@@ -17,6 +17,8 @@ export type GroupRuntimeOptions = {
     confirmPublished: (pending: PendingState) => StateNotification[];
     publishFailed: (pending: PendingState) => void;
     save: () => Promise<void>;
+    /** Owner admission fence, checked before transport and after awaits. */
+    assertOpen?: () => void;
     log?: Debugger;
     audit?: AuditSink;
     auditContext?: AuditContextOptions;
@@ -29,6 +31,8 @@ export type PublishCommitOptions = {
         welcome?: import("../../vendor/ts-mls/index.js").Welcome;
     };
     welcomeRecipients?: WelcomeRecipient[];
+    /** Admission fence; cancellation stops being reversible once publish starts. */
+    signal?: AbortSignal;
 };
 /** Drives group publish effects through Nostr and confirms or rolls back state. */
 export declare class GroupRuntime {
@@ -37,6 +41,11 @@ export declare class GroupRuntime {
     constructor(options: GroupRuntimeOptions);
     publishEffects(effects: GroupEffects): Promise<GroupPublishResult[]>;
     publishWork(work: GroupPublishWork): Promise<Record<string, PublishResponse>>;
+    /**
+     * Publish the original signed envelope on every attempt. Its timestamp,
+     * ciphertext and source-epoch expiration are fixed before signing; retries
+     * must reuse this artifact even after the current group policy changes.
+     */
     publishApplication(envelope: NostrEvent): Promise<Record<string, PublishResponse>>;
     publishProposal(envelope: NostrEvent, pending: PendingState): Promise<Record<string, PublishResponse>>;
     publishSelfUpdate(envelope: NostrEvent, pending: PendingState): Promise<Record<string, PublishResponse>>;

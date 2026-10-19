@@ -15,20 +15,25 @@ export type CompleteKeyPackage = {
 };
 /** Create default extensions for a key package */
 export declare function keyPackageDefaultExtensions(): CustomExtension[];
+export { isReusableKeyPackage } from "./key-package-dictionary.js";
 /** Calculates a key package reference with the hash implementation based on the key package's cipher suite */
 export declare function calculateKeyPackageRef(keyPackage: KeyPackage, cryptoProvider?: CryptoProvider): Promise<Uint8Array>;
+/** Signature key material returned by the selected ciphersuite. Keep signKey secret. */
+export type SignatureKeyPair = Awaited<ReturnType<CiphersuiteImpl["signature"]["keygen"]>>;
 /** Options for generating a marmot key package */
 export type GenerateKeyPackageOptions = {
+    /** Reuse an installation signing identity; init and encryption keys remain fresh. */
+    signatureKeyPair?: SignatureKeyPair;
     credential: Credential;
     capabilities?: Capabilities;
     lifetime?: Lifetime;
     extensions?: CustomExtension[];
     /**
-     * Whether to mark this KeyPackage as reusable (last-resort).
+     * Whether to mark this KeyPackage as reusable using the canonical empty-data
+     * `last_resort_key_package` component in its KeyPackage dictionary.
      *
-     * - `true`: add the empty `last_resort_key_package` component (`0x0004`) to an
-     *   `app_data_dictionary` KeyPackage extension (reusable; helps with race windows)
-     * - `false`: omit the marker (single-use; private init_key is expected to be consumed)
+     * - `true`: include the component (reusable; helps with race windows)
+     * - `false`: omit the component (single-use; private init_key is expected to be consumed)
      *
      * Default: `true` for backwards compatibility with existing marmot-ts behavior.
      */
@@ -55,4 +60,4 @@ export type GenerateKeyPackageOptions = {
  * @see refs/marmot/foundation/key-packages.md
  * @see refs/marmot/app-components/account-identity-proof-v2.md
  */
-export declare function generateKeyPackage({ credential, capabilities, lifetime, extensions, isLastResort, signer, createdAt, ciphersuiteImpl, }: GenerateKeyPackageOptions): Promise<CompleteKeyPackage>;
+export declare function generateKeyPackage({ credential, capabilities, lifetime, extensions, isLastResort, signer, createdAt, signatureKeyPair: suppliedSignatureKeyPair, ciphersuiteImpl, }: GenerateKeyPackageOptions): Promise<CompleteKeyPackage>;

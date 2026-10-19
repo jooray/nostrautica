@@ -16,6 +16,8 @@
  * `distributed_convergence.rs` (`AppMessageInvalidated`).
  */
 export class DeliveredPayloadLedger {
+    #closed = false;
+    #invalidated = new Set();
     #entries = new Map();
     /** Number of remembered payloads. */
     get size() {
@@ -36,8 +38,34 @@ export class DeliveredPayloadLedger {
                 envelopes.push(entry.envelope);
         return envelopes;
     }
+    /** Snapshot bounded by the same tree-aware pruning horizon as live entries. */
+    exportEntries() {
+        return [...this.#entries.values()].flatMap((branch) => [
+            ...branch.values(),
+        ]);
+    }
+    /** Complete rewind outbox, retained until the owner durably records it. */
+    exportInvalidated() {
+        return [...this.#invalidated];
+    }
+    acknowledgeInvalidated(entries) {
+        for (const entry of entries)
+            this.#invalidated.delete(entry);
+    }
+    /** Restore caller-validated evidence; codecs stay at the transport boundary. */
+    importEntries(entries) {
+        for (const entry of entries) {
+            if (entry.transportId &&
+                this.exportEntries().some((existing) => existing.transportId === entry.transportId &&
+                    existing.stateTag === entry.stateTag))
+                continue;
+            this.record(entry);
+        }
+    }
     /** Remembers a delivered application payload. */
     record(entry) {
+        if (this.#closed)
+            return;
         let branch = this.#entries.get(entry.stateTag);
         if (!branch) {
             branch = new Map();
@@ -45,6 +73,12 @@ export class DeliveredPayloadLedger {
         }
         if (!branch.has(entry.message))
             branch.set(entry.message, entry);
+    }
+    /** Permanently discard plaintext on destruction, including late deliveries. */
+    destroy() {
+        this.#closed = true;
+        this.#entries.clear();
+        this.#invalidated.clear();
     }
     /**
      * Removes and returns the payloads abandoned by a rewind to a canonical
@@ -59,6 +93,7 @@ export class DeliveredPayloadLedger {
             for (const [message, entry] of branch) {
                 if (entry.epoch > forkEpoch && !canonicalTags.has(entry.stateTag)) {
                     invalidated.push(entry);
+                    this.#invalidated.add(entry);
                     branch.delete(message);
                 }
             }
@@ -80,5 +115,12 @@ export class DeliveredPayloadLedger {
             if (branch.size === 0)
                 this.#entries.delete(stateTag);
         }
+    }
+    /** Only the published tree membership may release completed delivery evidence. */
+    commitRetention(tags) {
+        const keep = new Set(tags);
+        for (const tag of this.#entries.keys())
+            if (!keep.has(tag))
+                this.#entries.delete(tag);
     }
 }

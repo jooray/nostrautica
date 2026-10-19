@@ -8,13 +8,7 @@ export type CreateKeyPackageEventOptions = {
      * throwing {@link MissingSlotIdentifierError} when none is available.
      */
     identifier: string;
-    /**
-     * @deprecated Ignored. KeyPackage events do not repeat the publishing relays
-     * (`transports/nostr.md`, KeyPackage publication: "KeyPackage events do not
-     * repeat those relays"); peers find KeyPackages through the author's kind
-     * 10002 relay list. {@link KeyPackageManager} records the publish relays in
-     * its local store instead.
-     */
+    /** @deprecated Relay destinations belong to the transport and are never emitted as tags. */
     relays?: string[];
     client?: string;
     /**
@@ -25,6 +19,8 @@ export type CreateKeyPackageEventOptions = {
      */
     protected?: boolean;
 };
+/** Require a stable publication slot generated once from 32 random bytes. */
+export declare function validateKeyPackageSlot(identifier: string): void;
 /**
  * Creates an addressable key package event (kind 30443) from a key package.
  *

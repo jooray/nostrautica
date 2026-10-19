@@ -4,9 +4,15 @@ import { EventEmitter } from "eventemitter3";
 import { defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
 import { validateKeyPackageAccountIdentityProof } from "../core/components/account-identity-proof.js";
 import { getKeyPackage, getKeyPackageIdentifier, } from "../core/key-package-event.js";
-import { calculateKeyPackageRef } from "../core/key-package.js";
+import { calculateKeyPackageRef, isReusableKeyPackage, } from "../core/key-package.js";
+import { validateKeyPackageSlot } from "../core/key-package-event-encode.js";
+import { isValidRelayUrl, normalizeRelayUrl } from "../utils/relay-url.js";
 import { logger } from "../utils/debug.js";
 import { deduplicatePublishedEvents } from "./key-package-events.js";
+/** Local transport destinations, never derived from signed event tags. */
+export function normalizeKeyPackageRelays(relays) {
+    return [...new Set(relays.filter(isValidRelayUrl).map(normalizeRelayUrl))];
+}
 /**
  * Owns the persisted key package entries — the local private material and the
  * tracked kind-30443 events that advertise each package. Pure storage: it never
@@ -36,20 +42,24 @@ export class KeyPackageStore extends EventEmitter {
      * @returns The storage key (hex ref string)
      */
     async add(keyPackage) {
+        if (keyPackage.identifier !== undefined)
+            validateKeyPackageSlot(keyPackage.identifier);
         const keyPackageRef = await calculateKeyPackageRef(keyPackage.publicPackage, this.#cryptoProvider);
         const key = bytesToHex(keyPackageRef);
         const entry = {
             keyPackageRef,
             publicPackage: keyPackage.publicPackage,
             privatePackage: keyPackage.privatePackage,
+            ...(keyPackage.publicationRelays !== undefined
+                ? {
+                    publicationRelays: normalizeKeyPackageRelays(keyPackage.publicationRelays),
+                }
+                : {}),
             ...(keyPackage.identifier !== undefined
                 ? { identifier: keyPackage.identifier }
                 : {}),
             ...(keyPackage.published !== undefined
                 ? { published: deduplicatePublishedEvents(keyPackage.published) }
-                : {}),
-            ...(keyPackage.relays !== undefined && keyPackage.relays.length > 0
-                ? { relays: mergeRelays([], keyPackage.relays) }
                 : {}),
         };
         await this.#store.setItem(key, entry);
@@ -65,12 +75,13 @@ export class KeyPackageStore extends EventEmitter {
      *
      * Throws if the event body cannot be decoded as a valid key package, or if
      * the event's `i` tag (KeyPackageRef) does not match the decoded body.
-     *
-     * @param relays - Relays the event was published to, merged into the
-     *   entry's local `relays` record.
      */
     async addPublished(ref, event, relays = []) {
         const key = this.#resolveKey(ref);
+        const identifier = getKeyPackageIdentifier(event);
+        if (identifier === undefined)
+            throw new Error("KeyPackage publication requires a valid slot");
+        validateKeyPackageSlot(identifier);
         // The `i` tag IS the KeyPackageRef of the event body. Receivers MUST
         // verify it against the decoded KeyPackage and reject on mismatch
         // (transports/nostr.md §KeyPackage publication) so a forged `i` tag cannot
@@ -78,26 +89,30 @@ export class KeyPackageStore extends EventEmitter {
         // also throws if the body is not a valid KeyPackage. This is the single
         // chokepoint for both tracked (untrusted) and self-published events.
         const publicPackage = getKeyPackage(event);
+        isReusableKeyPackage(publicPackage);
         const computedRefBytes = await calculateKeyPackageRef(publicPackage, this.#cryptoProvider);
         const computedRef = bytesToHex(computedRefBytes);
         if (computedRef !== key.toLowerCase()) {
             throw new Error(`KeyPackage event ${event.id} carries i tag ${key} but its body's KeyPackageRef is ${computedRef}`);
         }
         const existing = await this.#store.getItem(key);
-        // Extract the addressable slot identifier if this is a kind 30443 event
-        const identifier = getKeyPackageIdentifier(event);
         if (existing) {
+            const publicationRelays = normalizeKeyPackageRelays([
+                ...(existing.publicationRelays ?? []),
+                ...relays,
+            ]);
+            const routesChanged = publicationRelays.length !==
+                (existing.publicationRelays?.length ?? 0) ||
+                publicationRelays.some((relay, index) => relay !== existing.publicationRelays?.[index]);
             const published = deduplicatePublishedEvents([
                 ...(existing.published ?? []),
                 event,
             ]);
             const shouldPersistIdentifier = identifier !== undefined && existing.identifier === undefined;
-            const mergedRelays = mergeRelays(existing.relays ?? [], relays);
-            const relaysChanged = mergedRelays.length !== (existing.relays ?? []).length;
             const publishedChanged = existing.published === undefined ||
                 published.length !== existing.published.length ||
                 !published.every((e, index) => e.id === existing.published?.[index]?.id);
-            if (!publishedChanged && !shouldPersistIdentifier && !relaysChanged) {
+            if (!publishedChanged && !shouldPersistIdentifier && !routesChanged) {
                 return;
             }
             const updated = {
@@ -105,7 +120,7 @@ export class KeyPackageStore extends EventEmitter {
                 // Persist identifier if discovered for the first time on this entry
                 ...(shouldPersistIdentifier ? { identifier } : {}),
                 published,
-                ...(mergedRelays.length > 0 ? { relays: mergedRelays } : {}),
+                publicationRelays,
             };
             await this.#store.setItem(key, updated);
             this.emit("updated", updated);
@@ -118,7 +133,7 @@ export class KeyPackageStore extends EventEmitter {
                 publicPackage,
                 ...(identifier !== undefined ? { identifier } : {}),
                 published: [event],
-                ...(relays.length > 0 ? { relays: mergeRelays([], relays) } : {}),
+                publicationRelays: normalizeKeyPackageRelays(relays),
             };
             await this.#store.setItem(key, entry);
             this.emit("added", entry);
@@ -158,7 +173,7 @@ export class KeyPackageStore extends EventEmitter {
         const packages = await Promise.all(allKeys.map((key) => this.#store.getItem(key)));
         return packages
             .filter((pkg) => pkg !== null && pkg.privatePackage !== undefined)
-            .map(({ keyPackageRef, publicPackage, identifier, published, relays, used, }) => {
+            .map(({ keyPackageRef, publicPackage, identifier, published, used, publicationRelays, }) => {
             let nonCurrent = false;
             try {
                 validateKeyPackageAccountIdentityProof(publicPackage);
@@ -171,7 +186,11 @@ export class KeyPackageStore extends EventEmitter {
                 publicPackage,
                 ...(identifier !== undefined ? { identifier } : {}),
                 ...(published !== undefined ? { published } : {}),
-                ...(relays !== undefined ? { relays } : {}),
+                ...(publicationRelays !== undefined
+                    ? {
+                        publicationRelays: normalizeKeyPackageRelays(publicationRelays),
+                    }
+                    : {}),
                 ...(used !== undefined ? { used } : {}),
                 ...(nonCurrent ? { nonCurrent: true } : {}),
             };
@@ -226,6 +245,64 @@ export class KeyPackageStore extends EventEmitter {
         this.emit("updated", updated);
         this.#log("marked key package %s as used", key);
     }
+    /** Records validated intent before adoption, without altering private material. */
+    async recordConsumption(groupId, ref) {
+        const key = this.#resolveKey(ref);
+        const existing = await this.#store.getItem(key);
+        // Direct GroupsManager users can supply external candidates without a local entry.
+        if (!existing)
+            return;
+        const receipts = existing.consumptionReceipts ?? [];
+        if (receipts.some((receipt) => bytesToHex(receipt.groupId) === bytesToHex(groupId)))
+            return;
+        await this.#store.setItem(key, {
+            ...existing,
+            consumptionReceipts: [
+                ...receipts,
+                { groupId: groupId.slice(), keyPackageRef: ref.slice() },
+            ],
+        });
+    }
+    /**
+     * Separate stores are not atomic: a crash may delay retirement until recovery.
+     * Pre-adoption receipts remain harmless until their group actually exists.
+     */
+    async finalizeConsumptions(hasAdoptedGroup) {
+        for (const key of await this.#store.keys()) {
+            const entry = await this.#store.getItem(key);
+            if (!entry?.consumptionReceipts?.length)
+                continue;
+            let adopted = false;
+            const remaining = [];
+            for (const receipt of entry.consumptionReceipts) {
+                if (bytesToHex(receipt.keyPackageRef) !== key)
+                    throw new Error("Consumption receipt KeyPackageRef mismatch");
+                if (await hasAdoptedGroup(receipt.groupId))
+                    adopted = true;
+                else
+                    remaining.push(receipt);
+            }
+            if (!adopted)
+                continue;
+            const { privatePackage, consumptionReceipts: _receipts, ...publicMetadata } = entry;
+            const retired = isReusableKeyPackage(entry.publicPackage)
+                ? { ...entry, used: true }
+                : { ...publicMetadata, used: true };
+            // Persist retirement before clearing the receipt, making retries idempotent.
+            await this.#store.setItem(key, {
+                ...retired,
+                consumptionReceipts: entry.consumptionReceipts,
+            });
+            const { consumptionReceipts: _completed, ...finished } = retired;
+            const updated = remaining.length
+                ? { ...finished, consumptionReceipts: remaining }
+                : finished;
+            await this.#store.setItem(key, updated);
+            this.emit("updated", updated);
+            // Never zero privatePackage: adopted MLS state can alias its arrays.
+            void privatePackage;
+        }
+    }
     /** Clears all entries (local and tracked) from the store. */
     async clear() {
         const allKeys = await this.#store.keys();
@@ -237,8 +314,4 @@ export class KeyPackageStore extends EventEmitter {
             }
         }
     }
-}
-/** Union of two relay lists, keeping first-seen order and dropping duplicates. */
-function mergeRelays(existing, added) {
-    return [...new Set([...existing, ...added])];
 }

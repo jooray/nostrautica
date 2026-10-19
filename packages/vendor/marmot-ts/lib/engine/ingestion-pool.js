@@ -1,4 +1,5 @@
 /** @module @category Engine */
+import { framedEpoch } from "./wire-format.js";
 const DEFAULT_MAX_SIZE = 1000;
 /**
  * A persistent pool of incoming events that could not yet be decrypted against
@@ -33,11 +34,15 @@ export class IngestionPool {
      * Pools an envelope (keyed by id). A peeled Commit supplies its authenticated
      * source epoch. Capacity refusal is retryable and never evicts accepted work.
      */
-    add(id, envelope, sourceEpoch) {
+    add(id, envelope, sourceEpoch, message) {
+        if (!Number.isSafeInteger(sourceEpoch) || sourceEpoch < 0)
+            sourceEpoch = undefined;
         const existing = this.#entries.get(id);
         if (existing) {
             if (existing.sourceEpoch === undefined && sourceEpoch !== undefined)
                 existing.sourceEpoch = sourceEpoch;
+            if (!existing.message && message)
+                existing.message = message;
             return { kind: "accepted" };
         }
         if (this.#entries.size >= this.#maxSize)
@@ -46,6 +51,7 @@ export class IngestionPool {
             id,
             envelope,
             sourceEpoch,
+            message,
             triedTags: new Set(),
         });
         return { kind: "accepted" };
@@ -78,10 +84,18 @@ export class IngestionPool {
      * epoch and remain capacity-bounded until they authenticate or are removed.
      */
     evictStale(currentEpoch) {
+        if (!Number.isSafeInteger(currentEpoch) ||
+            currentEpoch < 0 ||
+            this.#maxRewindCommits === Infinity ||
+            !Number.isSafeInteger(this.#maxRewindCommits) ||
+            this.#maxRewindCommits < 0)
+            return [];
+        const floor = Math.max(0, currentEpoch - this.#maxRewindCommits);
         const evicted = [];
         for (const entry of this.#entries.values()) {
             if (entry.sourceEpoch !== undefined &&
-                currentEpoch - entry.sourceEpoch > this.#maxRewindCommits)
+                Number.isSafeInteger(entry.sourceEpoch) &&
+                entry.sourceEpoch < floor)
                 evicted.push(entry);
         }
         for (const entry of evicted)
@@ -91,5 +105,25 @@ export class IngestionPool {
     /** Authenticated source epochs whose parent states remain active dependencies. */
     sourceEpochs() {
         return this.entries().flatMap((entry) => entry.sourceEpoch === undefined ? [] : [entry.sourceEpoch]);
+    }
+    /** Remember a verified receiver binding; never synthesize unknown epochs. */
+    bindReceiver(id, stateTag, message) {
+        const entry = this.#entries.get(id);
+        if (!entry)
+            return;
+        entry.stateTag = stateTag;
+        entry.message = message;
+        const sourceEpoch = framedEpoch(message);
+        const epoch = sourceEpoch === undefined ? undefined : Number(sourceEpoch);
+        if (epoch !== undefined && Number.isSafeInteger(epoch) && epoch >= 0)
+            entry.sourceEpoch = epoch;
+    }
+    /** Retire tag memo entries only after checkpoint membership becomes authoritative. */
+    commitRetention(retainedTags) {
+        const keep = new Set(retainedTags);
+        for (const entry of this.#entries.values())
+            for (const tag of entry.triedTags)
+                if (!keep.has(tag))
+                    entry.triedTags.delete(tag);
     }
 }

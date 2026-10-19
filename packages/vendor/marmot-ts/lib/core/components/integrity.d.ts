@@ -109,17 +109,11 @@ export declare function collectAppDataUpdateOps(proposals: readonly Proposal[]):
  * Enforced rules, in order (mirrors the MDK rustdoc numbering):
  * 1. the `app_data_dictionary` extension itself may never be dropped if it was
  *    present before;
- * 2. the `app_components` id (`0x0001`) and every id in the CURRENT epoch's
+ * 2. structural nonremovable ids and every id in the RESULTING epoch's
  *    required-component-id list may never be dropped;
  * 3. every dictionary entry that changes relative to the current epoch —
  *    added, rewritten, or removed — must match one of this commit's own
  *    `AppDataUpdate` operations.
- *
- * @param args.requiredIds MUST be derived by the caller from the CURRENT
- * (pre-commit) extensions — see Pitfall 2 in 03-RESEARCH.md. Deriving this
- * from `resultingExtensions` would let a commit add an id to `app_components`
- * and thereby protect that same id in the same commit, which is the exact bug
- * class this validator exists to close.
  *
  * Additionally, per account-identity-proof-v2.md "Lifecycle, authorization, and
  * removal" ("It is not GroupContext state and MUST NOT be created, replaced, or
@@ -134,6 +128,11 @@ export declare function validateAppComponentIntegrity(args: {
     currentExtensions: GroupContextExtension[];
     resultingExtensions: GroupContextExtension[];
     appDataUpdateOps: readonly AppDataUpdateOp[];
+    /**
+     * The current required list, used only as a fallback for contexts without an
+     * app_components entry. The complete resulting list controls removal,
+     * permitting an atomic authorized unrequire-and-remove.
+     */
     requiredIds: readonly AppComponentId[];
 }): CommitIntegrityViolation | undefined;
 /**

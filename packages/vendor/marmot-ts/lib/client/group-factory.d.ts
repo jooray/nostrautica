@@ -43,6 +43,7 @@ export type GroupFactoryOptions<THistory extends BaseGroupHistory | undefined = 
      */
     verifyEvent?: VerifyEventMethod;
 };
+/** Options for creating a group through {@link GroupsManager.create}. */
 export type CreateGroupOptions = SimpleGroupOptions & {
     ciphersuite?: CiphersuiteName;
     /**

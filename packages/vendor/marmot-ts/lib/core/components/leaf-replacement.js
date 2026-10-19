@@ -19,7 +19,7 @@ import { bytesEqual } from "./bytes.js";
  *    keeps the committer's own leaf decidable (see step 5).
  * 2. Add bucket: matches only if the changed leaf's slot was genuinely freed
  *    AND any proposal normalizes to an Add whose
- *    `add.keyPackage.leafNode.signature` is byte-equal ({@link bytesEqual})
+ *    `add.keyPackage.leafNode.signature` is byte-equal (internal `bytesEqual`)
  *    to `changed.leaf.signature`. Matched by signature bytes, never by leaf
  *    index — a Remove+Add commit reuses a freed slot, so the index is
  *    worthless for identifying WHICH Add this is, and the signature is exact.

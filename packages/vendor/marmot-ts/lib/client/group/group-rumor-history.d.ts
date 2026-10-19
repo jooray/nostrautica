@@ -9,6 +9,8 @@ export interface GroupRumorHistoryBackend {
     queryRumors(filters: Filter | Filter[]): Promise<Rumor[]>;
     /** Save a new group rumor event */
     addRumor(message: Rumor): Promise<void>;
+    /** Durably remove the exact inner rumor; repeated calls must succeed. */
+    removeRumor(rumorId: string): Promise<void>;
     /** Clear all rumor events from the backend */
     clear(): Promise<void>;
 }
@@ -16,6 +18,7 @@ export interface GroupRumorHistoryBackend {
 export type GroupRumorHistoryEvents = {
     rumor: (rumor: Rumor) => void;
     cleared: () => void;
+    removed: (rumorId: string) => void;
 };
 /** A group.history implementation that stores the parsed rumor events for a group and provies methods for querying */
 export declare class GroupRumorHistory extends EventEmitter<GroupRumorHistoryEvents> implements BaseGroupHistory {
@@ -29,13 +32,15 @@ export declare class GroupRumorHistory extends EventEmitter<GroupRumorHistoryEve
     saveRumor(rumor: Rumor): Promise<void>;
     /** Purge all rumor events from the backend */
     purgeMessages(): Promise<void>;
+    /** Retract a validated inner identity before notifying timeline listeners. */
+    removeMessage(rumorId: string): Promise<void>;
     /** Request stored rumors by filters */
     queryRumors(filters: Filter | Filter[]): Promise<Rumor[]>;
     /**
      * Async generator that yields the current timeline of {@link Rumor} events whenever a
-     * new rumor is saved that matches `filters` or the history is cleared. The initial snapshot
-     * is emitted immediately on subscription, then again after every matching `rumor` event or
-     * `cleared` event.
+     * matching rumor is saved, a rumor is removed, or history is cleared. Each
+     * snapshot is freshly queried so removal refills limited pages. Changes
+     * during loading or paused consumption are latched until the next pull.
      *
      * The generator runs until the caller breaks out of the loop or the consuming
      * iterator is garbage-collected (via the `finally` cleanup).

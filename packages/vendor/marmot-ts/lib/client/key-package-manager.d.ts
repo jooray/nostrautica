@@ -3,6 +3,7 @@ import { NostrEvent } from "applesauce-core/helpers/event";
 import { EventEmitter } from "eventemitter3";
 import { CiphersuiteName, CryptoProvider, PrivateKeyPackage, Welcome } from "../vendor/ts-mls/index.js";
 import { GenericKeyValueStore } from "../utils/key-value.js";
+import { type KeyPackagePublisherOptions } from "./key-package-publisher.js";
 import { ListedKeyPackage, LocalKeyPackage, StoredKeyPackage, WelcomeKeyPackageCandidate } from "./key-package-store.js";
 import { NostrNetworkInterface } from "./nostr-interface.js";
 import { type RejectReason, type VerifyEventMethod } from "./verify.js";
@@ -21,7 +22,7 @@ export type CreateKeyPackageOptions = {
     identifier?: string;
     /** Ciphersuite to use (default: MLS_128_DHKEMX25519_AES128GCM_SHA256_Ed25519) */
     ciphersuite?: CiphersuiteName;
-    /** Whether to mark the key package as last-resort (`last_resort_key_package` component; default: true) */
+    /** Whether to include the canonical reusable KeyPackage component (default: true) */
     isLastResort?: boolean;
     /** Client identifier string to include in the key package event */
     client?: string;
@@ -32,7 +33,7 @@ export type CreateKeyPackageOptions = {
 export type RotateKeyPackageOptions = {
     /**
      * Relay URLs for the new key package event.
-     * If omitted, the relays from the most recent publish of the old key package are reused.
+     * If omitted, the locally stored publication routes of the old key package are reused.
      */
     relays?: string[];
     /**
@@ -43,21 +44,12 @@ export type RotateKeyPackageOptions = {
     d?: string;
     /** Ciphersuite to use for the new key package */
     ciphersuite?: CiphersuiteName;
-    /** Whether to mark the new key package as last-resort (`last_resort_key_package` component; default: true) */
+    /** Whether to include the canonical reusable KeyPackage component (default: true) */
     isLastResort?: boolean;
     /** Client identifier string to include in the new key package event */
     client?: string;
     /** Whether to include the NIP-70 protected tag on the new event */
     protected?: boolean;
-};
-/** Options for {@link KeyPackageManager.purge}. */
-export type PurgeKeyPackageOptions = {
-    /**
-     * Extra relays to publish the deletion to, on top of the relays recorded
-     * locally when the key package was published. Needed for key packages
-     * tracked from another device, whose publish relays are not known here.
-     */
-    relays?: string[];
 };
 export type KeyPackageManagerEvents = {
     /** Emitted when a key package is stored locally */
@@ -80,6 +72,8 @@ export type KeyPackageManagerEvents = {
 export type KeyPackageManagerOptions = {
     /** The backend to store and load the key packages from */
     store: GenericKeyValueStore<StoredKeyPackage>;
+    /** Confirms durable adoption when recovering consumption receipts on startup/retry. */
+    hasAdoptedGroup?: (groupId: Uint8Array) => Promise<boolean>;
     /** Default `d` tag value for {@link KeyPackageManager.create} and {@link KeyPackageManager.rotate}. Falls back to this when no explicit `d` is passed. */
     clientId?: string;
     /** The signer used for the clients identity */
@@ -88,6 +82,10 @@ export type KeyPackageManagerOptions = {
     network: NostrNetworkInterface;
     /** The crypto provider to use for cryptographic operations */
     cryptoProvider?: CryptoProvider;
+    /** Capabilities to advertise in generated key packages. */
+    capabilities?: KeyPackagePublisherOptions["capabilities"];
+    /** Load a persisted installation signing identity. */
+    getSignatureKeyPair?: KeyPackagePublisherOptions["getSignatureKeyPair"];
     /**
      * Injectable Nostr event verifier for the 30443 KeyPackage trust boundary
      * (SEC-01). Defaults to applesauce's `verifyEvent`. Stored for the
@@ -106,8 +104,8 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
     #private;
     /**
      * Default slot identifier (`d` tag value) used by {@link create} when no
-     * explicit `d` is passed in options. Set this to a stable string (e.g.
-     * `"my-app-desktop"`) so all key packages from this manager share a single
+     * explicit `d` is passed in options. Generate 32 random bytes once and persist
+     * their 64-character lowercase hex encoding so key packages share a single
      * addressable slot on relays.
      */
     readonly clientId: string | undefined;
@@ -118,7 +116,7 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      *
      * @returns The storage key (hex ref string)
      */
-    add(keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> & Partial<Pick<LocalKeyPackage, "published" | "identifier">>): Promise<string>;
+    add(keyPackage: Pick<LocalKeyPackage, "publicPackage" | "privatePackage"> & Partial<Pick<LocalKeyPackage, "published" | "identifier" | "publicationRelays">>): Promise<string>;
     /**
      * Creates a new key package, stores the private material locally, signs and
      * publishes a kind 30443 addressable event to the specified relays, and
@@ -184,7 +182,7 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      *
      * @param refs - One or more key package references (hex string or Uint8Array)
      */
-    purge(refs: Uint8Array | string | Array<Uint8Array | string>, options?: PurgeKeyPackageOptions): Promise<void>;
+    purge(refs: Uint8Array | string | Array<Uint8Array | string>): Promise<void>;
     /**
      * Observes a Nostr event and, if it is a kind 30443 key package event that
      * passes the trust boundary (SEC-01/WIRE-01/WIRE-02), records it in the
@@ -198,9 +196,10 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      * method converts to a `false` return without an emit).
      *
      * @param event - Any Nostr event; non-key-package events are silently ignored
+     * @param relays - Locally known observation/publication destinations for future cleanup.
      * @returns `true` if the event was recorded, `false` if ignored or rejected
      */
-    track(event: NostrEvent): Promise<boolean>;
+    track(event: NostrEvent, relays?: readonly string[]): Promise<boolean>;
     /**
      * Lists all locally stored key packages, each enriched with their published
      * Nostr events. Entries lacking a valid current account identity proof
@@ -244,6 +243,10 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      * @param ref - The key package reference
      */
     markUsed(ref: Uint8Array | string): Promise<void>;
+    /** Records an intent after all Welcome checks and before durable adoption. */
+    recordConsumption(groupId: Uint8Array, ref: Uint8Array): Promise<void>;
+    /** Retries idempotent retirement for receipts backed by durable adopted groups. */
+    finalizeConsumptions(): Promise<void>;
     /** Clears all entries (local and tracked) from the store. */
     clear(): Promise<void>;
     /**

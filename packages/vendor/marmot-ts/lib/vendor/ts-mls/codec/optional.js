@@ -1,7 +1,7 @@
 import { uint8Decoder } from "./number.js";
 export function optionalEncoder(encodeT) {
     return (t) => {
-        if (t) {
+        if (t !== undefined) {
             const [len, write] = encodeT(t);
             return [
                 len + 1,

@@ -1,4 +1,3 @@
-/** @module @category Engine */
 /** One pooled envelope awaiting a retained state that can decrypt it. */
 export interface PooledEntry<TEnvelope> {
     /** Stable transport id (kind-445 event id) — the pool key. */
@@ -7,6 +6,10 @@ export interface PooledEntry<TEnvelope> {
     envelope: TEnvelope;
     /** MLS-authenticated source epoch, when the wrapper has been peeled. */
     sourceEpoch?: number;
+    /** Exact receiver node authenticated by a successful peel, when known. */
+    stateTag?: string;
+    /** Framed MLS input retained for exact resumption proposal dependencies. */
+    message?: import("../vendor/ts-mls/index.js").MlsMessage;
     /**
      * History-tree node tags this entry has already been peeled against without
      * success, so the tree-targeted sweep tries each `(event, node)` pair once.
@@ -49,7 +52,7 @@ export declare class IngestionPool<TEnvelope> {
      * Pools an envelope (keyed by id). A peeled Commit supplies its authenticated
      * source epoch. Capacity refusal is retryable and never evicts accepted work.
      */
-    add(id: string, envelope: TEnvelope, sourceEpoch?: number): PoolAddResult;
+    add(id: string, envelope: TEnvelope, sourceEpoch?: number, message?: import("../vendor/ts-mls/index.js").MlsMessage): PoolAddResult;
     /** Removes an entry (it was read, or is being given up). */
     remove(id: string): void;
     /**
@@ -71,4 +74,8 @@ export declare class IngestionPool<TEnvelope> {
     evictStale(currentEpoch: number): PooledEntry<TEnvelope>[];
     /** Authenticated source epochs whose parent states remain active dependencies. */
     sourceEpochs(): number[];
+    /** Remember a verified receiver binding; never synthesize unknown epochs. */
+    bindReceiver(id: string, stateTag: string, message: import("../vendor/ts-mls/index.js").MlsMessage): void;
+    /** Retire tag memo entries only after checkpoint membership becomes authoritative. */
+    commitRetention(retainedTags: Iterable<string>): void;
 }

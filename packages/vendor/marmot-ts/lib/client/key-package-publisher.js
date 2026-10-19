@@ -3,7 +3,7 @@ import { bytesToHex, randomBytes } from "@noble/hashes/utils.js";
 import { ciphersuites, defaultCryptoProvider, } from "../vendor/ts-mls/index.js";
 import { createCredential } from "../core/credential.js";
 import { createDeleteKeyPackageEvent, createKeyPackageEvent, } from "../core/key-package-event.js";
-import { generateKeyPackage } from "../core/key-package.js";
+import { generateKeyPackage, } from "../core/key-package.js";
 import { logger } from "../utils/debug.js";
 /**
  * The native-sensitive boundary of key package management: generates key
@@ -16,11 +16,15 @@ export class KeyPackagePublisher {
     #signer;
     #network;
     #cryptoProvider;
+    #capabilities;
+    #getSignatureKeyPair;
     #log = logger.extend("KeyPackagePublisher");
     constructor(options) {
+        this.#getSignatureKeyPair = options.getSignatureKeyPair;
         this.#signer = options.signer;
         this.#network = options.network;
         this.#cryptoProvider = options.cryptoProvider ?? defaultCryptoProvider;
+        this.#capabilities = options.capabilities;
     }
     /** Generates a fresh random addressable slot identifier (`d` tag value). */
     freshIdentifier() {
@@ -37,6 +41,8 @@ export class KeyPackagePublisher {
         return generateKeyPackage({
             credential,
             ciphersuiteImpl,
+            signatureKeyPair: await this.#getSignatureKeyPair?.(ciphersuiteImpl),
+            capabilities: this.#capabilities,
             isLastResort: options?.isLastResort,
             signer: this.#signer,
         });

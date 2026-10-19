@@ -1,6 +1,6 @@
 import { bytesToHex } from "applesauce-core/helpers/event";
 import { EventEmitter } from "eventemitter3";
-import { defaultCryptoProvider, encode, mlsMessageEncoder, } from "../../vendor/ts-mls/index.js";
+import { defaultCryptoProvider, encode, mlsMessageEncoder, protocolVersions, wireformats, } from "../../vendor/ts-mls/index.js";
 import { mayReleaseOutbound } from "../../core/convergence-status.js";
 import { groupLifecycleStates } from "../../core/group-lifecycle.js";
 import { commitDigest } from "../../core/convergence.js";
@@ -9,8 +9,10 @@ import { logger } from "../../utils/debug.js";
 import { getMarmotGroupInfo, } from "../../core/client-state.js";
 import { evaluateKeyPackageForGroup, } from "../../core/key-package-eligibility.js";
 import { GroupRuntime } from "../runtime/group-runtime.js";
+import { linkPublicationRetention } from "../runtime/publication-retention.js";
 import { GroupSession, ingestResultDisposition, } from "../session/group-session.js";
 import { NostrWelcomeDelivery } from "../transport/nostr/welcome-delivery.js";
+import { GroupImageService } from "./group-image-service.js";
 import { GroupMediaService, } from "./group-media-service.js";
 export { createAdminCommitPolicyCallback } from "../../engine/admin-policy.js";
 /** An error that is thrown when a group has no relays available to send messages. */
@@ -72,6 +74,13 @@ export class MarmotGroup extends EventEmitter {
     runtime;
     /** Optional media helper for group encrypted attachments. */
     mediaService;
+    /** Dedicated canonical group-image source and retrieval service. */
+    image;
+    #closeController = new AbortController();
+    /** Aborted when this facade is unloaded, terminal or destroyed. */
+    get closedSignal() {
+        return this.#closeController.signal;
+    }
     /**
      * Outbound intents held while convergence is not `Settled` (B5). Each entry
      * keeps the caller's promise open until the intent is built, encrypted, and
@@ -99,15 +108,7 @@ export class MarmotGroup extends EventEmitter {
      * {@link welcomeDeliveries} / {@link pendingWelcomes} for the accepted R-04
      * consequence.
      */
-    #welcomeDeliveries = [];
-    /**
-     * The founding Welcome retained solely to support {@link retryWelcome}.
-     * In-memory only (D-04) — lost on restart, at which point `retryWelcome`
-     * throws rather than silently no-opping.
-     */
     #foundingWelcome;
-    /** The author pubkey the retained founding Welcome was addressed from. */
-    #foundingWelcomeAuthor;
     log;
     on(event, fn, context) {
         if (event === "removed") {
@@ -197,9 +198,7 @@ export class MarmotGroup extends EventEmitter {
     get status() {
         if (this.session.terminalTombstone)
             return "disbanded";
-        return this.state.groupActiveState.kind === "removedFromGroup"
-            ? "removed"
-            : "active";
+        return this.session.removalBlocked ? "removed" : "active";
     }
     /**
      * Account-identity-proof profile support is orthogonal to membership
@@ -328,7 +327,7 @@ export class MarmotGroup extends EventEmitter {
      * accepted consequence of D-04 + D-10 + D-12, not an oversight (R-04).
      */
     get welcomeDeliveries() {
-        return this.#welcomeDeliveries.slice();
+        return (this.#foundingWelcome?.deliveries.flatMap((delivery) => delivery.outcome ? [delivery.outcome] : []) ?? []);
     }
     /**
      * The failed subset of {@link welcomeDeliveries} — the invitees a founding
@@ -341,7 +340,12 @@ export class MarmotGroup extends EventEmitter {
      * (refs/marmot/protocol-core/publish-lifecycle.md lines 66-78).
      */
     get pendingWelcomes() {
-        return this.#welcomeDeliveries.filter((outcome) => outcome.kind === "failed");
+        return this.welcomeDeliveries.filter((outcome) => outcome.kind === "failed");
+    }
+    #settleWelcomeDelivery(delivery, outcome) {
+        if (delivery.outcome?.kind !== "succeeded")
+            delivery.outcome = outcome;
+        return delivery.outcome;
     }
     /**
      * Fans out a founding Welcome to every invitee, one {@link
@@ -350,6 +354,10 @@ export class MarmotGroup extends EventEmitter {
      * publish path entirely, since a founding Add has no `GroupPublishWork` to
      * drive. Retains the Welcome and author so a failed recipient can be
      * retried later via {@link retryWelcome}.
+     * Fanout and retry settlement preserve success for the same encoded Welcome,
+     * author, recipient and KeyPackage event id. A replacement obligation has
+     * independent outcomes and retry work; older attempts settle only their own
+     * obligation. The report follows the most recently started fanout's order.
      *
      * Never throws and never saves: partial or total Welcome failure is a
      * normal outcome (D-12), reported through {@link pendingWelcomes} rather
@@ -361,16 +369,42 @@ export class MarmotGroup extends EventEmitter {
      * independently of the others.
      */
     async deliverFoundingWelcomes(options) {
-        this.#foundingWelcome = options.welcome;
-        this.#foundingWelcomeAuthor = options.author;
+        let encoded;
+        try {
+            encoded = bytesToHex(encode(mlsMessageEncoder, {
+                version: protocolVersions.mls10,
+                wireformat: wireformats.mls_welcome,
+                welcome: options.welcome,
+            }));
+        }
+        catch {
+            // Leave malformed Welcomes to the transport's per-recipient failure
+            // handling; they cannot reuse a previous obligation's success.
+        }
+        const previous = this.#foundingWelcome;
+        const sameWelcome = encoded !== undefined &&
+            previous?.encoded === encoded &&
+            previous.author === options.author;
+        const deliveries = options.recipients.map((recipient) => (sameWelcome
+            ? previous.deliveries.find((delivery) => delivery.recipient.pubkey === recipient.pubkey &&
+                delivery.recipient.keyPackageEventId ===
+                    recipient.keyPackageEventId)
+            : undefined) ?? { recipient });
+        // Capture recipient records before awaiting transport. Pending attempts
+        // retain their own record even when a different obligation replaces it.
+        this.#foundingWelcome = {
+            welcome: options.welcome,
+            author: options.author,
+            encoded,
+            deliveries,
+        };
         const outcomes = await this.runtime.welcomeDelivery.deliverMany({
             welcome: options.welcome,
             author: options.author,
             groupRelays: this.relays ?? [],
             recipients: options.recipients,
         });
-        this.#welcomeDeliveries = outcomes;
-        return outcomes;
+        return outcomes.map((outcome, index) => this.#settleWelcomeDelivery(deliveries[index], outcome));
     }
     /**
      * Re-delivers one invitee's founding Welcome. Throws naming `pubkey` when
@@ -378,7 +412,8 @@ export class MarmotGroup extends EventEmitter {
      * retained (for instance after a restart) — this fails loudly rather than
      * silently no-opping, since a silent no-op is exactly R-04's failure mode.
      * When the matching entry already succeeded, returns it unchanged without
-     * performing another delivery.
+     * performing another delivery. Overlapping retries share one attempt per
+     * recipient; failed or rejected attempts clear so a later call can retry.
      *
      * Deliberately has **no epoch guard**: RESEARCH Priority Finding #1
      * establishes that a late epoch-1 Welcome is safe because the joiner's
@@ -388,23 +423,34 @@ export class MarmotGroup extends EventEmitter {
      * precondition always holds.
      */
     async retryWelcome(pubkey) {
-        const index = this.#welcomeDeliveries.findIndex((outcome) => outcome.recipient.pubkey === pubkey);
-        if (index === -1 ||
-            !this.#foundingWelcome ||
-            !this.#foundingWelcomeAuthor) {
+        const founding = this.#foundingWelcome;
+        const delivery = founding?.deliveries.find((delivery) => delivery.recipient.pubkey === pubkey);
+        if (!founding?.author || !delivery?.outcome) {
             throw new Error(`retryWelcome: no retained founding Welcome delivery outcome for recipient ${pubkey}`);
         }
-        const existing = this.#welcomeDeliveries[index];
+        const existing = delivery.outcome;
         if (existing.kind === "succeeded")
             return existing;
-        const [outcome] = await this.runtime.welcomeDelivery.deliverMany({
-            welcome: this.#foundingWelcome,
-            author: this.#foundingWelcomeAuthor,
+        const inFlight = delivery.retry;
+        if (inFlight)
+            return inFlight;
+        const options = {
+            welcome: founding.welcome,
+            author: founding.author,
             groupRelays: this.relays ?? [],
             recipients: [existing.recipient],
+        };
+        // Defer transport execution until the shared promise is installed, including
+        // before a transport hook can synchronously reenter retryWelcome.
+        const attempt = Promise.resolve()
+            .then(() => this.runtime.welcomeDelivery.deliverMany(options))
+            .then(([outcome]) => this.#settleWelcomeDelivery(delivery, outcome))
+            .finally(() => {
+            if (delivery.retry === attempt)
+                delivery.retry = undefined;
         });
-        this.#welcomeDeliveries[index] = outcome;
-        return outcome;
+        delivery.retry = attempt;
+        return attempt;
     }
     constructor(state, options) {
         super();
@@ -472,6 +518,7 @@ export class MarmotGroup extends EventEmitter {
             getRelays: () => this.relays,
             getGroupRef: () => this.idStr,
             getGroupData: () => this.groupData,
+            assertOpen: () => this.session.assertOutboundOpen(),
             confirmPublished: (pending) => this.session.confirmPublished(pending),
             publishFailed: (pending) => this.session.publishFailed(pending),
             save: () => this.save(),
@@ -479,12 +526,18 @@ export class MarmotGroup extends EventEmitter {
             audit: options.audit,
             auditContext: options.auditContext,
         });
+        linkPublicationRetention(this.runtime, this.session);
         this.mediaService = new GroupMediaService({
             media: this.media,
             getState: () => this.state,
             getCiphersuite: () => this.ciphersuite,
             getRetainedStates: () => this.session.retainedStates(),
             getSigner: () => this.signer,
+        });
+        this.image = new GroupImageService({
+            getState: () => this.state,
+            getRetainedStates: () => this.session.retainedStates(),
+            isClosed: () => this.closedSignal.aborted || this.session.destroyed,
         });
     }
     /** Creates a new {@link MarmotGroup} instance from a {@link ClientState} object */
@@ -505,12 +558,20 @@ export class MarmotGroup extends EventEmitter {
     async realizeRemovalIfNeeded() {
         await this.#realizeRemovalIfNeeded();
     }
-    /** Realizes durable terminal notification exactly once across restarts. */
+    /** Consumes a durable at-most-once callback attempt; projection is authority. */
     async realizeDisbandIfNeeded() {
+        if (this.closedSignal.aborted)
+            return;
+        if (this.session.terminalTombstone)
+            for (const result of await this.session.driveConvergence()) {
+                await this.#applyRemovalWithdrawal(result);
+                this.emit("ingestResult", result);
+            }
         const tombstone = await this.session.markDisbandNotificationDelivered();
         if (!tombstone)
             return;
-        this.session.dispose();
+        this.#closeController.abort();
+        this.image.close();
         this.#rejectQueuedOutbound(new GroupTerminalError());
         this.#emitDisbandedSafely(tombstone);
     }
@@ -531,8 +592,13 @@ export class MarmotGroup extends EventEmitter {
         }
     }
     #assertNotDisbanded() {
+        // Destruction remains the strongest fence; retained terminal facades keep
+        // their typed disband error even after releasing in-memory resources.
+        if (this.session.destroyed)
+            this.session.assertOpen();
         if (this.session.terminalTombstone)
             throw new GroupTerminalError();
+        this.session.assertOpen();
     }
     /**
      * Persists any pending changes to the group state in the store.
@@ -544,6 +610,23 @@ export class MarmotGroup extends EventEmitter {
      */
     async save(force = false) {
         await this.session.save(force);
+        // The canonical media view omits selectable sibling and exactly pinned
+        // branches. Load the actual tree membership before releasing owned images.
+        // Cache cleanup is optional: failed or changing captures defer retirement
+        // without turning an already successful durable save into a failure.
+        if (this.closedSignal.aborted || this.session.destroyed)
+            return;
+        const tags = this.forkTree.tags();
+        try {
+            const states = await Promise.all(tags.map((tag) => this.forkTree.stateAt(tag)));
+            if (states.some((state) => !state) ||
+                tags.join() !== this.forkTree.tags().join())
+                return;
+            this.image.retireRetained(states);
+        }
+        catch {
+            // Retry on a later successful save; never infer absence from read failure.
+        }
     }
     /**
      * Re-scores the persisted fork history against the current tip and switches to
@@ -562,10 +645,14 @@ export class MarmotGroup extends EventEmitter {
      * removal.
      */
     async reconverge() {
+        if (this.session.destroyed)
+            return;
         this.#assertNotDisbanded();
         const results = await this.session.reconverge();
-        for (const result of results)
+        for (const result of results) {
             await this.#applyRemovalWithdrawal(result);
+            this.emit("ingestResult", result);
+        }
         // A tree-fed switch can also land us ON a branch that removes us. The
         // realization obligation is state-derived (D-12), so re-assert it here;
         // idempotent, and a no-op unless canonical state is now the tombstone.
@@ -633,12 +720,41 @@ export class MarmotGroup extends EventEmitter {
      */
     async submitIntent(intent) {
         this.#assertNotDisbanded();
+        await this.session.hydrateLifecycleEvidence();
+        if (this.session.removalBlocked)
+            throw new Error("Group removed or removal recovery pending");
+        // Snapshot immutable expected-parent evidence before a convergence wait.
+        intent = { ...intent };
+        const signal = intent.kind === "commit" ? intent.signal : undefined;
+        signal?.throwIfAborted();
         if (mayReleaseOutbound(this.session.convergenceStatus, this.lifecycle)) {
             return this.#sendNow(intent);
         }
         this.log("queueing %s — convergence %s, lifecycle %s", intent.kind, this.session.convergenceStatus, this.lifecycle);
         return new Promise((resolve, reject) => {
-            this.#outboundQueue.push({ intent, resolve, reject });
+            const cleanup = () => signal?.removeEventListener("abort", abort);
+            const item = {
+                intent,
+                resolve: (results) => {
+                    cleanup();
+                    resolve(results);
+                },
+                reject: (error) => {
+                    cleanup();
+                    reject(error);
+                },
+            };
+            const abort = () => {
+                const index = this.#outboundQueue.indexOf(item);
+                if (index < 0)
+                    return; // Preparation owns cancellation after dequeue.
+                this.#outboundQueue.splice(index, 1);
+                item.reject(signal.reason);
+            };
+            this.#outboundQueue.push(item);
+            signal?.addEventListener("abort", abort, { once: true });
+            if (signal?.aborted)
+                abort();
         });
     }
     /** Atomically enables lifecycle-v1 for a legacy group and publishes it once. */
@@ -714,8 +830,30 @@ export class MarmotGroup extends EventEmitter {
     }
     /** Builds + publishes an intent's effects immediately (no gating). */
     async #sendNow(intent) {
-        const effects = await this.session.send(intent);
-        return this.runtime.publishEffects(effects);
+        const signal = intent.kind === "commit" ? intent.signal : undefined;
+        signal?.throwIfAborted();
+        return new Promise((resolve, reject) => {
+            const abort = () => reject(signal.reason);
+            const cleanup = () => signal?.removeEventListener("abort", abort);
+            signal?.addEventListener("abort", abort, { once: true });
+            // Observe late preparation while releasing its caller/FIFO promptly.
+            // Start publication in the same continuation that acquires the effects,
+            // leaving no orphan staged commit between cancellation and runtime handoff.
+            void this.session.send(intent).then((effects) => {
+                cleanup();
+                if (signal?.aborted) {
+                    for (const work of effects.publish)
+                        if ("pending" in work)
+                            this.session.publishFailed(work.pending);
+                    reject(signal.reason);
+                    return;
+                }
+                resolve(this.runtime.publishEffects(effects));
+            }, (error) => {
+                cleanup();
+                reject(error);
+            });
+        });
     }
     /**
      * Releases queued outbound while convergence is `Settled` and the lifecycle
@@ -755,14 +893,18 @@ export class MarmotGroup extends EventEmitter {
             await this.#applyRemovalWithdrawal(result);
             if (result.kind === "removed")
                 await this.#realizeRemovalIfNeeded();
+            this.emit("ingestResult", result);
         }
         await this.realizeDisbandIfNeeded();
         // CR-04: routed through the single resume seam rather than repeating its
         // predicate, so the profile gate (D-12) and the already-disbanded check
         // cannot be present on one resume path and missing on the other.
         await this.resumePendingDisband();
-        if (resumed.length === 0)
-            await this.#drainOutbound();
+        // Drain even when retained input was resumed (#109): `#drainOutbound`
+        // re-checks the release gate, so it is a no-op if that input reopened the
+        // window (which arms a fresh settle check). Resumed input that is not
+        // convergence-relevant arms nothing, so this wake is the last chance.
+        await this.#drainOutbound();
     }
     /**
      * Resumes a durable terminal intent after hydration when preparation is
@@ -770,6 +912,10 @@ export class MarmotGroup extends EventEmitter {
      * request mid-session, so both resume paths share one predicate.
      */
     async resumePendingDisband() {
+        if (this.session.removalBlocked)
+            return;
+        if (this.session.destroyed)
+            return;
         // D-12: nothing is published automatically for a group outside the current
         // account identity proof profile. `MarmotGroupEngine.requestDisband` now
         // refuses such a group itself (CR-04), before it persists or prepares
@@ -819,6 +965,8 @@ export class MarmotGroup extends EventEmitter {
         }
     }
     async #performRemovalRealization() {
+        if (this.session.terminalTombstone)
+            return;
         if (this.state.groupActiveState.kind !== "removedFromGroup")
             return;
         if (this.#removedMarkerStore) {
@@ -826,6 +974,7 @@ export class MarmotGroup extends EventEmitter {
             if (alreadyRealized)
                 return;
             await this.#removedMarkerStore.setItem(this.#removedMarkerKey, true);
+            await this.session.markRemovalNotificationDelivered();
         }
         else {
             // No persisted marker configured: realization degrades to in-memory
@@ -851,21 +1000,6 @@ export class MarmotGroup extends EventEmitter {
                 this.log("removed listener failed: %o", error);
             }
         }
-    }
-    /**
-     * Clears the persisted removed-inactive marker (D-12). Called from
-     * {@link destroy} so a fully-purged group never leaves a stale marker
-     * entry behind. Plan 03-07 (CONV-03) adds a second call site: when a later
-     * rewind supersedes the removing commit and re-establishes canonical
-     * membership, so a subsequent removal can realize again instead of being
-     * permanently suppressed by a stale marker.
-     */
-    async #clearRemovalMarker() {
-        if (!this.#removedMarkerStore) {
-            this.#removalRealizedInMemory = false;
-            return;
-        }
-        await this.#removedMarkerStore.removeItem(this.#removedMarkerKey);
     }
     /**
      * ingests an array of group messages and applies commits to the group state.
@@ -918,12 +1052,16 @@ export class MarmotGroup extends EventEmitter {
                 catch {
                     /* rolled back; retried on a later ingest */
                 }
+                this.emit("ingestResult", result);
                 yield result;
-                if (applied)
-                    yield {
+                if (applied) {
+                    const reconciled = {
                         ...applied,
                         disposition: ingestResultDisposition(applied),
                     };
+                    this.emit("ingestResult", reconciled);
+                    yield reconciled;
+                }
                 continue;
             }
             // An inbound commit removed us (involuntary Remove, or a peer committing
@@ -958,6 +1096,7 @@ export class MarmotGroup extends EventEmitter {
             if (result.kind === "processed" && result.selectedTerminal)
                 await this.realizeDisbandIfNeeded();
             await this.#applyRemovalWithdrawal(result);
+            this.emit("ingestResult", result);
             yield result;
         }
         // WR-16: same trailing re-assert as `reconverge()`, so the live and
@@ -1002,8 +1141,7 @@ export class MarmotGroup extends EventEmitter {
             this.log("rewind superseded one removal but canonical state is still removed — keeping the marker");
             return;
         }
-        this.log("rewind superseded our removal — clearing removal marker");
-        await this.#clearRemovalMarker();
+        await this.session.finishRemovalRecovery();
     }
     /**
      * Encrypts a media file for sharing in a group message, in the group's
@@ -1057,12 +1195,16 @@ export class MarmotGroup extends EventEmitter {
      * timer/promise does not outlive the cached instance.
      */
     dispose() {
+        this.#closeController.abort();
+        this.image.close();
         this.session.dispose();
         this.#rejectQueuedOutbound("Group unloaded; outbound cancelled.");
     }
     /** Destroys the group and purges the group history */
     async destroy() {
         this.log("destroying group");
+        this.image.close();
+        this.session.beginDestroy();
         // Stop the settle timer and fail queued outbound before tearing down (B5).
         this.dispose();
         this.log("clearing group media");

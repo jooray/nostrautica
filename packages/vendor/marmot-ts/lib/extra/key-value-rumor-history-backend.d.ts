@@ -24,6 +24,7 @@ export declare class KeyValueRumorHistoryBackend implements GroupRumorHistoryBac
     queryRumors(filters: Filter | Filter[]): Promise<Rumor[]>;
     /** Save a rumor, keyed by its id so duplicate ingests overwrite in place. */
     addRumor(rumor: Rumor): Promise<void>;
+    removeRumor(rumorId: string): Promise<void>;
     /** Remove every stored rumor. */
     clear(): Promise<void>;
 }

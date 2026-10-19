@@ -1,7 +1,7 @@
 import { Debugger } from "debug";
 import { type CiphersuiteImpl, type ClientState, type IncomingMessageCallback, MlsMessage, type ProcessMessageResult } from "../vendor/ts-mls/index.js";
 import { type DeferredReason } from "../core/inbound.js";
-import type { RejectedForkCandidate } from "./fork-recovery.js";
+import { type RejectedForkCandidate } from "./fork-recovery.js";
 import type { RetainedHistoryStore } from "./retained-store.js";
 import { type StateNotification } from "./state-notifications.js";
 import type { DisbandCandidateEvidence, IngestResult, PeeledMessagePair } from "./types.js";
@@ -51,6 +51,9 @@ export type AppliedForkResolution<TEnvelope> = {
         payload: Uint8Array;
         tag: string;
         epoch: number;
+        commitDigest?: Uint8Array;
+        transportId?: string;
+        rumorId?: string;
     }[];
     /**
      * Notifications withdrawn because the commit(s) that produced them were
@@ -89,6 +92,8 @@ export interface IngestContext<TEnvelope> {
     retained: RetainedHistoryStore;
     /** The rollback horizon (`maxRewindCommits`) from the active convergence policy. */
     maxRewindCommits: number;
+    /** Application expiry is independent of retained recovery material. */
+    appPayloadPastEpochLimit?: number;
     log: Debugger;
     getState(): ClientState;
     /** True only for canonical protocol disband; Unrecoverable is not terminal. */
@@ -133,7 +138,7 @@ export interface IngestContext<TEnvelope> {
     toUnrecoverable(): void;
     /**
      * Content-derived inbound dedup (`inbound-processing.md`; reference
-     * `seen_message_ids` / `sent_message_ids`). Keyed on {@link contentDedupId} so
+     * `seen_message_ids` / `sent_message_ids`). Keyed on the internal `contentDedupId` so
      * the same MLS message re-wrapped in a fresh transport envelope is recognized
      * across sources and restarts-within-process.
      */
@@ -182,11 +187,14 @@ export declare function isAuthenticApplicationMessage(result: ProcessMessageResu
 export declare function ingestEnvelopes<TEnvelope>(ctx: IngestContext<TEnvelope>, envelopes: TEnvelope[], options?: {
     retryCount?: number;
     maxRetries?: number;
+    /** @internal Error accumulation shared by recursive retry passes. */
     _errors?: Array<{
         envelope: TEnvelope;
         error: unknown;
     }>;
+    /** @internal Deferred-message bookkeeping shared by recursive retry passes. */
     _deferred?: Map<TEnvelope, DeferredEntry>;
+    /** @internal Peel-failure bookkeeping shared by recursive retry passes. */
     _decryptFailed?: Set<TEnvelope>;
 }): AsyncGenerator<IngestResult<TEnvelope>>;
 export {};

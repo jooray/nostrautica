@@ -5,7 +5,7 @@ import { type EncryptedMediaVersion, type EncryptMediaFileResult, type MediaAtta
  * the scheme label and validation profile; when omitted it defaults to
  * `encrypted-media-v1` so pre-v2 callers keep their exact behaviour.
  */
-type MediaCryptoFields = Pick<MediaAttachment, "plaintextSha256" | "mediaType" | "filename"> & {
+export type MediaCryptoFields = Pick<MediaAttachment, "plaintextSha256" | "mediaType" | "filename"> & {
     version?: EncryptedMediaVersion;
 };
 /**
@@ -115,4 +115,3 @@ export declare function decryptMediaFile(encrypted: Uint8Array, fileKey: Uint8Ar
  * @throws If no candidate key authenticates the ciphertext, or a check fails
  */
 export declare function decryptMediaFileWithKeys(encrypted: Uint8Array, fileKeys: Uint8Array[], attachment: MediaAttachment): Uint8Array;
-export {};

@@ -2,7 +2,7 @@ import { EventSigner } from "applesauce-core";
 import { EventEmitter } from "eventemitter3";
 import { ClientState, CryptoProvider } from "../vendor/ts-mls/index.js";
 import { SerializedClientState } from "../core/client-state.js";
-import { type ConvergencePolicy } from "../core/convergence.js";
+import type { ConvergencePolicy } from "../core/convergence.js";
 import { GroupHistoryTree } from "../engine/history-tree.js";
 import type { IngestionPoolOptions } from "../engine/ingestion-pool.js";
 import type { AuditContextOptions, AuditSink } from "../audit/index.js";

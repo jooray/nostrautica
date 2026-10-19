@@ -21,6 +21,7 @@ import { GroupRuntime } from "../runtime/group-runtime.js";
 import type { GroupPublishResult, GroupSessionSendIntent } from "../session/group-effects.js";
 import { GroupSession, type DispositionedIngestResult, type GroupSessionHistory, type ProposalBuilder } from "../session/group-session.js";
 import { NostrNetworkInterface, PublishResponse } from "../nostr-interface.js";
+import { GroupImageService } from "./group-image-service.js";
 import type { WelcomeDeliveryOutcome, WelcomeRecipient } from "../transport/nostr/welcome-delivery.js";
 import { GroupMediaService, type DownloadMediaOptions, type EncryptMediaMetadata, type UploadMediaOptions } from "./group-media-service.js";
 export { createAdminCommitPolicyCallback } from "../../engine/admin-policy.js";
@@ -148,8 +149,8 @@ export type MarmotGroupOptions<THistory extends BaseGroupHistory | undefined = u
      * `ClientState` deserialize just to check. Deliberately NOT a field grafted
      * onto the serialized `ClientState`: `ClientState` stays exactly what
      * ts-mls produces, and the marker is independently readable/clearable
-     * (see `#clearRemovalMarker`, used by plan 03-07's CONV-03 rewind-supersede
-     * path). When omitted, realization degrades to in-memory-only — it still
+     * (cleared by the session after validated durable exact-anchor recovery).
+     * When omitted, realization degrades to in-memory-only — it still
      * fires exactly once per process, but does not survive a restart.
      */
     removedMarkerStore?: GenericKeyValueStore<boolean>;
@@ -165,8 +166,8 @@ export type MarmotGroupOptions<THistory extends BaseGroupHistory | undefined = u
     auditContext?: AuditContextOptions;
     /**
      * Convergence policy (branch selection + `maxRewindCommits` rollback horizon).
-     * Set `maxRewindCommits: Infinity` to keep forks of any age eligible for
-     * re-convergence. Defaults to the profile-1 policy.
+     * Keep the finite profile-1 default for production. `Infinity` is an explicit
+     * debugging/forensics choice that can retain unbounded fork evidence.
      */
     convergencePolicy?: ConvergencePolicy;
     /**
@@ -201,18 +202,20 @@ export type MarmotGroupOptions<THistory extends BaseGroupHistory | undefined = u
     scheduler?: ConvergenceScheduler;
     /**
      * The bounded convergence window, derived from the history tree on load. Set
-     * by the loader ({@link GroupRegistry}); not part of the public construction
+     * by the internal loader (`GroupRegistry`); not part of the public construction
      * API.
      */
     retained?: RetainedHistoryStore;
     /**
-     * A full-fork history tree rehydrated from {@link rewindStore} on load. Set by
-     * the loader ({@link GroupRegistry}); not part of the public construction API.
+     * A full-fork history tree rehydrated from the `rewindStore` option on load. Set by
+     * the internal loader (`GroupRegistry`); not part of the public construction API.
      */
     historyTree?: GroupHistoryTree;
 };
 /** Map of events that can be emitted by a MarmotGroup */
 export type MarmotGroupEvents<THistory extends BaseGroupHistory | undefined = any, TMedia extends BaseGroupMedia | undefined = any> = {
+    /** Reconciled results from ingestion, history recovery, and settlement. */
+    ingestResult: (result: DispositionedIngestResult) => void;
     /** Emitted when the group state is updated */
     stateChanged: (state: ClientState) => void;
     /** Emitted when a new application message is received */
@@ -229,14 +232,14 @@ export type MarmotGroupEvents<THistory extends BaseGroupHistory | undefined = an
      * decides when to call {@link MarmotGroup.destroy} to purge it.
      */
     removed: (group: MarmotGroup<THistory, TMedia>) => void;
-    /** Emitted once, after durable terminal notification delivery is recorded. */
+    /** At-most-once callback attempt after its durable record, when storage exists. */
     disbanded: (group: MarmotGroup<THistory, TMedia>, evidence: GroupDisbandedEvent) => void;
     /** Emitted when history persistence fails (best-effort, non-blocking) */
     historyError: (error: Error) => void;
     /**
      * Emitted when the fork-history tree grew during ingest — a new commit or a
      * newly observed fork branch. Fires even when the canonical state is
-     * unchanged (a superseded fork still adds nodes). Read {@link forkTreeView}
+     * unchanged (a superseded fork still adds nodes). Read {@link MarmotGroup.forkTreeView}
      * to re-render.
      */
     historyChanged: (group: MarmotGroup<THistory, TMedia>) => void;
@@ -265,6 +268,10 @@ export declare class MarmotGroup<THistory extends BaseGroupHistory | undefined =
     readonly runtime: GroupRuntime;
     /** Optional media helper for group encrypted attachments. */
     readonly mediaService: GroupMediaService<TMedia>;
+    /** Dedicated canonical group-image source and retrieval service. */
+    readonly image: GroupImageService;
+    /** Aborted when this facade is unloaded, terminal or destroyed. */
+    get closedSignal(): AbortSignal;
     private log;
     on<T extends EventEmitter.EventNames<MarmotGroupEvents<THistory, TMedia>>>(event: T, fn: EventEmitter.EventListener<MarmotGroupEvents<THistory, TMedia>, T>, context?: unknown): this;
     once<T extends EventEmitter.EventNames<MarmotGroupEvents<THistory, TMedia>>>(event: T, fn: EventEmitter.EventListener<MarmotGroupEvents<THistory, TMedia>, T>, context?: unknown): this;
@@ -377,6 +384,10 @@ export declare class MarmotGroup<THistory extends BaseGroupHistory | undefined =
      * publish path entirely, since a founding Add has no `GroupPublishWork` to
      * drive. Retains the Welcome and author so a failed recipient can be
      * retried later via {@link retryWelcome}.
+     * Fanout and retry settlement preserve success for the same encoded Welcome,
+     * author, recipient and KeyPackage event id. A replacement obligation has
+     * independent outcomes and retry work; older attempts settle only their own
+     * obligation. The report follows the most recently started fanout's order.
      *
      * Never throws and never saves: partial or total Welcome failure is a
      * normal outcome (D-12), reported through {@link pendingWelcomes} rather
@@ -398,7 +409,8 @@ export declare class MarmotGroup<THistory extends BaseGroupHistory | undefined =
      * retained (for instance after a restart) — this fails loudly rather than
      * silently no-opping, since a silent no-op is exactly R-04's failure mode.
      * When the matching entry already succeeded, returns it unchanged without
-     * performing another delivery.
+     * performing another delivery. Overlapping retries share one attempt per
+     * recipient; failed or rejected attempts clear so a later call can retry.
      *
      * Deliberately has **no epoch guard**: RESEARCH Priority Finding #1
      * establishes that a late epoch-1 Welcome is safe because the joiner's
@@ -419,7 +431,7 @@ export declare class MarmotGroup<THistory extends BaseGroupHistory | undefined =
      * process restarts when a removal marker store is configured.
      */
     realizeRemovalIfNeeded(): Promise<void>;
-    /** Realizes durable terminal notification exactly once across restarts. */
+    /** Consumes a durable at-most-once callback attempt; projection is authority. */
     realizeDisbandIfNeeded(): Promise<void>;
     /**
      * Persists any pending changes to the group state in the store.

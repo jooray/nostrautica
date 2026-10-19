@@ -35,7 +35,7 @@ export interface ChangedLeaf {
  * - every other resulting leaf (new via Add, or re-signed via an Update
  *   proposal or the committer's own update-path leaf) is returned.
  *
- * Comparing `leaf.signature` byte-inequality (via {@link bytesEqual}, which
+ * Comparing `leaf.signature` byte-inequality (via internal `bytesEqual`, which
  * already treats two `undefined` values as equal) is a safe, zero-dependency
  * proxy for "this leaf's content changed": every `LeafNode` (all three
  * `leafNodeSource` variants — key_package/update/commit) signs over its own

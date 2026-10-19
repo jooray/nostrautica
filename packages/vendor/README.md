@@ -14,19 +14,29 @@ See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 fla
   upstream `marmot-protocol/marmot-ts` master plus the upstream PRs we need that have not
   merged yet. The exact commit (and the bundled ts-mls commit) is recorded in
   `marmot-ts/package.json` under `"vendoredFrom"` — that field, not this README, is the pin.
-  At the time of writing: `0ab8336` = upstream master `71999f56` + our 22 open interop PRs,
-  `#81`, `#83`–`#99` and `#101`–`#104` (every one except third-party work). PR `#82` is not
-  carried: upstream fixed the same problem in `7b59a722`/`162239da` — GREASE ids stay in the
-  `mls_proposals` tag, tag and leaf must match exactly at invite/eligibility, and the
-  GREASE-stripped tags older builds publish stay accepted as a legacy mode — and this branch
-  keeps our `key-package-event-validate` tag check in lockstep with upstream's
-  `checkKeyPackageProposalsTag` so GREASE-carrying tags pass both. The pre-rebase tip is kept
-  as branch `nostrautica-vendor-pre-71999f56` on the fork. The PRs came from a
-  message-by-message comparison against MDK 0.11.0 and HEAD and cover AppDataUpdate
-  extension order, KeyPackage tags/last-resort/relays, encrypted media v2 (0x800b) and
-  the group image (0x8002), strict app-event and kind-445 decoding, past-epoch message
-  retention, Welcome/join and commit-legality checks that match MDK, and fork ranking. The PR
-  list is `gh pr list --repo marmot-protocol/marmot-ts --author jooray`.
+  At the time of writing: `7c2725d` = upstream **v0.7.0** master `14a7d7f` + our two PRs
+  that are still open:
+
+  - `#83` encrypted media v2 (`0x800b`). **Required, not optional**: every room the
+    pre-0.7.0 build created lists `0x800b` as a required component (as MDK groups do), and
+    upstream without it refuses to join those rooms ("Welcome requires unsupported
+    component") and makes KeyPackages that cannot be invited into them.
+  - `#94` check a kind-30443's tags against its KeyPackage before inviting (MDK parity).
+
+  The other 20 of our interop PRs (`#81`, `#84`–`#93`, `#95`–`#99`, `#101`–`#104`) are in
+  upstream, merged or superseded by equivalent upstream work in 0.7.0. When `#83` and `#94`
+  land, vendor upstream directly (`--repo https://github.com/marmot-protocol/marmot-ts.git
+  --ref <tag>`) and drop the fork. The previous pin (`0ab8336`, master `71999f56` + 22 PRs) is
+  kept as branch `nostrautica-vendor-pre-0.7.0` on the fork. The PR list is
+  `gh pr list --repo marmot-protocol/marmot-ts --author jooray`.
+
+  0.7.0 reads state the previous pin wrote (coordinator SQLite and app IndexedDB groups,
+  stored KeyPackages, including ones published under a `web-` slot); this was checked by
+  writing state with the old build and operating on it with the new one. Its one break that
+  touched us: KeyPackage slot ids (`clientId` / `d`) must be 64 lowercase hex. The app
+  migrates its old `web-<16 hex>` slot once (`identity.ts` `ensureClientId`, then
+  `MarmotChat.retireLegacyKeyPackageSlot` deletes the old address), and the coordinator
+  persists a random slot in `marmot_kv` (`coordinatorKeyPackageSlot`).
 
   This generation produces the **current Marmot profile**: KeyPackages and leaves carry the
   `marmot.member.account-identity-proof.v2` component (**0x8009**, a kind-450 event signed by

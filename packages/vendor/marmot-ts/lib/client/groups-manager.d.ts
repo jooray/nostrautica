@@ -10,6 +10,7 @@ import type { AuditContextOptions, AuditSink } from "../audit/index.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
 import type { IngestPersistenceCapability } from "./marmot-client.js";
 import { BaseGroupHistory, BaseGroupMedia, GroupHistoryFactory, GroupMediaFactory, MarmotGroup, type GroupDisbandedEvent } from "./group/marmot-group.js";
+import { type GroupImageProfile, type GroupImageOperationOptions, type GroupImageMutationResult } from "./group/group-image-service.js";
 import type { WelcomeKeyPackageCandidate } from "./key-package-store.js";
 import { type CreateGroupOptions } from "./group-factory.js";
 import type { GroupRuntime } from "./runtime/group-runtime.js";
@@ -17,6 +18,7 @@ import type { GroupPublishResult, GroupSessionSendIntent } from "./session/group
 import type { DispositionedIngestResult, GroupSession } from "./session/group-session.js";
 import type { NostrNetworkInterface, PublishResponse, Unsubscribable } from "./nostr-interface.js";
 import { type RejectReason, type VerifyEventMethod } from "./verify.js";
+/** Deterministic bounded LRU used by long-lived group subscriptions. */
 export declare class BoundedIdCache {
     #private;
     readonly capacity: number;
@@ -27,12 +29,28 @@ export declare class BoundedIdCache {
 }
 /** Options for {@link GroupsManager.connect} / {@link GroupsManager.connectAll}. */
 export interface ConnectOptions {
+    /** Stops intake, including a connection still waiting for backfill. */
+    signal?: AbortSignal;
     /**
      * Relays to subscribe on when a group carries no relays of its own. A group
      * with neither its own relays nor a fallback is skipped (it cannot receive,
      * just as it cannot send).
      */
     fallbackRelays?: string[];
+    /**
+     * Overlap, in seconds, re-fetched behind each relay's stored backfill
+     * cursor (and ahead of the live subscription's start) to absorb relay clock
+     * skew and late-propagating events. Defaults to 600 (10 minutes).
+     */
+    backfillSlackSeconds?: number;
+    /** `limit` of each backfill page request. Defaults to 500. */
+    backfillPageSize?: number;
+    /**
+     * Maximum pages fetched from each relay per connect. When a relay hits the
+     * cap the fetched events are still ingested, but its cursor is not
+     * advanced, so the remainder is retried on the next connect. Defaults to 50.
+     */
+    backfillMaxPages?: number;
 }
 /** Options for creating a new GroupsManager */
 export type GroupsManagerOptions<THistory extends BaseGroupHistory | undefined = undefined, TMedia extends BaseGroupMedia | undefined = undefined> = {
@@ -72,8 +90,9 @@ export type GroupsManagerOptions<THistory extends BaseGroupHistory | undefined =
     mediaFactory?: GroupMediaFactory<TMedia>;
     /**
      * Convergence policy applied to every group (branch selection + the
-     * `maxRewindCommits` rollback horizon). Set `maxRewindCommits: Infinity` to
-     * keep forks of any age eligible for re-convergence. Defaults to profile 1.
+     * `maxRewindCommits` rollback horizon). Keep the finite profile-1 default
+     * for production. `Infinity` is an explicit debugging/forensics choice
+     * that keeps arbitrarily old forks eligible and can retain unbounded evidence.
      */
     convergencePolicy?: ConvergencePolicy;
     /**
@@ -88,6 +107,8 @@ export type GroupsManagerOptions<THistory extends BaseGroupHistory | undefined =
      * reaches `group.ingest()`. Defaults to applesauce's `verifyEvent`.
      */
     verifyEvent?: VerifyEventMethod;
+    /** Maximum admitted image mutations per loaded group, including active work. Default 16. */
+    maxPendingImageMutations?: number;
 };
 /** Events emitted by {@link GroupsManager} */
 export type GroupsManagerEvents<THistory extends BaseGroupHistory | undefined = any, TMedia extends BaseGroupMedia | undefined = any> = {
@@ -130,11 +151,13 @@ export type GroupsManagerEvents<THistory extends BaseGroupHistory | undefined = 
      * tag (SEC-01/WIRE-02).
      */
     rejected: (groupId: Uint8Array, event: NostrEvent, reason: RejectReason) => void;
+    /** Every connected group result, including timer-driven invalidations, once. */
+    ingestResult: (groupId: Uint8Array, result: DispositionedIngestResult) => void;
 };
 /**
  * Orchestrates the lifecycle of {@link MarmotGroup} instances. Delegates
- * in-memory caching and store hydration to a {@link GroupRegistry} and group
- * construction to a {@link GroupFactory}, layering the public lifecycle events
+ * in-memory caching and store hydration to an internal `GroupRegistry` and group
+ * construction to an internal `GroupFactory`, layering the public lifecycle events
  * (created/imported/joined/destroyed/left) and the send/ingest facade on top.
  */
 export declare class GroupsManager<THistory extends BaseGroupHistory | undefined = any, TMedia extends BaseGroupMedia | undefined = any> extends EventEmitter<GroupsManagerEvents<THistory, TMedia>> {
@@ -159,6 +182,10 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
     get(groupId: Uint8Array | string): Promise<MarmotGroup<THistory, TMedia>>;
     /** Returns the protocol session for a loaded or persisted group. */
     session(groupId: Uint8Array | string): Promise<GroupSession<THistory>>;
+    /** Upload opaque encrypted bytes, then submit guarded metadata through MLS. */
+    replaceGroupImage(groupId: Uint8Array | string, bytes: Uint8Array, mediaType: string, profile: GroupImageProfile, options?: GroupImageOperationOptions): Promise<GroupImageMutationResult>;
+    /** Clear canonical Blossom metadata; URL avatars and remote blobs remain. */
+    clearGroupImage(groupId: Uint8Array | string, options?: GroupImageOperationOptions): Promise<GroupImageMutationResult>;
     /** Returns the runtime publisher for a loaded or persisted group. */
     runtime(groupId: Uint8Array | string): Promise<GroupRuntime>;
     /** Returns the complete group info/debug model for a loaded or persisted group. */
@@ -237,6 +264,8 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
     adoptClientState(state: ClientState, options?: {
         /** Which lifecycle event to emit. Defaults to `"imported"`. */
         emit?: "imported" | "joined";
+        /** Runs after duplicate rejection while adoption for this group is serialized. */
+        beforeAdopt?: () => Promise<void>;
     }): Promise<MarmotGroup<THistory, TMedia>>;
     /**
      * Imports a new group from a {@link ClientState} object, persisting it to
@@ -263,6 +292,8 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
         welcome: Welcome;
         candidates: WelcomeKeyPackageCandidate[];
         ciphersuiteImpl: CiphersuiteImpl;
+        /** Records durable cleanup intent only after validation and duplicate rejection. */
+        beforeAdopt?: (groupId: Uint8Array, keyPackageRef: Uint8Array) => Promise<void>;
     }): Promise<{
         group: MarmotGroup<THistory, TMedia>;
         consumedKeyPackageRef: Uint8Array | null;
@@ -290,5 +321,7 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
      * Returns an async generator that yields the current list of groups
      * whenever the store changes.
      */
-    watch(): AsyncGenerator<MarmotGroup<THistory, TMedia>[]>;
+    watch(options?: {
+        signal?: AbortSignal;
+    }): AsyncGenerator<MarmotGroup<THistory, TMedia>[]>;
 }

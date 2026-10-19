@@ -1,4 +1,5 @@
 import { createAuditEmitter, errorDetail, } from "../../audit/index.js";
+import { confirmPublicationRetention } from "./publication-retention.js";
 import { hasAck } from "../../utils/index.js";
 /** Drives group publish effects through Nostr and confirms or rolls back state. */
 export class GroupRuntime {
@@ -10,6 +11,7 @@ export class GroupRuntime {
     #confirmPublished;
     #publishFailed;
     #save;
+    #assertOpen;
     #log;
     #audit;
     constructor(options) {
@@ -21,6 +23,7 @@ export class GroupRuntime {
         this.#confirmPublished = options.confirmPublished;
         this.#publishFailed = options.publishFailed;
         this.#save = options.save;
+        this.#assertOpen = options.assertOpen ?? (() => { });
         this.#log = options.log;
         this.#audit = createAuditEmitter(options.audit && options.auditContext
             ? { ...options.auditContext, sink: options.audit }
@@ -65,6 +68,7 @@ export class GroupRuntime {
                     actorPubkey: work.actorPubkey,
                     welcome: work.welcome,
                     welcomeRecipients: work.welcomeRecipients,
+                    signal: work.signal,
                 });
                 return { work, ...result };
             }
@@ -85,9 +89,15 @@ export class GroupRuntime {
                     actorPubkey: work.actorPubkey,
                     welcome: work.welcome,
                     welcomeRecipients: work.welcomeRecipients,
+                    signal: work.signal,
                 });
         }
     }
+    /**
+     * Publish the original signed envelope on every attempt. Its timestamp,
+     * ciphertext and source-epoch expiration are fixed before signing; retries
+     * must reuse this artifact even after the current group policy changes.
+     */
     async publishApplication(envelope) {
         return this.#publishToGroupRelays(envelope, "Failed to publish application message");
     }
@@ -104,9 +114,11 @@ export class GroupRuntime {
             throw error;
         }
         try {
+            this.#assertOpen();
             this.#confirmPublished(pending);
         }
         catch (error) {
+            this.#assertOpen();
             return {
                 response,
                 notifications: [],
@@ -139,9 +151,11 @@ export class GroupRuntime {
         }
         let notifications;
         try {
+            this.#assertOpen();
             notifications = this.#confirmPublished(pending);
         }
         catch (error) {
+            this.#assertOpen();
             return {
                 response,
                 notifications: [],
@@ -158,7 +172,8 @@ export class GroupRuntime {
     async #publishCommitResult(options) {
         let response;
         try {
-            response = await this.#publishToGroupRelays(options.envelope, "Failed to publish commit");
+            options.signal?.throwIfAborted();
+            response = await this.#publishToGroupRelays(options.envelope, "Failed to publish commit", options.signal);
         }
         catch (err) {
             this.#publishFailed(options.pending);
@@ -166,9 +181,11 @@ export class GroupRuntime {
         }
         let notifications;
         try {
+            this.#assertOpen();
             notifications = this.#confirmPublished(options.pending);
         }
         catch (error) {
+            this.#assertOpen();
             return {
                 response,
                 notifications: [],
@@ -179,12 +196,14 @@ export class GroupRuntime {
         }
         const persistence = await this.#persistConfirmedState();
         const innerWelcome = options.welcome?.welcome;
+        this.#assertOpen();
         let welcomeDelivery = {
             kind: "notRequired",
         };
         if (innerWelcome && options.welcomeRecipients?.length) {
             welcomeDelivery = await this.#deliverWelcomes(innerWelcome, options.actorPubkey, options.welcomeRecipients);
         }
+        this.#assertOpen();
         return {
             response,
             notifications,
@@ -194,22 +213,30 @@ export class GroupRuntime {
         };
     }
     async #persistConfirmedState() {
+        this.#assertOpen();
+        let persistence;
         try {
             await this.#save();
-            return { kind: "succeeded" };
+            persistence = { kind: "succeeded" };
         }
         catch (error) {
-            return { kind: "failed", error: errorDetail(error) };
+            persistence = { kind: "failed", error: errorDetail(error) };
         }
+        this.#assertOpen();
+        return persistence;
     }
-    async #publishToGroupRelays(envelope, failurePrefix) {
+    async #publishToGroupRelays(envelope, failurePrefix, signal) {
+        this.#assertOpen();
         const relays = this.#getRelays();
         if (!relays)
             throw new Error("Group has no relays available to send messages.");
         this.#emitPublishAttempt(envelope, "group", relays);
         let response;
         try {
-            response = await this.#getNetwork().publish(relays, envelope);
+            const network = this.#getNetwork();
+            signal?.throwIfAborted();
+            response = await network.publish(relays, envelope);
+            this.#assertOpen();
         }
         catch (error) {
             this.#emitPublishFailure(envelope, "group", relays, "adapter", error);
@@ -229,6 +256,7 @@ export class GroupRuntime {
             throw new Error(`${failurePrefix}: ${errors || "no relay acknowledged"}`);
         }
         this.#emitPublishOutcome(envelope, "group", response, true);
+        confirmPublicationRetention(this, envelope.id);
         return response;
     }
     #emitPublishAttempt(envelope, targetKind, relays) {
