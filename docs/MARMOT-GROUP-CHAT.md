@@ -105,8 +105,9 @@ paths, messages both ways, avatar commits followed by White Noise, and revoke.
 
 Both the app and the coordinator run `@internet-privacy/marmot-ts`, vendored pre-built
 in `packages/vendor/marmot-ts` (with its ts-mls fork bundled inside) from
-`jooray/marmot-ts` branch `nostrautica-vendor`, which is upstream master plus the
-upstream PRs we need before they merge. `packages/vendor/README.md` has the pin, the
+`jooray/marmot-ts` branch `nostrautica-vendor`, which is upstream (v0.7.0) plus the
+two upstream PRs we need before they merge (#83 encrypted media v2, #94 KeyPackage tag
+checks). `packages/vendor/README.md` has the pin, the
 carried patches and the one-command re-vendor (`node scripts/vendor-marmot.mjs`).
 
 This generation speaks the **current Marmot profile**. Every KeyPackage and leaf carries
@@ -134,6 +135,13 @@ discarded, not migrated). Each side retires what it cannot run:
   event binding, and KeyPackages that marmot flags `nonCurrent` are purged. The next
   `ensurePublished` publishes a current 30443 in the same `d` slot and re-attests, and
   the device joins the new room through the normal Welcome path.
+
+**KeyPackage slot.** Since marmot-ts 0.7.0 the `d` of a kind-30443 must be 32 random
+bytes as lowercase hex, persisted per install. Builds before that used `web-<16 hex>`;
+such an install mints a new slot once, publishes under it, and then deletes the old
+address with a NIP-09 `a` deletion. Spent KeyPackages from the old slot are dropped
+locally; an unused one keeps its private key, because an in-flight Welcome may be
+encrypted to it.
 
 **Encrypted media.** marmot-ts now creates every group with
 `marmot.group.encrypted-media.v2` (0x800b), listing MDK's default Blossom servers, as

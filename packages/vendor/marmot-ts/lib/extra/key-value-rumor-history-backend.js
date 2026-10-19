@@ -43,6 +43,11 @@ export class KeyValueRumorHistoryBackend {
     async addRumor(rumor) {
         await this.store.setItem(rumor.id, rumor);
     }
+    async removeRumor(rumorId) {
+        if (!/^[a-f0-9]{64}$/.test(rumorId))
+            throw new Error("Invalid rumor ID for history removal");
+        await this.store.removeItem(rumorId);
+    }
     /** Remove every stored rumor. */
     async clear() {
         await this.store.clear();

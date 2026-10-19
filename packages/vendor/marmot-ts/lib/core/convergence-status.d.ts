@@ -25,7 +25,7 @@ export declare const convergenceStatuses: {
     readonly blocked: "Blocked";
 };
 /** A convergence status value. */
-export type ConvergenceStatus = (typeof convergenceStatuses)[keyof typeof convergenceStatuses];
+export type ConvergenceStatus = "Syncing" | "Resolving" | "Settled" | "Blocked";
 /** The inputs from which {@link deriveConvergenceStatus} computes the status. */
 export interface ConvergenceStatusInput {
     /** Current wall-clock time (ms). */

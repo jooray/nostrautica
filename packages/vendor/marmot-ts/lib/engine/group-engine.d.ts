@@ -1,11 +1,13 @@
-import { CiphersuiteImpl, ClientState } from "../vendor/ts-mls/index.js";
+import { CiphersuiteImpl, ClientState, Proposal } from "../vendor/ts-mls/index.js";
 import { type CommitIntegrityViolation } from "../core/components/integrity.js";
 import { type AccountIdentityProofRejectReason, type GroupProfileSupport } from "../core/components/account-identity-proof.js";
 import { type ConvergenceStatus } from "../core/convergence-status.js";
 import { type GroupLifecycleState } from "../core/group-lifecycle.js";
 import { type AuditContextOptions, type AuditSink } from "../audit/index.js";
 import type { GenericKeyValueStore } from "../utils/key-value.js";
+import { type RemovalAttribution, type RemovalRecovery } from "./fork-recovery.js";
 import { GroupHistoryTree } from "./history-tree.js";
+import type { HistoryRetentionPin, HistoryRetentionOptions, HistoryRetentionPlan } from "./retention.js";
 import { type IngestionPoolOptions } from "./ingestion-pool.js";
 import { type StateNotification } from "./state-notifications.js";
 import { RetainedHistoryStore } from "./retained-store.js";
@@ -83,6 +85,8 @@ export type MarmotGroupEngineOptions<TEnvelope> = {
     ciphersuite: CiphersuiteImpl;
     peeler: GroupPeeler<TEnvelope>;
     onStateChanged?: (state: ClientState) => void;
+    /** Synchronous terminal fence before exposing the selected state to observers. */
+    onSelectedDisband?: (evidence: DisbandCandidateEvidence, state: ClientState) => void;
     /**
      * The bounded convergence window (canonical states + applied commits within
      * the rollback horizon), derived from the history tree on load. When omitted
@@ -99,8 +103,9 @@ export type MarmotGroupEngineOptions<TEnvelope> = {
     /**
      * The signed convergence policy governing branch selection and the rollback
      * horizon (`maxRewindCommits`). Defaults to {@link DEFAULT_CONVERGENCE_POLICY}.
-     * Set `maxRewindCommits` to `Infinity` to never expire old forks (the full
-     * history tree retains everything regardless). Validated on construction.
+     * Keep that finite default for production. `Infinity` is an explicit
+     * debugging/forensics choice that can retain unbounded fork evidence.
+     * The horizon does not guarantee full-history tree pruning. Validated on construction.
      */
     convergencePolicy?: import("../core/convergence.js").CompatibleConvergencePolicy;
     /**
@@ -123,7 +128,7 @@ export type MarmotGroupEngineOptions<TEnvelope> = {
     scheduler?: ConvergenceScheduler;
     /**
      * Called once the quiescence window elapses after convergence-relevant input,
-     * so the owner can re-check {@link convergenceStatus} and release any queued
+     * so the owner can re-check {@link MarmotGroupEngine.convergenceStatus} and release any queued
      * outbound work (B5). The engine itself holds no outbound queue.
      */
     onSettleCheck?: () => void | Promise<void>;
@@ -153,6 +158,25 @@ export declare class MarmotGroupEngine<TEnvelope> {
     constructor(options: MarmotGroupEngineOptions<TEnvelope>);
     /** Number of undecryptable events currently held in the ingestion pool. */
     get pendingCount(): number;
+    /** @internal Fence engine-mediated mutation through durable retention cleanup. */
+    retainSettled(operation?: (capture: Readonly<HistoryRetentionOptions & {
+        revision: bigint;
+    }>, publish: (plan: HistoryRetentionPlan) => Promise<void>) => Promise<HistoryRetentionPlan>, dependencies?: {
+        pins?: readonly HistoryRetentionPin[];
+        contentIds?: readonly string[];
+        unresolvedDependency?: boolean;
+    }): Promise<{
+        kind: "committed";
+        floorEpoch: number;
+    } | {
+        kind: "postponed";
+        reason: string;
+    }>;
+    /** @internal Observable retention pressure, including unfinished exact pins. */
+    retentionIdentityCounts(): Readonly<{
+        sent: number;
+        seen: number;
+    }>;
     /**
      * The undecryptable events currently held in the ingestion pool, oldest-first:
      * received transport envelopes that have not yet decrypted/processed into the
@@ -200,12 +224,25 @@ export declare class MarmotGroupEngine<TEnvelope> {
      * `Settled` as wall-clock time passes even with no new input.
      */
     get convergenceStatus(): ConvergenceStatus;
+    exportDeliveredPayloads(): import("./delivered-payloads.js").DeliveredAppPayload<TEnvelope>[];
+    /** Permanently close plaintext delivery bookkeeping on local destruction. */
+    destroyDeliveredPayloads(): void;
+    /** Rewind obligations awaiting the transport owner's durable handoff. */
+    exportInvalidatedPayloads(): import("./delivered-payloads.js").DeliveredAppPayload<TEnvelope>[];
+    acknowledgeInvalidatedPayloads(entries: Iterable<import("./delivered-payloads.js").DeliveredAppPayload<TEnvelope>>): void;
+    importDeliveredPayloads(entries: import("./delivered-payloads.js").DeliveredAppPayload<TEnvelope>[]): void;
     /** Snapshot of the active immutable pass, exposed for scheduler diagnostics. */
     get convergencePass(): ConvergencePassState | undefined;
     /** Canonical terminal evidence retained until the client persists its tombstone. */
     get selectedDisbandEvidence(): DisbandCandidateEvidence | undefined;
     /** Number of envelopes retained but not yet admitted to a convergence pass. */
     get retainedConvergenceInputCount(): number;
+    /**
+     * The envelopes retained but not yet admitted to a convergence pass (held
+     * while a commit publication or merge gates inbound, or a pass reaches its
+     * cutoff). Like {@link pendingEnvelopes}, they exist only in memory.
+     */
+    retainedConvergenceInput(): TEnvelope[];
     /** Opens or refreshes the current collection pass from the monotonic clock. */
     admitConvergencePass(): ConvergencePassState;
     /** Current durable irreversible request, hydrated before this promise resolves. */
@@ -217,7 +254,9 @@ export declare class MarmotGroupEngine<TEnvelope> {
     /** Atomically enables lifecycle-v1 for a legacy group when every leaf supports it. */
     enableGroupDisbanding(): Promise<SendResult<TEnvelope> | undefined>;
     /** Executes a local send intent and returns the wrapped transport envelope. */
-    send(intent: SendIntent): Promise<SendResult<TEnvelope>>;
+    send(intent: SendIntent, 
+    /** Ephemeral caller fence; checked after fallible commit preparation, never stored in state. */
+    assertPreparation?: (proposals: readonly Proposal[]) => void): Promise<SendResult<TEnvelope>>;
     /**
      * Applies staged state after publish confirmation (publish-before-apply).
      *
@@ -258,7 +297,7 @@ export declare class MarmotGroupEngine<TEnvelope> {
      * `GroupSession`) already does exactly that.
      *
      * @yields DispositionedIngestResult - processing result plus inbound
-     *   {@link Disposition}.
+     *   {@link @internet-privacy/marmot-ts/core!Disposition}.
      */
     ingest(envelopes: TEnvelope[], options?: {
         maxRetries?: number;
@@ -273,6 +312,21 @@ export declare class MarmotGroupEngine<TEnvelope> {
      * Called on group teardown (destroy/unload) so no timer outlives the group.
      */
     dispose(): void;
+    /**
+     * Re-scores the persisted fork history against the current tip and switches to
+     * the canonical branch when a competitor wins (`convergence.md`). Every
+     * candidate is sourced from the history tree, so a fork known only on disk is
+     * re-evaluated without the transport re-delivering it — the load-time and
+     * post-sweep path for dynamic fork switching. A switch reuses
+     * {@link #applyForkResolution}; only the resulting `invalidated` retractions are
+     * yielded (a tree-fed switch has no triggering envelope, so it is never a
+     * `processed` result — the now-canonical branch's app messages surface via a
+     * follow-up sweep). No-op unless `Stable` and the tree holds a competing tip.
+     */
+    /** Replay exact-anchor retained descendants before granting membership recovery. */
+    recoverRemovedFromAnchor(attribution: RemovalAttribution, expectedTip?: string): Promise<RemovalRecovery | undefined>;
+    /** Validate an already-saved active projection against durable selection authority. */
+    validateRemovalRecovery(attribution: RemovalAttribution, authority: RemovalRecovery, state?: ClientState): Promise<boolean>;
     /**
      * Drives one tree-fed re-convergence pass to completion, switching to the
      * canonical branch if the persisted history now favors a competing fork. Public

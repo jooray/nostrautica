@@ -52,6 +52,11 @@ export declare function parseMediaAttachment(tag: string[]): MediaAttachment;
  * `null` if the tag is not a valid encrypted-media reference. Use
  * {@link parseMediaAttachment} to learn why a tag was rejected.
  *
+ * A `null` result means the media reference is invalid and MUST be dropped (the
+ * containing message should be dropped too for a host-safety failure). Locator
+ * fetchability against group policy is checked separately by
+ * {@link selectFetchableLocators}.
+ *
  * @param tag - A raw `imeta` tag array from a Nostr event
  */
 export declare function parseMediaImetaTag(tag: string[]): MediaAttachment | null;

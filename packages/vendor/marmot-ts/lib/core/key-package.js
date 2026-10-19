@@ -1,16 +1,24 @@
 /** @module @category Core - Key Package */
-import { defaultCredentialTypes, defaultCryptoProvider, generateKeyPackageWithKey as MLSGenerateKeyPackageWithKey, makeKeyPackageRef, } from "../vendor/ts-mls/index.js";
+import { defaultCredentialTypes, defaultCryptoProvider, generateKeyPackageWithKey as MLSGenerateKeyPackageWithKey, makeKeyPackageRef, appDataDictionaryExtensionType, makeAppDataDictionaryExtension, } from "../vendor/ts-mls/index.js";
 import { hexToBytes } from "@noble/hashes/utils.js";
 import { createDefaultKeyPackageLifetime, isLifetimeWithinCap, } from "../utils/timestamp.js";
 import { ensureMarmotCapabilities } from "./capabilities.js";
 import { makeLeafAppComponentsExtension, produceAccountIdentityProof, } from "./components/index.js";
 import { getCredentialPubkey } from "./credential.js";
 import { defaultCapabilities } from "./default-capabilities.js";
-import { ensureLastResortExtension } from "./extensions.js";
+import { LAST_RESORT_EXTENSION_TYPE } from "./protocol.js";
+import { readKeyPackageDictionary } from "./key-package-dictionary.js";
+import { appComponentsEntry } from "./components/dictionary.js";
 /** Create default extensions for a key package */
 export function keyPackageDefaultExtensions() {
-    return ensureLastResortExtension([]);
+    return [
+        makeAppDataDictionaryExtension([
+            appComponentsEntry([0x0004]),
+            { componentId: 0x0004, data: new Uint8Array() },
+        ]),
+    ];
 }
+export { isReusableKeyPackage } from "./key-package-dictionary.js";
 /** Calculates a key package reference with the hash implementation based on the key package's cipher suite */
 export async function calculateKeyPackageRef(keyPackage, cryptoProvider) {
     const provider = cryptoProvider ?? defaultCryptoProvider;
@@ -24,7 +32,7 @@ export async function calculateKeyPackageRef(keyPackage, cryptoProvider) {
  * @see refs/marmot/foundation/key-packages.md
  * @see refs/marmot/app-components/account-identity-proof-v2.md
  */
-export async function generateKeyPackage({ credential, capabilities, lifetime, extensions, isLastResort = true, signer, createdAt, ciphersuiteImpl, }) {
+export async function generateKeyPackage({ credential, capabilities, lifetime, extensions, isLastResort = true, signer, createdAt, signatureKeyPair: suppliedSignatureKeyPair, ciphersuiteImpl, }) {
     if (credential.credentialType !== defaultCredentialTypes.basic)
         throw new Error("Marmot key packages must use a basic credential");
     // Ensure the credential has a valid pubkey
@@ -38,18 +46,40 @@ export async function generateKeyPackage({ credential, capabilities, lifetime, e
     // rejects an explicit caller-supplied `lifetime` override (D-09).
     if (!isLifetimeWithinCap(resolvedLifetime))
         throw new Error(`generateKeyPackage: lifetime range ${resolvedLifetime.notAfter - resolvedLifetime.notBefore}s exceeds the 7,261,200s (84-day) cap`);
-    // Individual KeyPackages may be single-use or last-resort reusable
-    // (`foundation/key-packages.md`); last-resort is a KeyPackage-level marker,
-    // not an advertised capability.
-    // `isLastResort` controls whether this KeyPackage is marked reusable.
-    const resolvedExtensions = isLastResort
-        ? ensureLastResortExtension(extensions ?? [])
-        : (extensions ?? []);
+    // Reuse is KeyPackage data, never an MLS capability or LeafNode entry
+    // (refs/marmot/foundation/key-packages.md).
+    const suppliedExtensions = extensions ?? [];
+    const dictionary = (readKeyPackageDictionary(suppliedExtensions) ?? []).filter((entry) => entry.componentId !== 0x0004 && entry.componentId !== 0x0001);
+    if (isLastResort)
+        dictionary.push({ componentId: 0x0004, data: new Uint8Array() });
+    dictionary.sort((a, b) => a.componentId - b.componentId);
+    const resolvedExtensions = suppliedExtensions.filter((extension) => extension.extensionType !== LAST_RESORT_EXTENSION_TYPE &&
+        extension.extensionType !== appDataDictionaryExtensionType);
+    if (dictionary.length)
+        resolvedExtensions.push(makeAppDataDictionaryExtension([
+            appComponentsEntry(dictionary.map((entry) => entry.componentId)),
+            ...dictionary,
+        ]));
     // Every leaf carries exactly one 0x8009 account identity proof binding the
     // leaf signature key to the Nostr account (refs/marmot/app-components/
     // account-identity-proof-v2.md; refs/marmot/foundation/key-packages.md).
-    // The leaf signature keypair is generated first so the proof can bind it.
-    const signatureKeyPair = await ciphersuiteImpl.signature.keygen();
+    // The leaf signature keypair is selected first so the proof can bind it.
+    const signatureKeyPair = suppliedSignatureKeyPair ?? (await ciphersuiteImpl.signature.keygen());
+    if (suppliedSignatureKeyPair) {
+        // A sign/verify round trip validates both the algorithm and matching halves.
+        // Do not expose key material or provider errors in the failure message.
+        const challenge = new TextEncoder().encode("marmot-ts signature key validation");
+        let valid = false;
+        try {
+            const signature = await ciphersuiteImpl.signature.sign(signatureKeyPair.signKey, challenge);
+            valid = await ciphersuiteImpl.signature.verify(signatureKeyPair.publicKey, challenge, signature);
+        }
+        catch {
+            /* Reject malformed or incompatible key material below. */
+        }
+        if (!valid)
+            throw new Error("signatureKeyPair is incompatible with the ciphersuite");
+    }
     const proof = await produceAccountIdentityProof({
         signer,
         accountIdentity: hexToBytes(accountPubkey),

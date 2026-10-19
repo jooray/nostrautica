@@ -7,6 +7,7 @@ import {
   buildChatKeyProfile,
   resolveChatIdentity,
   loadChatDeviceKey,
+  clearLegacyClientId,
   lockChatIdentityForLogout,
   unlockChatIdentityForLogin,
   type ChatIdentity,
@@ -421,6 +422,36 @@ describe("per-device chat identity (NIP §10.1, decision D3)", () => {
     const deviceB = await resolveChatIdentity(localSigner(accountSk));
     expect(deviceB.pubkey).not.toBe(deviceA.pubkey); // two devices = two members
     expect(deviceB.account).toBe(deviceA.account); // same owning account
+  });
+
+  // marmot-ts 0.7.0 refuses any KeyPackage slot (`d`) that is not 64 lowercase hex,
+  // which every install before it held as a `web-<16 hex>` label.
+  it("mints a 64-hex KeyPackage slot and keeps it across resolves", async () => {
+    const id = await resolveChatIdentity(remoteSigner("d".repeat(64)));
+    expect(id.clientId).toMatch(/^[0-9a-f]{64}$/);
+    expect(id.legacyClientId).toBeUndefined();
+    expect((await resolveChatIdentity(remoteSigner("d".repeat(64)))).clientId).toBe(id.clientId);
+  });
+
+  it("replaces a pre-0.7.0 `web-` slot once and remembers it until it is retired", async () => {
+    const first = await resolveChatIdentity(remoteSigner("e".repeat(64)));
+    // Rewind the stored slot to what an older build wrote.
+    const backend = marmotKvBackend();
+    const key = (await backend.keysWithPrefix("__chat_client_id__")).find((k) => k.endsWith(first.pubkey))!;
+    await backend.set(key, "web-0123456789abcdef");
+
+    const migrated = await resolveChatIdentity(remoteSigner("e".repeat(64)));
+    expect(migrated.clientId).toMatch(/^[0-9a-f]{64}$/);
+    expect(migrated.legacyClientId).toBe("web-0123456789abcdef");
+    // Stable: the next start neither mints another slot nor forgets the legacy one.
+    const again = await resolveChatIdentity(remoteSigner("e".repeat(64)));
+    expect(again.clientId).toBe(migrated.clientId);
+    expect(again.legacyClientId).toBe("web-0123456789abcdef");
+
+    await clearLegacyClientId(migrated.pubkey);
+    const retired = await resolveChatIdentity(remoteSigner("e".repeat(64)));
+    expect(retired.clientId).toBe(migrated.clientId);
+    expect(retired.legacyClientId).toBeUndefined();
   });
 
   it("no 31602 chat-device-key backup is published on resolve (backup retired)", async () => {

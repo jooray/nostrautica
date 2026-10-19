@@ -15,7 +15,7 @@
 import { MarmotClient, Proposals } from "@internet-privacy/marmot-ts/client";
 import type { GroupRumorHistory } from "@internet-privacy/marmot-ts/client";
 import { getNostrGroupIdHex, getPubkeyLeafNodes, getGroupMembers } from "@internet-privacy/marmot-ts/core";
-import { KIND_DM_RELAY_LIST, KIND_RELAY_LIST } from "@nostrautica/protocol";
+import { KIND_DELETION, KIND_DM_RELAY_LIST, KIND_RELAY_LIST } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
@@ -27,6 +27,7 @@ import {
   buildChatKeyProfile,
   defaultDeviceLabel,
   loadDeviceLabel,
+  clearLegacyClientId,
   type ChatIdentity,
 } from "./identity.js";
 import {
@@ -257,6 +258,7 @@ export class MarmotChat {
     // is retrievable; if not, force a fresh publish to the same `d` slot (the relay
     // replaces in place, so this can't spawn a duplicate).
     await this.ensureKeyPackageOnRelays();
+    await this.retireLegacyKeyPackageSlot();
     // Every account type attests its per-device chat key to the coordinator (D3),
     // sealed by the account key and carrying a proof of possession (NIP §10.2).
     //
@@ -401,6 +403,44 @@ export class MarmotChat {
       });
     } catch (err) {
       console.warn("marmot: key-package relay re-verification failed", err);
+    }
+  }
+
+  /**
+   * Delete the kind-30443 this install published under its pre-0.7.0 device-label
+   * slot (`web-…`, see `ensureClientId`). A new `d` is a new address, so without
+   * this the old KeyPackage stays discoverable beside the new one and the
+   * coordinator, or a White Noise inviter, could still pick it.
+   *
+   * Runs after the new slot's package is on the relays, so the device is never
+   * left with nothing to be invited by. The relay copy goes by address (`a`), which
+   * covers every version published there. Locally only SPENT legacy packages are
+   * dropped: an unused one may be what an in-flight Welcome was encrypted to, and
+   * its private key is the only way to join from it. Best-effort; a failure keeps
+   * the legacy slot remembered and is retried on the next start.
+   */
+  private async retireLegacyKeyPackageSlot(): Promise<void> {
+    const legacy = this.identity.legacyClientId;
+    if (!legacy) return;
+    try {
+      const deletion = this.identity.eventSigner.signEvent({
+        kind: KIND_DELETION,
+        created_at: Math.floor(Date.now() / 1000),
+        tags: [
+          ["a", `${KIND_KEY_PACKAGE}:${this.identity.pubkey}:${legacy}`],
+          ["k", String(KIND_KEY_PACKAGE)],
+        ],
+        content: "retired KeyPackage slot",
+      });
+      await publishSigned(deletion as unknown as Parameters<typeof publishSigned>[0], this.relays);
+      const stored = await this.client.keyPackages.list().catch(() => []);
+      for (const pkg of stored) {
+        if (pkg.identifier === legacy && pkg.used) await this.client.keyPackages.remove(pkg.keyPackageRef);
+      }
+      await clearLegacyClientId(this.identity.pubkey);
+      this.identity.legacyClientId = undefined;
+    } catch (err) {
+      console.warn("marmot: retiring the legacy KeyPackage slot failed", err);
     }
   }
 

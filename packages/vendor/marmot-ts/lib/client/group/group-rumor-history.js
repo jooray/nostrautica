@@ -1,4 +1,3 @@
-import { insertEventIntoDescendingList, } from "applesauce-core/helpers";
 import { matchFilters } from "applesauce-core/helpers/filter";
 import { EventEmitter } from "eventemitter3";
 import { deserializeApplicationData } from "../../core/group-message.js";
@@ -15,13 +14,14 @@ export class GroupRumorHistory extends EventEmitter {
     }
     /** Parses an MLS message and saves it as a rumor event */
     async saveMessage(message) {
+        let rumor;
         try {
-            const rumor = deserializeApplicationData(message);
-            await this.saveRumor(rumor);
+            rumor = deserializeApplicationData(message);
         }
         catch (error) {
-            // Failed to read rumor, skip saving
+            return; // Invalid payloads have no rumor to store.
         }
+        await this.saveRumor(rumor);
     }
     /** Saves a new rumor event to the backend */
     async saveRumor(rumor) {
@@ -35,15 +35,22 @@ export class GroupRumorHistory extends EventEmitter {
         // Notify listeners that all rumors have been cleared
         this.emit("cleared");
     }
+    /** Retract a validated inner identity before notifying timeline listeners. */
+    async removeMessage(rumorId) {
+        if (!/^[a-f0-9]{64}$/.test(rumorId))
+            throw new Error("Invalid rumor ID for history removal");
+        await this.backend.removeRumor(rumorId);
+        this.emit("removed", rumorId);
+    }
     /** Request stored rumors by filters */
     async queryRumors(filters) {
         return this.backend.queryRumors(Array.isArray(filters) ? filters : [filters]);
     }
     /**
      * Async generator that yields the current timeline of {@link Rumor} events whenever a
-     * new rumor is saved that matches `filters` or the history is cleared. The initial snapshot
-     * is emitted immediately on subscription, then again after every matching `rumor` event or
-     * `cleared` event.
+     * matching rumor is saved, a rumor is removed, or history is cleared. Each
+     * snapshot is freshly queried so removal refills limited pages. Changes
+     * during loading or paused consumption are latched until the next pull.
      *
      * The generator runs until the caller breaks out of the loop or the consuming
      * iterator is garbage-collected (via the `finally` cleanup).
@@ -54,42 +61,39 @@ export class GroupRumorHistory extends EventEmitter {
                 ? filters
                 : [filters]
             : [{}];
-        let current = [];
-        let next = null;
-        const notify = (rumor) => {
-            // Only wake up if the new rumor matches at least one of the caller's filters.
-            // matchFilters expects a signed NostrEvent; Rumor has all checked fields
-            // (id, kind, pubkey, tags, created_at) — cast is safe here.
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            if (!matchFilters(filtersArray, rumor))
-                return;
-            if (next) {
-                // Add event to timeline
-                insertEventIntoDescendingList(current, rumor);
-                // Resolve next promise
-                next([...current]);
-                next = null;
-            }
+        let version = 0;
+        let observed = -1;
+        let wake;
+        const changed = () => {
+            version++;
+            wake?.();
+            wake = undefined;
         };
-        const notifyCleared = () => {
-            if (next) {
-                // Resolve next promise with empty timeline
-                next([]);
-                next = null;
-            }
+        const inserted = (rumor) => {
+            if (matchFilters(filtersArray, rumor))
+                changed();
         };
-        this.on("rumor", notify);
-        this.on("cleared", notifyCleared);
+        this.on("rumor", inserted);
+        this.on("cleared", changed);
+        this.on("removed", changed);
         try {
-            current = (await this.backend.queryRumors(filtersArray));
-            yield current;
             while (true) {
-                yield await new Promise((r) => (next = r));
+                if (observed === version)
+                    await new Promise((resolve) => {
+                        wake = resolve;
+                    });
+                const snapshotVersion = version;
+                const snapshot = await this.backend.queryRumors(filtersArray);
+                if (snapshotVersion !== version)
+                    continue;
+                observed = snapshotVersion;
+                yield [...snapshot];
             }
         }
         finally {
-            this.off("rumor", notify);
-            this.off("cleared", notifyCleared);
+            this.off("rumor", inserted);
+            this.off("cleared", changed);
+            this.off("removed", changed);
         }
     }
     /**

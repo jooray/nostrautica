@@ -1,204 +1,74 @@
 /** @module @category Core - App Components */
-import { chacha20poly1305 } from "@noble/ciphers/chacha.js";
-import { equalBytes } from "@noble/ciphers/utils.js";
-import { sha256 } from "@noble/hashes/sha2.js";
-import { randomBytes } from "@noble/hashes/utils.js";
-import { BinaryReader, BinaryWriter } from "../binary.js";
-/**
- * Codec for `marmot.group.blossom.image.v1` (`0x8002`) — the encrypted group
- * image stored as one opaque Blossom blob. All fields empty encodes the absent
- * (cleared) image.
- *
- * Wire (Marmot binary profile), each field a QUIC-varint length + bytes:
- *   opaque image_hash<0..32>;        // SHA-256 of the encrypted blob
- *   opaque image_key<0..32>;         // ChaCha20-Poly1305 key
- *   opaque image_nonce<0..12>;       // ChaCha20-Poly1305 nonce
- *   opaque image_upload_key<0..32>;  // secret key that signs Blossom auth
- *   opaque media_type<0..128>;       // canonical media type of the plaintext
- *
- * A present image MUST have every key field at its exact length and a non-empty,
- * canonical `media_type`; mixed partial states are invalid.
- *
- * @see refs/marmot/app-components/group-blossom-image-v1.md
- * @see MDK `crates/traits/src/app_components/blossom_image.rs`
- */
-const IMAGE_HASH_LEN = 32;
-const IMAGE_KEY_LEN = 32;
-const IMAGE_NONCE_LEN = 12;
-const IMAGE_UPLOAD_KEY_LEN = 32;
-const MEDIA_TYPE_MAX_LEN = 128;
-const MEDIA_TYPE_PART_MAX_LEN = 64;
-/** AEAD version label for group images (`group-blossom-image-v1.md`, "Image bytes"). */
-const GROUP_IMAGE_VERSION = "marmot-group-image-v1";
-/** The absent (cleared) image state. */
-export function emptyGroupBlossomImageV1() {
-    return {
-        imageHash: new Uint8Array(0),
-        imageKey: new Uint8Array(0),
-        imageNonce: new Uint8Array(0),
-        imageUploadKey: new Uint8Array(0),
-        mediaType: "",
-    };
-}
-/** Whether `image` carries an image (any field non-empty). */
-export function isGroupBlossomImagePresent(image) {
-    return (image.imageHash.length > 0 ||
-        image.imageKey.length > 0 ||
-        image.imageNonce.length > 0 ||
-        image.imageUploadKey.length > 0 ||
-        image.mediaType.length > 0);
-}
-/** WHATWG ASCII whitespace: TAB, LF, FF, CR, SPACE. */
-function isAsciiWhitespace(code) {
-    return (code === 0x09 ||
-        code === 0x0a ||
-        code === 0x0c ||
-        code === 0x0d ||
-        code === 0x20);
-}
-/** RFC 9110 `tchar`. */
-function isTokenChar(code) {
-    return ((code >= 0x30 && code <= 0x39) ||
-        (code >= 0x41 && code <= 0x5a) ||
-        (code >= 0x61 && code <= 0x7a) ||
-        "!#$%&'*+-.^_`|~".includes(String.fromCharCode(code)));
-}
-/**
- * Canonicalizes a media type for the group image component and its AEAD AAD:
- * drop parameters after the first `;`, trim ASCII whitespace, require exactly
- * one `/` between non-empty token `type` and `subtype` (each at most 64 bytes,
- * whole at most 128), ASCII-lowercase, and map `image/jpg` to `image/jpeg`.
- *
- * This is byte-for-byte MDK's `canonicalize_marmot_media_type`, which is what
- * White Noise applies when it validates a `0x8002` commit. It is stricter than
- * the five steps in `features/encrypted-media-v1.md` (token characters, single
- * slash, length bounds); using the looser rule here would let this library
- * accept image state that MDK members reject, forking the group.
- *
- * @throws Error if the value is not a valid media type.
- */
+import { BinaryReader, BinaryWriter, encodeUtf8 } from "../binary.js";
+/** Image-specific MIME normalization; does not change message-media semantics. */
 export function canonicalizeGroupImageMediaType(value) {
-    const semicolon = value.indexOf(";");
-    let start = 0;
-    let end = semicolon === -1 ? value.length : semicolon;
-    while (start < end && isAsciiWhitespace(value.charCodeAt(start)))
-        start++;
-    while (end > start && isAsciiWhitespace(value.charCodeAt(end - 1)))
-        end--;
-    const mediaType = value.slice(start, end);
-    const slash = mediaType.indexOf("/");
-    if (slash === -1 || mediaType.indexOf("/", slash + 1) !== -1)
-        throw new Error("media type must contain exactly one slash");
-    const type = mediaType.slice(0, slash);
-    const subtype = mediaType.slice(slash + 1);
-    if (type.length === 0 || subtype.length === 0)
-        throw new Error("media type and subtype must be non-empty");
-    if (type.length > MEDIA_TYPE_PART_MAX_LEN ||
-        subtype.length > MEDIA_TYPE_PART_MAX_LEN ||
-        mediaType.length > MEDIA_TYPE_MAX_LEN)
-        throw new Error("media type exceeds Marmot length bounds");
-    for (let i = 0; i < mediaType.length; i++) {
-        if (i === slash)
-            continue;
-        if (!isTokenChar(mediaType.charCodeAt(i)))
-            throw new Error("media type contains an invalid token byte");
+    // MDK's strict image interpretation of the frozen media algorithm. Only these
+    // five ASCII whitespace bytes are stripped; JS trim() accepts more bytes.
+    const mime = value
+        .split(";", 1)[0]
+        .replace(/^[\t\n\f\r ]+|[\t\n\f\r ]+$/g, "");
+    const parts = mime.split("/");
+    if (parts.length !== 2)
+        throw new Error("group image media type must contain exactly one slash");
+    if (!parts[0] || !parts[1])
+        throw new Error("group image media type and subtype must be non-empty");
+    if (parts[0].length > 64 || parts[1].length > 64 || mime.length > 128) {
+        throw new Error("group image media type exceeds Marmot length bounds");
     }
-    const canonical = mediaType.replace(/[A-Z]/g, (c) => c.toLowerCase());
+    const token = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
+    if (!parts.every((part) => token.test(part)))
+        throw new Error("group image media type contains an invalid token byte");
+    const canonical = mime.toLowerCase();
     return canonical === "image/jpg" ? "image/jpeg" : canonical;
 }
-/** Checks a present image's field lengths and returns its canonical media type. */
-function validatePresentImage(image) {
-    if (image.imageHash.length !== IMAGE_HASH_LEN ||
-        image.imageKey.length !== IMAGE_KEY_LEN ||
-        image.imageNonce.length !== IMAGE_NONCE_LEN ||
-        image.imageUploadKey.length !== IMAGE_UPLOAD_KEY_LEN ||
-        image.mediaType.length === 0)
-        throw new Error("group image component has invalid partial state");
-    return canonicalizeGroupImageMediaType(image.mediaType);
-}
 /**
- * Encodes a {@link GroupBlossomImageV1} to component `data` bytes. A present
- * image's media type is canonicalized before encoding.
+ * Encodes the ordered five vectors in `app-components/group-blossom-image-v1.md`.
+ * Producers may supply a declared MIME which is stored in canonical form.
  */
-export function encodeGroupBlossomImageV1(image) {
-    const present = isGroupBlossomImagePresent(image);
-    const mediaType = present ? validatePresentImage(image) : "";
-    const empty = new Uint8Array(0);
+export function encodeGroupBlossomImage(image) {
+    if (image.kind === "empty")
+        return new Uint8Array(5);
+    const mediaType = canonicalizeGroupImageMediaType(image.mediaType);
     return new BinaryWriter()
-        .opaque(present ? image.imageHash : empty, { max: IMAGE_HASH_LEN })
-        .opaque(present ? image.imageKey : empty, { max: IMAGE_KEY_LEN })
-        .opaque(present ? image.imageNonce : empty, { max: IMAGE_NONCE_LEN })
-        .opaque(present ? image.imageUploadKey : empty, {
-        max: IMAGE_UPLOAD_KEY_LEN,
-    })
-        .opaque(new TextEncoder().encode(mediaType), { max: MEDIA_TYPE_MAX_LEN })
+        .opaque(image.imageHash, { min: 32, max: 32 })
+        .opaque(image.imageKey, { min: 32, max: 32 })
+        .opaque(image.imageNonce, { min: 12, max: 12 })
+        .opaque(image.imageUploadKey, { min: 32, max: 32 })
+        .opaque(encodeUtf8(mediaType), { min: 1, max: 128 })
         .build();
 }
-/**
- * Decodes `marmot.group.blossom.image.v1` component `data` bytes, rejecting
- * partial states and a non-canonical media type.
- */
-export function decodeGroupBlossomImageV1(data) {
+/** Strict bounded decoding with owned fields and canonical present/empty states. */
+export function decodeGroupBlossomImage(data) {
     const reader = new BinaryReader(data);
-    const imageHash = reader.opaque({ max: IMAGE_HASH_LEN });
-    const imageKey = reader.opaque({ max: IMAGE_KEY_LEN });
-    const imageNonce = reader.opaque({ max: IMAGE_NONCE_LEN });
-    const imageUploadKey = reader.opaque({ max: IMAGE_UPLOAD_KEY_LEN });
-    const mediaTypeBytes = reader.opaque({ max: MEDIA_TYPE_MAX_LEN });
+    const imageHash = reader.opaque({ max: 32 }).slice();
+    const imageKey = reader.opaque({ max: 32 }).slice();
+    const imageNonce = reader.opaque({ max: 12 }).slice();
+    const imageUploadKey = reader.opaque({ max: 32 }).slice();
+    const mediaBytes = reader.opaque({ max: 128 });
     reader.end();
-    let mediaType;
-    try {
-        mediaType = new TextDecoder("utf-8", { fatal: true }).decode(mediaTypeBytes);
+    if ([imageHash, imageKey, imageNonce, imageUploadKey, mediaBytes].every((field) => field.length === 0)) {
+        return { kind: "empty" };
     }
-    catch {
-        throw new Error("group image media type is not UTF-8");
+    if (imageHash.length !== 32 ||
+        imageKey.length !== 32 ||
+        imageNonce.length !== 12 ||
+        imageUploadKey.length !== 32 ||
+        mediaBytes.length === 0) {
+        throw new Error("group image component has invalid partial state");
     }
-    const image = { imageHash, imageKey, imageNonce, imageUploadKey, mediaType };
-    if (!isGroupBlossomImagePresent(image))
-        return image;
-    if (validatePresentImage(image) !== mediaType)
+    const mediaType = new TextDecoder("utf-8", { fatal: true }).decode(mediaBytes);
+    const canonicalBytes = encodeUtf8(canonicalizeGroupImageMediaType(mediaType));
+    // Compare bytes as well as text: TextDecoder strips a leading UTF-8 BOM.
+    if (canonicalBytes.length !== mediaBytes.length ||
+        !canonicalBytes.every((byte, i) => byte === mediaBytes[i])) {
         throw new Error("group image media type is not canonical");
-    return image;
-}
-function groupImageAad(mediaType) {
-    return new TextEncoder().encode(`${GROUP_IMAGE_VERSION}\0${mediaType}`);
-}
-/**
- * Encrypts a group image for `marmot.group.blossom.image.v1` with a fresh
- * random key, nonce and upload key. Upload `encryptedBlob` to a Blossom server
- * under `image.imageHash` (signing the upload authorization with
- * `image.imageUploadKey`), then commit `image`.
- */
-export function encryptGroupBlossomImage(plaintext, mediaType) {
-    if (plaintext.length === 0)
-        throw new Error("group image cannot be empty");
-    const canonical = canonicalizeGroupImageMediaType(mediaType);
-    const imageKey = randomBytes(IMAGE_KEY_LEN);
-    const imageNonce = randomBytes(IMAGE_NONCE_LEN);
-    const encryptedBlob = chacha20poly1305(imageKey, imageNonce, groupImageAad(canonical)).encrypt(plaintext);
+    }
     return {
-        encryptedBlob,
-        image: {
-            imageHash: sha256(encryptedBlob),
-            imageKey,
-            imageNonce,
-            imageUploadKey: randomBytes(IMAGE_UPLOAD_KEY_LEN),
-            mediaType: canonical,
-        },
+        kind: "present",
+        imageHash,
+        imageKey,
+        imageNonce,
+        imageUploadKey,
+        mediaType,
     };
-}
-/**
- * Verifies a fetched blob against `image.imageHash` and decrypts it.
- *
- * @throws Error if the image is absent, the hash does not match, or the AEAD
- *   check fails. Per the spec this is an application-level fetch failure; it
- *   never invalidates the component state.
- */
-export function decryptGroupBlossomImage(encryptedBlob, image) {
-    if (!isGroupBlossomImagePresent(image))
-        throw new Error("group image is absent");
-    const mediaType = validatePresentImage(image);
-    if (!equalBytes(sha256(encryptedBlob), image.imageHash))
-        throw new Error("group image blob does not match image_hash");
-    return chacha20poly1305(image.imageKey, image.imageNonce, groupImageAad(mediaType)).decrypt(encryptedBlob);
 }

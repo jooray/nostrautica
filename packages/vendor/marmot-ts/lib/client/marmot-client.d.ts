@@ -1,4 +1,3 @@
-/** @module @category Client - Marmot Client */
 import { Rumor } from "applesauce-common/helpers/gift-wrap";
 import { EventSigner } from "applesauce-core";
 import { Capabilities, CryptoProvider, GroupInfo, Welcome } from "../vendor/ts-mls/index.js";
@@ -11,7 +10,7 @@ import { BaseGroupHistory, BaseGroupMedia, GroupHistoryFactory, GroupMediaFactor
 import { GroupsManager } from "./groups-manager.js";
 import { InviteManager, StoredInviteEntry, type UnreadInvite } from "./invite-manager.js";
 import type { StoredKeyPackage } from "./key-package-manager.js";
-import { KeyPackageManager } from "./key-package-manager.js";
+import { KeyPackageManager, type KeyPackageManagerOptions } from "./key-package-manager.js";
 import type { NostrNetworkInterface } from "./nostr-interface.js";
 import { type VerifyEventMethod } from "./verify.js";
 /** Decrypted group metadata previewed from a Welcome before joining. */
@@ -66,7 +65,8 @@ export type MarmotClientOptions<THistory extends BaseGroupHistory | undefined = 
     groupStateStore: GenericKeyValueStore<SerializedClientState>;
     /**
      * Durable backend for group lifecycle intent and terminal records. When
-     * omitted, lifecycle records share {@link groupStateStore} through a
+     * omitted, lifecycle records share the `groupStateStore` from
+     * {@link MarmotClientOptions} through a
      * disband-key-scoped adapter.
      */
     lifecycleStore?: GenericKeyValueStore<Uint8Array>;
@@ -93,10 +93,11 @@ export type MarmotClientOptions<THistory extends BaseGroupHistory | undefined = 
     removedMarkerStore?: GenericKeyValueStore<boolean>;
     /**
      * Convergence policy applied to every group: branch selection and the
-     * `maxRewindCommits` rollback horizon. Set `maxRewindCommits: Infinity` to
-     * preserve the whole MLS history and keep forks of any age eligible for
-     * re-convergence. Defaults to the profile-1 policy
-     * ({@link DEFAULT_CONVERGENCE_POLICY}).
+     * `maxRewindCommits` rollback horizon. Keep the finite profile-1 default
+     * ({@link DEFAULT_CONVERGENCE_POLICY}) for production. `Infinity` is an
+     * explicit debugging/forensics choice that keeps arbitrarily old forks
+     * eligible and can retain unbounded evidence; the horizon does not guarantee
+     * pruning of every full-history tree record.
      */
     convergencePolicy?: ConvergencePolicy;
     /**
@@ -112,6 +113,8 @@ export type MarmotClientOptions<THistory extends BaseGroupHistory | undefined = 
     inviteStore?: GenericKeyValueStore<StoredInviteEntry>;
     /** The crypto provider to use for cryptographic operations */
     cryptoProvider?: CryptoProvider;
+    /** Load a persisted installation signing identity for KeyPackages. */
+    getSignatureKeyPair?: KeyPackageManagerOptions["getSignatureKeyPair"];
     /** The nostr relay pool to use for the client. Should implement GroupNostrInterface for group operations. */
     network: NostrNetworkInterface;
     /** Optional forensic audit sink inherited by groups. Omitted by default. */
@@ -132,8 +135,8 @@ export type MarmotClientOptions<THistory extends BaseGroupHistory | undefined = 
     /**
      * Default `d` tag value (slot identifier) for key package events.
      * Used by {@link KeyPackageManager.create} when no explicit `d` is passed.
-     * Set this to a stable per-device string (e.g. `"my-app-desktop"`) so all
-     * key packages from this client share a single addressable slot on relays.
+     * Generate 32 random bytes once and persist their 64-character lowercase hex
+     * encoding so key packages share a stable addressable slot on relays.
      */
     clientId?: string;
 } & (THistory extends undefined ? {} : {
@@ -202,7 +205,8 @@ export declare class MarmotClient<THistory extends BaseGroupHistory | undefined 
      * 2. Finds the matching local KeyPackage private material from the store
      * 3. Calls ts-mls joinGroup() to create a new ClientState
      * 4. Persists the resulting ClientState via `this.groups.adoptClientState()`
-     * 5. Marks the consumed key package as used via `this.keyPackages.markUsed()`
+     * 5. Finalizes a durable consumption receipt: retires single-use private
+     *    material and retains reusable packages marked as used
      * 6. Returns a MarmotGroup instance
      *
      * After joining, callers can list used key packages with

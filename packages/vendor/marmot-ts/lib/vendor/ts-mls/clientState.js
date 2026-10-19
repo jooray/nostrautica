@@ -703,6 +703,7 @@ export async function joinGroupInternal(params) {
             treeHashCache,
         },
         groupInfoExtensions: gi.extensions,
+        groupInfo: gi,
     };
 }
 /** @public */

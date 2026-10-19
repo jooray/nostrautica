@@ -1,6 +1,10 @@
 import { CiphersuiteImpl, ClientState, ComponentData, GroupContextExtension } from "../vendor/ts-mls/index.js";
 import { AppComponentId, type EncryptedMediaPolicyV2 } from "./components/index.js";
 import { CompleteKeyPackage } from "./key-package.js";
+/** Thrown when caller-supplied GroupContext extensions are invalid. */
+export declare class InvalidGroupContextExtensionError extends Error {
+    constructor(message: string);
+}
 export interface CreateGroupParams {
     /** Creator's complete key package (public + private) */
     creatorKeyPackage: CompleteKeyPackage;
@@ -15,7 +19,10 @@ export interface CreateGroupParams {
      * to the ids present in {@link components}.
      */
     requiredComponentIds?: AppComponentId[];
-    /** Additional group context extensions (optional) */
+    /**
+     * Additional group context extensions (optional), with unique extension types.
+     * Do not supply `app_data_dictionary`; dictionary data belongs in {@link components}.
+     */
     extensions?: GroupContextExtension[];
     /** Cipher suite implementation for cryptographic operations */
     ciphersuiteImpl: CiphersuiteImpl;

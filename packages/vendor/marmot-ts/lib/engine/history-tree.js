@@ -5,6 +5,24 @@ import { BinaryReader, BinaryWriter } from "../core/binary.js";
 import { deserializeClientState, serializeClientState, } from "../core/client-state.js";
 import { commitDigest } from "../core/convergence.js";
 import { decodeOwnCommitRecord, encodeOwnCommitRecord, } from "./own-commit-stamp.js";
+import { projectHistoricalReceivers, retainedTopology, } from "./retention.js";
+function retentionPlanIdentity(plan) {
+    return bytesToHex(commitDigest(new TextEncoder().encode(JSON.stringify({
+        revision: plan.revision,
+        canonicalTipTag: plan.canonicalTipTag,
+        rootTag: plan.logicalRootTag,
+        tipEpoch: plan.tipEpoch,
+        floorEpoch: plan.floorEpoch,
+        appFloorEpoch: plan.appFloorEpoch,
+        retainedTags: plan.retainedTags,
+        excludedTags: plan.excludedTags,
+        receivers: [...plan.receiverEpochs],
+        snapshots: [...plan.snapshots].map(([tag, bytes]) => [
+            tag,
+            bytesToHex(bytes),
+        ]),
+    }))));
+}
 /** Wire-format version byte for a persisted node-edge / meta record. */
 const HISTORY_TREE_VERSION = 1;
 /** Default number of heavy snapshots kept rehydrated in memory at once. */
@@ -15,9 +33,9 @@ const stateKey = (gid, tag) => `${gid}/state/${tag}`;
 const commitKey = (gid, tag) => `${gid}/commit/${tag}`;
 /**
  * The retained group history tree (Marmot v2 full-fork history). Holds every
- * group state ever observed — the canonical branch and every fork — as a tree
- * of {@link ClientState} snapshots linked by commit edges. No pruning is
- * performed: the tree retains everything.
+ * retained group state — the canonical branch and eligible forks — as a tree
+ * of {@link ClientState} snapshots linked by commit edges. Settled retention
+ * publishes authoritative membership before removing obsolete physical keys.
  *
  * The **light index** (per-node epoch/parent/edge metadata) is always resident.
  * **Heavy material** (serialized snapshots + commit bytes) is kept in a bounded
@@ -37,7 +55,12 @@ export class GroupHistoryTree {
     /** Bounded LRU of heavy material; dirty (unflushed) entries are never evicted. */
     #heavy = new Map();
     /** Tags whose light + heavy material has not yet been flushed to the store. */
-    #dirty = new Set();
+    #dirty = new Map();
+    #revision = 0;
+    #publishedRetention;
+    #checkpoint;
+    #retentionActive = false;
+    #flushing;
     /** Max heavy entries kept resident (excluding pinned dirty entries). */
     #cacheMax;
     /** The root node tag, or `undefined` while the tree is empty. */
@@ -54,7 +77,7 @@ export class GroupHistoryTree {
         if (root)
             this.setRoot(root);
     }
-    /** The root node tag (the welcome/creation state), or `undefined` if empty. */
+    /** Logical retained root tag, or `undefined` if empty. */
     get rootTag() {
         return this.#rootTag;
     }
@@ -79,6 +102,7 @@ export class GroupHistoryTree {
      * Throws if a different root is already set (a tree has exactly one root).
      */
     setRoot(state) {
+        this.#assertMutable();
         const tag = bytesToHex(state.confirmationTag);
         if (this.#rootTag !== undefined && this.#rootTag !== tag) {
             throw new Error("GroupHistoryTree: root already set to a different node");
@@ -89,8 +113,8 @@ export class GroupHistoryTree {
                 epoch: Number(state.groupContext.epoch),
                 childTags: [],
             });
+            this.#markDirty(tag);
             this.#putHeavy(tag, { snapshot: serializeClientState(state) });
-            this.#dirty.add(tag);
         }
         this.#rootTag = tag;
         this.#gid = bytesToHex(state.groupContext.groupId);
@@ -212,6 +236,12 @@ export class GroupHistoryTree {
         }
         if (!this.#store || !this.#gid)
             return undefined;
+        const projection = this.#checkpoint?.projections[tag];
+        if (projection !== undefined) {
+            const bytes = hexToBytes(projection);
+            this.#putHeavy(tag, { snapshot: bytes });
+            return bytes;
+        }
         const bytes = await this.#store.getItem(stateKey(this.#gid, tag));
         if (!bytes)
             return undefined;
@@ -230,7 +260,7 @@ export class GroupHistoryTree {
     /** The serialized commit bytes that produced a node, or `undefined`. */
     async commitBytesOf(childTag) {
         const node = this.#nodes.get(childTag);
-        if (!node || !node.parentTag)
+        if (!node || !node.edge)
             return undefined;
         const cached = this.#heavy.get(childTag);
         if (cached?.commit) {
@@ -247,7 +277,7 @@ export class GroupHistoryTree {
     /** Confirmation-time evidence for a locally-authored commit, if stamped. */
     async ownCommitStampOf(childTag) {
         const node = this.#nodes.get(childTag);
-        if (!node || !node.parentTag)
+        if (!node || !node.edge)
             return undefined;
         const cached = this.#heavy.get(childTag)?.commit;
         const record = cached ??
@@ -278,6 +308,7 @@ export class GroupHistoryTree {
      * @returns the child node tag.
      */
     recordCommit(parentTag, commitMessage, childState, senderLeafIndex, ownCommitStamp) {
+        this.#assertMutable();
         const parent = this.#nodes.get(parentTag);
         if (!parent)
             throw new Error(`GroupHistoryTree: parent ${parentTag.slice(0, 8)} not in tree`);
@@ -292,13 +323,13 @@ export class GroupHistoryTree {
                 childTags: [],
                 edge: { commitDigest: commitDigest(bytes), senderLeafIndex },
             });
+            this.#markDirty(childTag);
             this.#putHeavy(childTag, {
                 snapshot: serializeClientState(childState),
                 commit: ownCommitStamp
                     ? encodeOwnCommitRecord({ wireBytes: bytes, stamp: ownCommitStamp })
                     : bytes,
             });
-            this.#dirty.add(childTag);
         }
         else {
             if (existing.parentTag !== parentTag ||
@@ -314,6 +345,7 @@ export class GroupHistoryTree {
                 ? decodeOwnCommitRecord(cached.commit)
                 : undefined;
             if (ownCommitStamp && decoded?.kind === "legacy") {
+                this.#markDirty(childTag);
                 this.#putHeavy(childTag, {
                     snapshot: cached.snapshot,
                     commit: encodeOwnCommitRecord({
@@ -321,7 +353,6 @@ export class GroupHistoryTree {
                         stamp: ownCommitStamp,
                     }),
                 });
-                this.#dirty.add(childTag);
             }
         }
         if (!parent.childTags.includes(childTag))
@@ -337,6 +368,7 @@ export class GroupHistoryTree {
      * yet in the tree, so a batch can skip a dangling edge instead of throwing.
      */
     recordEdge(edge) {
+        this.#assertMutable();
         const parent = this.#nodes.get(edge.parentTag);
         if (!parent)
             return false;
@@ -351,11 +383,11 @@ export class GroupHistoryTree {
                     senderLeafIndex: edge.senderLeafIndex,
                 },
             });
+            this.#markDirty(edge.childTag);
             this.#putHeavy(edge.childTag, {
                 snapshot: edge.childSnapshot,
                 commit: edge.commitBytes,
             });
-            this.#dirty.add(edge.childTag);
         }
         if (!parent.childTags.includes(edge.childTag))
             parent.childTags.push(edge.childTag);
@@ -368,6 +400,7 @@ export class GroupHistoryTree {
      * does not change it). Throws if the node is absent or the tag would change.
      */
     updateSnapshot(tag, state) {
+        this.#assertMutable();
         const node = this.#nodes.get(tag);
         if (!node)
             throw new Error(`GroupHistoryTree: cannot update absent node ${tag.slice(0, 8)}`);
@@ -375,11 +408,11 @@ export class GroupHistoryTree {
         if (stateTag !== tag)
             throw new Error("GroupHistoryTree: updateSnapshot would change the node identity");
         const existing = this.#heavy.get(tag);
+        this.#markDirty(tag);
         this.#putHeavy(tag, {
             snapshot: serializeClientState(state),
             commit: existing?.commit,
         });
-        this.#dirty.add(tag);
     }
     /**
      * Binds a backing store to a fresh, in-memory tree so its nodes can be flushed
@@ -388,12 +421,13 @@ export class GroupHistoryTree {
      * same store is already bound (e.g. on a tree loaded via {@link load}).
      */
     bindStore(store) {
+        this.#assertMutable();
         if (this.#store === store)
             return;
         this.#store = store;
         this.#rootDirty = true;
         for (const tag of this.#nodes.keys())
-            this.#dirty.add(tag);
+            this.#markDirty(tag);
     }
     /**
      * Persists all unflushed nodes incrementally: each dirty node's light edge
@@ -402,24 +436,66 @@ export class GroupHistoryTree {
      * a save costs O(new nodes), not O(tree). Requires a bound store.
      */
     async flush() {
+        this.#assertMutable();
+        if (this.#flushing)
+            return this.#flushing;
+        const operation = this.#flush();
+        this.#flushing = operation;
+        try {
+            await operation;
+        }
+        finally {
+            this.#flushing = undefined;
+        }
+    }
+    async #flush() {
         if (!this.#store || !this.#gid)
             throw new Error("GroupHistoryTree: flush requires a bound store");
         const gid = this.#gid;
-        for (const tag of this.#dirty) {
-            const node = this.#nodes.get(tag);
-            const heavy = this.#heavy.get(tag);
+        const revision = this.#revision;
+        const dirty = [...this.#dirty].map(([tag, generation]) => ({
+            tag,
+            generation,
+            node: this.#nodes.get(tag),
+            heavy: this.#heavy.get(tag),
+        }));
+        const checkpoint = this.#checkpoint
+            ? {
+                ...this.#checkpoint,
+                members: this.tags(),
+                garbage: this.#checkpoint.garbage.filter((tag) => !this.#nodes.has(tag)),
+                receivers: { ...this.#checkpoint.receivers },
+            }
+            : undefined;
+        for (const { tag, node, heavy } of dirty) {
             if (!node || !heavy)
-                continue;
-            await this.#store.setItem(edgeKey(gid, tag), encodeEdgeRecord(node));
+                throw new Error("GroupHistoryTree: dirty material missing");
+            await this.#store.setItem(edgeKey(gid, tag), this.#encodePhysicalEdge(node));
             await this.#store.setItem(stateKey(gid, tag), heavy.snapshot);
-            if (node.parentTag && heavy.commit)
-                await this.#store.setItem(commitKey(gid, tag), heavy.commit);
+            if (node.edge) {
+                const commit = heavy.commit ?? (await this.#store.getItem(commitKey(gid, tag)));
+                if (!commit)
+                    throw new Error("GroupHistoryTree: required commit missing");
+                await this.#store.setItem(commitKey(gid, tag), commit);
+            }
+            if (checkpoint) {
+                checkpoint.receivers[tag] = [
+                    ...deserializeClientState(heavy.snapshot).historicalReceiverData.keys(),
+                ].map(Number);
+                checkpoint.projections = { ...checkpoint.projections };
+                delete checkpoint.projections[tag];
+            }
         }
-        if (this.#rootDirty && this.#rootTag) {
-            await this.#store.setItem(metaKey(gid), encodeMeta(this.#rootTag));
-            this.#rootDirty = false;
+        if (this.#rootTag && (this.#rootDirty || checkpoint)) {
+            await this.#store.setItem(metaKey(gid), checkpoint ? encodeCheckpoint(checkpoint) : encodeMeta(this.#rootTag));
+            if (checkpoint)
+                this.#checkpoint = checkpoint;
+            if (this.#revision === revision)
+                this.#rootDirty = false;
         }
-        this.#dirty.clear();
+        for (const { tag, generation } of dirty)
+            if (this.#dirty.get(tag) === generation)
+                this.#dirty.delete(tag);
         // Flushed entries are now clean and may be evicted under cache pressure.
         this.#evict();
     }
@@ -432,19 +508,25 @@ export class GroupHistoryTree {
         const metaBytes = await store.getItem(metaKey(gid));
         if (!metaBytes)
             return undefined;
-        const rootTag = decodeMeta(metaBytes);
+        const checkpoint = metaBytes[0] === 2 ? decodeCheckpoint(metaBytes) : undefined;
+        const rootTag = checkpoint?.rootTag ?? decodeMeta(metaBytes);
         const tree = new GroupHistoryTree(undefined, options);
         tree.#store = store;
         tree.#gid = gid;
         const prefix = `${gid}/edge/`;
-        const keys = await store.keys();
+        const keys = checkpoint
+            ? checkpoint.members.map((tag) => edgeKey(gid, tag))
+            : await store.keys();
         for (const key of keys) {
             if (!key.startsWith(prefix))
                 continue;
             const tag = key.slice(prefix.length);
             const bytes = await store.getItem(key);
-            if (!bytes)
+            if (!bytes) {
+                if (checkpoint)
+                    throw new Error("GroupHistoryTree: required edge missing");
                 continue;
+            }
             const rec = decodeEdgeRecord(bytes);
             tree.#nodes.set(tag, {
                 tag,
@@ -454,22 +536,386 @@ export class GroupHistoryTree {
                 edge: rec.edge,
             });
         }
+        // Version 1 had no child-order authority; normalize adapter enumeration.
+        if (!checkpoint) {
+            const ordered = [...tree.#nodes.values()].sort((a, b) => a.epoch - b.epoch || a.tag.localeCompare(b.tag));
+            tree.#nodes.clear();
+            for (const node of ordered)
+                tree.#nodes.set(node.tag, node);
+        }
         for (const node of tree.#nodes.values()) {
             if (node.parentTag)
                 tree.#nodes.get(node.parentTag)?.childTags.push(node.tag);
         }
         tree.#rootTag = rootTag;
+        if (checkpoint) {
+            tree.#checkpoint = checkpoint;
+            await tree.#validateCheckpoint(checkpoint);
+            const root = tree.#nodes.get(rootTag);
+            root.parentTag = undefined;
+            for (const node of tree.#nodes.values())
+                node.childTags = [];
+            for (const node of tree.#nodes.values())
+                if (node.parentTag)
+                    tree.#nodes.get(node.parentTag).childTags.push(node.tag);
+        }
         // Loaded nodes are already persisted — nothing dirty.
         return tree;
     }
     /** Removes every persisted key for a group's tree from the store. */
     static async purge(store, gid) {
-        const prefix = `${gid}/`;
         const keys = await store.keys();
         for (const key of keys) {
-            if (key === metaKey(gid) || key.startsWith(prefix))
+            if (key === metaKey(gid) ||
+                ["edge", "state", "commit"].some((namespace) => key.startsWith(`${gid}/${namespace}/`)))
                 await store.removeItem(key);
         }
+    }
+    /**
+     * Captures one settled keep decision. Callers fence dependency admission until cleanup ends.
+     * @internal
+     */
+    async prepareRetention(options) {
+        this.#assertMutable();
+        const revision = this.#revision;
+        const topology = retainedTopology(this, options);
+        const snapshots = new Map();
+        const receiverEpochs = new Map();
+        for (const tag of topology.retainedTags) {
+            const bytes = await this.snapshotOf(tag);
+            if (!bytes)
+                throw new Error("GroupHistoryTree: required snapshot missing");
+            const projected = projectHistoricalReceivers(bytes, topology.appFloorEpoch, (options.pins ?? []).filter((pin) => pin.stateTag === tag));
+            snapshots.set(tag, projected.snapshot);
+            receiverEpochs.set(tag, projected.receiverEpochs);
+        }
+        if (revision !== this.#revision)
+            throw new Error("GroupHistoryTree: retention plan became stale");
+        return {
+            ...topology,
+            revision,
+            canonicalTipTag: options.canonicalTipTag,
+            snapshots,
+            receiverEpochs,
+        };
+    }
+    /**
+     * Flush required bytes, publish authority, then adopt; never delete before publication.
+     * @internal
+     */
+    async publishRetention(plan) {
+        this.#assertMutable();
+        if (!plan.logicalRootTag)
+            return;
+        if (!this.#store || !this.#gid) {
+            this.#publishLocalRetention(plan);
+            return;
+        }
+        if (this.#flushing)
+            await this.#flushing;
+        if (plan.revision !== this.#revision)
+            throw new Error("GroupHistoryTree: retention plan became stale");
+        this.#retentionActive = true;
+        try {
+            const identity = retentionPlanIdentity(plan);
+            await this.#flush();
+            const root = this.#nodes.get(plan.logicalRootTag);
+            const existingBoundary = plan.logicalRootTag === this.#checkpoint?.rootTag
+                ? this.#checkpoint.boundary
+                : undefined;
+            const boundary = existingBoundary ??
+                (root.parentTag && root.edge
+                    ? {
+                        parentTag: root.parentTag,
+                        epoch: this.#nodes.get(root.parentTag).epoch,
+                        digest: bytesToHex(root.edge.commitDigest),
+                        senderLeafIndex: root.edge.senderLeafIndex,
+                    }
+                    : undefined);
+            const checkpoint = {
+                version: 2,
+                rootTag: plan.logicalRootTag,
+                members: [...plan.retainedTags],
+                garbage: [
+                    ...new Set([
+                        ...(this.#checkpoint?.garbage ?? []),
+                        ...plan.excludedTags,
+                    ]),
+                ],
+                receivers: Object.fromEntries([...plan.receiverEpochs].map(([tag, epochs]) => [
+                    tag,
+                    epochs ? [...epochs] : null,
+                ])),
+                boundary,
+                projections: Object.fromEntries([...plan.snapshots].map(([tag, bytes]) => [tag, bytesToHex(bytes)])),
+            };
+            // A plan object is not trusted merely because its TypeScript type matches.
+            decodeCheckpoint(encodeCheckpoint(checkpoint));
+            if (!checkpoint.members.includes(plan.canonicalTipTag))
+                throw new Error("GroupHistoryTree: retention excludes canonical tip");
+            const keep = new Set(checkpoint.members);
+            for (const tag of checkpoint.members) {
+                const snapshot = plan.snapshots.get(tag);
+                const node = this.#nodes.get(tag);
+                if (!snapshot || !node)
+                    throw new Error("GroupHistoryTree: retention snapshot absent");
+                const state = deserializeClientState(snapshot);
+                if (bytesToHex(state.confirmationTag) !== tag ||
+                    Number(state.groupContext.epoch) !== node.epoch ||
+                    bytesToHex(state.groupContext.groupId) !== this.#gid)
+                    throw new Error("GroupHistoryTree: retention snapshot identity mismatch");
+                const allowed = checkpoint.receivers[tag];
+                const actual = [...state.historicalReceiverData.keys()]
+                    .map(Number)
+                    .sort((a, b) => a - b);
+                if (allowed !== null &&
+                    actual.join() !== [...allowed].sort((a, b) => a - b).join())
+                    throw new Error("GroupHistoryTree: retention receiver allowlist mismatch");
+                if (tag !== checkpoint.rootTag &&
+                    (!node.parentTag ||
+                        !keep.has(node.parentTag) ||
+                        this.#nodes.get(node.parentTag).epoch + 1 !== node.epoch))
+                    throw new Error("GroupHistoryTree: retention parent closure broken");
+                if (node.edge) {
+                    const bytes = await this.#store.getItem(commitKey(this.#gid, tag));
+                    if (!bytes ||
+                        bytesToHex(commitDigest(decodeOwnCommitRecord(bytes).wireBytes)) !==
+                            bytesToHex(node.edge.commitDigest))
+                        throw new Error("GroupHistoryTree: retention commit mismatch");
+                }
+            }
+            const authority = encodeCheckpoint(checkpoint);
+            try {
+                await this.#store.setItem(metaKey(this.#gid), authority);
+            }
+            catch (error) {
+                const persisted = await this.#store.getItem(metaKey(this.#gid));
+                if (persisted && bytesToHex(persisted) === bytesToHex(authority)) {
+                    this.#adoptCheckpoint(checkpoint, plan.snapshots);
+                    this.#publishedRetention = {
+                        plan: new WeakRef(plan),
+                        revision: this.#revision,
+                        identity,
+                    };
+                }
+                throw error;
+            }
+            this.#adoptCheckpoint(checkpoint, plan.snapshots);
+            this.#publishedRetention = {
+                plan: new WeakRef(plan),
+                revision: this.#revision,
+                identity,
+            };
+        }
+        finally {
+            this.#retentionActive = false;
+        }
+    }
+    /** Process-local authority only; never advertises restart recovery. */
+    #publishLocalRetention(plan) {
+        if (plan.revision !== this.#revision)
+            throw new Error("GroupHistoryTree: retention plan became stale");
+        if (!plan.logicalRootTag ||
+            !plan.retainedTags.includes(plan.canonicalTipTag))
+            throw new Error("GroupHistoryTree: retention excludes canonical tip");
+        const gid = bytesToHex(deserializeClientState(plan.snapshots.get(plan.canonicalTipTag))
+            .groupContext.groupId);
+        const keep = new Set(plan.retainedTags);
+        if (keep.size !== plan.retainedTags.length ||
+            this.tags().some((tag) => keep.has(tag) === plan.excludedTags.includes(tag)))
+            throw new Error("GroupHistoryTree: retention membership mismatch");
+        for (const tag of keep) {
+            const node = this.#nodes.get(tag);
+            const snapshot = plan.snapshots.get(tag);
+            if (!node ||
+                !snapshot ||
+                (tag !== plan.logicalRootTag && !keep.has(node.parentTag)))
+                throw new Error("GroupHistoryTree: retention snapshot absent");
+            const state = deserializeClientState(snapshot);
+            if (bytesToHex(state.confirmationTag) !== tag ||
+                Number(state.groupContext.epoch) !== node.epoch ||
+                bytesToHex(state.groupContext.groupId) !== gid)
+                throw new Error("GroupHistoryTree: retention snapshot identity mismatch");
+            const epochs = plan.receiverEpochs.get(tag);
+            if (epochs !== undefined &&
+                [...state.historicalReceiverData.keys()]
+                    .map(Number)
+                    .sort((a, b) => a - b)
+                    .join() !== [...epochs].sort((a, b) => a - b).join())
+                throw new Error("GroupHistoryTree: retention receiver mismatch");
+        }
+        const root = this.#nodes.get(plan.logicalRootTag);
+        const boundary = plan.logicalRootTag === this.#checkpoint?.rootTag
+            ? this.#checkpoint.boundary
+            : root.parentTag && root.edge
+                ? {
+                    parentTag: root.parentTag,
+                    epoch: this.#nodes.get(root.parentTag).epoch,
+                    digest: bytesToHex(root.edge.commitDigest),
+                    senderLeafIndex: root.edge.senderLeafIndex,
+                }
+                : undefined;
+        const identity = retentionPlanIdentity(plan);
+        this.#adoptCheckpoint({
+            version: 2,
+            rootTag: plan.logicalRootTag,
+            members: [...keep],
+            garbage: [],
+            receivers: Object.fromEntries([...plan.receiverEpochs].map(([tag, epochs]) => [
+                tag,
+                epochs ? [...epochs] : null,
+            ])),
+            projections: {},
+            boundary,
+        }, plan.snapshots);
+        this.#publishedRetention = {
+            plan: new WeakRef(plan),
+            revision: this.#revision,
+            identity,
+        };
+        // With no adapter, the projected bytes must remain available in memory.
+        for (const [tag, snapshot] of plan.snapshots)
+            this.#putHeavy(tag, { snapshot, commit: this.#heavy.get(tag)?.commit });
+    }
+    /** @internal Exact local plan adopted from durable authority, including after-forward rejection. */
+    isRetentionPublished(plan) {
+        return (this.#publishedRetention?.plan.deref() === plan &&
+            this.#publishedRetention.revision === this.#revision &&
+            this.#publishedRetention.identity === retentionPlanIdentity(plan));
+    }
+    /**
+     * Restart-safe, idempotent exact-key cleanup of the currently durable authority.
+     * @internal
+     */
+    async resumeRetentionCleanup() {
+        this.#assertMutable();
+        if (!this.#store || !this.#gid)
+            return;
+        if (this.#dirty.size || this.#flushing)
+            throw new Error("GroupHistoryTree: flush mutations before retention cleanup");
+        this.#retentionActive = true;
+        try {
+            const persisted = await GroupHistoryTree.load(this.#store, this.#gid, {
+                snapshotCacheSize: this.#cacheMax,
+            });
+            if (!persisted || !persisted.#checkpoint)
+                return;
+            const checkpoint = persisted.#checkpoint;
+            if (this.#rootTag !== checkpoint.rootTag ||
+                this.tags().join() !== checkpoint.members.join())
+                throw new Error("GroupHistoryTree: cleanup authority differs from live membership");
+            for (const [tag, snapshot] of Object.entries(checkpoint.projections))
+                await this.#store.setItem(stateKey(this.#gid, tag), hexToBytes(snapshot));
+            for (const tag of checkpoint.garbage) {
+                await this.#store.removeItem(edgeKey(this.#gid, tag));
+                await this.#store.removeItem(stateKey(this.#gid, tag));
+                await this.#store.removeItem(commitKey(this.#gid, tag));
+            }
+            if (checkpoint.garbage.length ||
+                Object.keys(checkpoint.projections).length) {
+                const clean = { ...checkpoint, garbage: [], projections: {} };
+                await this.#store.setItem(metaKey(this.#gid), encodeCheckpoint(clean));
+                this.#checkpoint = clean;
+            }
+        }
+        finally {
+            this.#retentionActive = false;
+        }
+    }
+    #adoptCheckpoint(checkpoint, snapshots) {
+        const keep = new Set(checkpoint.members);
+        for (const tag of this.tags())
+            if (!keep.has(tag)) {
+                this.#nodes.delete(tag);
+                this.#heavy.delete(tag);
+                this.#dirty.delete(tag);
+            }
+        for (const node of this.#nodes.values())
+            node.childTags = node.childTags.filter((tag) => keep.has(tag));
+        this.#nodes.get(checkpoint.rootTag).parentTag = undefined;
+        this.#rootTag = checkpoint.rootTag;
+        this.#checkpoint = checkpoint;
+        this.#revision++;
+        for (const [tag, snapshot] of snapshots)
+            if (this.#heavy.has(tag))
+                this.#putHeavy(tag, { snapshot, commit: this.#heavy.get(tag)?.commit });
+    }
+    async #validateCheckpoint(checkpoint) {
+        const root = this.#nodes.get(checkpoint.rootTag);
+        if (!root)
+            throw new Error("GroupHistoryTree: logical root absent");
+        if (checkpoint.boundary) {
+            const b = checkpoint.boundary;
+            if (root.parentTag !== b.parentTag ||
+                root.epoch !== b.epoch + 1 ||
+                !root.edge ||
+                bytesToHex(root.edge.commitDigest) !== b.digest ||
+                root.edge.senderLeafIndex !== b.senderLeafIndex ||
+                this.#nodes.has(b.parentTag))
+                throw new Error("GroupHistoryTree: invalid boundary provenance");
+        }
+        else if (root.parentTag || root.edge)
+            throw new Error("GroupHistoryTree: unexpected root edge");
+        for (const node of this.#nodes.values()) {
+            if (!Number.isSafeInteger(node.epoch) || node.epoch < 0)
+                throw new Error("GroupHistoryTree: invalid epoch");
+            const seen = new Set();
+            let cursor = node;
+            while (cursor.tag !== root.tag) {
+                if (seen.has(cursor.tag))
+                    throw new Error("GroupHistoryTree: checkpoint cycle");
+                seen.add(cursor.tag);
+                const parent = cursor.parentTag
+                    ? this.#nodes.get(cursor.parentTag)
+                    : undefined;
+                if (!parent || parent.epoch + 1 !== cursor.epoch)
+                    throw new Error("GroupHistoryTree: retained parent closure broken");
+                cursor = parent;
+            }
+            const primary = await this.#store.getItem(stateKey(this.#gid, node.tag));
+            if (!primary)
+                throw new Error("GroupHistoryTree: required snapshot missing");
+            const snapshot = checkpoint.projections[node.tag] === undefined
+                ? primary
+                : hexToBytes(checkpoint.projections[node.tag]);
+            const state = deserializeClientState(snapshot);
+            if (bytesToHex(state.confirmationTag) !== node.tag ||
+                Number(state.groupContext.epoch) !== node.epoch ||
+                bytesToHex(state.groupContext.groupId) !== this.#gid)
+                throw new Error("GroupHistoryTree: snapshot identity mismatch");
+            const receivers = checkpoint.receivers[node.tag];
+            const actual = [...state.historicalReceiverData.keys()]
+                .map(Number)
+                .sort((a, b) => a - b);
+            if (actual.some((epoch) => !Number.isSafeInteger(epoch) || epoch < 0 || epoch >= node.epoch))
+                throw new Error("GroupHistoryTree: invalid historical receiver epoch");
+            if (receivers !== null &&
+                actual.join() !== [...receivers].sort((a, b) => a - b).join())
+                throw new Error("GroupHistoryTree: receiver allowlist mismatch");
+            if (node.edge) {
+                const record = await this.#store.getItem(commitKey(this.#gid, node.tag));
+                if (!record || node.edge.commitDigest.length !== 32)
+                    throw new Error("GroupHistoryTree: required commit missing");
+                const wire = decodeOwnCommitRecord(record).wireBytes;
+                if (bytesToHex(commitDigest(wire)) !==
+                    bytesToHex(node.edge.commitDigest) ||
+                    !decode(mlsMessageDecoder, wire))
+                    throw new Error("GroupHistoryTree: invalid retained commit");
+            }
+        }
+    }
+    #assertMutable() {
+        if (this.#retentionActive)
+            throw new Error("GroupHistoryTree: retention publication or cleanup in progress");
+    }
+    #markDirty(tag) {
+        this.#dirty.set(tag, ++this.#revision);
+    }
+    #encodePhysicalEdge(node) {
+        const boundary = node.tag === this.#checkpoint?.rootTag
+            ? this.#checkpoint.boundary
+            : undefined;
+        return encodeEdgeRecord(boundary ? { ...node, parentTag: boundary.parentTag } : node);
     }
     /** Inserts/refreshes a heavy entry at the LRU tail, then evicts if needed. */
     #putHeavy(tag, entry) {
@@ -548,4 +994,54 @@ function decodeMeta(bytes) {
     const rootBytes = r.opaque();
     r.end();
     return rootBytes.length ? bytesToHex(rootBytes) : undefined;
+}
+function encodeCheckpoint(checkpoint) {
+    const payload = new TextEncoder().encode(JSON.stringify(checkpoint));
+    const bytes = new Uint8Array(payload.length + 1);
+    bytes[0] = 2;
+    bytes.set(payload, 1);
+    return bytes;
+}
+function decodeCheckpoint(bytes) {
+    const value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(1)));
+    if (!value || typeof value !== "object")
+        throw new Error("GroupHistoryTree: invalid checkpoint");
+    const c = value;
+    const validTag = (tag) => typeof tag === "string" && /^(?:[0-9a-f]{2})+$/.test(tag);
+    const tagsValid = (tags) => Array.isArray(tags) &&
+        tags.every(validTag) &&
+        new Set(tags).size === tags.length;
+    if (c.version !== 2 ||
+        !validTag(c.rootTag) ||
+        !tagsValid(c.members) ||
+        !tagsValid(c.garbage) ||
+        !c.members.includes(c.rootTag) ||
+        c.garbage.some((tag) => c.members.includes(tag)) ||
+        !c.receivers ||
+        typeof c.receivers !== "object" ||
+        Array.isArray(c.receivers) ||
+        Object.keys(c.receivers).length !== c.members.length ||
+        !c.projections ||
+        typeof c.projections !== "object" ||
+        Array.isArray(c.projections) ||
+        Object.entries(c.projections).some(([tag, snapshot]) => !c.members.includes(tag) || !validTag(snapshot)))
+        throw new Error("GroupHistoryTree: invalid checkpoint membership");
+    for (const tag of c.members) {
+        const epochs = c.receivers[tag];
+        if (epochs !== null &&
+            (!Array.isArray(epochs) ||
+                epochs.some((epoch) => !Number.isSafeInteger(epoch) || epoch < 0) ||
+                new Set(epochs).size !== epochs.length))
+            throw new Error("GroupHistoryTree: invalid receiver allowlist");
+    }
+    if (c.boundary &&
+        (!validTag(c.boundary.parentTag) ||
+            !Number.isSafeInteger(c.boundary.epoch) ||
+            c.boundary.epoch < 0 ||
+            !/^[0-9a-f]{64}$/.test(c.boundary.digest) ||
+            (c.boundary.senderLeafIndex !== undefined &&
+                (!Number.isSafeInteger(c.boundary.senderLeafIndex) ||
+                    c.boundary.senderLeafIndex < 0))))
+        throw new Error("GroupHistoryTree: invalid boundary provenance");
+    return c;
 }

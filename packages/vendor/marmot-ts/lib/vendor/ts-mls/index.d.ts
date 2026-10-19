@@ -44,7 +44,7 @@ export { protocolVersions, type ProtocolVersionName, type ProtocolVersionValue }
 export { wireformats, type WireformatName, type WireformatValue } from "./wireformat.js";
 export { nodeTypes } from "./nodeType.js";
 export { leafNodeSources, type LeafNodeSourceName, type LeafNodeSourceValue } from "./leafNodeSource.js";
-export { type LeafIndex } from "./treemath.js";
+export { type LeafIndex, leafToNodeIndex } from "./treemath.js";
 export { type Node, type NodeLeaf, type NodeParent, type RatchetTree, getCredentialFromLeafIndex, } from "./ratchetTree.js";
 export { type GreaseConfig, greaseCapabilities, greaseExtensions, greaseValues } from "./grease.js";
 export { type LeafNode, type LeafNodeCommit, type LeafNodeData, type LeafNodeInfoCommitOmitted, type LeafNodeInfoKeyPackage, type LeafNodeInfoOmitted, type LeafNodeInfoUpdateOmitted, type LeafNodeKeyPackage, type LeafNodeUpdate, } from "./leafNode.js";

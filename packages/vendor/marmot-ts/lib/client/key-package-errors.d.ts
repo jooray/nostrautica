@@ -24,7 +24,7 @@ export declare class KeyPackageNotFoundError extends Error {
 /**
  * Thrown by {@link KeyPackageManager.rotate} when no relay URLs can be
  * determined for the replacement key package — neither passed explicitly
- * nor recoverable from the old package's publish records.
+ * nor recoverable from the old package's local publication routes.
  */
 export declare class KeyPackageRotatePreconditionError extends Error {
     constructor();

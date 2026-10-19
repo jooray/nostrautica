@@ -31,6 +31,7 @@ export { protocolVersions } from "./protocolVersion.js";
 export { wireformats } from "./wireformat.js";
 export { nodeTypes } from "./nodeType.js";
 export { leafNodeSources } from "./leafNodeSource.js";
+export { leafToNodeIndex } from "./treemath.js";
 export { getCredentialFromLeafIndex, } from "./ratchetTree.js";
 export { greaseCapabilities, greaseExtensions, greaseValues } from "./grease.js";
 export { privateKeyPackageEncoder, privateKeyPackageDecoder, keyPackageEncoder, keyPackageDecoder, makeKeyPackageRef, generateKeyPackage, generateKeyPackageWithKey, } from "./keyPackage.js";

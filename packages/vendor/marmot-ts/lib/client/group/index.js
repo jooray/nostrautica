@@ -3,6 +3,8 @@ export * from "./application-message.js";
 export * from "./invite.js";
 export * from "./fork-tree-view.js";
 export * from "./group-media-service.js";
+export { GroupImageService } from "./group-image-service.js";
+export { fetchGroupImageTransport } from "./group-image-transport.js";
 export * from "./blossom.js";
 export * from "./group-media-store.js";
 export * from "./marmot-group.js";

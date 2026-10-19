@@ -4,9 +4,14 @@ import { encode, mlsMessageEncoder, protocolVersions, wireformats, } from "../ve
 import { encodeContent } from "../utils/encoding.js";
 import { unixNow } from "../utils/nostr.js";
 import { isGreaseValue } from "./grease.js";
-import { calculateKeyPackageRef } from "./key-package.js";
-import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_APP_COMPONENTS_TAG, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, } from "./protocol.js";
+import { calculateKeyPackageRef, isReusableKeyPackage } from "./key-package.js";
+import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_APP_COMPONENTS_TAG, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, LAST_RESORT_EXTENSION_TYPE, } from "./protocol.js";
 import { SUPPORTED_APP_COMPONENT_IDS } from "./components/ids.js";
+/** Require a stable publication slot generated once from 32 random bytes. */
+export function validateKeyPackageSlot(identifier) {
+    if (typeof identifier !== "string" || !/^[0-9a-f]{64}$/.test(identifier))
+        throw new Error("Invalid KeyPackage publication slot: expected exactly 64 lowercase hex characters. Migrate device labels by generating 32 random bytes once, encoding them as lowercase hex, and persisting that stable slot.");
+}
 /**
  * Creates an addressable key package event (kind 30443) from a key package.
  *
@@ -18,6 +23,8 @@ export function createKeyPackageEvent(options) {
 }
 async function createKeyPackageEventInternal(options) {
     const { keyPackage, client } = options;
+    validateKeyPackageSlot(options.identifier);
+    isReusableKeyPackage(keyPackage);
     // Publish the KeyPackage wrapped in an MLSMessage with wire_format
     // mls_key_package (RFC 9420 §6). The kind-30443 content is specified as the
     // serialized MLSMessage bytes (transports/nostr.md), mirroring the kind-444
@@ -53,7 +60,7 @@ async function createKeyPackageEventInternal(options) {
         }
     }
     // Filter out GREASE values from the extension types
-    // We only want to include real extension ids (e.g. app_data_dictionary), not GREASE.
+    // We only want to include real extension ids (e.g. last_resort, app_data_dictionary), not GREASE.
     // MDK strips GREASE from extensions on both its publish and validate sides
     // (refs/mdk crates/cgka-engine/src/capabilities.rs
     // `advertised_capabilities_from_caps`), so mls_extensions stays GREASE-free.
@@ -61,7 +68,7 @@ async function createKeyPackageEventInternal(options) {
     const filteredExtensionTypes = extensionTypes.filter((hexValue) => {
         // Parse the hex value back to number to check if it's a GREASE value
         const extType = parseInt(hexValue);
-        return !isGreaseValue(extType);
+        return !isGreaseValue(extType) && extType !== LAST_RESORT_EXTENSION_TYPE;
     });
     // Get the protocol version - keyPackage.version is a numeric ProtocolVersionValue
     // NIP tag expects a display string like "1.0".

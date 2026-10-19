@@ -16,6 +16,12 @@ export interface DeliveredAppPayload<TEnvelope> {
     message: MlsMessage;
     /** The decrypted Marmot app payload bytes, so a retraction can name it. */
     payload: Uint8Array;
+    /** Actual edge that produced this delivery state; absent for roots. */
+    commitDigest?: Uint8Array;
+    /** Transport identity supplied by the peeler. */
+    transportId?: string;
+    /** Canonical inner identity, only when strict decoding succeeds. */
+    rumorId?: string;
 }
 /**
  * A bounded ledger of application payloads already delivered as `accepted`,
@@ -42,8 +48,17 @@ export declare class DeliveredPayloadLedger<TEnvelope> {
     has(stateTag: string, message: MlsMessage): boolean;
     /** Retained transport envelopes used as witnesses by later fork passes. */
     envelopes(): TEnvelope[];
+    /** Snapshot bounded by the same tree-aware pruning horizon as live entries. */
+    exportEntries(): DeliveredAppPayload<TEnvelope>[];
+    /** Complete rewind outbox, retained until the owner durably records it. */
+    exportInvalidated(): DeliveredAppPayload<TEnvelope>[];
+    acknowledgeInvalidated(entries: Iterable<DeliveredAppPayload<TEnvelope>>): void;
+    /** Restore caller-validated evidence; codecs stay at the transport boundary. */
+    importEntries(entries: Iterable<DeliveredAppPayload<TEnvelope>>): void;
     /** Remembers a delivered application payload. */
     record(entry: DeliveredAppPayload<TEnvelope>): void;
+    /** Permanently discard plaintext on destruction, including late deliveries. */
+    destroy(): void;
     /**
      * Removes and returns the payloads abandoned by a rewind to a canonical
      * branch: those delivered strictly after `forkEpoch` whose delivery state is
@@ -58,4 +73,6 @@ export declare class DeliveredPayloadLedger<TEnvelope> {
      * payload still nameable by a fork candidate loses its retraction record.
      */
     pruneBelow(epoch: number): void;
+    /** Only the published tree membership may release completed delivery evidence. */
+    commitRetention(tags: readonly string[]): void;
 }

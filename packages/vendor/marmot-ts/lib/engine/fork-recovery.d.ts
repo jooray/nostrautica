@@ -1,8 +1,9 @@
 import { type CiphersuiteImpl, type ClientState, type IncomingMessageCallback, type MlsFramedMessage, MlsMessage, type ProcessMessageResult } from "../vendor/ts-mls/index.js";
 import { type CommitIntegrityViolation } from "../core/components/integrity.js";
-import { type AppWitness, type CommitOrderingPriority, type ConvergencePolicy, type BranchScore } from "../core/convergence.js";
+import { type AppWitness, type BranchCandidate, type CommitOrderingPriority, type ConvergencePolicy, type BranchScore } from "../core/convergence.js";
 import type { EdgeSnapshot } from "./history-tree.js";
 import type { RetainedAppliedLink } from "./retained-store.js";
+import type { GroupHistoryTree } from "./history-tree.js";
 import type { DisbandCandidateEvidence, GroupPeeler } from "./types.js";
 /** One applied step on a candidate branch: parent → message → child. */
 export interface ChainLink {
@@ -10,6 +11,38 @@ export interface ChainLink {
     message: MlsMessage;
     child: ClientState;
 }
+/** Non-secret authenticated removal provenance; the tombstone is not a tree edge. */
+export interface RemovalAttribution {
+    version: 1 | 2;
+    /** Version 2 preserves the normal resolver's authenticated sender input. */
+    removingCommitter?: string;
+    /** The removal commit's `tip_priority`; absent in records written before it was kept. */
+    removingPriority?: CommitOrderingPriority;
+    removalDigest: string;
+    parentTag: string;
+    parentEpoch: number;
+    groupId: string;
+    localIdentity: string;
+    localLeaf: number;
+}
+/** Validated selection authority, independent of volatile notification withdrawal. */
+export interface RemovalRecovery {
+    removalDigest: string;
+    parentTag: string;
+    selectedTip: string;
+}
+/** Enumerate descendants of one exact retained active parent, never a tombstone. */
+export declare function buildRemovalBranchSet(tree: GroupHistoryTree, attribution: RemovalAttribution): Promise<BranchCandidate[] | undefined>;
+/** Scoring identity from the exact authenticated tip message and its parent. */
+export declare function tipCommitterOf(parent: ClientState, message: MlsMessage): Uint8Array;
+/** Missing retained material cannot silently remove a competing scoring input. */
+export declare function treeTipCommitter(tree: GroupHistoryTree, tag: string): Promise<Uint8Array | undefined>;
+/**
+ * The `tip_priority` of the commit that produced tree node `tag`, classified
+ * from its proposals against the stored parent, or from the own-commit stamp
+ * when they cannot be rebuilt. `undefined` when neither is available.
+ */
+export declare function treeTipPriority(tree: GroupHistoryTree, tag: string): Promise<CommitOrderingPriority | undefined>;
 /**
  * A resulting state already known for one of our own applied commits, together
  * with the confirmation tag of the exact parent it was applied to (CONV-04).
@@ -69,7 +102,7 @@ export interface RejectedForkCandidate {
  * instead of being replayed. That child still passes the full
  * {@link validateCommitLegality} gate when the commit's proposals can be
  * rebuilt off the wire, and every proposal-independent legality check
- * ({@link validateLegalityWithoutProposals}) when they cannot (WR-03).
+ * (internal `validateLegalityWithoutProposals`) when they cannot (WR-03).
  */
 export declare function resolveCandidateParent(params: {
     ciphersuite: CiphersuiteImpl;

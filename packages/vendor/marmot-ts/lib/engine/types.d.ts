@@ -31,15 +31,10 @@ export type PeeledMessagePair<TEnvelope> = {
     envelope: TEnvelope;
     message: MlsMessage;
 };
-/** Transport metadata for wrapping one outbound MLS message. */
-export type GroupMessageWrapOptions = {
-    /**
-     * Relay expiry hint (Unix seconds) for an application message whose source
-     * epoch enables `message-retention.v1`. The Nostr binding writes it as the
-     * NIP-40 `expiration` tag (`transports/nostr.md` "Message expiration").
-     * Never set for commits or proposals.
-     */
-    expiration?: bigint;
+/** Optional application metadata pinned to authenticated plaintext/source epoch. */
+export type GroupMessageWrapMetadata = {
+    /** Exact checked-u64 Unix expiry; absent for disabled or undefined expiry. */
+    readonly expiration?: bigint;
 };
 /** Crypto boundary between the engine and transport-specific wrapping. */
 export interface GroupPeeler<TEnvelope> {
@@ -47,7 +42,7 @@ export interface GroupPeeler<TEnvelope> {
         read: PeeledMessagePair<TEnvelope>[];
         unreadable: TEnvelope[];
     }>;
-    wrapGroupMessage(message: MlsMessage, state: ClientState, options?: GroupMessageWrapOptions): Promise<TEnvelope>;
+    wrapGroupMessage(message: MlsMessage, state: ClientState, metadata?: GroupMessageWrapMetadata): Promise<TEnvelope>;
     /** A stable transport id for an envelope (used to key the ingestion pool). */
     idOf(envelope: TEnvelope): string;
 }
@@ -84,6 +79,9 @@ export type ProposalContext = {
     groupData: MarmotGroupView;
 };
 export type ProposalAction<T extends Proposal | Proposal[]> = (context: ProposalContext) => Promise<T>;
+/** Ordered commit inputs; each builder resolves to one or several proposals. */
+export type CommitProposalInput = Proposal | ProposalAction<Proposal | Proposal[]>;
+export type CommitProposalInputs = (CommitProposalInput | CommitProposalInput[])[];
 /** Application intent when calling {@link MarmotGroupEngine.send}. */
 export type SendIntent = {
     kind: "applicationMessage";
@@ -94,7 +92,7 @@ export type SendIntent = {
 } | {
     kind: "commit";
     actorPubkey: string;
-    extraProposals?: (Proposal | ProposalAction<Proposal> | (Proposal | ProposalAction<Proposal>)[])[];
+    extraProposals?: CommitProposalInputs;
     proposalRefs?: string[];
 } | {
     kind: "selfUpdate";
@@ -118,7 +116,7 @@ export type SendIntent = {
      */
     kind: "foundingAdd";
     actorPubkey: string;
-    extraProposals: (Proposal | ProposalAction<Proposal> | (Proposal | ProposalAction<Proposal>)[])[];
+    extraProposals: CommitProposalInputs;
 };
 /** Engine response to {@link MarmotGroupEngine.send}. */
 export type SendResult<TEnvelope> = {
@@ -286,6 +284,10 @@ export type InvalidatedIngestResult<TEnvelope> = {
     tag?: string;
     /** MLS epoch of that fork node. */
     epoch?: number;
+    /** Producing losing-state edge, never the triggering/winning commit. */
+    commitDigest?: Uint8Array;
+    transportId?: string;
+    rumorId?: string;
 };
 /**
  * A `self_remove`-only commit this client built and staged during ingest because
@@ -312,6 +314,7 @@ export type AutoCommitIngestResult<TEnvelope> = {
  */
 export type RemovedIngestResult<TEnvelope> = {
     kind: "removed";
+    removalAttribution?: import("./fork-recovery.js").RemovalAttribution;
     result: ProcessMessageResult;
     envelope: TEnvelope;
     message: MlsMessage;
