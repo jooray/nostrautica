@@ -4,6 +4,7 @@ import {
   KIND_PROFILE,
   hexToBytes,
   parseCoordinate,
+  pickLatest,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
@@ -30,8 +31,8 @@ export interface EventMetadataInput {
 // `d` (the address identifier) is preserved separately below, never dropped.
 const MANAGED_TAGS = new Set(["title", "summary", "start", "end", "location", "image", "D"]);
 
-function latest<T extends { created_at?: number }>(events: T[]): T | undefined {
-  return events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+function latest<T extends { id: string; created_at?: number }>(events: T[]): T | undefined {
+  return pickLatest(events); // §3.1 tie-break, not arrival order (audit DS41-013)
 }
 
 /**

@@ -143,7 +143,9 @@ export async function loadEventContext(
   if (opts.adoptLang !== false && !session.loggedIn) i18n.adoptEventLang(config.lang);
 
   // E_id's kind-0 carries the small icon (picture) and, as a fallback, the banner.
-  const profileEvent = profileEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // §3.1 latest-wins (lowest id on a created_at tie), like the coordinator — a
+  // timestamp-only sort keeps relay arrival order on a tie (audit DS41-013).
+  const profileEvent = pickLatest(profileEvents);
   let kind0: Record<string, any> = {};
   if (profileEvent) {
     try {
@@ -153,7 +155,9 @@ export async function loadEventContext(
     }
   }
 
-  const evt = eventEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // The space record carries the event's END, which anchors the coordinator's
+  // retention sweep; it picks with pickLatest, so must we (audit SB-92).
+  const evt = pickLatest(eventEvents);
   const ctx: EventContext = {
     naddr,
     coordinate,

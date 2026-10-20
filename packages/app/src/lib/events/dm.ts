@@ -6,7 +6,7 @@
  * own pubkey — so sent history is recoverable on any device. Plain NIP-17:
  * conversations continue in 0xchat/Amethyst/any NIP-17 client.
  */
-import { KIND_DM, KIND_GIFT_WRAP, KIND_DM_RELAY_LIST, giftwrapSince } from "@nostrautica/protocol";
+import { KIND_DM, KIND_GIFT_WRAP, KIND_DM_RELAY_LIST, giftwrapSince, pickLatest } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
@@ -68,7 +68,7 @@ export function selectDmRelays(
 /** Fetch a pubkey's kind-10050 DM relay list; [] if they've published none. */
 export async function fetchDmRelays(pubkey: string): Promise<string[]> {
   const events = await fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey] });
-  const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(events);
   return latest ? relayUrlsFromDmList(latest.tags) : [];
 }
 

@@ -309,7 +309,7 @@ export function cachedTextLibrary(): string[] | undefined {
 export async function fetchUserBlossomServers(signer: AppSigner): Promise<string[]> {
   const pubkey = await signer.getPublicKey();
   const lists = await fetchEvents({ kinds: [KIND_BLOSSOM_SERVERS], authors: [pubkey] });
-  const latest = lists.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  const latest = pickLatest(lists);
   // The 10063 tags are user/relay-supplied and unvalidated — https: only (APPR-8).
   return latest
     ? latest.tags

@@ -143,6 +143,28 @@ describe("loadEventContext — forged-config rejection (APPK-1)", () => {
     expect((await loadEventContext(naddr)).title).toBe("Untitled event");
   });
 
+  // Audit SB-92 / DS41-013: two same-second edits of the space record. The
+  // coordinator takes the lowest id (pickLatest); the app took arrival order, so
+  // the two could disagree on the END date the retention sweep is anchored to.
+  it("resolves a same-second space-record tie by lowest id, whatever the arrival order", async () => {
+    const edit = (end: string) =>
+      finalizeEvent(
+        { kind: KIND_CALENDAR_EVENT, created_at: 3_000, tags: [["d", IDENT], ["title", end], ["end", end]], content: "" },
+        eidSk,
+      );
+    const a = edit("1900000000");
+    const b = edit("1900003600");
+    const [low, high] = a.id < b.id ? [a, b] : [b, a];
+    for (const order of [[high, low], [low, high]]) {
+      fetchEvents.mockImplementation((filter: { kinds?: number[] }) => {
+        if (filter.kinds?.[0] === KIND_EVENT_CONFIG) return Promise.resolve([signedConfig(1_000)]);
+        if (filter.kinds?.[0] === KIND_CALENDAR_EVENT) return Promise.resolve([...order]);
+        return Promise.resolve([]);
+      });
+      expect((await loadEventContext(naddr)).title).toBe(low.tags.find((t) => t[0] === "title")![1]);
+    }
+  });
+
   it("uses edited event metadata as the context cache freshness stamp", async () => {
     const calendar = finalizeEvent(
       {
