@@ -7034,6 +7034,30 @@ describe("audit SB-99 — a join in flight across a detach publishes nothing", (
   });
 });
 
+/** Audit SB-31: a store throw between the in-flight claim and dispatch leaked the claim. */
+describe("audit SB-31 — a store error before dispatch releases the rumor claim", () => {
+  it("the same join is processed on redelivery after bumpInboxRate threw", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, pk);
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "x", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    const real = h.store.bumpInboxRate.bind(h.store);
+    (h.store as any).bumpInboxRate = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+    await expect(h.coordinator.handleInboxWrap(h.coordinate, wrap as any)).rejects.toThrow(/SQLITE_BUSY/);
+    (h.store as any).bumpInboxRate = real;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+});
+
 /**
  * Coordinator twin of audit SB-10. The install path picked the newest 31600 out of
  * the relay's answer by kind alone, trusting the relay to have honoured `authors`

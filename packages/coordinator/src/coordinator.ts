@@ -2116,6 +2116,22 @@ export class Coordinator {
     return MAX_RUMORS_PER_EVENT_WINDOW + enrolled * RUMORS_PER_ATTENDEE_WINDOW;
   }
 
+  /**
+   * Run a pre-dispatch step between unwrapFresh's in-flight claim and
+   * processRumorWithRetry (which releases it), releasing the claim if the step
+   * throws (audit SB-31). A store error there (SQLITE_BUSY in bumpInboxRate) used
+   * to leave the rumor id claimed for the life of the process: the rumor could
+   * never be processed again until a restart, and the Set grew with every one.
+   */
+  private releaseClaimOnThrow<T>(rumorId: string, step: () => T): T {
+    try {
+      return step();
+    } catch (e) {
+      this.inFlightRumors.delete(rumorId);
+      throw e;
+    }
+  }
+
   /** Handle a wrap addressed to the coordinator's own pubkey (install/admin). */
   async handleCoordinatorWrap(wrap: GiftWrap): Promise<void> {
     // COORDINATOR_RUMOR_KINDS, not the global registry: this key installs events
@@ -2129,9 +2145,14 @@ export class Coordinator {
     // an event inbox. A rate-rejected wrap is left UNSEEN (not written to the durable
     // seen ledger) so the ledger can't be grown by a flood — a legitimately-throttled
     // rumor is simply retried by a later backfill rescan once the burst subsides.
-    const organizerCommand =
-      rumor.kind === KIND_ADMIN_COMMAND && this.isInstalledEventIdentity(rumor.pubkey);
-    if (!this.inboxRateAllows(COORD_INBOX_RATE_KEY, rumor.pubkey, organizerCommand)) {
+    const allowed = this.releaseClaimOnThrow(rumor.id, () =>
+      this.inboxRateAllows(
+        COORD_INBOX_RATE_KEY,
+        rumor.pubkey,
+        rumor.kind === KIND_ADMIN_COMMAND && this.isInstalledEventIdentity(rumor.pubkey),
+      ),
+    );
+    if (!allowed) {
       log(`[coord-inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)}`);
       this.inFlightRumors.delete(rumor.id);
       return;
@@ -2233,7 +2254,7 @@ export class Coordinator {
     // burst subsides; a sustained flood is simply re-dropped by this gate each pass.
     // The in-flight claim taken by unwrapFresh is released here since we bypass
     // processRumorWithRetry (which would otherwise release it).
-    if (!this.inboxRateAllows(coordinate, rumor.pubkey)) {
+    if (!this.releaseClaimOnThrow(rumor.id, () => this.inboxRateAllows(coordinate, rumor.pubkey))) {
       // Name the budget: "the event is over its ceiling" and "this one sender is
       // flooding" are the same line otherwise, and they call for opposite
       // responses from whoever is reading the log during an event.
@@ -2249,11 +2270,17 @@ export class Coordinator {
     // not be able to create a pending attendee row by submitting a profile. Left
     // UNSEEN (not marked) so a legitimate submission that merely raced ahead of its
     // own join request is recovered by the next backfill rescan once the join lands.
-    if (
-      rumor.kind === KIND_PROFILE_SUBMISSION &&
-      !this.deps.store.getAttendee(coordinate, rumor.pubkey) &&
-      !(await this.awaitEnrollment(coordinate, rumor))
-    ) {
+    let enrolled: boolean;
+    try {
+      enrolled =
+        rumor.kind !== KIND_PROFILE_SUBMISSION ||
+        !!this.deps.store.getAttendee(coordinate, rumor.pubkey) ||
+        (await this.awaitEnrollment(coordinate, rumor));
+    } catch (e) {
+      this.inFlightRumors.delete(rumor.id); // see releaseClaimOnThrow
+      throw e;
+    }
+    if (!enrolled) {
       log(`[submission] dropped from ${short(rumor.pubkey)}: no enrollment row (never joined) for ${coordinate}`);
       this.inFlightRumors.delete(rumor.id);
       return;
