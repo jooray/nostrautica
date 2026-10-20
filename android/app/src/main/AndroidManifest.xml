@@ -58,13 +58,14 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="https" android:host="nostrautica.cypherpunk.today" android:pathPrefix="/app" />
             </intent-filter>
-            <!-- nostr:naddr1… links to a Nostrautica event, and our own scheme for signer callbacks. -->
+            <!-- nostr:naddr1… links to a Nostrautica event. Only naddr: claiming the whole
+                 nostr: scheme made this app the handler for npub/nevent/note links it can't
+                 show, which then went nowhere instead of to a Nostr client or njump.me. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
-                <data android:scheme="nostr" />
-                <data android:scheme="nostrautica" />
+                <data android:scheme="nostr" android:sspPrefix="naddr1" />
             </intent-filter>
         </activity>
 

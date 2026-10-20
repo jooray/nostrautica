@@ -90,7 +90,6 @@ sealed interface Route {
                     if (naddr.startsWith("naddr1")) Event(naddr) to null else null
                 }
                 uri.fragment != null -> parseHash(uri.fragment!!)
-                uri.scheme == "nostrautica" -> parseHash(s.substringAfter("nostrautica://"))
                 else -> null
             }
         }
