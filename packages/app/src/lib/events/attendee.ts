@@ -60,7 +60,7 @@ import {
 } from "./keystore.js";
 import { acceptedRecordAuthors } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
+import { onlyVerified, onlyByAuthors, onlyAddressed } from "$lib/nostr/verify.js";
 import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { eventRelayHints } from "./event-context.js";
@@ -178,7 +178,8 @@ async function fetchEventConfig(
     relays,
   );
   // Authority boundary (audit APPK-1): re-verify before the latest-wins pick.
-  const latest = pickLatest(onlyVerified(events));
+  // …and re-check kind/author/d: a relay need not honour the filter (SB-10).
+  const latest = pickLatest(onlyAddressed(onlyVerified(events), KIND_EVENT_CONFIG, coord.pubkey, coord.identifier));
   if (!latest) return undefined;
   try {
     return parseEventConfig(coord.pubkey, latest.tags);

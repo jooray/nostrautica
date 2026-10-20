@@ -14,7 +14,7 @@ import {
   pickLatest,
 } from "@nostrautica/protocol";
 import { fetchEvents, addRelays } from "$lib/nostr/ndk.js";
-import { onlyVerified } from "$lib/nostr/verify.js";
+import { onlyVerified, onlyAddressed } from "$lib/nostr/verify.js";
 import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 import { swr } from "$lib/cache/swr.js";
@@ -111,10 +111,16 @@ export async function loadEventContext(
 
   // Authority boundary (audit APPK-1): these fetches feed latest-by-created_at
   // picks the whole app trusts, so every candidate is signature-re-verified
-  // here even though NDK already validates relay traffic.
+  // here even though NDK already validates relay traffic. The two addressable
+  // reads also re-check kind/author/`d` (audit SB-10): a relay need not honour
+  // the filter, and another of this E_id's configs verifies just as well.
   const [configEvents, eventEvents, profileEvents] = await Promise.all([
-    fetchEvents({ kinds: [KIND_EVENT_CONFIG], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
-    fetchEvents({ kinds: [kind], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
+    fetchEvents({ kinds: [KIND_EVENT_CONFIG], authors: [pubkey], "#d": [identifier] }).then((evs) =>
+      onlyAddressed(onlyVerified(evs), KIND_EVENT_CONFIG, pubkey, identifier),
+    ),
+    fetchEvents({ kinds: [kind], authors: [pubkey], "#d": [identifier] }).then((evs) =>
+      onlyAddressed(onlyVerified(evs), kind, pubkey, identifier),
+    ),
     fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }).then(onlyVerified),
   ]);
 

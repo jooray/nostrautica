@@ -31,7 +31,7 @@ import {
   type MembershipProof,
 } from "@nostrautica/protocol";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { onlyVerified } from "$lib/nostr/verify.js";
+import { onlyVerified, onlyAddressed } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { loadEventKeys, listEventKeys } from "./keystore.js";
@@ -152,7 +152,7 @@ export async function fetchNewestConfig(
   const hints = unionRelays(relays, eventRelayHints(coordinate), DEFAULT_RELAYS);
   const filter = { kinds: [KIND_EVENT_CONFIG], authors: [coord.pubkey], "#d": [coord.identifier] };
   const events = opts.fresh ? await fetchEventsRelayOnly(filter, hints) : await fetchEvents(filter, hints);
-  const latest = pickLatest(onlyVerified(events));
+  const latest = pickLatest(onlyAddressed(onlyVerified(events), KIND_EVENT_CONFIG, coord.pubkey, coord.identifier));
   if (!latest) return undefined;
   try {
     return parseEventConfig(coord.pubkey, latest.tags);

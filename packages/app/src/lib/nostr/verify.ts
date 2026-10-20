@@ -48,3 +48,26 @@ export function onlyByAuthors<T extends Partial<SignedEventLike>>(events: T[], a
   const allow = new Set(authors);
   return events.filter((e) => e.pubkey !== undefined && allow.has(e.pubkey));
 }
+
+/**
+ * Keep only events that ARE the addressable record that was asked for: this
+ * `kind`, authored by `pubkey`, whose `d` tag is `d` (audit SB-10). A relay is
+ * not obliged to honour a `kinds`/`authors`/`#d` filter, and {@link onlyVerified}
+ * checks only the Schnorr signature — so a hostile relay could answer the query
+ * for `meetup-12`'s 31600 with the same E_id's config for a DIFFERENT `d` (its
+ * signature still verifies), and the latest-wins pick would adopt it: the join
+ * request is encrypted to the wrong E_inbox and the wrong coordinator is treated
+ * as authoritative. The coordinator re-checks the same fields for the same reason.
+ *
+ * The `d` compared is the FIRST `d` tag, the one NIP-01 addresses by.
+ */
+export function onlyAddressed<T extends Partial<SignedEventLike>>(
+  events: T[],
+  kind: number,
+  pubkey: string,
+  d: string,
+): T[] {
+  return events.filter(
+    (e) => e.kind === kind && e.pubkey === pubkey && e.tags?.find((t) => t[0] === "d")?.[1] === d,
+  );
+}
