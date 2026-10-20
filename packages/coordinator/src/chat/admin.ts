@@ -231,7 +231,14 @@ export class MarmotAdmin {
     const existing = this.store.getMarmotGroup(opts.coordinate);
     if (existing) {
       // A frozen group re-activates when chat is toggled back on (§9 Q4).
-      if (existing.status === "frozen") this.store.setMarmotGroupStatus(opts.coordinate, "active");
+      if (existing.status === "frozen") {
+        this.store.setMarmotGroupStatus(opts.coordinate, "active");
+        // Republish (audit DS41-051): a roster published while frozen carries no
+        // nostr_group_id, and clients fail closed without it. Nothing else on this
+        // path republishes — the backfill adds nobody when every member still holds
+        // a leaf — so the room stayed "Setting up" until some unrelated roster change.
+        this.rosterChanged(opts.coordinate);
+      }
       // Reconcile the admin set on every ensureGroup: organizers approved (or
       // whose chat devices changed) while chat was frozen/offline are promoted
       // now, and a coordinator that lost its admin state re-asserts it.

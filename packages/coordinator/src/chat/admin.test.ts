@@ -1438,6 +1438,22 @@ describe("MarmotAdmin — roster republish on every chat_keys change", () => {
     expect(published).toEqual([]);
   });
 
+  it("republishes when a FROZEN group is re-activated — the frozen roster carried no group id (DS41-051)", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const changed: string[] = [];
+    const admin = makeAdmin(store, mls, [], undefined, { onRosterChanged: (c) => changed.push(c) });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    admin.freeze(COORD);
+    changed.length = 0;
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    expect(changed).toEqual([COORD]);
+    // …but an already-active group's re-ensure (every restart) does not.
+    changed.length = 0;
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    expect(changed).toEqual([]);
+  });
+
   it("republishes when a device binds (op:add)", async () => {
     const { published, store, admin } = setup();
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
