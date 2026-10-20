@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
-import { buildEventConfig, parseEventConfig, type EventConfig } from "./config.js";
+import { buildEventConfig, configCoordinate, configForSpace, parseEventConfig, type EventConfig } from "./config.js";
 import { makeCoordinate } from "./coordinate.js";
 import { KIND_COMMUNITY } from "./kinds.js";
 import { keyGrantContentSchema } from "./schemas.js";
@@ -94,5 +94,43 @@ describe("space hierarchy (§15)", () => {
     expect(grant.parent?.a).toBe(community);
     // Without the field the grant parses exactly as before.
     expect(keyGrantContentSchema.parse({ v: 2, a: meetup, role: "attendee", eck: [], granted_by: hex(4) }).parent).toBeUndefined();
+  });
+});
+
+/**
+ * Audit SB-09 — a community's 31600 `a` tag named `31923:<E_id>:<d>`, the calendar
+ * alias of itself, because the builder only knew the default kind.
+ */
+describe("audit SB-09 — the 31600 `a` tag names the space's real kind", () => {
+  const eid = hex(5);
+  const aTag = (cfg: EventConfig) => buildEventConfig(cfg).tags.find((t) => t[0] === "a")?.[1];
+
+  it("a community config names its 31612 coordinate, and an event's tags are unchanged", () => {
+    const community = makeCoordinate(eid, "club", KIND_COMMUNITY);
+    expect(aTag({ ...base(eid, "club"), spaceKind: KIND_COMMUNITY })).toBe(community);
+    // Without spaceKind (every dated event) the tags are exactly what they were.
+    expect(aTag(base(eid, "ev"))).toBe(`31923:${eid}:ev`);
+    expect(buildEventConfig({ ...base(eid, "ev"), spaceKind: 31923 }).tags).toEqual(buildEventConfig(base(eid, "ev")).tags);
+    expect(() => buildEventConfig({ ...base(eid, "ev"), spaceKind: 1 })).toThrow();
+  });
+
+  it("parse keeps the kind of a correctly stamped community, so a re-save round-trips", () => {
+    const tags = buildEventConfig({ ...base(eid, "club"), spaceKind: KIND_COMMUNITY }).tags;
+    const parsed = parseEventConfig(eid, tags);
+    expect(parsed.spaceKind).toBe(KIND_COMMUNITY);
+    expect(configCoordinate(parsed)).toBe(makeCoordinate(eid, "club", KIND_COMMUNITY));
+    expect(buildEventConfig(parsed).tags).toEqual(tags);
+    expect(parseEventConfig(eid, buildEventConfig(base(eid, "ev")).tags).spaceKind).toBeUndefined();
+  });
+
+  it("configForSpace repairs a community stamped 31923 before the fix, and leaves an event alone", () => {
+    const legacy = parseEventConfig(eid, buildEventConfig(base(eid, "club")).tags); // the old, wrong `a`
+    expect(legacy.spaceKind).toBeUndefined();
+    const community = makeCoordinate(eid, "club", KIND_COMMUNITY);
+    expect(aTag(configForSpace(legacy, community))).toBe(community);
+    const event = makeCoordinate(eid, "ev");
+    const fixed = configForSpace({ ...base(eid, "ev"), spaceKind: KIND_COMMUNITY }, event);
+    expect("spaceKind" in fixed).toBe(false);
+    expect(aTag(fixed)).toBe(event);
   });
 });

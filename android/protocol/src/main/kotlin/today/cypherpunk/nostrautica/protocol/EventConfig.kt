@@ -30,14 +30,27 @@ data class EventConfig(
     val parent: String? = null,
     /** §15: the events that belong to this community (31923 coordinates). */
     val children: List<String> = emptyList(),
+    /**
+     * The space's kind (config.ts `spaceKind`, audit SB-09): 31923 for a dated
+     * event, 31612 for a community. It names the kind in the `a` tag, which a
+     * community used to stamp as 31923. [parse] sets 31612 only when the `a` tag
+     * already says so; a writer republishing a config should set it from the
+     * coordinate it holds (see [forSpace]).
+     */
+    val spaceKind: Int = Kinds.CALENDAR_EVENT,
 ) {
-    /** The coordinate of a dated event; communities are built with [coordinate] and their kind. */
-    fun coordinate(kind: Int = Kinds.CALENDAR_EVENT) = Coordinate(kind, eidPubkey, d)
+    /** The space's coordinate, by [spaceKind] unless a kind is given. */
+    fun coordinate(kind: Int = spaceKind) = Coordinate(kind, eidPubkey, d)
+
+    /** config.ts configForSpace: this config with [spaceKind] taken from the space's own coordinate. */
+    fun forSpace(coordinate: Coordinate): EventConfig =
+        copy(spaceKind = if (coordinate.kind == Kinds.COMMUNITY) Kinds.COMMUNITY else Kinds.CALENDAR_EVENT)
 
     /** Chat is operative only with a coordinator (the MLS admin bot). */
     val isMarmotChatEnabled: Boolean get() = coordinator != null && "marmot" in chat
 
-    fun toTags(kind: Int = Kinds.CALENDAR_EVENT): List<List<String>> {
+    fun toTags(kind: Int = spaceKind): List<List<String>> {
+        require(kind in Kinds.SPACE_KINDS) { "31600 config: spaceKind must be a space kind" }
         val tags = mutableListOf(
             listOf("d", d),
             listOf("a", coordinate(kind).toString()),
@@ -172,6 +185,8 @@ data class EventConfig(
                 retentionDays = first(tags, "retention")?.toIntOrNull()?.takeIf { it >= 1 },
                 parent = first(tags, Hierarchy.PARENT_TAG)?.takeIf(Hierarchy::isValidParent),
                 children = all(tags, Hierarchy.CHILD_TAG).filter(Hierarchy::isValidChild).distinct().take(Hierarchy.MAX_CHILDREN),
+                // SB-09: only a community's own coordinate sets it (config.ts parseEventConfig).
+                spaceKind = if (first(tags, "a") == Coordinate(Kinds.COMMUNITY, eidPubkey, d).toString()) Kinds.COMMUNITY else Kinds.CALENDAR_EVENT,
             )
         }
 

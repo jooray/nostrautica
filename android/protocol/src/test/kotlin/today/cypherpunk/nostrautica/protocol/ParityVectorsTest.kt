@@ -66,6 +66,9 @@ class ParityVectorsTest {
             assertEquals(label, (w["coordinatorGen"]!! as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it !is JsonNull }?.int, got.coordinatorGen)
             assertEquals(label, w["relays"]!!.jsonArray.map { it.jsonPrimitive.content }, got.relays)
             assertEquals(label, w["chatRelays"]!!.jsonArray.map { it.jsonPrimitive.content }, got.chatRelays)
+            assertEquals(label, w["spaceKind"]!!.jsonPrimitive.int, got.spaceKind)
+            val aBuilt = (w["aBuilt"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it !is JsonNull }?.content
+            if (aBuilt != null) assertEquals(label, aBuilt, got.toTags().first { it[0] == "a" }[1])
         }
     }
 

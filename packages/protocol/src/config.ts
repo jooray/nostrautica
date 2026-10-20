@@ -3,8 +3,8 @@
  * config lives entirely in tags on a public event signed by `E_id`. This module
  * builds and parses those tags into a typed object.
  */
-import { KIND_EVENT_CONFIG } from "./kinds.js";
-import { makeCoordinate } from "./coordinate.js";
+import { KIND_CALENDAR_EVENT, KIND_COMMUNITY, KIND_EVENT_CONFIG } from "./kinds.js";
+import { SPACE_KINDS, isCommunityCoordinate, makeCoordinate } from "./coordinate.js";
 import {
   CHILD_TAG,
   MAX_CHILDREN,
@@ -169,6 +169,17 @@ export interface EventConfig {
   parent?: string;
   /** The events that belong to this community (§15, `child` tags): 31923 coordinates. */
   children?: string[];
+  /**
+   * The kind of the space this config belongs to (audit SB-09): 31923 for a dated
+   * event, 31612 for a community. It names the kind in the `["a", …]` tag, which
+   * must be the space's real coordinate. Every community used to advertise
+   * `31923:<E_id>:<d>` because the builder only knew the default kind. Absent means
+   * a dated event, so existing events stay byte-identical; the parser sets it only
+   * for a community whose `a` tag already says 31612. Writers that republish a
+   * space's config should set it from the coordinate they hold, which also repairs
+   * a community published before the fix.
+   */
+  spaceKind?: number;
 }
 
 export interface EventConfigTags {
@@ -179,7 +190,10 @@ export interface EventConfigTags {
 
 /** Build the tag array for a kind 31600 event. */
 export function buildEventConfig(cfg: EventConfig): EventConfigTags {
-  const coordinate = makeCoordinate(cfg.eidPubkey, cfg.d);
+  if (cfg.spaceKind !== undefined && !SPACE_KINDS.includes(cfg.spaceKind)) {
+    throw new Error(`31600 config: spaceKind must be one of ${SPACE_KINDS.join(", ")}`);
+  }
+  const coordinate = makeCoordinate(cfg.eidPubkey, cfg.d, cfg.spaceKind ?? KIND_CALENDAR_EVENT);
   const tags: string[][] = [
     ["d", cfg.d],
     ["a", coordinate],
@@ -429,6 +443,9 @@ export function parseEventConfig(
       const c = [...new Set(all(tags, CHILD_TAG).filter(isValidChildCoordinate))].slice(0, MAX_CHILDREN);
       return c.length ? c : undefined;
     })(),
+    // SB-09: only a community's own coordinate sets it, so a dated event (and a
+    // community stamped 31923 before the fix) parses exactly as before.
+    ...(first(tags, "a") === makeCoordinate(eidPubkey, d, KIND_COMMUNITY) ? { spaceKind: KIND_COMMUNITY } : {}),
   };
 }
 
@@ -443,9 +460,21 @@ function retentionTag(tags: string[][]): number | undefined {
   return Number.isInteger(n) && n >= 1 ? n : undefined;
 }
 
-/** The event coordinate for a parsed config. */
+/**
+ * `cfg` with {@link EventConfig.spaceKind} set from the space's own `coordinate`
+ * (audit SB-09), for every path that republishes a config it read back. Reading
+ * a community stamped `31923` before the fix and saving it again thus repairs
+ * the `a` tag, and a dated event keeps no `spaceKind` at all (byte-identical).
+ */
+export function configForSpace(cfg: EventConfig, coordinate: string): EventConfig {
+  const { spaceKind: _spaceKind, ...rest } = cfg;
+  void _spaceKind;
+  return isCommunityCoordinate(coordinate) ? { ...rest, spaceKind: KIND_COMMUNITY } : rest;
+}
+
+/** The space coordinate for a parsed config (a dated event unless {@link EventConfig.spaceKind} says otherwise). */
 export function configCoordinate(cfg: EventConfig): string {
-  return makeCoordinate(cfg.eidPubkey, cfg.d);
+  return makeCoordinate(cfg.eidPubkey, cfg.d, cfg.spaceKind ?? KIND_CALENDAR_EVENT);
 }
 
 /**
