@@ -1,6 +1,7 @@
 <script lang="ts">
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
+  import { reseed } from "$lib/util/form-seed.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { session } from "$lib/signer/session.svelte.js";
@@ -449,8 +450,16 @@
   let talksMode = $state<"off" | "on" | "prerecord-first">("off");
   let savingTalks = $state(false);
   let talksSaved = $state(false);
+  // Re-seed only while untouched (audit SB-17): every save on this page replaces
+  // `ctx`, and re-assigning unconditionally reset unsaved edits in other cards.
+  // The seeds are plain (non-reactive) lets and the current value is read
+  // untracked, so a keystroke does not re-run these effects.
+  let talksSeed: typeof talksMode | undefined;
   $effect(() => {
-    if (ctx) talksMode = ctx.config.talks;
+    if (!ctx) return;
+    const next = ctx.config.talks;
+    talksMode = reseed(untrack(() => talksMode), talksSeed, next);
+    talksSeed = next;
   });
   async function saveTalks() {
     if (!ctx) return;
@@ -475,8 +484,12 @@
   let chatEnabled = $state(false);
   let savingChat = $state(false);
   let chatSaved = $state(false);
+  let chatSeed: boolean | undefined; // see talksSeed (SB-17)
   $effect(() => {
-    if (ctx) chatEnabled = ctx.config.chat.includes("marmot");
+    if (!ctx) return;
+    const next = ctx.config.chat.includes("marmot");
+    chatEnabled = reseed(untrack(() => chatEnabled), chatSeed, next);
+    chatSeed = next;
   });
   async function saveChat() {
     if (!ctx) return;
@@ -504,8 +517,12 @@
   let retentionInput = $state<number | null>(null);
   let savingRetention = $state(false);
   let retentionSaved = $state(false);
+  let retentionSeed: number | null | undefined; // see talksSeed (SB-17)
   $effect(() => {
-    if (ctx) retentionInput = ctx.config.retentionDays ?? null;
+    if (!ctx) return;
+    const next = ctx.config.retentionDays ?? null;
+    retentionInput = reseed(untrack(() => retentionInput), retentionSeed, next);
+    retentionSeed = next;
   });
   const retentionDirty = $derived(!!ctx && (retentionInput ?? undefined) !== ctx.config.retentionDays);
   async function saveRetention() {
@@ -540,8 +557,12 @@
   let relaysInput = $state("");
   let savingRelays = $state(false);
   let relaysSaved = $state(false);
+  let relaysSeed: string | undefined; // see talksSeed (SB-17)
   $effect(() => {
-    if (ctx) relaysInput = ctx.config.relays.join("\n");
+    if (!ctx) return;
+    const next = ctx.config.relays.join("\n");
+    relaysInput = reseed(untrack(() => relaysInput), relaysSeed, next);
+    relaysSeed = next;
   });
   function parseRelaysInput(): string[] {
     return unionRelays(
