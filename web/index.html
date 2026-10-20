@@ -3,6 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Static page, own assets only. The one inline script (theme, below) is
+     allowed by hash; the deploy build fails if the hash and script drift apart
+     (checkLandingCsp in scripts/build-docs.mjs). -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'sha256-A40mVum1/KE56K/rZgiQKHz4xcmtdfcPfjRwHMPWu5o='; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
 <title>Nostrautica: chart a course to the people worth meeting</title>
 <meta name="description" content="Nostrautica pairs AI matchmaking with a real, portable Nostr identity, so every attendee knows who to meet, and why. Works for a normal conference with live talks, or the prerecorded 'fire, not the podium' format.">
 <meta name="color-scheme" content="light dark">
@@ -22,7 +26,7 @@
 <meta name="twitter:description" content="AI matchmaking plus a real, portable Nostr identity, for any event.">
 <meta name="twitter:image" content="https://nostrautica.cypherpunk.today/assets/og-card.png">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath fill='%236d28d9' d='M50 2c4 38 8 42 46 48-38 6-42 10-46 48-4-38-8-42-46-48 38-6 42-10 46-48Z'/%3E%3C/svg%3E">
-<link rel="stylesheet" href="assets/style.css?v=6386288f">
+<link rel="stylesheet" href="assets/style.css?v=62964884">
 <script>
   /* Applied before paint to avoid a flash of the wrong theme. Light is the
      default; dark only kicks in on an explicit stored choice or when the OS
@@ -200,7 +204,7 @@
       <div class="section-head center">
         <p class="eyebrow" data-i18n="formats.eyebrow">Two ways to run it</p>
         <h2 data-i18n="formats.title">Keep your stage. Or set it on fire.</h2>
-        <p data-i18n="formats.lede">Nostrautica's matching works the same either way. The format is your call, not ours.</p>
+        <p data-i18n="formats.lede">Nostrautica's matching works the same either way. The format is up to you.</p>
       </div>
 
       <div class="format-grid">
@@ -210,7 +214,7 @@
           <p data-i18n="formats.standard_body">Keep your speakers, your schedule, your stage. Nostrautica layers on top. Everyone gets recommendations on who to find, whether that's the hallway or the DMs.</p>
           <ul class="talks-points">
             <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.standard_point1">Works with any agenda you already run</span></li>
-            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.standard_point2">Matches keep updating as people check in</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.standard_point2">Nostrautica is your conference's app: the schedule, contacts, chats, all of it</span></li>
             <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.standard_point3">Talks can feed matching too, if you opt in</span></li>
           </ul>
         </div>
@@ -220,16 +224,13 @@
           <h3 data-i18n="formats.fire_title">Prerecorded talks, live everything else</h3>
           <p data-i18n="formats.fire_body">Speakers record ahead of time and everyone watches before they arrive. That frees the whole venue, the whole day, for the conversations your matches actually pointed you toward.</p>
           <ul class="talks-points">
-            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.fire_point1">No stage to build, no AV budget to blow</span></li>
+            <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.fire_point1">You don't have to build a stage or raise an AV budget</span></li>
             <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.fire_point2">Talks can feed matching too, if you opt in</span></li>
             <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="formats.fire_point3">The room becomes the main event</span></li>
           </ul>
         </div>
       </div>
 
-      <figure class="talks-visual">
-        <figcaption data-i18n="formats.caption">Talks, queued up before you arrive.</figcaption>
-      </figure>
     </div>
   </section>
 
@@ -245,7 +246,7 @@
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f2">Get a ranked, reasoned list of people to meet</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f3">See who you already follow, and who follows you</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f4">Message anyone directly, end-to-end encrypted</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f6">Leave with a real Nostr identity you carry to the next event</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="attendees.f6">You leave with a real Nostr identity you carry to the next event, or into everyday life. It holds the people you met, and you can follow what they post.</span></li>
         </ul>
         <a class="btn btn-ghost" href="/docs/PARTICIPANT-GUIDE.html" data-i18n="attendees.cta" data-i18n-href="attendees.cta_href">Read the participant guide</a>
       </div>
@@ -472,7 +473,7 @@
   </div>
 </footer>
 
-<script src="assets/i18n.js?v=b8621b73"></script>
+<script src="assets/i18n.js?v=b5c4aa98"></script>
 <script src="assets/app.js?v=3845cfa8"></script>
 </body>
 </html>

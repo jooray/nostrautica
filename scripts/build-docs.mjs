@@ -44,6 +44,7 @@ import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync
 import { createHash } from "node:crypto";
 import { join, dirname, resolve, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DOCS = join(ROOT, "docs");
@@ -558,6 +559,22 @@ export function build(outDir) {
     throw new Error(`landing page references ${staleVersions.length} asset(s) with a stale ?v= stamp`);
   }
 
+  const copyDrift = checkLandingCopy(ROOT);
+  if (copyDrift.length) {
+    console.error(`[docs] landing copy check FAILED: ${copyDrift.length} static string(s) differ from i18n.js:`);
+    for (const m of copyDrift) console.error(`  ✗ ${m}`);
+    process.exitCode = 1;
+    throw new Error(`landing page static text differs from the English dictionary in ${copyDrift.length} place(s)`);
+  }
+
+  const cspProblems = checkLandingCsp(ROOT);
+  if (cspProblems.length) {
+    console.error(`[docs] landing CSP check FAILED:`);
+    for (const m of cspProblems) console.error(`  ✗ ${m}`);
+    process.exitCode = 1;
+    throw new Error(`landing page CSP does not allow its inline script(s)`);
+  }
+
   const missingImages = checkGuideImages(ROOT);
   if (missingImages.length) {
     console.error(`[docs] guide image check FAILED: ${missingImages.length} missing file(s):`);
@@ -569,7 +586,7 @@ export function build(outDir) {
   console.log(
     `[docs] built ${pages.size} pages → ${outDir}` +
       (warnings.length ? ` (${warnings.length} link warning(s))` : "") +
-      `; internal link check passed (external links are not fetched); landing assets OK; asset stamps OK; guide images OK`,
+      `; internal link check passed (external links are not fetched); landing assets OK; asset stamps OK; landing copy + CSP OK; guide images OK`,
   );
   return { pages, errors, warnings };
 }
@@ -660,6 +677,63 @@ export function checkGuideImages(root) {
     }
   }
   return [...missing].sort();
+}
+
+/**
+ * The landing page's static English text must match the English dictionary.
+ *
+ * `applyLang` overwrites every data-i18n element from web/assets/i18n.js on
+ * load, so a stale static string is invisible in a browser with JS, but it is
+ * what crawlers, no-JS readers and the first paint see. Four had drifted, one
+ * of them a different product claim altogether (audit SB-109).
+ */
+export function checkLandingCopy(root) {
+  const landing = join(root, "web", "index.html");
+  const dictFile = join(root, "web", "assets", "i18n.js");
+  if (!existsSync(landing) || !existsSync(dictFile)) return [];
+  const ctx = { window: {} };
+  runInNewContext(readFileSync(dictFile, "utf8"), ctx);
+  const en = ctx.window.NOSTRAUTICA_I18N?.en ?? {};
+  const html = readFileSync(landing, "utf8");
+  const decode = (s) =>
+    s
+      .replace(/&nbsp;/g, " ")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;|&apos;/g, "'")
+      .replace(/&amp;/g, "&");
+  const norm = (s) => s.replace(/\s+/g, " ").trim();
+  const drift = [];
+  const re = /<([a-z0-9]+)\b[^>]*?\sdata-i18n(-html)?="([^"]+)"[^>]*>([\s\S]*?)<\/\1>/g;
+  for (const [, , isHtml, key, inner] of html.matchAll(re)) {
+    if (!(key in en)) {
+      drift.push(`data-i18n="${key}" has no English dictionary entry`);
+      continue;
+    }
+    const shown = isHtml ? norm(inner) : norm(decode(inner));
+    if (shown !== norm(en[key])) drift.push(`${key}: index.html says "${shown}" but i18n.js says "${norm(en[key])}"`);
+  }
+  return drift;
+}
+
+/**
+ * Every inline <script> on the landing page must be allowed by a hash in its
+ * CSP meta, or the browser silently refuses to run it (the theme bootstrap
+ * would stop applying before paint). Returns the problems, with the hash to use.
+ */
+export function checkLandingCsp(root) {
+  const landing = join(root, "web", "index.html");
+  if (!existsSync(landing)) return [];
+  const html = readFileSync(landing, "utf8");
+  const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]+)"/.exec(html)?.[1];
+  if (!csp) return ["web/index.html has no Content-Security-Policy meta"];
+  const problems = [];
+  for (const [, body] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+    const hash = `sha256-${createHash("sha256").update(body).digest("base64")}`;
+    if (!csp.includes(`'${hash}'`)) problems.push(`inline script not allowed by the CSP; its hash is '${hash}'`);
+  }
+  return problems;
 }
 
 export function checkLandingAssets(root) {

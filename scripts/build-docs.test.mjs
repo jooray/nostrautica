@@ -24,6 +24,8 @@ import {
   cleanOutDir,
   THEME_JS,
   DOCS_CSP,
+  checkLandingCopy,
+  checkLandingCsp,
 } from "./build-docs.mjs";
 
 const ROOT = "/repo/root";
@@ -238,6 +240,46 @@ test("THEME_JS: survives a localStorage that throws, and the toggle still works 
   onReady();
   onClick();
   assert.equal(attrs["data-theme"], "light");
+});
+
+function landingCopyFixture(html, en) {
+  const root = mkdtempSync(join(tmpdir(), "landing-copy-"));
+  mkdirSync(join(root, "web", "assets"), { recursive: true });
+  writeFileSync(join(root, "web", "index.html"), html);
+  writeFileSync(
+    join(root, "web", "assets", "i18n.js"),
+    `(function (root) { root.NOSTRAUTICA_I18N = { en: ${JSON.stringify(en)} }; })(window);`,
+  );
+  return root;
+}
+
+test("checkLandingCopy: static text that drifted from the dictionary is reported (SB-109)", () => {
+  const root = landingCopyFixture(
+    `<p data-i18n="a">Same &amp; fine</p><span data-i18n="b">Matches keep updating</span>`,
+    { a: "Same & fine", b: "Nostrautica is your conference's app" },
+  );
+  const drift = checkLandingCopy(root);
+  assert.equal(drift.length, 1);
+  assert.ok(drift[0].startsWith("b:"));
+});
+
+test("checkLandingCopy: the real landing page matches its dictionary", () => {
+  assert.deepEqual(checkLandingCopy(resolve(import.meta.dirname, "..")), []);
+});
+
+test("checkLandingCsp: an inline script missing from the CSP is reported with its hash (SB-114)", () => {
+  const root = mkdtempSync(join(tmpdir(), "landing-csp-"));
+  mkdirSync(join(root, "web"), { recursive: true });
+  const body = "console.log(1)";
+  const hash = createHash("sha256").update(body).digest("base64");
+  writeFileSync(
+    join(root, "web", "index.html"),
+    `<meta http-equiv="Content-Security-Policy" content="script-src 'self'"><script>${body}</script>`,
+  );
+  const problems = checkLandingCsp(root);
+  assert.equal(problems.length, 1);
+  assert.ok(problems[0].includes(`sha256-${hash}`));
+  assert.deepEqual(checkLandingCsp(resolve(import.meta.dirname, "..")), []);
 });
 
 test("DOCS_CSP: allows exactly the theme script by hash (SB-114)", () => {

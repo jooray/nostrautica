@@ -587,15 +587,6 @@ section { position: relative; padding-block: clamp(3.5rem, 8vw, 6.5rem); }
 .is-android .install-android .format-tag { color: var(--accent); }
 .is-android .install-web .talks-points,
 .is-android .install-web .install-note { display: none; }
-.talks-visual { display: grid; place-items: center; position: relative; margin-top: 2.5rem; }
-.talks-visual .phone { --pw: 230px; margin-inline: auto; }
-.talks-visual figcaption {
-  text-align: center;
-  margin-top: 1rem;
-  font-size: 0.85rem;
-  color: var(--text-faint);
-  font-family: var(--mono);
-}
 
 /* ---------- Feature two-column (organizers/attendees) ---------- */
 .feature-split {

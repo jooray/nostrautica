@@ -63,7 +63,6 @@
       "formats.fire_point1": "You don't have to build a stage or raise an AV budget",
       "formats.fire_point2": "Talks can feed matching too, if you opt in",
       "formats.fire_point3": "The room becomes the main event",
-      "formats.caption": "Talks, queued up before you arrive.",
 
       "organizers.eyebrow": "For organizers",
       "organizers.title": "Run the whole thing from your phone.",
@@ -221,7 +220,6 @@
       "formats.fire_point1": "Nemusíte stavať pódium ani zháňať rozpočet na audiovizuálnu techniku",
       "formats.fire_point2": "Aj prednášky môžu byť signálom pre párovanie, ak sa tak rozhodnete",
       "formats.fire_point3": "Z miestnosti sa stáva hlavný program",
-      "formats.caption": "Prednášky, pripravené ešte pred vaším príchodom.",
 
       "organizers.eyebrow": "Pre organizátorov",
       "organizers.title": "Celé podujatie riadite z telefónu.",
@@ -379,7 +377,6 @@
       "formats.fire_point1": "Nemusíte stavět pódium ani shánět rozpočet na audiovizuální techniku",
       "formats.fire_point2": "I přednášky mohou být signálem pro párování, pokud se tak rozhodnete",
       "formats.fire_point3": "Z místnosti se stává hlavní program",
-      "formats.caption": "Přednášky, připravené ještě před vaším příchodem.",
 
       "organizers.eyebrow": "Pro organizátory",
       "organizers.title": "Celou akci řídíte z telefonu.",
@@ -536,7 +533,6 @@
       "formats.fire_point1": "Du musst keine Bühne aufbauen und kein AV-Budget auftreiben",
       "formats.fire_point2": "Auch Talks können ins Matching einfließen, wenn du das möchtest",
       "formats.fire_point3": "Der Raum wird zum Hauptprogramm",
-      "formats.caption": "Talks, bereit, bevor du ankommst.",
 
       "organizers.eyebrow": "Für Veranstaltende",
       "organizers.title": "Steuere alles vom Handy aus.",
@@ -693,7 +689,6 @@
       "formats.fire_point1": "No tienes que montar un escenario ni conseguir presupuesto para audiovisuales",
       "formats.fire_point2": "Las charlas también pueden alimentar el emparejamiento, si tú lo decides",
       "formats.fire_point3": "La sala se convierte en el evento principal",
-      "formats.caption": "Charlas, listas antes de que llegues.",
 
       "organizers.eyebrow": "Para organizadores",
       "organizers.title": "Dirige todo desde tu teléfono.",
