@@ -116,6 +116,15 @@ function nextRev(coordinate: string, observed: number | undefined): number {
   return next;
 }
 
+/**
+ * Claim the next 21601 submission `rev` for an event — {@link nextRev} for the
+ * callers outside this module (the join flow). The persisted high-water mark is
+ * written before the caller publishes, so a failed publish can't reissue it.
+ */
+export function claimSubmissionRev(coordinate: string, observed: number | undefined): number {
+  return nextRev(coordinate, observed);
+}
+
 /** The highest rev known to have been sent for this event, or -1. */
 function revFloor(coordinate: string, observed: number | undefined): number {
   const stored = cacheGet<number>(selfRevKey(coordinate))?.data;

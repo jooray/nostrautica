@@ -28,7 +28,7 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { loadSelfCopy, cacheSelfCopy } from "$lib/media/submit.js";
+import { loadSelfCopy, cacheSelfCopy, claimSubmissionRev } from "$lib/media/submit.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 /**
@@ -164,8 +164,14 @@ export async function sendJoinRequest(
   // (loadSelfCopy) and bumps past it, cleanly superseding the join submission. A
   // first join is rev 0; the self-copy written below carries it so the next edit
   // bumps from it.
+  //
+  // Through the persisted high-water mark (claimSubmissionRev), not
+  // `(prevSelf?.rev ?? -1) + 1`: an empty relay read with no local self-copy made
+  // that 0 again, and a re-join at rev 0 after rev N loses the §3.3 comparison —
+  // the coordinator drops it as stale while this screen says it was sent (audit
+  // DS41-008). Same rule the Record flow uses.
   const prevSelf = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
-  const rev = (prevSelf?.rev ?? -1) + 1;
+  const rev = claimSubmissionRev(ctx.coordinate, prevSelf?.rev);
 
   const wraps: Promise<unknown>[] = [
     signerWrap(signer, inboxPubkey, {
