@@ -451,13 +451,16 @@ this coordinator saw. The detach writes it to the `detached_events` table (schem
 v6) and logs it (`attendee data purged after <date> unless re-attached`). The
 retention sweep, at boot and then hourly, runs the full local purge (the same
 reference-counted purge described in §6) for every row whose deadline has passed,
-then deletes the row. The deadline is "the next sweep", within the hour, when:
+then deletes the row. Two special cases:
 
-- it has already passed at detach time, or
-- the event has none: no `retention` tag, or no end date (a 31612 community, or a
-  31923 without `end`/`start`). An installed event in that state is kept
-  indefinitely, because it is still being served. A detached one is not, so it
-  does not get that exception.
+- **The deadline has already passed** at detach time: the data goes at the next
+  sweep, within the hour.
+- **The event has no deadline**: no `retention` tag, or no end date (every 31612
+  community, or a 31923 without `end`/`start`). An installed event in that state
+  is kept indefinitely, because it is still being served. A detached one is not:
+  its data goes **7 days after the detach** (`DETACHED_NO_DEADLINE_GRACE_SEC`).
+  The week is there so that a mistaken detach, or a detach and re-attach during a
+  coordinator move, does not cost every transcript and AI profile.
 
 A re-attach to this coordinator (a fresh grant at a higher `gen`) before the purge
 deletes the row and keeps the data; the event is then an installed event again,
@@ -471,18 +474,18 @@ What the detach purge does **not** do:
   ECKs that address the blinded ones, so its purge is local only.
 - **Backups.** A snapshot taken before the purge still contains the data. Expire
   old backups (§6).
-- **Events detached before schema v6** have no ledger row, so nothing purges them.
-  To forget one, delete its rows by coordinate yourself, take a backup first, and
-  expire older backups.
 - **The minimal security state** stays, as after a retention purge:
   `install_state` (the detach tombstone and `gen` high-water mark that bar a
   replayed grant), `billing_state`, the global `seen_rumors` ledger, and the
   coordinator's own MLS key material in `marmot_kv`. None of it holds attendee
   content.
 
+**Events detached before schema v6** are picked up by the v6 migration: on the
+first start of a v6 binary, every coordinate that still has attendee data but no
+event row gets a ledger row due 7 days after that start.
+
 Tell organizers this before they detach: the old coordinator keeps what it learned
-until the event's retention deadline, or for at most an hour when the event has no
-deadline.
+until the event's retention deadline, or for 7 days when the event has no deadline.
 
 **Periodic restore drill.** On a schedule, `verify-backup` the latest snapshot and
 `restore` it onto an isolated host with subscriptions and provider calls disabled;

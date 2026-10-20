@@ -53,7 +53,7 @@ import {
   RUMOR_MAX_CLOCK_SKEW_SEC,
   type EckVersion,
 } from "@nostrautica/protocol";
-import { Store } from "./store/db.js";
+import { Store, DETACHED_NO_DEADLINE_GRACE_SEC } from "./store/db.js";
 import { Coordinator, sanitizeMatchList, fitTalkContent, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
 import type { RoleRoutes } from "./providers/types.js";
@@ -6324,15 +6324,25 @@ describe("audit SB-16 — a detached event's attendee data is purged at its rete
     expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
   });
 
-  it("no retention policy / no end date: 'keep while served' does not survive the detach — purged at the next sweep", async () => {
+  it("no retention policy / no end date: kept for the 7-day grace after the detach, then purged", async () => {
     const h = await setup(); // no retention tag, no end tag: the installed sweep never touches it
     const pk = await join(h, generateSecretKey(), "crypto");
     await h.coordinator.jobs.drain();
     await h.coordinator.retentionSweep();
     expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined(); // installed: kept
+    const detachedAt = Math.floor(h.clock.t / 1000);
     await admin(h, "detach", {});
+    expect(h.store.getDetachedEvent(h.coordinate)?.purge_after_sec).toBe(detachedAt + DETACHED_NO_DEADLINE_GRACE_SEC);
+    // A mistaken detach is not punished within the hour: still there after six days.
+    await h.coordinator.retentionSweep();
+    h.clock.t += 6 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)?.profile_json).toBeTruthy();
+    // Past the week: gone.
+    h.clock.t += 2 * DAY * 1000;
     await h.coordinator.retentionSweep();
     expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
   });
 
   it("a re-attach before the deadline cancels the purge and keeps the data", async () => {

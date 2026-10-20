@@ -116,7 +116,7 @@ import {
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor, RumorKind } from "@nostrautica/protocol";
 
-import { Store, DAEMON_PARK_REASON, EVENT_NOT_LIVE_PARK_REASON, type BillingStateRow, type EnqueueOutcome } from "./store/db.js";
+import { Store, DAEMON_PARK_REASON, DETACHED_NO_DEADLINE_GRACE_SEC, EVENT_NOT_LIVE_PARK_REASON, type BillingStateRow, type EnqueueOutcome } from "./store/db.js";
 import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
 import { InviteChecker, MemberOfChecker, evaluateEntitlement, type EntitlementDecision, type LinkConfig } from "./pipeline/entitlement.js";
 import { processAttendee } from "./pipeline/process.js";
@@ -5161,7 +5161,7 @@ export class Coordinator {
    *  - DELETE the stored E_inbox/ECK custody (decision D6 — re-attach requires a
    *    fresh grant with a new gen); the tombstone row survives for dedupe/replay bar;
    *  - schedule the purge of the event's attendee-derived data (audit SB-16) for the
-   *    retention deadline it would have had, or the next sweep when it has none
+   *    retention deadline it would have had, or a week out when it has none
    *    ({@link detachPurgeAfter}); a re-install before then cancels it;
    *  - freeze the event's Marmot group (the existing freeze path) — full Marmot
    *    detach semantics (key rotation, member wipe) remain Phase 2/3.
@@ -5237,15 +5237,16 @@ export class Coordinator {
    * When a detached event's attendee-derived data is purged (audit SB-16): the
    * retention deadline the event would have had as an installed event
    * (`end + retention·86400`, from the live state, else from the stored config and
-   * anchor of an event detached before it was restored), or NOW when there is none.
+   * anchor of an event detached before it was restored). A deadline already in the
+   * past means the next sweep.
    *
-   * "None" covers two cases the installed-event sweep treats as "never": no
-   * `retention` tag (keep indefinitely) and no end date (a 31612 community, or a
-   * 31923 without dates). That rule is about an event this coordinator still serves,
-   * where the organizer's data is in use and the sweep cannot know when the window
-   * opened. After a detach nothing here uses it any more, and "never" would be
-   * exactly the leak SB-16 describes, so it does not carry over: such an event's
-   * data is purged at the first sweep after the detach (within the hour).
+   * With no deadline at all, the detach time + {@link DETACHED_NO_DEADLINE_GRACE_SEC}
+   * (7 days). "None" covers two cases the installed-event sweep treats as "never":
+   * no `retention` tag (keep indefinitely) and no end date (a 31612 community, or a
+   * 31923 without dates). That rule is about an event this coordinator still serves;
+   * after a detach "never" would be exactly the leak SB-16 describes, so it does not
+   * carry over. But "at once" would turn a mistaken detach of a community into the
+   * loss of every transcript and AI profile, so it gets a week to be re-attached.
    */
   private detachPurgeAfter(coordinate: string, state: EventState | undefined): number {
     const nowSec = Math.floor(this.now() / 1000);
@@ -5266,7 +5267,7 @@ export class Coordinator {
         if (retentionDays !== undefined && endSec > 0) deadline = endSec + retentionDays * 86_400;
       }
     }
-    return deadline === null ? nowSec : Math.max(deadline, nowSec);
+    return deadline === null ? nowSec + DETACHED_NO_DEADLINE_GRACE_SEC : Math.max(deadline, nowSec);
   }
 
   /**

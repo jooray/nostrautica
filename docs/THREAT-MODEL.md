@@ -84,13 +84,14 @@ system protects, what it deliberately leaks, and who must be trusted.
   applied had the event stayed installed: the event's end time plus the `retention`
   days of its last 31600 this coordinator saw. Then the hourly sweep runs the same
   reference-counted local purge it runs for an installed event. If that deadline has
-  already passed, or the event has none (no `retention` tag, or no end date, as for
-  a 31612 community), the data goes at the next sweep, within the hour. A re-attach
-  to the same coordinator before the deadline cancels the purge. Two limits: the
+  already passed, the data goes at the next sweep, within the hour. If the event has
+  none (no `retention` tag, or no end date, as for every 31612 community), it goes
+  7 days after the detach, so a mistaken detach can still be undone. A re-attach to
+  the same coordinator before the deadline cancels the purge. Two limits: the
   purge is local only (with the ECKs gone, the old coordinator can no longer address
   its blinded relay records to send NIP-09 deletions), and backups taken before the
   purge still hold the data. An organizer replacing a coordinator should treat the
-  old one as holding everything it processed until that deadline. See
+  old one as holding everything it processed until that deadline (or for a week). See
   COORDINATOR-OPERATOR-GUIDE.md §9.
 - **LLM / STT provider**: sees plaintext transcripts and summaries. Mitigations:
   v1 prefers Venice private/TEE-tier models (`require_private`); v2 uses

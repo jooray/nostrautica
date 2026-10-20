@@ -94,6 +94,25 @@ export const DAEMON_PARK_REASON = "daemon budget exceeded";
 export const EVENT_NOT_LIVE_PARK_REASON = "event not live";
 
 /**
+ * How long a detached event with NO computable retention deadline keeps its
+ * attendee-derived data before the detach purge removes it (audit SB-16). "No
+ * deadline" is no `retention` tag or no end date, which is every 31612 community.
+ *
+ * Not zero, on purpose. A community detached by mistake (a 31600 edited in the
+ * wrong client, a coordinator field cleared), or detached from here and
+ * re-attached during a coordinator move, must not lose every transcript and AI
+ * profile within the hour: re-deriving them is a paid STT/LLM run per attendee,
+ * and media that has since left Blossom cannot be re-derived at all. A week is
+ * long enough to notice and re-attach, and short enough that "detached" still
+ * means "gone soon". An event WITH a deadline that has already passed is not
+ * given this grace: its organizer declared when the data should go, and it is past.
+ *
+ * Also the grace given to events detached before the ledger existed (the v6
+ * backfill in {@link applyDetachedEventsLedger}).
+ */
+export const DETACHED_NO_DEADLINE_GRACE_SEC = 7 * 86_400;
+
+/**
  * An ordered, transactional schema migration (audit O3). `up` runs inside a
  * `BEGIN IMMEDIATE` transaction and, on success, `user_version` is advanced to
  * `version`. `up` MUST be idempotent (re-runnable) — a database interrupted between
@@ -503,9 +522,16 @@ function applyInviteUsagePerRedeemer(db: DatabaseSync): void {
  * thing the retention sweep iterates over, so every attendee-derived row of a
  * detached event used to stay forever. A row here records when that data falls due:
  * the retention deadline the event would have had (end + window from its last
- * known 31600), or the detach time when no deadline can be computed. The sweep
+ * known 31600), or the detach time + {@link DETACHED_NO_DEADLINE_GRACE_SEC} when no deadline can be computed. The sweep
  * purges due rows through `purgeEventArtifacts` and then deletes the row; a
  * re-install deletes it first, which cancels the purge.
+ *
+ * Backfill: an event detached BEFORE this version left its data with no ledger row,
+ * so nothing would ever purge it. Every coordinate that still has event-scoped
+ * attendee data (any table `purgeEventArtifacts` deletes by coordinate) but no
+ * `events` row gets a row due at migration time + {@link DETACHED_NO_DEADLINE_GRACE_SEC}:
+ * its last config is gone with the custody, so no real deadline can be computed,
+ * and the week is the window to re-attach. Idempotent (`ON CONFLICT DO NOTHING`).
  *
  * Why this is a version boundary although it is only a new table: an older binary
  * would ignore the table AND re-install without clearing it, so after a roll-forward
@@ -522,6 +548,29 @@ function applyDetachedEventsLedger(db: DatabaseSync): void {
       detached_at INTEGER NOT NULL        -- unix seconds
     )
   `);
+  const tableExists = (name: string) =>
+    !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(name);
+  // Every table purgeEventArtifacts clears by a `coordinate` column. The ref tables
+  // stand in for transcripts / pipeline_artifacts / nostr_summaries, which are not
+  // coordinate-keyed themselves.
+  const scoped = [
+    "attendees", "submissions", "talks", "pairs", "job_status", "usage", "inbox_rate", "invite_usage",
+    "command_watermarks", "marmot_chat_keys", "marmot_chat_links", "marmot_consumed_kps", "marmot_groups",
+    "transcript_refs", "artifact_refs", "summary_refs",
+  ].filter(tableExists);
+  const sources = scoped.map((t) => `SELECT coordinate FROM ${t}`);
+  if (tableExists("jobs")) {
+    sources.push("SELECT json_extract(payload, '$.coordinate') AS coordinate FROM jobs WHERE json_valid(payload)");
+  }
+  if (sources.length === 0) return;
+  const nowSec = Math.floor(Date.now() / 1000);
+  db.prepare(
+    `INSERT INTO detached_events (coordinate, purge_after_sec, detached_at)
+       SELECT DISTINCT coordinate, ?, ? FROM (${sources.join(" UNION ")})
+        WHERE coordinate IS NOT NULL AND coordinate <> ''
+          AND coordinate NOT IN (SELECT coordinate FROM events)
+     ON CONFLICT(coordinate) DO NOTHING`,
+  ).run(nowSec + DETACHED_NO_DEADLINE_GRACE_SEC, nowSec);
 }
 
 const MIGRATIONS: Migration[] = [
@@ -2010,7 +2059,7 @@ export class Store {
   }
   /** Detached events whose purge deadline has been reached (`purge_after_sec <= nowSec`).
    *  Inclusive, unlike the installed sweep's `nowSec > deadline`, so that a row
-   *  scheduled for "now" (no deadline) is due at the very next sweep, even one that
+   *  scheduled for "now" (a deadline already passed) is due at the very next sweep, even one that
    *  runs within the same second. */
   dueDetachedEvents(nowSec: number): { coordinate: string; purge_after_sec: number; detached_at: number }[] {
     return this.db
