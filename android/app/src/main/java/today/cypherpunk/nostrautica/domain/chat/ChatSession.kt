@@ -134,7 +134,10 @@ class ChatSession internal constructor(
             val roster0 = chat.cachedRoster(account, ctx.coordinate)
             _state.update { it.copy(roster = roster0) }
             chat.warmProfiles(roster0, chatRelays)
-            val ref = engine.ensureAccount(d, advertised, chatRelays)
+            var ref = engine.ensureAccount(d, advertised, chatRelays)
+            // Widening the inbox to this event's relays breaks MDK's group subscriptions
+            // until a restart; do it now, before anything of ours is bound to the runtime.
+            if (engine.refreshIfStale()) ref = engine.ensureAccount(d, advertised, chatRelays)
             chat.keys.saveAdvertisedRelays(d.pubkey, advertised)
             accountRef = ref
             coroutineScope {
@@ -197,6 +200,15 @@ class ChatSession internal constructor(
                     binding = GroupBinding.select(groups, rosterGid, coord)
                 }
             }
+            // A group joined (or rejoined) in a running runtime gets no live subscription
+            // from MDK: its messages arrived only after a force-stop (e2e BUG-4). Restart
+            // the runtime once so its start registers the group like any other. A no-op
+            // unless the engine recorded such a join or a relay-list change.
+            if (engine.refreshIfStale()) {
+                unbindTimeline()
+                groups = engine.groups(ref)
+                binding = GroupBinding.select(groups, rosterGid, coord)
+            }
             val phase = when (GroupBinding.phase(binding)) {
                 GroupBinding.Phase.READY -> Phase.READY
                 GroupBinding.Phase.EVICTED -> Phase.EVICTED
@@ -245,9 +257,14 @@ class ChatSession internal constructor(
         _state.update { it.copy(attest = r.fold({ ok -> if (ok) Attest.SENT else Attest.QUEUED }, { Attest.FAILED })) }
     }
 
+    private fun unbindTimeline() {
+        timelineJob?.cancel(); timelineJob = null
+        timeline?.close(); timeline = null
+        boundGroup = null
+    }
+
     private fun bindTimeline(ref: String, gid: String, me: String) {
-        timelineJob?.cancel()
-        timeline?.close()
+        unbindTimeline()
         boundGroup = gid
         val h = engine.timeline(ref, gid, me)
         timeline = h

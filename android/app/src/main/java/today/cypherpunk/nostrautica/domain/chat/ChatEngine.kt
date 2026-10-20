@@ -35,6 +35,14 @@ interface ChatEngine {
     fun release()
 
     /**
+     * Restart the runtime when its live group subscriptions may be missing a group
+     * joined mid-run or a changed relay list ([RuntimeFreshness]), and only while the
+     * caller is its sole holder. Returns whether it restarted; every timeline handle
+     * from before is then dead and must be opened again.
+     */
+    suspend fun refreshIfStale(): Boolean
+
+    /**
      * Make [device] a local-signing account (importing its key the first time) that
      * advertises [relays] as its 10002/10050. Returns the account reference.
      */
