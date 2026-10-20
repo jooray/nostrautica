@@ -249,6 +249,30 @@ async function withFlushLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
 
 // ── Queue operations ─────────────────────────────────────────────────────────
 
+/**
+ * Ids discarded in this tab WHILE a flush is running (audit DS41-014), or null
+ * when none is. A flush works from ONE snapshot of the store, so a Discard tapped
+ * while it is busy with an earlier row only deleted the row — the flusher still
+ * held the event and published it when it got there, after the UI had promised a
+ * cancel. Scoped to the flush so it never outlives the snapshot it corrects.
+ */
+let discardedDuringFlush: Set<string> | null = null;
+
+function noteDiscarded(id: string): void {
+  discardedDuringFlush?.add(id);
+}
+
+/**
+ * Is this row still queued, right now? Checked immediately before the flusher
+ * publishes a row and before it writes one back, so a discard (here or, where the
+ * backend can answer a point read cheaply, in another tab) wins over a snapshot.
+ */
+async function stillQueued(id: string): Promise<boolean> {
+  if (discardedDuringFlush?.has(id)) return false;
+  if (!backend?.get) return true; // no point read: the in-tab set is the guard
+  return (await backend.get(id).catch(() => undefined)) !== undefined;
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 /** One row by event id, using the backend's point read when it has one. */
@@ -440,6 +464,15 @@ export async function flushQueue(): Promise<FlushResult> {
 
 async function flushQueueCore(): Promise<FlushResult> {
   if (!backend) return { sent: 0, remaining: 0, failed: 0 };
+  discardedDuringFlush = new Set();
+  try {
+    return await flushQueueSnapshot(backend);
+  } finally {
+    discardedDuringFlush = null;
+  }
+}
+
+async function flushQueueSnapshot(backend: OutboxBackend): Promise<FlushResult> {
   const active = activeCacheOwner();
   const now = Date.now();
   const items = (await backend.getAll()).sort((a, b) => a.queuedAt - b.queuedAt);
@@ -479,6 +512,8 @@ async function flushQueueCore(): Promise<FlushResult> {
       tally(item, true, false);
       continue;
     }
+    // Discarded since the snapshot (DS41-014): the user was promised a cancel.
+    if (!(await stillQueued(item.event.id))) continue;
     try {
       const missing = stillMissing(await publishSigned(item.event, item.relays));
       if (missing.length === 0) {
@@ -495,6 +530,8 @@ async function flushQueueCore(): Promise<FlushResult> {
       // the outbox. So narrow the target set to what is still missing and keep
       // going; the action itself counts as sent.
       sent++;
+      // Never resurrect a row discarded while the publish was in flight.
+      if (!(await stillQueued(item.event.id))) continue;
       const attempts = (item.attempts ?? 0) + 1;
       if (attempts >= MAX_FLUSH_ATTEMPTS) {
         // Same policy as an unreachable straggler below: give up quietly.
@@ -522,6 +559,8 @@ async function flushQueueCore(): Promise<FlushResult> {
         await backend.delete(item.event.id).catch(() => {});
         continue;
       }
+      // Discarded while the publish was in flight: leave it gone.
+      if (!(await stillQueued(item.event.id))) continue;
       const lastError = e instanceof Error ? e.message : String(e);
       await backend
         .put({ ...item, attempts, lastAttemptAt: now, failed, lastError })
@@ -565,6 +604,8 @@ export async function countQueuedForOwner(owner: string): Promise<number> {
 export async function discardQueuedForOwner(owner: string): Promise<number> {
   if (!backend) return 0;
   const mine = (await backend.getAll()).filter((i) => i.owner === owner);
+  // Marked first, so a flush already holding these rows skips them (DS41-014).
+  for (const item of mine) noteDiscarded(item.event.id);
   for (const item of mine) await backend.delete(item.event.id).catch(() => {});
   return mine.length;
 }
@@ -588,6 +629,7 @@ export async function retryFailed(id: string): Promise<FlushResult> {
 
 /** User action from the outbox UI: permanently drop a queued/failed item. */
 export async function discardQueued(id: string): Promise<void> {
+  noteDiscarded(id);
   await backend?.delete(id);
 }
 

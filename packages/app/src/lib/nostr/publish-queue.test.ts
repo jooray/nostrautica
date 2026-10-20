@@ -141,6 +141,29 @@ describe("publish-queue (App-8)", () => {
     expect(await listQueued()).toEqual([]);
   });
 
+  it("a Discard tapped mid-flush wins over the flush's snapshot (DS41-014)", async () => {
+    seed(store, "a", { queuedAt: 100 });
+    seed(store, "b", { queuedAt: 200 });
+    publishSigned.mockImplementation(async (event?: unknown) => {
+      // While the flusher is busy with "a", the user discards "b" in the outbox.
+      if ((event as { id: string }).id === "a") await discardQueued("b");
+    });
+    const res = await flushQueue();
+    expect(publishSigned.mock.calls.map((c) => (c[0] as { id: string }).id)).toEqual(["a"]);
+    expect(res.sent).toBe(1);
+    expect(store.has("b")).toBe(false);
+  });
+
+  it("a discard during a failing publish is not resurrected by the retry bookkeeping (DS41-014)", async () => {
+    seed(store, "c", { queuedAt: 100 });
+    publishSigned.mockImplementation(async () => {
+      await discardQueued("c");
+      throw new Error("relay timeout");
+    });
+    await flushQueue();
+    expect(store.has("c")).toBe(false);
+  });
+
   it("runs under a single-flusher lock: a contended flush is skipped", async () => {
     // Lock manager that reports the lock as already held (callback gets null).
     __setOutboxLocks({
