@@ -713,6 +713,7 @@ export const messages = {
     // above only covers an EMPTY roster; this covers a full but unconfirmed one.
     "attendees.asOf": "Showing a saved list, as of {time}. No relay has answered since.",
     "attendees.asOf.unknown": "Showing a saved list. This device cannot tell how old it is.",
+    "feed.stale": "Showing the copy saved on this device. No relay answered, so newer posts may be missing.",
 
     // Attendee
     "attendee.youFollow": "You follow",
@@ -2432,6 +2433,7 @@ export const messages = {
     "attendees.name": "Účastník",
     "attendees.asOf": "Zobrazuje sa uložený zoznam, stav k {time}. Odvtedy neodpovedal žiadny relay.",
     "attendees.asOf.unknown": "Zobrazuje sa uložený zoznam. Toto zariadenie nevie, aký je starý.",
+    "feed.stale": "Zobrazuje sa kópia uložená v tomto zariadení. Neodpovedal žiadny relay, takže novšie príspevky môžu chýbať.",
 
     // Attendee
     "attendee.youFollow": "Sledujete",
@@ -4142,6 +4144,7 @@ export const messages = {
     "attendees.name": "Účastník",
     "attendees.asOf": "Zobrazuje se uložený seznam, stav k {time}. Od té doby neodpověděl žádný relay.",
     "attendees.asOf.unknown": "Zobrazuje se uložený seznam. Toto zařízení neví, jak je starý.",
+    "feed.stale": "Zobrazuje se kopie uložená v tomto zařízení. Neodpověděl žádný relay, takže novější příspěvky mohou chybět.",
 
     // Účastník
     "attendee.youFollow": "Sledujete",
@@ -5862,6 +5865,7 @@ export const messages = {
     // unbestätigte ab.
     "attendees.asOf": "Zeigt eine gespeicherte Liste, Stand {time}. Seitdem hat kein Relay geantwortet.",
     "attendees.asOf.unknown": "Zeigt eine gespeicherte Liste. Dieses Gerät kann nicht sagen, wie alt sie ist.",
+    "feed.stale": "Zeigt die auf diesem Gerät gespeicherte Kopie. Kein Relay hat geantwortet, neuere Beiträge können fehlen.",
 
     // Teilnehmende Person
     "attendee.youFollow": "Du folgst",
@@ -7590,6 +7594,7 @@ export const messages = {
     // confirmar.
     "attendees.asOf": "Mostrando una lista guardada, del {time}. Ningún relay ha respondido desde entonces.",
     "attendees.asOf.unknown": "Mostrando una lista guardada. Este dispositivo no puede saber qué antigüedad tiene.",
+    "feed.stale": "Mostrando la copia guardada en este dispositivo. Ningún relay respondió, así que pueden faltar publicaciones más recientes.",
 
     // Asistente
     "attendee.youFollow": "Sigues",

@@ -124,6 +124,9 @@
   // open (no cached posts/page to paint).
   // svelte-ignore state_referenced_locally -- intentional one-time seed from cache-painted state
   let bodyLoading = $state(eventPosts.length === 0 && externalPosts.length === 0 && !page);
+  // The last refresh of the layout/feed failed, so what is on screen is the
+  // cached copy (audit DS41-015 / SB-18).
+  let feedStale = $state(false);
   let pinnedPosts = $state<Map<string, EventPost>>(new Map());
   // Seed the attendees-section count from the cached roster (§2.4) so the widget
   // paints instantly on revisit rather than after a fresh roster decrypt.
@@ -455,6 +458,7 @@
     const [pageRes, postsRes] = await Promise.allSettled([fetchEventPage(c), fetchEventPosts(c)]);
     if (pageRes.status === "fulfilled") page = pageRes.value;
     if (postsRes.status === "fulfilled") eventPosts = postsRes.value;
+    if (pageRes.status === "fulfilled" && postsRes.status === "fulfilled") feedStale = false;
   }
 
   /**
@@ -522,8 +526,12 @@
           fetchEventPage(ctx!),
           fetchEventPosts(ctx!),
         ]);
-        page = pageRes.status === "fulfilled" ? pageRes.value : undefined;
-        eventPosts = postsRes.status === "fulfilled" ? postsRes.value : [];
+        // A failed or unanswered refresh keeps what the cache painted (audit
+        // DS41-015): assigning undefined/[] here erased the layout and feed the
+        // visitor was already reading, with no error. Say it is a saved copy.
+        if (pageRes.status === "fulfilled") page = pageRes.value;
+        if (postsRes.status === "fulfilled") eventPosts = postsRes.value;
+        feedStale = pageRes.status === "rejected" || postsRes.status === "rejected";
         bodyLoading = false;
       })();
       if (identityPending) waitForIdentity(ctx);
@@ -1112,6 +1120,12 @@
       <div class="sk-line" style="width:92%"></div>
       <div class="sk-line" style="width:71%"></div>
     </div>
+  {/if}
+
+  {#if feedStale && !bodyLoading && (officialPosts.length > 0 || page)}
+    <!-- The refresh failed and what follows is the saved copy (audit SB-18):
+         say so instead of presenting it as current. -->
+    <p class="muted" role="status" style="margin:0.25rem 0">{t("feed.stale")}</p>
   {/if}
 
   {#if page && page.sections.length}

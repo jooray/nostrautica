@@ -55,6 +55,8 @@
   // svelte-ignore state_referenced_locally -- intentional one-time read of the initial cache-painted value
   if (!loading) perfMark("Posts", "cache-paint");
 
+  /** A refresh failed, so the list shown is (at least partly) the cached copy. */
+  let stale = $state(false);
   let source = $state<"event" | "attendees" | "both">("both");
   let visibility = $state<"public" | "members" | "both">("both");
 
@@ -86,9 +88,15 @@
         const sources = (await fetchEventPage(ctx).catch(() => page))?.sources ?? [];
         return fetchExternalPosts(ctx!, sources).catch(() => externalPosts);
       })();
+      // A failed refresh keeps the cached feed, and now says so (audit SB-18):
+      // it used to sit on screen as if it were current.
+      const keep = <T,>(fallback: T) => () => {
+        stale = true;
+        return fallback;
+      };
       const [ev, att, ext] = await Promise.all([
-        fetchEventPosts(ctx).catch(() => eventPosts),
-        fetchAttendeePosts(ctx).catch(() => attendeePosts),
+        fetchEventPosts(ctx).catch(keep(eventPosts)),
+        fetchAttendeePosts(ctx).catch(keep(attendeePosts)),
         external,
       ]);
       eventPosts = ev;
@@ -111,6 +119,9 @@
   </div>
 {:else}
   <h1>{t("posts.title")}</h1>
+  {#if stale && !loading && posts.length > 0}
+    <p class="muted" role="status" style="margin:0.25rem 0">{t("feed.stale")}</p>
+  {/if}
 
   <div class="row filters">
     <label class="stack" style="gap:0.25rem">
