@@ -1321,6 +1321,33 @@ describe("a revoke that lands while a sync is in flight is not undone (DS41-048 
   });
 });
 
+describe("one member's throwing sync does not abort the backfill (DS41-053)", () => {
+  it("logs, queues a retry for that member, and still adds the next one", async () => {
+    class ThrowingMls extends FakeMls {
+      override async isMember(group: string, pubkey: string): Promise<boolean> {
+        if (pubkey === CHATKEY) throw new Error("simulated MLS read failure");
+        return super.isMember(group, pubkey);
+      }
+    }
+    const ACCOUNT2 = "b".repeat(64);
+    const store = freshStore();
+    const mls = new ThrowingMls();
+    const queued: string[] = [];
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1"), kpEvent(CHATKEY2, "kp2")], undefined, {
+      enqueueSync: (_c, pubkey) => queued.push(pubkey),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT2, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT2, chatPubkey: CHATKEY2, now: 1 });
+
+    await expect(admin.backfillApproved(COORD)).resolves.toBeUndefined();
+    expect(queued).toEqual([ACCOUNT]);
+    expect(mls.invited).toEqual([CHATKEY2]);
+  });
+});
+
 describe("a failed attestation sync is retried, not just logged", () => {
   it("queues durable work when the inline sync throws", async () => {
     const logs: string[] = [];

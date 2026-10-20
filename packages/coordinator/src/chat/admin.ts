@@ -953,8 +953,21 @@ export class MarmotAdmin {
       const sync = async () => {
         synced = await this.syncMember(coordinate, a.pubkey, { prefetched });
       };
-      if (this.withMemberLock) await this.withMemberLock(coordinate, a.pubkey, sync);
-      else await sync();
+      // One member's failure is that member's, not the walk's (audit DS41-053).
+      // `syncMember` contains a failed Add, but not its trailing admin promotion
+      // (`maybeSyncAdmins` commits and can throw on a relay with no ack) nor a
+      // failed membership read; a throw here used to abort the backfill for every
+      // member after this one AND, through ensureChat, the event's chat
+      // subscriptions. It becomes a durable retry for this member instead.
+      try {
+        if (this.withMemberLock) await this.withMemberLock(coordinate, a.pubkey, sync);
+        else await sync();
+      } catch (e) {
+        this.log(
+          `[chat] backfill sync for ${a.pubkey.slice(0, 8)} in ${coordinate} threw: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        synced = false;
+      }
       // A member the walk could not add gets a durable retry of their own (audit
       // B-5), rather than being silently left out until the next restart — which,
       // for chat being turned on mid-event, means until the event is over.

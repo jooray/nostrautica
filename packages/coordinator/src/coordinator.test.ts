@@ -3551,6 +3551,27 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     expect(mls.removed).toEqual([[pk]]);
   });
 
+  // DS41-053: subscribeChat was the last line of ensureChat, so any throw in the
+  // chat setup left a live event with no 30443 watcher and no 445 ingest.
+  it("a throwing chat setup still opens the 30443 + 445 subscriptions", async () => {
+    class FailingRelaysMls extends StubMls {
+      override async ensureRelays(): Promise<void> {
+        throw new Error("simulated: routing-relay commit got no relay ack");
+      }
+    }
+    const h = await setup(0, { chat: true, chatMls: new FailingRelaysMls(), skipAutoInstall: true });
+    await expect(
+      h.coordinator.installEvent({
+        coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+        gen: 1, source: "grant", backfill: "full",
+      }),
+    ).rejects.toThrow(/no relay ack/);
+    const open = h.transport.subs.filter((s: any) => !s.closed);
+    expect(open.some((s: any) => s.filter?.kinds?.includes(30443))).toBe(true);
+    expect(open.some((s: any) => s.filter?.kinds?.includes(445))).toBe(true);
+  });
+
   it("detach freezes the group and emits a chat-orphaned 21606 (reliability tail 6e)", async () => {
     const mls = new StubMls();
     const h = await setup(0, { chat: true, chatMls: mls });

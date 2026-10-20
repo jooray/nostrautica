@@ -5310,6 +5310,20 @@ export class Coordinator {
    */
   private async ensureChat(state: EventState): Promise<void> {
     if (!this.marmot) return;
+    // Subscribe however far the setup gets (audit DS41-053). subscribeChat used to
+    // be the last line of the setup, so ANY throw in it — an admin-promotion commit
+    // with no relay ack, a routing-relay commit — left an event that is live, with
+    // its inbox subscribed, but with no 30443 watcher and no 445 ingest for the
+    // rest of the daemon's life: members saw the room and the coordinator stopped
+    // seeing it. The throw still propagates, so the callers' retry/log is unchanged.
+    try {
+      await this.setUpChat(state);
+    } finally {
+      this.subscribeChat(state);
+    }
+  }
+
+  private async setUpChat(state: EventState): Promise<void> {
     await this.phase("chat:ensure-group", () =>
       this.marmot!.ensureGroup({
         coordinate: state.coordinate,
@@ -5341,7 +5355,6 @@ export class Coordinator {
       }
     });
     await this.phase("chat:roster-scan", () => this.marmot!.backfillApproved(state.coordinate));
-    this.subscribeChat(state);
   }
 
   /**
