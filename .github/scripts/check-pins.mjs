@@ -13,7 +13,14 @@
  *  2. No mutable infrastructure tags — every `image:` in docker-compose must be
  *     pinned by an `@sha256:` digest (a bare `:latest` / `:master` / version tag
  *     is rejected).
+ *  3. Every `COPY` source in the coordinator Dockerfile is a COMMITTED path. The
+ *     release gate builds from `git archive HEAD`, so a COPY of a path that is no
+ *     longer tracked is a hard build error. That is how the gate went red for eight
+ *     releases (audit SB-51): `packages/vendor/ts-mls` was retired on 2026-10-05
+ *     and the Dockerfile kept copying it. This catches it in seconds, in the
+ *     cheapest job, with the path named.
  */
+import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -82,10 +89,35 @@ for (const m of compose.matchAll(/^\s*image:\s*(\S+)/gm)) {
   }
 }
 
+// ── 3. Dockerfile COPY sources are committed ────────────────────────────────
+// Only build-context COPYs (no --from=<stage>); the last operand is the
+// destination. Checked against `git ls-files`, not the disk, because the gate's
+// build context is `git archive HEAD`: an untracked leftover directory on a
+// developer's machine must not make a stale COPY look fine.
+for (const m of dockerfile.matchAll(/^COPY\s+(.+)$/gm)) {
+  const args = m[1].trim().split(/\s+/);
+  if (args.some((a) => a.startsWith("--from"))) continue;
+  const operands = args.filter((a) => !a.startsWith("--"));
+  for (const src of operands.slice(0, -1)) {
+    let tracked = "";
+    try {
+      tracked = execFileSync("git", ["ls-files", "--", src], { cwd: repoRoot }).toString().trim();
+    } catch (err) {
+      errors.push(`could not run git ls-files for Dockerfile COPY source ${src}: ${err.message}`);
+      continue;
+    }
+    if (!tracked) {
+      errors.push(
+        `docker/coordinator.Dockerfile COPYs ${src}, which is not a committed path (the clean-context build would fail)`,
+      );
+    }
+  }
+}
+
 // ── report ───────────────────────────────────────────────────────────────────
 if (errors.length) {
   console.error("Pin guardrail FAILED (audit Q14):");
   for (const e of errors) console.error(`  - ${e}`);
   process.exit(1);
 }
-console.log(`Pin guardrail OK: Node major ${expectedMajor} everywhere; all infra images digest-pinned.`);
+console.log(`Pin guardrail OK: Node major ${expectedMajor} everywhere; all infra images digest-pinned; every Dockerfile COPY source is committed.`);
