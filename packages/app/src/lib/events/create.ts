@@ -32,7 +32,7 @@ import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publi
 import { DEFAULT_RELAYS, chatInteropRelays } from "$lib/nostr/relays.js";
 import { saveEventKeys } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
-import { generateInvites, approveAttendee } from "./organizer.js";
+import { generateInvites, approveAttendee, CoordinatorAttachedError } from "./organizer.js";
 import { sendJoinRequest } from "./join.js";
 import { fetchProfiles } from "./social.js";
 
@@ -350,17 +350,25 @@ export async function enrollOrganizerAsParticipant(
     { name, profile, inviteNsec: invite?.nsec },
     blindingKey,
   );
-  await approveAttendee(
-    organizer,
-    ctx,
-    {
-      attendeePubkey: pubkey,
-      name,
-      message: "",
-      rsvpPublic: false,
-      profile,
-      rumorCreatedAt: Math.floor(Date.now() / 1000),
-    },
-    "organizer",
-  );
+  try {
+    await approveAttendee(
+      organizer,
+      ctx,
+      {
+        attendeePubkey: pubkey,
+        name,
+        message: "",
+        rsvpPublic: false,
+        profile,
+        rumorCreatedAt: Math.floor(Date.now() / 1000),
+      },
+      "organizer",
+    );
+  } catch (e) {
+    // With a coordinator attached the roster has ONE author, the coordinator
+    // (audit SB-91): it approves the join request above through the invite, and an
+    // E_id-authored self-approval would be a second roster competing on the same
+    // address. Nothing else to do here.
+    if (!(e instanceof CoordinatorAttachedError)) throw e;
+  }
 }

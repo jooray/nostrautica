@@ -355,8 +355,11 @@ describe("account-addressed organizer wraps", () => {
 
   it("routes an initial attendee ECK grant to the attendee inbox plus event/default relays", async () => {
     await saveEventKeys(organizerKeys(), OWNER);
+    // A client-side approval only exists without a coordinator (SB-91: with one,
+    // it is a 21604 and the coordinator grants).
+    const noCoordinator = { ...ctx, config: { ...ctx.config, coordinator: undefined } } as EventContext;
 
-    await approveAttendee({} as AppSigner, ctx, {
+    await approveAttendee({} as AppSigner, noCoordinator, {
       attendeePubkey: attendee,
       name: "Attendee",
       message: "",

@@ -236,6 +236,15 @@ therefore has protocol consequences beyond the coordinator's own state:
   the coordinator currently named in the newest fetchable `31600`, or by `E_id`. Records
   authored by a formerly assigned coordinator are ignored once a newer config no longer
   names it.
+- **One roster author.** While the newest `31600` names a coordinator, the roster
+  (31604) and directory (31603) are the coordinator's to write: an organizer client
+  **MUST NOT** publish an `E_id`-authored 31604 then, and routes approvals and removals
+  as `21604` commands instead. It **SHOULD** decide that from a freshly read `31600`,
+  not a cached one, since another organizer device may have attached a coordinator
+  since: two authors on one address are resolved by `created_at` alone, and the
+  coordinator's next republish silently drops whoever only the `E_id` roster listed.
+  The detach/replace rotation (above) is the one exception: it republishes under the new
+  key before the coordinator-less `31600` goes out.
 - **Handover republish.** A newly attached coordinator **MUST** republish the event's
   member records (directory, roster, match lists, published talks) under its own key (bootstrapping from the previous coordinator's still-decryptable records where custody
   allows, and from reprocessing otherwise), so that record-authority pinning (above) never

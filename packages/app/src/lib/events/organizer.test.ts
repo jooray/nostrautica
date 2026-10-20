@@ -87,6 +87,8 @@ import {
   addCoOrganizer,
   checkOrganizerKeys,
   repairEventKeys,
+  noteFreshConfig,
+  CoordinatorAttachedError,
   __resetFreshConfigMemoForTests,
 } from "./organizer.js";
 import {
@@ -1162,6 +1164,37 @@ describe("roster read-modify-write safety", () => {
       expect(rotated.tags.find((t) => t[0] === "eck")?.[1]).toBe("3");
       expect((JSON.parse(eckDecrypt(base64ToBytes(v3.key), rotated.content)) as RosterContent).attendees.map((a) => a.pubkey)).toEqual([ALICE]);
       expect((await checkOrganizerKeys(ctx))?.collision).toBe(false);
+    });
+  });
+
+  // ── Audit SB-91: one roster authority ───────────────────────────────────────
+  describe("no client-authored roster while a coordinator is attached", () => {
+    it("refuses a local approval when the newest config names a coordinator", async () => {
+      // The page loaded before another device attached one: ctx says none.
+      noteFreshConfig(COORD, { ...ctx.config, coordinator: getPublicKey(generateSecretKey()) } as never);
+      fetchEventsRelayOnly.mockResolvedValue([rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]);
+
+      await expect(approveAttendee({} as AppSigner, ctx, request(BOB))).rejects.toBeInstanceOf(CoordinatorAttachedError);
+      expect(publishSigned).not.toHaveBeenCalled();
+    });
+
+    it("refuses a local revoke (a client rotation) for the same reason", async () => {
+      noteFreshConfig(COORD, { ...ctx.config, coordinator: getPublicKey(generateSecretKey()) } as never);
+      fetchEventsRelayOnly.mockResolvedValue([
+        rosterEvent([
+          { pubkey: ALICE, d: "d-alice", role: "attendee" },
+          { pubkey: BOB, d: "d-bob", role: "attendee" },
+        ]),
+      ]);
+
+      await expect(revokeAttendeeClient({} as AppSigner, ctx, BOB)).rejects.toBeInstanceOf(CoordinatorAttachedError);
+      expect(publishSigned).not.toHaveBeenCalled();
+      expect((await loadEventKeys(COORD))?.eck).toHaveLength(1);
+    });
+
+    it("refuses when the page itself knows of a coordinator", async () => {
+      const withCoord = { ...ctx, config: { ...ctx.config, coordinator: getPublicKey(generateSecretKey()) } } as EventContext;
+      await expect(approveAttendee({} as AppSigner, withCoord, request(BOB))).rejects.toBeInstanceOf(CoordinatorAttachedError);
     });
   });
 

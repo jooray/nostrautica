@@ -43,6 +43,7 @@
     pollForOrganizerGrant,
     checkOrganizerKeys,
     repairEventKeys,
+    CoordinatorAttachedError,
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
@@ -960,7 +961,21 @@
 
   /** Approve one attendee by pubkey (coordinator command or local approve).
    *  Throws on failure so the bulk runner can record a per-item outcome. */
-  async function approveOne(pubkey: string): Promise<"done" | "queued"> {
+  async function approveOne(pubkey: string, retried = false): Promise<"done" | "queued"> {
+    if (!ctx || !session.signer) throw new Error("not ready");
+    try {
+      return await approveOnce(pubkey);
+    } catch (e) {
+      // Another device attached a coordinator since this page last looked (SB-91):
+      // adopt the newest config and route this approval through it instead.
+      if (!(e instanceof CoordinatorAttachedError) || retried) throw e;
+      await refreshKeyStatus(false);
+      if (!ctx?.config.coordinator) throw e;
+      return approveOne(pubkey, true);
+    }
+  }
+
+  async function approveOnce(pubkey: string): Promise<"done" | "queued"> {
     if (!ctx || !session.signer) throw new Error("not ready");
     if (ctx.config.coordinator) {
       // Route through the coordinator so IT grants + publishes the directory
@@ -1053,7 +1068,7 @@
 
   // Inline, screenshotable revoke confirmation lives in AdminPeople (which owns the
   // confirm state); the parent performs the revoke and updates its data model.
-  async function revoke(pubkey: string) {
+  async function revoke(pubkey: string, retried = false) {
     if (!ctx || !session.signer) return;
     try {
       if (ctx.config.coordinator) {
@@ -1071,6 +1086,11 @@
       revokedSet = new Set([...revokedSet, pubkey]);
       approvedSet = new Set([...approvedSet].filter((p) => p !== pubkey));
     } catch (e) {
+      // A coordinator attached elsewhere (SB-91): the removal is its to make.
+      if (e instanceof CoordinatorAttachedError && !retried) {
+        await refreshKeyStatus(false);
+        if (ctx?.config.coordinator) return revoke(pubkey, true);
+      }
       error = e instanceof Error ? e.message : String(e);
     }
   }

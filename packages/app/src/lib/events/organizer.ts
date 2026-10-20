@@ -511,6 +511,9 @@ export async function approveAttendee(
   req: PendingRequest,
   role: "attendee" | "organizer" = "attendee",
 ): Promise<void> {
+  // One roster authority (SB-91): with a coordinator attached the approval is a
+  // 21604, never a client-authored 31604.
+  await assertNoCoordinatorAuthority(ctx);
   const owner = activeKeystoreOwner() ?? undefined;
   const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer") throw new Error("not the organizer");
@@ -1424,6 +1427,10 @@ export async function revokeAttendeeClient(
    */
   blindingKey?: Uint8Array,
 ): Promise<void> {
+  // One roster authority (SB-91): with a coordinator attached the removal is a
+  // 21604 and the coordinator rotates; a client rotation here would be a second
+  // roster author and a second, colliding ECK mint (SB-86).
+  await assertNoCoordinatorAuthority(ctx);
   // Captured once (audit DS41-001): the rotated ECK is saved after a roster read
   // and a directory read, and must land under the identity that read these keys,
   // not whoever is signed in by then.
@@ -1872,6 +1879,8 @@ async function freshConfig(ctx: EventContext): Promise<EventConfig> {
 // the person again. Admin now reads the newest 31600 on every refresh and notes
 // it here; the local approve/revoke paths refuse while it names a coordinator.
 
+/** How long a noted fresh config stands in for a new read in the guards below. */
+const FRESH_CONFIG_TTL_MS = 90_000;
 const freshConfigMemo = new Map<string, { cfg: EventConfig; at: number }>();
 
 /** Record the newest 31600 read from the relays (Admin's refresh, every config write). */
@@ -1893,6 +1902,24 @@ export class CoordinatorAttachedError extends Error {
     );
     this.name = "CoordinatorAttachedError";
   }
+}
+
+/**
+ * Refuse a client-authored 31604 when the event's newest config names a
+ * coordinator. Uses the config Admin noted within the last 90 s, else reads one.
+ * A read that fails falls back to the page's config: the guard exists to stop a
+ * KNOWN second authority, and refusing every approval on a flaky read would make
+ * a coordinator-less event unmanageable offline.
+ */
+async function assertNoCoordinatorAuthority(ctx: EventContext): Promise<void> {
+  if (ctx.config.coordinator) throw new CoordinatorAttachedError();
+  let memo = freshConfigMemo.get(ctx.coordinate);
+  if (!memo || Date.now() - memo.at > FRESH_CONFIG_TTL_MS) {
+    const cfg = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(() => undefined);
+    if (cfg) noteFreshConfig(ctx.coordinate, cfg);
+    memo = freshConfigMemo.get(ctx.coordinate);
+  }
+  if (memo?.cfg.coordinator) throw new CoordinatorAttachedError();
 }
 
 /**
