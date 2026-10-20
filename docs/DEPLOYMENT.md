@@ -166,7 +166,7 @@ past the readiness line, which only makes the metric lie.
 
 ### Runtime
 
-The Dockerfile and systemd unit are reference deployment material, not a complete production runbook. The coordinator needs Node 22.5+, ffmpeg/ffprobe, protected provider credentials, a stable coordinator identity, relay connectivity, and durable writable SQLite storage.
+The Dockerfile and systemd unit are reference deployment material, not a complete production runbook. The coordinator needs Node 22.13+ (`node:sqlite` is behind a flag before 22.13), ffmpeg/ffprobe, protected provider credentials, a stable coordinator identity, relay connectivity, and durable writable SQLite storage.
 
 The SQLite volume is not disposable when Marmot chat or Cashu is enabled. See [COORDINATOR-OPERATOR-GUIDE.md](COORDINATOR-OPERATOR-GUIDE.md) for backup, restore, lifecycle, and operational limitations.
 
