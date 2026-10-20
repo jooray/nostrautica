@@ -151,6 +151,8 @@ object Limits {
     const val MAX_PRIVACY_ROLES = 32
     const val MAX_PRIVACY_ROLE = 64
     const val MAX_PRIVACY_TIER = 200
+    /** Tombstones a per-event settings clock keeps per field (settings-merge.ts). */
+    const val MAX_SETTINGS_TOMBSTONES = 200
     const val MAX_TALK_TITLE = 200
     const val MAX_TALK_DESC = 2000
     const val MAX_CHAT_KEY_LABEL = 60
@@ -792,11 +794,32 @@ data class PerEventSettings(
     @SerialName("want_to_meet") val wantToMeet: List<String> = emptyList(),
     val met: List<String> = emptyList(),
     val notes: Map<String, String> = emptyMap(),
+    /** Per-entry change stamps (ms) for the cross-device merge, SB-88 — see [SettingsMerge]. */
+    val clock: SettingsClock? = null,
+    /** The stamp of every entry [clock] does not name. */
+    val base: Long? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v)
         for (l in listOf(favorites, wantToMeet, met)) { checkList(l, Limits.MAX_ROSTER, "list"); l.forEach { checkHex32(it, "pubkey") } }
         check(notes.size <= Limits.MAX_NOTES) { "too many notes" }; notes.values.forEach { checkLen(it, Limits.MAX_NOTE, "note") }
+        clock?.validate()
+        check(base == null || base >= 0) { "base" }
+    }
+}
+
+@Serializable
+data class SettingsClock(
+    val favorites: Map<String, Long> = emptyMap(),
+    @SerialName("want_to_meet") val wantToMeet: Map<String, Long> = emptyMap(),
+    val met: Map<String, Long> = emptyMap(),
+    val notes: Map<String, Long> = emptyMap(),
+) : Validated {
+    override fun validate() {
+        for (m in listOf(favorites, wantToMeet, met, notes)) {
+            check(m.size <= Limits.MAX_ROSTER + Limits.MAX_SETTINGS_TOMBSTONES) { "too many settings stamps" }
+            m.forEach { (k, at) -> checkHex32(k, "stamp key"); check(at >= 0) { "stamp" } }
+        }
     }
 }
 

@@ -1216,6 +1216,27 @@ export const userSettingsSchema = z.object({
 });
 export type UserSettings = z.infer<typeof userSettingsSchema>;
 
+/**
+ * Removed entries a per-event settings clock keeps per field (tombstones), on
+ * top of the present ones. A tombstone is what stops another device's stale
+ * copy from resurrecting a removed favourite; past this many the oldest are
+ * dropped (a very old removal can then come back from a device that slept
+ * through it, the gentler failure than an unbounded payload).
+ */
+export const MAX_SETTINGS_TOMBSTONES = 200;
+const settingsStamps = z
+  .record(hex32, z.number().int().nonnegative())
+  .refine((r) => Object.keys(r).length <= MAX_ROSTER + MAX_SETTINGS_TOMBSTONES, {
+    message: "too many settings stamps",
+  });
+export const settingsClockSchema = z.object({
+  favorites: settingsStamps.default({}),
+  want_to_meet: settingsStamps.default({}),
+  met: settingsStamps.default({}),
+  notes: settingsStamps.default({}),
+});
+export type SettingsClock = z.infer<typeof settingsClockSchema>;
+
 export const perEventSettingsSchema = z.object({
   v: version,
   favorites: z.array(hex32).max(MAX_ROSTER).default([]),
@@ -1230,6 +1251,14 @@ export const perEventSettingsSchema = z.object({
       message: `too many notes (max ${MAX_NOTES})`,
     })
     .default({}),
+  // Per-entry change stamps for the cross-device merge (audit SB-88, see
+  // settings-merge.ts). ADDITIVE and optional, so the payload stays `v: 2`: a
+  // client that predates them reads the four fields above exactly as before
+  // (zod and kotlinx both drop unknown keys) and, when it writes, simply omits
+  // them, which a newer reader treats as a whole-document write at that event's
+  // created_at. `base` (ms) is the stamp of every entry the clock does not name.
+  clock: settingsClockSchema.optional(),
+  base: z.number().int().nonnegative().optional(),
 });
 export type PerEventSettings = z.infer<typeof perEventSettingsSchema>;
 

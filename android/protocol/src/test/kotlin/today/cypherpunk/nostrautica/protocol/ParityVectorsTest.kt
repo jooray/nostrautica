@@ -34,6 +34,7 @@ class ParityVectorsTest {
         "myProfileContent" to MyProfileContent.serializer(),
         "eventKeysBackup" to EventKeysBackup.serializer(),
         "talkSubmissionContent" to TalkSubmissionContent.serializer(),
+        "perEventSettings" to PerEventSettings.serializer(),
     )
 
     private fun tags(e: kotlinx.serialization.json.JsonElement) = e.jsonArray.map { t -> t.jsonArray.map { it.jsonPrimitive.content } }
@@ -77,6 +78,31 @@ class ParityVectorsTest {
         val m = v["menu"]!!.jsonObject
         val want = m["items"]!!.jsonArray.map { it.jsonObject.let { o -> o["label"]!!.jsonPrimitive.content to o["target"]!!.jsonPrimitive.content } }
         assertEquals(want, EventPage.rTagsToMenu(tags(m["tags"]!!)).map { it.label to it.target })
+    }
+
+    private fun settings(e: kotlinx.serialization.json.JsonElement) = Wire.json.decodeFromJsonElement(PerEventSettings.serializer(), e)
+    private fun json(s: PerEventSettings) = Wire.json.encodeToJsonElement(PerEventSettings.serializer(), s)
+
+    @Test fun settingsMergeLikeTs() {
+        // SB-88: both ports must converge on the same document, byte for byte in
+        // meaning, or a phone and a laptop would keep rewriting each other.
+        for (m in v["settingsMerges"]!!.jsonArray.map { it.jsonObject }) {
+            val got = SettingsMerge.merge(settings(m["a"]!!), m["aAt"]!!.jsonPrimitive.content.toLong(), settings(m["b"]!!), m["bAt"]!!.jsonPrimitive.content.toLong())
+            assertEquals(m["label"]!!.jsonPrimitive.content, m["out"]!!, json(got))
+        }
+        for (m in v["settingsEdits"]!!.jsonArray.map { it.jsonObject }) {
+            val e = m["edit"]!!.jsonObject
+            val edit = if (e["kind"]!!.jsonPrimitive.content == "toggle") {
+                val f = when (e["list"]!!.jsonPrimitive.content) {
+                    "favorites" -> SettingsMerge.Field.FAVORITES
+                    "want_to_meet" -> SettingsMerge.Field.WANT_TO_MEET
+                    else -> SettingsMerge.Field.MET
+                }
+                SettingsMerge.Edit.Toggle(f, e["pubkey"]!!.jsonPrimitive.content)
+            } else SettingsMerge.Edit.Note(e["pubkey"]!!.jsonPrimitive.content, e["note"]!!.jsonPrimitive.content)
+            val got = SettingsMerge.edit(settings(m["doc"]!!), m["docAt"]!!.jsonPrimitive.content.toLong(), edit, m["nowMs"]!!.jsonPrimitive.content.toLong())
+            assertEquals(m["label"]!!.jsonPrimitive.content, m["out"]!!, json(got))
+        }
     }
 
     @Test fun aLibraryEntryKeepsItsExplicitNullA() {

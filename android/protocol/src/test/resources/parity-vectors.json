@@ -14201,6 +14201,96 @@
     ]
    },
    "ok": false
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "legacy (no clock)",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {}
+   },
+   "ok": true
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "with clock + base",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": 5
+     },
+     "met": {
+      "abababababababababababababababababababababababababababababababab": 6
+     }
+    },
+    "base": 3
+   },
+   "ok": true
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "clock key not hex",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "x": 5
+     }
+    }
+   },
+   "ok": false
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "clock stamp negative",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": -1
+     }
+    }
+   },
+   "ok": false
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "base negative",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "base": -1
+   },
+   "ok": false
   }
  ],
  "configs": [
@@ -15337,5 +15427,963 @@
     "label": "M46"
    }
   ]
- }
+ },
+ "settingsMerges": [
+  {
+   "label": "two devices, same baseline",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 5,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "bAt": 8,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "two devices, reversed",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 8,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "bAt": 5,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "tombstone beats stale copy",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 9,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "bAt": 8,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "legacy write older than stamps",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 9,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": "old"
+    }
+   },
+   "bAt": 3,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": "old"
+    },
+    "clock": {
+     "favorites": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 3000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 3000
+     }
+    },
+    "base": 3000
+   }
+  },
+  {
+   "label": "legacy write newer than stamps",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 9,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {}
+   },
+   "bAt": 100,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 100000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 100000
+   }
+  },
+  {
+   "label": "two legacy docs",
+   "a": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "notes": {}
+   },
+   "aAt": 10,
+   "b": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "notes": {}
+   },
+   "bAt": 20,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 20000
+     },
+     "notes": {}
+    },
+    "base": 20000
+   }
+  },
+  {
+   "label": "note tie by text",
+   "a": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "apple"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   },
+   "aAt": 0,
+   "b": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "banana"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   },
+   "bAt": 0,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "banana"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "odd note key carried",
+   "a": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "not-a-pubkey": "keep me"
+    }
+   },
+   "aAt": 1,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "bAt": 8,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays",
+     "not-a-pubkey": "keep me"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 1000
+   }
+  }
+ ],
+ "settingsEdits": [
+  {
+   "label": "favourite A",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "toggle",
+    "list": "favorites",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+   },
+   "nowMs": 1000,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "note A",
+   "doc": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "note",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "note": "  relays  "
+   },
+   "nowMs": 1001,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "phone favourites B",
+   "doc": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "toggle",
+    "list": "favorites",
+    "pubkey": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+   },
+   "nowMs": 5000,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "laptop marks C met",
+   "doc": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "toggle",
+    "list": "met",
+    "pubkey": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+   },
+   "nowMs": 8000,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "phone un-favourites A",
+   "doc": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "toggle",
+    "list": "favorites",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+   },
+   "nowMs": 9000,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "clear note on legacy doc with lagging clock",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "x"
+    }
+   },
+   "docAt": 2000,
+   "edit": {
+    "kind": "note",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "note": " "
+   },
+   "nowMs": 5,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 2000001
+     }
+    },
+    "base": 2000000
+   }
+  },
+  {
+   "label": "toggle on legacy doc",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "met": [],
+    "notes": {}
+   },
+   "docAt": 50,
+   "edit": {
+    "kind": "toggle",
+    "list": "want_to_meet",
+    "pubkey": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+   },
+   "nowMs": 10,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 50000,
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 50001
+     },
+     "met": {},
+     "notes": {}
+    },
+    "base": 50000
+   }
+  },
+  {
+   "label": "note tie a",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "note",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "note": "apple"
+   },
+   "nowMs": 7000,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "apple"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "note tie b",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "note",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "note": "banana"
+   },
+   "nowMs": 7000,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "banana"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   }
+  }
+ ]
 }

@@ -115,6 +115,13 @@ add("talkSubmissionContent", "base", talk({}));
 add("talkSubmissionContent", "50 speakers", talk({ speakers: n(50, () => pk) }));
 add("talkSubmissionContent", "51 speakers", talk({ speakers: n(51, () => pk) }));
 
+const pes = (over) => ({ v: 2, favorites: [pk], want_to_meet: [], met: [], notes: {}, ...over });
+add("perEventSettings", "legacy (no clock)", pes({}));
+add("perEventSettings", "with clock + base", pes({ clock: { favorites: { [pk]: 5 }, met: { [hex("ab")]: 6 } }, base: 3 }));
+add("perEventSettings", "clock key not hex", pes({ clock: { favorites: { x: 5 } } }));
+add("perEventSettings", "clock stamp negative", pes({ clock: { favorites: { [pk]: -1 } } }));
+add("perEventSettings", "base negative", pes({ base: -1 }));
+
 for (const p of payloads) p.ok = P[`${p.schema}Schema`].safeParse(p.payload).success;
 
 // ── 31600 tags: the v tag, the coordinator generation, relay URL filters ───
@@ -151,6 +158,39 @@ const menuTags = [["r", "https://a", "A"], ["r", long(2049), "too long"], ["r", 
   ...n(60, (i) => ["r", `https://m${i}`, `M${i}`])];
 const menu = { tags: menuTags, items: P.rTagsToMenu(menuTags) };
 
+// ── Per-event settings merge (SB-88) ──────────────────────────────────────
+const settingsMerges = [];
+const settingsEdits = [];
+{
+  const A = hex("a1"), B = hex("b2"), C = hex("c3");
+  const legacy = (over) => ({ v: 2, favorites: [], want_to_meet: [], met: [], notes: {}, ...over });
+  const E = P.emptyPerEventSettings();
+  const ed = (label, doc, docAt, edit, nowMs) => {
+    const out = P.editPerEventSettings({ settings: doc, createdAt: docAt }, edit, nowMs);
+    settingsEdits.push({ label, doc, docAt, edit, nowMs, out });
+    return out;
+  };
+  const mg = (label, a, aAt, b, bAt) => {
+    settingsMerges.push({ label, a, aAt, b, bAt, out: P.mergePerEventSettings({ settings: a, createdAt: aAt }, { settings: b, createdAt: bAt }) });
+  };
+  const f1 = ed("favourite A", E, 0, { kind: "toggle", list: "favorites", pubkey: A }, 1_000);
+  const n1 = ed("note A", f1, 0, { kind: "note", pubkey: A, note: "  relays  " }, 1_001);
+  const phone = ed("phone favourites B", n1, 0, { kind: "toggle", list: "favorites", pubkey: B }, 5_000);
+  const laptop = ed("laptop marks C met", n1, 0, { kind: "toggle", list: "met", pubkey: C }, 8_000);
+  const unfav = ed("phone un-favourites A", phone, 0, { kind: "toggle", list: "favorites", pubkey: A }, 9_000);
+  ed("clear note on legacy doc with lagging clock", legacy({ notes: { [A]: "x" } }), 2_000, { kind: "note", pubkey: A, note: " " }, 5);
+  ed("toggle on legacy doc", legacy({ want_to_meet: [B] }), 50, { kind: "toggle", list: "want_to_meet", pubkey: C }, 10);
+  mg("two devices, same baseline", phone, 5, laptop, 8);
+  mg("two devices, reversed", laptop, 8, phone, 5);
+  mg("tombstone beats stale copy", unfav, 9, laptop, 8);
+  mg("legacy write older than stamps", unfav, 9, legacy({ favorites: [C], notes: { [C]: "old" } }), 3);
+  mg("legacy write newer than stamps", unfav, 9, legacy({ favorites: [C] }), 100);
+  mg("two legacy docs", legacy({ met: [A] }), 10, legacy({ met: [B] }), 20);
+  mg("note tie by text", ed("note tie a", E, 0, { kind: "note", pubkey: A, note: "apple" }, 7_000), 0,
+    ed("note tie b", E, 0, { kind: "note", pubkey: A, note: "banana" }, 7_000), 0);
+  mg("odd note key carried", legacy({ notes: { "not-a-pubkey": "keep me" } }), 1, laptop, 8);
+}
+
 writeFileSync(new URL("../../protocol/src/test/resources/parity-vectors.json", import.meta.url),
-  JSON.stringify({ payloads, configs, coordinates, menu }, null, 1) + "\n");
+  JSON.stringify({ payloads, configs, coordinates, menu, settingsMerges, settingsEdits }, null, 1) + "\n");
 console.log(`wrote parity-vectors.json: ${payloads.length} payloads, ${configs.length} configs, ${coordinates.length} coordinates`);
