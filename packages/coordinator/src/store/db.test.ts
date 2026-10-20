@@ -1605,3 +1605,38 @@ describe("docs/VERSIONING.md: schema version drift guard", () => {
     }
   });
 });
+
+/** Audit DS41-030: NULLs in a composite PRIMARY KEY are distinct, so the upsert never matched. */
+describe("event-wide job_status rows (no pubkey) upsert in place", () => {
+  const row = (attempts: number) => ({
+    coordinate: "31923:aa:d", stage: "score_batch", pubkey: null, state: "poison" as const, attempts,
+    error_category: "provider", retryable: 1, updated_at: attempts,
+  });
+  it("a repeated poison of the same event-wide stage is ONE row", () => {
+    const store = new Store();
+    store.recordJobStatus(row(1) as any);
+    store.recordJobStatus(row(2) as any);
+    const rows = store.poisonStatuses("31923:aa:d");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ pubkey: null, attempts: 2 });
+    store.close();
+  });
+  it("collapses NULL-keyed duplicates already on disk to the newest", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-js-"));
+    const path = join(dir, "t.sqlite");
+    try {
+      new Store(path).close();
+      const raw = new DatabaseSync(path);
+      const ins = raw.prepare("INSERT INTO job_status (coordinate, stage, pubkey, state, attempts, error_category, retryable, updated_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)");
+      for (const n of [1, 3, 2]) ins.run("31923:aa:d", "score_batch", "poison", n, "provider", 1, n);
+      raw.close();
+      const store = new Store(path);
+      const rows = store.poisonStatuses("31923:aa:d");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.attempts).toBe(3);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

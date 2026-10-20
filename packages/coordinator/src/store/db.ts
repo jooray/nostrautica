@@ -285,6 +285,20 @@ function applyBaselineDDL(db: DatabaseSync): void {
     /* column already exists */
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim_priority ON jobs (state, next_run_at, priority, id)");
+  // Migration (audit DS41-030): event-wide job_status rows are keyed with pubkey ""
+  // now, not NULL (NULLs never matched the upsert's ON CONFLICT, so each poison
+  // added a row). Collapse the duplicates already written to the newest one and
+  // re-key it. Idempotent: a second run finds no NULL rows. No version bump; an
+  // older binary reads "" as a falsy pubkey, which is how it treated NULL.
+  db.exec(`
+    DELETE FROM job_status WHERE pubkey IS NULL AND EXISTS (
+      SELECT 1 FROM job_status j2
+       WHERE j2.coordinate = job_status.coordinate AND j2.stage = job_status.stage
+         AND (j2.pubkey = '' OR (j2.pubkey IS NULL AND (j2.updated_at > job_status.updated_at
+              OR (j2.updated_at = job_status.updated_at AND j2.rowid > job_status.rowid))))
+    );
+    UPDATE job_status SET pubkey = '' WHERE pubkey IS NULL;
+  `);
   // Migration (audit DS41-032): how many times a job was picked up again after its
   // lease ran out, i.e. after the process holding it died. Same reasoning as
   // `priority`: a plain defaulted column, invisible to an older binary, so no
@@ -3585,7 +3599,10 @@ export class Store {
       .run({
         coordinate: row.coordinate,
         stage: row.stage,
-        pubkey: row.pubkey ?? null,
+        // "" (not NULL) for an event-wide stage: SQLite treats NULLs in a PRIMARY KEY
+        // as distinct, so ON CONFLICT never matched and every poison of score_batch /
+        // config_effects appended another row (audit DS41-030).
+        pubkey: row.pubkey ?? "",
         state: row.state,
         attempts: row.attempts,
         error_category: row.error_category,
@@ -3596,7 +3613,9 @@ export class Store {
 
   poisonStatuses(coordinate: string): JobStatusRow[] {
     return this.db
-      .prepare("SELECT * FROM job_status WHERE coordinate = ? AND state = 'poison'")
+      .prepare(
+        "SELECT coordinate, stage, NULLIF(pubkey, '') AS pubkey, state, attempts, error_category, retryable, updated_at FROM job_status WHERE coordinate = ? AND state = 'poison'",
+      )
       .all(coordinate) as any;
   }
 
