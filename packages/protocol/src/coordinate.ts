@@ -70,8 +70,8 @@ export function parseCoordinate(coordinate: string): EventCoordinate {
 }
 
 /**
- * True iff `coordinate` is a canonical Nostrautica EVENT coordinate — a valid
- * `kind:pubkey:d` whose kind is exactly {@link KIND_CALENDAR_EVENT} (31923, audit
+ * True iff `coordinate` is a canonical Nostrautica SPACE coordinate — a valid
+ * `kind:pubkey:d` whose kind is one of {@link SPACE_KINDS} (31923 or 31612, audit
  * R18). The generic {@link parseCoordinate} deliberately accepts any Nostr kind
  * (naddr encode/decode, kind-0/10002 lookups, …); this is the stricter predicate
  * for anywhere an EVENT identity is required — a coordinator grant, key grant, or
@@ -87,8 +87,8 @@ export function isEventCoordinate(coordinate: string): boolean {
 }
 
 /**
- * Parse a coordinate that MUST be a Nostrautica event coordinate (kind exactly
- * {@link KIND_CALENDAR_EVENT} = 31923, audit R18). Throws on any other kind or a
+ * Parse a coordinate that MUST be a Nostrautica space coordinate (kind one of
+ * {@link SPACE_KINDS}: 31923 or 31612, audit R18). Throws on any other kind or a
  * malformed coordinate. Use at every boundary that installs/authorizes an event by
  * coordinate; use the generic {@link parseCoordinate} for non-event coordinates.
  */

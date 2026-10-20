@@ -107,7 +107,7 @@ per the tolerant-parse rule, which is stricter than intended rather than looser.
   silently misparsed under the wrong semantics; forward compatibility is achieved by
   bumping `v` and shipping clients first.
 
-Custom kinds occupy the addressable block `31600`–`31611` and the gift-wrap rumor block
+Custom kinds occupy the addressable block `31600`–`31612` and the gift-wrap rumor block
 `21600`–`21610`.
 
 ## 3. Ordering, replaceability, and revisions

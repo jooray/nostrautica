@@ -12,8 +12,8 @@
  * Invariants asserted in registry.test.ts:
  *  - every custom `KIND_*` constant in the custom ranges appears here exactly once;
  *  - every entry's `constant` resolves to its `kind`;
- *  - the addressable kinds are EXACTLY 31600–31611 and the rumor kinds EXACTLY
- *    21600–21610;
+ *  - the addressable kinds are EXACTLY 31600–31612 and the rumor kinds EXACTLY
+ *    21600–21610 (CUSTOM_ADDRESSABLE_RANGE / CUSTOM_RUMOR_RANGE below);
  *  - every rumor-class kind is in `RUMOR_KINDS`;
  *  - every non-null `schemaExport` is a real export of the schemas module.
  */

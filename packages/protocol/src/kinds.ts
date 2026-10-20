@@ -1,8 +1,9 @@
 /**
  * Nostr event kind constants used across Nostrautica (spec §7).
  *
- * Custom kinds occupy the addressable block 31600–31610 and the gift-wrap
- * "rumor" block 21600–21609 (21607 = Marmot chat-key attestation). Rumor kinds sit
+ * Custom kinds occupy the addressable block 31600–31612 and the gift-wrap
+ * "rumor" block 21600–21610 (21607 = Marmot chat-key attestation); registry.ts
+ * holds the authoritative ranges and its test enforces them. Rumor kinds sit
  * in the ephemeral range on purpose:
  * rumors are never published as signed events, and a leaked one won't be stored
  * by relays.
