@@ -76,6 +76,11 @@ app/
 Routes are the PWA's (`ui/nav/Route.kt` ports `routes.ts`), so every web link,
 invite links with `?code=…&lang=…` included, opens the same screen; the app
 claims `https://nostrautica.cypherpunk.today/app` and `nostr:naddr…` links.
+The https links are verified app links: `web/.well-known/assetlinks.json`
+(deployed with the landing page) names `today.cypherpunk.nostrautica` and the
+release key's SHA-256, so Android opens them in the app without a chooser.
+Debug builds are not verified. Changing the signing key means updating that
+file; `AppLinksTest` pins it to the manifest and the key.
 
 ### Data, battery, offline
 
@@ -109,14 +114,34 @@ of the device key's relay lists and default kind-0 to public indexers.
 Release builds are R8-minified, arm64-v8a only (MarmotKit is ~20 MB per ABI
 compressed), with compressed native libraries (~27 MB APK). Signing uses the
 shared publisher key from `~/.apk-signing-keystore/signing.properties` (or
-`APP_SIGNING_PROPERTIES`); without it the APK is unsigned.
+`APP_SIGNING_PROPERTIES`); without it `assembleRelease` fails rather than
+produce an unsigned APK (`-PunsignedRelease=true` opts out deliberately).
+
+For every release, bump `versionCode` and `versionName` in
+`app/build.gradle.kts`. `versionName` must equal the root `package.json`
+version (`docs/VERSIONING.md`), and `assembleRelease` fails when it doesn't.
+Then run the release check, which must end on `RELEASE CHECK OK`:
 
 ```sh
-./gradlew assembleRelease
-"$ANDROID_HOME/build-tools/36.0.0/apksigner" verify --print-certs app/build/outputs/apk/release/app-release.apk
-# SHA-256 79750fb49349ec3729be5a3e825507a15e47c6d987e854ae91d5d50a20b3a24d
+android/tools/release-check.sh
 ```
 
-Bump `versionCode`/`versionName` in `app/build.gradle.kts` with every release
-(`versionName` follows the root `package.json`, see `docs/VERSIONING.md`).
+It checks, in order:
+
+1. `versionName` equals the root version and is newer than the last
+   `android-v*` GitHub release. `versionCode` is above that release's, which
+   it reads from the local `v<version>` tag, or from the release's APK when
+   the tag is missing. Offline, set `PREV_VERSION_CODE` and
+   `PREV_VERSION_NAME`.
+2. The signing properties and keystore exist.
+3. `./gradlew testDebugUnitTest :protocol:test assembleRelease` passes. A
+   stale APK is deleted first.
+4. `apksigner` finds exactly one signer, the shared publisher key
+   `79750fb49349ec3729be5a3e825507a15e47c6d987e854ae91d5d50a20b3a24d`.
+   `aapt2` shows the package `today.cypherpunk.nostrautica` and the
+   expected `versionCode`/`versionName`.
+
+The script prints the APK's SHA-256 for the release notes.
+`--skip-build` re-checks an APK that is already built. The same key's
+fingerprint is in `web/.well-known/assetlinks.json` (verified app links).
 Distribution is Zapstore/Obtainium/direct APK, not Google Play.
