@@ -7,6 +7,7 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.builtins.ListSerializer
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -31,6 +32,13 @@ class StaleCacheTest {
     private val nostr = Nostr(ctx, RelayPool(RelayPool.newHttpClient()), EventStore(db), db)
 
     @After fun down() = db.close()
+
+    // Audit DS41-061.
+    @Test fun anOfflineProfileRefreshDoesNotMarkProfilesFresh() = runBlocking {
+        val pk = LocalSigner.generate().pubkey
+        Profiles(nostr, cache).refresh(listOf(pk))
+        assertFalse(cache.isFresh("k0:$pk", Profiles.TTL_MS))
+    }
 
     // Audit DS41-056: the empty write used to be stamped "now", so Cache.put refused the real list forever.
     @Test fun anEmptyRosterPassDoesNotSuppressTheRealDirectory() = runBlocking {
