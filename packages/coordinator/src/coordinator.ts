@@ -2994,13 +2994,10 @@ export class Coordinator {
     // brings a kind-0 bio and posts — start the AI pipeline at approval time so
     // matching runs from profile + nostr-context immediately, no intro required.
     // The job is keyed by the submission hash, so when an intro lands later the
-    // changed key re-processes and the scoped recompute re-matches them.
+    // changed key re-processes and the scoped recompute re-matches them. Once:
+    // a second call here was an INSERT OR IGNORE no-op that still ran
+    // supersedePendingJobs's DELETE … LIKE over the jobs table (audit SB-46).
     this.enqueueProcess(state.coordinate, attendeePubkey);
-    // The AI pipeline is kicked off when a profile submission arrives (there is
-    // nothing to transcribe/profile until then). Directory text is already visible.
-    if (this.deps.store.getAttendee(state.coordinate, attendeePubkey)?.profile_json) {
-      this.enqueueProcess(state.coordinate, attendeePubkey);
-    }
     // Marmot (§4.2): add the newly-approved attendee's chat identities to the
     // group. Routed through the durable job runner (audit COORD-9): a transient
     // MLS/relay failure is retried with backoff and surfaces via the poison/21606
