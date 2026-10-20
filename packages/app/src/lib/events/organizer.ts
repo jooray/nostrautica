@@ -459,7 +459,15 @@ export async function fetchPending(
       req.withdrawalRequestedPurge = w.deleteData;
     }
   }
-  const result = [...byAttendee.values()].sort((a, b) => a.rumorCreatedAt - b.rumorCreatedAt);
+  // Oldest first; a same-second tie breaks on the lowest rumor id (§3.1, audit
+  // P4), never on arrival order — which differed from the Android's (SB-82).
+  const idOf = (pk: string): string => joinRumorId.get(pk) ?? withdrawals.get(pk)?.id ?? "";
+  const result = [...byAttendee.values()].sort((a, b) => {
+    if (a.rumorCreatedAt !== b.rumorCreatedAt) return a.rumorCreatedAt - b.rumorCreatedAt;
+    const ia = idOf(a.attendeePubkey);
+    const ib = idOf(b.attendeePubkey);
+    return ia < ib ? -1 : ia > ib ? 1 : 0;
+  });
   const newestAt = result.reduce((m, r) => Math.max(m, r.rumorCreatedAt), 0);
   cacheSet(pendingKey(ctx.coordinate), result, newestAt);
   return result;

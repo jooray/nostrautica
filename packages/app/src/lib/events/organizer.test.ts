@@ -932,6 +932,30 @@ describe("fetchPending surfaces withdrawals", () => {
     expect(second.map((p) => p.attendeePubkey)).toEqual([ATTENDEE]);
   });
 
+  // SB-82: two joins in the same second are ordered by lowest rumor id, not by
+  // the order the wraps happened to arrive in.
+  it("orders same-second joins by rumor id regardless of arrival order", async () => {
+    const OTHER_SK = generateSecretKey();
+    const otherJoin = wrapRumor(OTHER_SK, getPublicKey(EINBOX_SK), {
+      kind: KIND_JOIN_REQUEST,
+      created_at: 300,
+      content: { v: 2, a: COORD, name: "Bo", message: "hey", rsvp_public: false },
+      tags: [["a", COORD]],
+    });
+    const mine = joinWrap(300);
+    const keys = (await loadEventKeys(COORD))!;
+
+    fetchEventsRelayOnly.mockResolvedValue([mine, otherJoin]);
+    const first = (await fetchPending(inboxCtx, keys)).map((p) => p.attendeePubkey);
+    __resetPersistForTests();
+    setActiveCacheOwner(OWNER);
+    fetchEventsRelayOnly.mockResolvedValue([otherJoin, mine]);
+    const second = (await fetchPending(inboxCtx, keys)).map((p) => p.attendeePubkey);
+
+    expect(first).toHaveLength(2);
+    expect(second).toEqual(first);
+  });
+
   it("does not let a stale withdrawal shadow a later re-join", async () => {
     fetchEventsRelayOnly.mockResolvedValue([withdrawWrap(100, true), joinWrap(200)]);
 
