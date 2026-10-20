@@ -7,7 +7,13 @@
 import { describe, it, expect, vi } from "vitest";
 import { encryptMedia } from "@nostrautica/protocol";
 import { Store } from "../store/db.js";
-import { transcribeMedia, MediaPolicyError, MIN_AUDIO_BYTES_TO_EXPECT_SPEECH } from "./transcribe.js";
+import {
+  transcribeMedia,
+  MediaPolicyError,
+  EmptyTranscriptError,
+  MAX_EMPTY_STT_ATTEMPTS,
+  MIN_AUDIO_BYTES_TO_EXPECT_SPEECH,
+} from "./transcribe.js";
 import { ProbeUnavailableError, SubprocessError } from "./audio.js";
 import { MockStt } from "../providers/mock.js";
 
@@ -269,12 +275,14 @@ describe("H-3 — an UNPROBEABLE duration is a rejection, not a pass", () => {
 describe("an empty transcript over non-trivial audio is not cached", () => {
   const bigSegment = { data: new Uint8Array(MIN_AUDIO_BYTES_TO_EXPECT_SPEECH), mime: "audio/ogg" };
 
-  it("leaves the cache empty so a reprocess can try again", async () => {
+  it("leaves the cache empty and fails retryably, so the job tries again (DS41-040)", async () => {
     const store = new Store();
     const { ciphertext, descriptor } = await fixture(30);
     const stt = new MockStt({ default: "" });
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const r = await transcribeMedia(
+    // Pre-fix this RESOLVED with "", and the job committed as done: a content-free
+    // profile, no status, and a terminal dedupe key nothing re-opened.
+    const err = await transcribeMedia(
       {
         store,
         stt,
@@ -284,11 +292,62 @@ describe("an empty transcript over non-trivial audio is not cached", () => {
         extractAudio: async () => [bigSegment],
       },
       descriptor as any,
-    );
-    expect(r.text).toBe("");
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(EmptyTranscriptError);
+    expect(err).not.toBeInstanceOf(MediaPolicyError);
     expect(store.getTranscript(descriptor.x)).toBeUndefined(); // NOT cached
+    expect(store.emptySttAttempts(descriptor.x)).toBe(1);
     expect(warn.mock.calls.map((c) => c.join(" ")).join("\n")).toMatch(/empty transcript/);
     warn.mockRestore();
+  });
+
+  it("gives up after MAX_EMPTY_STT_ATTEMPTS as a media-policy reject, then stops paying (DS41-040)", async () => {
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const stt = new MockStt({ default: "" });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const deps = {
+      store,
+      stt,
+      sttModel: "m",
+      fetchBlob: async () => ciphertext,
+      probeDuration: async () => 30,
+      extractAudio: async () => [bigSegment],
+    };
+    const errors: unknown[] = [];
+    for (let i = 0; i < MAX_EMPTY_STT_ATTEMPTS; i++) errors.push(await transcribeMedia(deps, descriptor as any).catch((e) => e));
+    expect(errors.slice(0, -1).every((e) => e instanceof EmptyTranscriptError)).toBe(true);
+    expect(errors.at(-1)).toBeInstanceOf(MediaPolicyError);
+    expect(stt.calls).toBe(MAX_EMPTY_STT_ATTEMPTS);
+    // Once given up on, a further attempt rejects before downloading or calling STT.
+    let downloaded = false;
+    await expect(
+      transcribeMedia({ ...deps, fetchBlob: async () => ((downloaded = true), ciphertext) }, descriptor as any),
+    ).rejects.toBeInstanceOf(MediaPolicyError);
+    expect(downloaded).toBe(false);
+    expect(stt.calls).toBe(MAX_EMPTY_STT_ATTEMPTS);
+    warn.mockRestore();
+  });
+
+  it("a later real transcript clears the count", async () => {
+    const store = new Store();
+    const { ciphertext, descriptor } = await fixture(30);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const base = { store, sttModel: "m", fetchBlob: async () => ciphertext, probeDuration: async () => 30, extractAudio: async () => [bigSegment] };
+    await transcribeMedia({ ...base, stt: new MockStt({ default: "" }) }, descriptor as any).catch(() => {});
+    expect(store.emptySttAttempts(descriptor.x)).toBe(1);
+    await transcribeMedia({ ...base, stt: new MockStt({ default: "hello" }) }, descriptor as any);
+    expect(store.emptySttAttempts(descriptor.x)).toBe(0);
+    warn.mockRestore();
+  });
+
+  it("an organizer reprocess resets the attendee's counters", async () => {
+    const store = new Store();
+    const x = "a".repeat(64);
+    for (let i = 0; i < MAX_EMPTY_STT_ATTEMPTS; i++) store.recordEmptyStt(x, i);
+    store.recordTranscriptRef(x, "31923:pk:d", "b".repeat(64), 0);
+    expect(store.clearEmptySttForSubject("31923:pk:d", "b".repeat(64))).toBe(1);
+    expect(store.emptySttAttempts(x)).toBe(0);
   });
 
   it("still caches an empty transcript for a genuinely tiny clip (real silence costs one call)", async () => {

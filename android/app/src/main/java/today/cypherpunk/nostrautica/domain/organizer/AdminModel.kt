@@ -233,6 +233,18 @@ object AdminModel {
 
     fun statusId(s: CoordinatorStatusContent) = "${s.a}${s.stage}${s.pubkey ?: ""}"
 
+    /** coordinator-status.ts contextNoticeId: carries `at`, so a later edit's notice is not pre-dismissed. */
+    fun contextNoticeId(s: CoordinatorStatusContent) = "${statusId(s)}@${s.at}"
+
+    /**
+     * coordinator-status.ts latestContextNotice (audit DS41-041): the newest
+     * "event details changed, recompute?" advisory, unless that one was dismissed.
+     */
+    fun contextNotice(statuses: List<CoordinatorStatusContent>, dismissed: Set<String>): CoordinatorStatusContent? =
+        statuses.filter { it.stage == "event_context" && it.errorCategory == "recompute_suggested" }
+            .maxByOrNull { it.at }
+            ?.takeIf { contextNoticeId(it) !in dismissed }
+
     /** "active 2 min ago" labels (Admin.svelte sinceLabel): key + n. */
     fun sinceLabel(unixSec: Long, now: Long = System.currentTimeMillis() / 1000): Pair<String, Int> {
         val s = maxOf(0, now - unixSec)

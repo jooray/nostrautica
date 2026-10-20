@@ -32,6 +32,17 @@ export const DEFAULT_MAX_MEDIA_BYTES = MAX_MEDIA_FILE_BYTES;
 export const MIN_AUDIO_BYTES_TO_EXPECT_SPEECH = 8 * 1024;
 
 /**
+ * How many empty STT answers a blob gets before it is rejected as media policy
+ * (audit DS41-040). Each one before the last is a retryable failure, so the job
+ * runner tries again on its backoff schedule (1 s, 10 s, 100 s, then hourly); five
+ * attempts span the first hour, long enough to ride out a provider hiccup. After
+ * that the recording is treated as one the provider cannot hear, and the attendee's
+ * pipeline carries on without it rather than poisoning. An organizer `reprocess`
+ * resets the count.
+ */
+export const MAX_EMPTY_STT_ATTEMPTS = 5;
+
+/**
  * The media violates the coordinator's declared policy (audit H-3): the actual
  * downloaded ciphertext length doesn't match the descriptor's `size`, or the real
  * decoded duration exceeds the event limit. The media is REJECTED (marked
@@ -43,6 +54,18 @@ export class MediaPolicyError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "MediaPolicyError";
+  }
+}
+
+/**
+ * STT answered with no text for audio long enough to hold speech (audit DS41-040).
+ * Retryable: thrown up to {@link MAX_EMPTY_STT_ATTEMPTS} − 1 times per blob, after
+ * which the same condition becomes a {@link MediaPolicyError}.
+ */
+export class EmptyTranscriptError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "EmptyTranscriptError";
   }
 }
 
@@ -164,6 +187,13 @@ export async function transcribeMedia(
   const now = deps.now ?? (() => Date.now());
   const cached = deps.store.getTranscriptRow(descriptor.x);
   if (cached !== undefined) return { text: cached.text, lang: cached.lang ?? undefined };
+  // Already given up on (DS41-040): reject before paying for another download + STT.
+  const emptySoFar = deps.store.emptySttAttempts(descriptor.x);
+  if (emptySoFar >= MAX_EMPTY_STT_ATTEMPTS) {
+    throw new MediaPolicyError(
+      `speech-to-text returned nothing for this recording ${emptySoFar} times — rejected (an organizer reprocess retries it)`,
+    );
+  }
 
   deps.signal?.throwIfAborted();
   const download =
@@ -300,12 +330,26 @@ export async function transcribeMedia(
   // audio bytes, which at the 16 kbit/s mono Opus this pipeline produces is ~2 KB
   // per second.
   const audioBytes = segments.reduce((n, s) => n + s.data.length, 0);
+  //
+  // Nor is it a success (audit DS41-040). Returning "" committed the job as done:
+  // the attendee got a content-free profile, their pairs were cleared, no status
+  // was raised, and a re-delivery hit the terminal dedupe key. It is now a bounded
+  // retry — retryable until MAX_EMPTY_STT_ATTEMPTS, then a MediaPolicyError that
+  // drops this one recording and lets the rest of the pipeline run.
   if (transcript === "" && audioBytes >= MIN_AUDIO_BYTES_TO_EXPECT_SPEECH) {
+    const attempts = deps.store.recordEmptyStt(descriptor.x, now());
     console.warn(
-      `[stt] empty transcript for ${audioBytes} bytes of extracted audio (blob ${descriptor.x.slice(0, 12)}…) — ` +
-        `NOT caching it, so a reprocess can try again rather than inheriting a permanent silence`,
+      `[stt] empty transcript for ${audioBytes} bytes of extracted audio (blob ${descriptor.x.slice(0, 12)}…), ` +
+        `attempt ${attempts}/${MAX_EMPTY_STT_ATTEMPTS} — not cached`,
     );
-    return { text: transcript, lang };
+    if (attempts >= MAX_EMPTY_STT_ATTEMPTS) {
+      throw new MediaPolicyError(
+        `speech-to-text returned nothing for ${audioBytes} bytes of audio ${attempts} times — rejected`,
+      );
+    }
+    throw new EmptyTranscriptError(
+      `speech-to-text returned nothing for ${audioBytes} bytes of audio (attempt ${attempts}/${MAX_EMPTY_STT_ATTEMPTS}) — retrying`,
+    );
   }
   deps.store.putTranscript(descriptor.x, transcript, now(), lang);
   return { text: transcript, lang };

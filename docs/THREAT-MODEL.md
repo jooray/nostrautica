@@ -75,6 +75,17 @@ system protects, what it deliberately leaks, and who must be trusted.
   unencrypted-backup disclosure reveals attendee bios, transcripts, inferred
   interests, and pairwise reasoning without the coordinator identity key. Operators
   must protect the database file and encrypt backups at rest accordingly.
+- **A detached coordinator keeps what it learned** (audit SB-16). A detach deletes
+  the coordinator's custody of the event (the `E_inbox` key and every ECK), so it
+  cannot read anything published after that. It does not delete the attendee-derived
+  data it already holds: profiles, AI profiles, transcripts, pair reasoning, talks
+  and summaries. That data is removed only by the retention sweep (hourly, for an
+  installed event whose 31600 declares `retention`, once its end time plus the
+  declared days has passed) or by the operator. The sweep covers installed events
+  only, so in practice a detached event's data stays on the old coordinator until
+  it is re-attached there and its window elapses, or until the operator deletes it.
+  An organizer replacing a coordinator should treat the old one as still holding
+  everything it processed. See COORDINATOR-OPERATOR-GUIDE.md §9.
 - **LLM / STT provider**: sees plaintext transcripts and summaries. Mitigations:
   v1 prefers Venice private/TEE-tier models (`require_private`); v2 uses
   operator-chosen Routstr nodes.

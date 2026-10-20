@@ -14,6 +14,8 @@ import {
 import {
   authenticateCoordinatorStatus,
   dedupeLatestStatuses,
+  latestContextNotice,
+  contextNoticeId,
 } from "./coordinator-status.js";
 
 const coordinator = getPublicKey(generateSecretKey());
@@ -91,5 +93,22 @@ describe("dedupeLatestStatuses", () => {
     const out = dedupeLatestStatuses([poison, cleared]);
     expect(out).toHaveLength(1);
     expect(out[0].state).toBe("cleared");
+  });
+});
+
+describe("event-context advisory (audit DS41-041)", () => {
+  const a = "31923:" + "e".repeat(64) + ":d1";
+  const first: CoordinatorStatusContent = { v: 2, a, stage: "event_context", error_category: "recompute_suggested", at: 10 };
+  const later: CoordinatorStatusContent = { ...first, at: 20 };
+  const poison: CoordinatorStatusContent = { v: 2, a, stage: "event_context", state: "poison", error_category: "other", at: 30 };
+
+  it("surfaces the newest recompute suggestion, never a poison item", () => {
+    expect(latestContextNotice([first, later, poison], new Set())).toEqual(later);
+    expect(latestContextNotice([poison], new Set())).toBeUndefined();
+  });
+
+  it("a dismissal hides that notice only, not the one a later edit raises", () => {
+    expect(latestContextNotice([first, later], new Set([contextNoticeId(later)]))).toBeUndefined();
+    expect(latestContextNotice([first, later], new Set([contextNoticeId(first)]))).toEqual(later);
   });
 });

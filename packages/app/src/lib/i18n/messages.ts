@@ -1253,6 +1253,9 @@ export const messages = {
     "admin.poison.retry": "Retry",
     "admin.poison.retrying": "Retrying…",
     "admin.poison.dismiss": "Dismiss",
+    "admin.contextChanged.title": "Event details changed",
+    "admin.contextChanged.body":
+      "The title, summary or topics changed after matches were scored, so the current matches still reflect the old description. Recompute to score everyone against the new one. This runs the AI again for every pair.",
 
     // Not found
     "notfound.title": "Not found",
@@ -2997,6 +3000,9 @@ export const messages = {
     "admin.poison.retry": "Skúsiť znova",
     "admin.poison.retrying": "Skúšam znova…",
     "admin.poison.dismiss": "Zavrieť",
+    "admin.contextChanged.title": "Údaje o podujatí sa zmenili",
+    "admin.contextChanged.body":
+      "Názov, zhrnutie alebo témy sa zmenili až po vyhodnotení spojení, takže súčasné spojenia stále vychádzajú zo starého popisu. Prepočítajte ich, aby sa všetci vyhodnotili podľa nového. AI sa pritom znova spustí pre každú dvojicu.",
 
     // Not found
     "notfound.title": "Nenájdené",
@@ -4728,6 +4734,9 @@ export const messages = {
     "admin.poison.retry": "Zkusit znovu",
     "admin.poison.retrying": "Zkouším znovu…",
     "admin.poison.dismiss": "Zavřít",
+    "admin.contextChanged.title": "Údaje o akci se změnily",
+    "admin.contextChanged.body":
+      "Název, shrnutí nebo témata se změnily až po vyhodnocení spojení, takže současná spojení pořád vycházejí ze starého popisu. Přepočítejte je, aby se všichni vyhodnotili podle nového. AI se přitom znovu spustí pro každou dvojici.",
 
     // Nenalezeno
     "notfound.title": "Nenalezeno",
@@ -6453,6 +6462,9 @@ export const messages = {
     "admin.poison.retry": "Erneut versuchen",
     "admin.poison.retrying": "Versucht erneut…",
     "admin.poison.dismiss": "Verwerfen",
+    "admin.contextChanged.title": "Veranstaltungsdetails geändert",
+    "admin.contextChanged.body":
+      "Titel, Zusammenfassung oder Themen haben sich geändert, nachdem die Matches bewertet wurden. Die aktuellen Matches beruhen also noch auf der alten Beschreibung. Berechne sie neu, damit alle nach der neuen bewertet werden. Dabei läuft die KI für jedes Paar erneut.",
 
     // Nicht gefunden
     "notfound.title": "Nicht gefunden",
@@ -8217,6 +8229,9 @@ export const messages = {
     "admin.poison.retry": "Reintentar",
     "admin.poison.retrying": "Reintentando…",
     "admin.poison.dismiss": "Descartar",
+    "admin.contextChanged.title": "Cambiaron los datos del evento",
+    "admin.contextChanged.body":
+      "El título, el resumen o los temas cambiaron después de calcular las coincidencias, así que las actuales todavía se basan en la descripción anterior. Recalcúlalas para evaluar a todos con la nueva. Esto vuelve a ejecutar la IA para cada pareja.",
 
     // No encontrado
     "notfound.title": "No encontrado",

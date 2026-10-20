@@ -63,7 +63,7 @@
   } from "$lib/events/invite-export.js";
   import { redeemedInvitePubkeys } from "$lib/events/invite-sheet.js";
   import { cachedProfiles } from "$lib/events/social.js";
-  import { fetchCoordinatorStatuses, cachedCoordinatorStatuses } from "$lib/events/coordinator-status.js";
+  import { fetchCoordinatorStatuses, cachedCoordinatorStatuses, latestContextNotice, contextNoticeId } from "$lib/events/coordinator-status.js";
   import { enrollOrganizerAsParticipant } from "$lib/events/create.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
@@ -562,6 +562,18 @@
       (s) => s.state === "poison" && !dismissedStatuses.has(statusId(s)),
     ),
   );
+
+  // DS41-041: the coordinator's advisory that the event's title/summary/topics
+  // changed after matches were scored.
+  const contextNotice = $derived(latestContextNotice(coordStatuses, dismissedStatuses));
+  function dismissContextNotice(s: CoordinatorStatusContent) {
+    dismissedStatuses = new Set([...dismissedStatuses, contextNoticeId(s)]);
+    persistDismissed();
+  }
+  async function recomputeForContext(s: CoordinatorStatusContent) {
+    await recomputeMatches();
+    if (!error) dismissContextNotice(s);
+  }
 
   // Latest billing signal from the coordinator (payment_required / grace).
   // Payment is external for now — we just surface the reason + a checkout link,
@@ -1205,6 +1217,20 @@
       <button class="btn inline" onclick={() => router.go({ name: "eventSettings", naddr })}>
         {t("admin.tab.settings")}
       </button>
+    </div>
+  {/if}
+
+  {#if contextNotice}
+    {@const notice = contextNotice}
+    <div class="card" style="margin-bottom:0.75rem;border-left:3px solid var(--accent)">
+      <strong>{t("admin.contextChanged.title")}</strong>
+      <p class="muted" style="margin:0.25rem 0">{t("admin.contextChanged.body")}</p>
+      <div class="row">
+        <button class="btn inline primary" onclick={() => recomputeForContext(notice)} disabled={recomputing}>
+          {recomputing ? t("admin.coordinator.recomputing") : t("admin.coordinator.recompute")}
+        </button>
+        <button class="btn inline" onclick={() => dismissContextNotice(notice)}>{t("admin.poison.dismiss")}</button>
+      </div>
     </div>
   {/if}
 
