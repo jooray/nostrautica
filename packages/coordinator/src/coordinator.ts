@@ -349,6 +349,35 @@ function parseEventEndSec(evt: NostrEvent | undefined): number {
   return read("end") || read("start");
 }
 
+/** A stored `events.eck_json`, or [] when it is not a readable version list. */
+function parseHeldEck(json: string): EckVersion[] {
+  try {
+    const v = JSON.parse(json) as unknown;
+    return Array.isArray(v)
+      ? v.filter((x): x is EckVersion => Number.isInteger(x?.id) && typeof x?.key === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Union of two ECK version lists by id, ascending (NIP §4: grants union-merge, so a
+ * stale list never drops a version the holder already has). `prefer` picks whose
+ * key survives when both name the same id.
+ */
+export function unionEckVersions(
+  held: EckVersion[],
+  incoming: EckVersion[],
+  prefer: "held" | "incoming",
+): EckVersion[] {
+  const byId = new Map<number, EckVersion>();
+  const [first, second] = prefer === "held" ? [incoming, held] : [held, incoming];
+  for (const v of first) byId.set(v.id, v);
+  for (const v of second) byId.set(v.id, v);
+  return [...byId.values()].sort((a, b) => a.id - b.id);
+}
+
 /**
  * Relays the Whitenoise Marmot/MLS client publishes key packages and group
  * traffic to (`CHAT_INTEROP_RELAYS`, shared with the app via the protocol
@@ -775,6 +804,15 @@ export class Coordinator {
    * treated as authorization to run NOR as a detach.
    */
   private suspended = new Map<string, { inboxSkHex: string; eck: EckVersion[]; configRelays: string[]; gen: number; retryAt: number; attempts: number; reason: string }>();
+  /**
+   * Coordinate → the gen an install of it ran to the end at in this process (a
+   * grant install or the boot restore). A same-gen grant for one of these is a
+   * redelivery or a replay, not a partial install to resume (audit SB-121/SB-127).
+   * In memory on purpose: a restart restores every stored event through the full
+   * install chain, which repopulates it, and a crash mid-install leaves no entry,
+   * so the redelivered grant still resumes.
+   */
+  private readonly completedInstallGen = new Map<string, number>();
   private closers: Array<() => void> = [];
   /**
    * Rumor ids whose handler is currently in flight (audit P0-3). Subscription
@@ -1359,6 +1397,18 @@ export class Coordinator {
           );
           return;
         }
+        // A row at the high gen is ALSO what a completed install looks like, so the
+        // row alone cannot tell a resume from a replay (audit SB-121/SB-127). This
+        // process finished an install of exactly this gen (a live grant install or
+        // the boot restore): the grant is a redelivery or a replay, and re-running
+        // the install would re-walk the inbox history, re-publish billing and
+        // re-key the event from the grant's ECK list.
+        if (this.completedInstallGen.get(grant.coordinate) === gen) {
+          log(
+            `[install] REJECTED ${grant.coordinate}: already installed at gen ${gen} — a redelivered or replayed grant, nothing to resume`,
+          );
+          return;
+        }
         log(`[install] ${grant.coordinate}: resuming a partially-completed install at gen ${gen}`);
       }
       if (!config) {
@@ -1449,11 +1499,21 @@ export class Coordinator {
       this.suspended.delete(grant.coordinate);
     }
 
+    // Union-merge the ECK set with what this coordinate already holds (NIP §4: a
+    // stale grant never downgrades custody; audit SB-121). The grant's list is the
+    // organizer's view at signing time and lacks any version this daemon minted on
+    // a revoke since, so writing it verbatim rolled the event back to a key the
+    // revoked attendee holds. On a clash of ids the held key wins for a resume of
+    // the same gen, the grant's for a newer gen.
+    const held = this.deps.store.getEvent(grant.coordinate);
+    const eck = held
+      ? unionEckVersions(parseHeldEck(held.eck_json), grant.eck, gen > held.gen ? "incoming" : "held")
+      : grant.eck;
     this.deps.store.upsertEvent({
       coordinate: grant.coordinate,
       configJson: JSON.stringify(config ?? {}),
       inboxNsec: grant.inboxSkHex,
-      eckJson: JSON.stringify(grant.eck),
+      eckJson: JSON.stringify(eck),
       configRelays: JSON.stringify(relays),
       gen,
       now: this.now(),
@@ -1468,7 +1528,7 @@ export class Coordinator {
       identifier,
       eidPubkey,
       inboxSk: hexToBytes(grant.inboxSkHex),
-      eck: grant.eck,
+      eck,
       configRelays: relays,
       nostrContextN: config?.nostrContext ?? 0,
       matching: config?.matching ?? "off",
@@ -1553,6 +1613,7 @@ export class Coordinator {
         log(`[handover] ${state.coordinate}: bootstrap failed (non-fatal): ${e instanceof Error ? e.message : e}`),
       );
     }
+    this.completedInstallGen.set(grant.coordinate, gen);
   }
 
   /** Suspend an event whose config is unfetchable (NIP §3.5, P0-5): record it for a
@@ -1563,6 +1624,7 @@ export class Coordinator {
     reason = "newest 31600 not fetchable",
   ): void {
     // Make sure a previously-live instance stops serving while suspended.
+    this.completedInstallGen.delete(grant.coordinate);
     for (const map of [this.inboxSubs, this.configSubs, this.chatSubs]) {
       map.get(grant.coordinate)?.close();
       map.delete(grant.coordinate);
@@ -4768,6 +4830,7 @@ export class Coordinator {
     }
     // Drop live state and DELETE key custody (D6).
     this.events.delete(coordinate);
+    this.completedInstallGen.delete(coordinate);
     this.deps.store.deleteEvent(coordinate);
     this.inviteHashCache.delete(coordinate);
     if (!already) {

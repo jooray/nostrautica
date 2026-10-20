@@ -5636,6 +5636,60 @@ describe("audit C1 — commands resume to full completion after a partial failur
   });
 });
 
+/**
+ * Audit SB-121 / SB-127. The same-gen "resume" exception accepted a fresh 21603 for
+ * an install that had COMPLETED (the event row exists and is not tombstoned either
+ * way), and wrote the grant's ECK list verbatim. A grant signed before a revoke
+ * carries only v1, so the replay dropped the coordinator-minted v2 and the revoked
+ * attendee could read everything published afterwards.
+ */
+describe("audit SB-121 — a same-gen grant never rolls back a revocation", () => {
+  async function revokeOne(h: Harness): Promise<void> {
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+  }
+  function replayGrant(h: Harness): any {
+    return wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"],
+      },
+    });
+  }
+  const heldIds = (h: Harness) => (JSON.parse(h.store.getEvent(h.coordinate)!.eck_json) as EckVersion[]).map((v) => v.id);
+
+  it("rejects a same-gen grant for an install that already completed", async () => {
+    const h = await setup();
+    await revokeOne(h);
+    expect(heldIds(h)).toEqual([1, 2]);
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((m: unknown) => void logs.push(String(m)));
+    try {
+      await h.coordinator.handleCoordinatorWrap(replayGrant(h));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(heldIds(h)).toEqual([1, 2]);
+    expect(logs.join("\n")).toMatch(/already installed at gen 1/);
+    expect(logs.join("\n")).not.toMatch(/resuming a partially-completed install/);
+  });
+
+  it("a genuine resume union-merges the ECK set instead of replacing it", async () => {
+    const h = await setup();
+    await revokeOne(h);
+    // As if the daemon had crashed mid-install: nothing marks the install complete.
+    (h.coordinator as any).completedInstallGen.clear();
+    await h.coordinator.handleCoordinatorWrap(replayGrant(h));
+    expect(heldIds(h)).toEqual([1, 2]);
+    const live = (h.coordinator as any).events.get(h.coordinate);
+    expect(Math.max(...live.eck.map((v: EckVersion) => v.id))).toBe(2);
+  });
+});
+
 // ── audit R1/R2/R3/R12 — concurrency, membership ordering, retention lifecycle ──
 describe("audit R1 — same-subject commands are serialized, not merely ordered", () => {
   function adminWrapAt(h: Harness, cmd: string, args: Record<string, unknown>, createdAt: number): any {
