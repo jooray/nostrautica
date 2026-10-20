@@ -494,6 +494,31 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     expect(memoHas(wrap.id)).toBe(true);
   });
 
+  it("an account switch mid-scan never files the grant under the next account (DS41-001)", async () => {
+    const wrap = await keyGrantWrap();
+    const other = getPublicKey(generateSecretKey());
+    fetchEventsRelayOnly.mockResolvedValue([wrap]);
+    // The 31600 lookup is the await the switch lands in: A logs out and B signs
+    // in while A's scan is still authenticating A's grant.
+    fetchEvents.mockImplementation(async () => {
+      setActiveOwner(other);
+      setActiveCacheOwner(other);
+      return [signedConfig()];
+    });
+
+    const outcomes: { truncated: boolean }[] = [];
+    expect(await receiveGrants(attendee, { onOutcome: (o) => outcomes.push(o) })).toEqual([]);
+    expect(await loadEventKeys(coordinate, other)).toBeUndefined();
+    // Not memoized and reported as cut short: A's next scan picks it up again.
+    expect(outcomes[0]?.truncated).toBe(true);
+    setActiveOwner(attendeePk);
+    setActiveCacheOwner(attendeePk);
+    expect(memoHas(wrap.id)).toBe(false);
+    fetchEvents.mockResolvedValue([signedConfig()]);
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect((await loadEventKeys(coordinate, attendeePk))?.eck).toHaveLength(1);
+  });
+
   describe("§15 community proof in a key grant", () => {
     const community = makeCoordinate(getPublicKey(generateSecretKey()), "btc-community", KIND_COMMUNITY);
     const parentTag = [["parent", community]];

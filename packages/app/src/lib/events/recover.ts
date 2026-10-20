@@ -27,7 +27,7 @@ import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
-import { loadEventKeys, listEventKeys, saveEventKeys } from "./keystore.js";
+import { loadEventKeys, listEventKeys, saveEventKeys, activeKeystoreOwner } from "./keystore.js";
 import {
   startScanBudget,
   emptyOutcome,
@@ -114,8 +114,8 @@ async function resolveCoordinate(backup: EventKeysBackup): Promise<string | unde
  * a fresher local ECK set (e.g. after a revocation rotation) is never clobbered
  * by an older backup — union the ECK versions, keep local secrets when present.
  */
-async function restore(coordinate: string, backup: EventKeysBackup): Promise<void> {
-  const existing = await loadEventKeys(coordinate).catch(() => undefined);
+async function restore(coordinate: string, backup: EventKeysBackup, owner: string): Promise<void> {
+  const existing = await loadEventKeys(coordinate, owner).catch(() => undefined);
   const byId = new Map<number, { id: number; key: string }>();
   for (const v of existing?.eck ?? []) byId.set(v.id, v);
   for (const v of backup.eck) if (!byId.has(v.id)) byId.set(v.id, v);
@@ -129,7 +129,7 @@ async function restore(coordinate: string, backup: EventKeysBackup): Promise<voi
     // record and the backup so a re-attach on a fresh device still increments past
     // the last-used gen instead of colliding at gen 1.
     coordinatorGen: Math.max(existing?.coordinatorGen ?? 0, backup.coordinator_gen ?? 0) || undefined,
-  });
+  }, owner);
 }
 
 /**
@@ -220,7 +220,16 @@ export async function recoverEventKeys(
       decrypted++;
       const coordinate = await resolveCoordinate(backup);
       if (!coordinate) continue;
-      await restore(coordinate, backup);
+      // The session moved on while we awaited the signer/relays (audit DS41-001):
+      // a logout, or a switch to another account. This backup is `pubkey`'s
+      // custody, and the write used to resolve its owner NOW — filing A's E_id
+      // and E_inbox nsecs under B. Stop instead; nothing below is memoized, so
+      // the next session of this identity re-reads it.
+      if (activeKeystoreOwner() !== pubkey) {
+        outcome.truncated = true;
+        break;
+      }
+      await restore(coordinate, backup, pubkey);
       // Definitive: decrypted, resolved, and written to the keystore. Only now —
       // a backup whose coordinate could not be resolved stays un-memoized, since
       // that depends on a 31600 read that may simply have failed this time.

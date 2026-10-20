@@ -53,6 +53,7 @@ import { signerUnwrap } from "./giftwrap.js";
 import {
   addEckVersions,
   applyOrganizerGrant,
+  activeKeystoreOwner,
   loadEventKeys,
   listEventKeys,
   currentEck,
@@ -64,7 +65,12 @@ import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { eventRelayHints } from "./event-context.js";
-import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
+import {
+  cacheGet,
+  cacheSet,
+  whenCacheReady,
+  cacheGeneration,
+} from "$lib/cache/persist.js";
 import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
 import { recordOwnStatus } from "./attendee-status.js";
 import {
@@ -581,7 +587,20 @@ export async function receiveGrants(
     return configCache.get(coordinate);
   };
 
+  // Fence for the whole pass (audit DS41-001): every unwrap below can wait a
+  // minute on a remote signer, and a logout or account switch in that window must
+  // neither file this identity's custody under the next one nor write it back to
+  // a store the logout just locked. Writes name `pubkey` explicitly; the loop
+  // stops (un-memoized, so the next scan of this identity resumes) once the
+  // session is no longer this identity's.
+  const gen = cacheGeneration();
+  const sessionMovedOn = () => activeKeystoreOwner() !== pubkey || cacheGeneration() !== gen;
+
   for (const wrap of wraps) {
+    if (sessionMovedOn()) {
+      outcome.truncated = true;
+      break;
+    }
     // Recipient binding: the relay filter already restricts `#p`, but a hostile
     // relay can return extra wraps — the successful unwrap below proves the wrap
     // was actually sealed to us, this is just a cheap early guard.
@@ -653,11 +672,19 @@ export async function receiveGrants(
       // Union the granted ECK versions into any existing record (audit APPK-4):
       // an authentic-but-stale 21605 processed after a fresher 21602 must not
       // clobber the record back to older versions — only role/secrets update.
-      await applyOrganizerGrant(grant.a, {
-        eck: grant.eck,
-        eidNsecHex: grant.eid_nsec,
-        einboxNsecHex: grant.einbox_nsec,
-      });
+      if (sessionMovedOn()) {
+        outcome.truncated = true;
+        break;
+      }
+      await applyOrganizerGrant(
+        grant.a,
+        {
+          eck: grant.eck,
+          eidNsecHex: grant.eid_nsec,
+          einboxNsecHex: grant.einbox_nsec,
+        },
+        pubkey,
+      );
       coordinates.add(grant.a);
       memo[wrap.id] = { coordinate: grant.a, versions: grant.eck.map((v) => v.id), organizer: true };
       memoDirty = true;
@@ -723,10 +750,15 @@ export async function receiveGrants(
         memoDirty = true;
         continue;
       }
+      if (sessionMovedOn()) {
+        outcome.truncated = true;
+        break;
+      }
       await addEckVersions(
         grant.a,
         grant.eck,
         grant.role === "organizer" ? "organizer" : "attendee",
+        pubkey,
       );
       coordinates.add(grant.a);
       // §15.3: a proof to join the event's community. Kept only when it is for the
@@ -816,7 +848,7 @@ export async function receiveGrants(
       const keep = new Set(keys.slice(-MAX_GRANT_WRAPS));
       for (const k of keys) if (!keep.has(k)) delete memo[k];
     }
-    cacheSet(GRANT_MEMO_KEY, memo, Math.floor(Date.now() / 1000), pubkey);
+    cacheSet(GRANT_MEMO_KEY, memo, Math.floor(Date.now() / 1000), pubkey, gen);
   }
   // §15.5: join the community of any event the person consented to, from the
   // proofs just stored AND from earlier ones (a grant is memoized once processed,
