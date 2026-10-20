@@ -60,6 +60,12 @@ fun AppRoot(container: AppContainer, incoming: MutableStateFlow<Pair<Route, Stri
         router.go(route)
         incoming.value = null
     }
+    // A restored NIP-46 session is adopted from storage; confirm the bunker still signs for it (SB-19).
+    LaunchedEffect(Unit) {
+        if (!container.session.verifyRestoredSigner()) {
+            today.cypherpunk.nostrautica.ui.shell.Toasts.show(strings.t("signin.identityChanged"))
+        }
+    }
     BackHandler(enabled = router.stack.size > 1) { router.back() }
     CompositionLocalProvider(LocalContainer provides container, LocalRouter provides router, LocalStrings provides strings) {
         NostrauticaTheme(theme) {

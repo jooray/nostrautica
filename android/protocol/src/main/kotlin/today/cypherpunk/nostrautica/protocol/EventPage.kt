@@ -48,6 +48,9 @@ object EventPage {
 
     fun menuToRTags(items: List<MenuItem>) = items.map { listOf("r", it.target, it.label) }
 
+    /** The public menu, under the private menu's bounds (rTagsToMenu, SB-43). */
     fun rTagsToMenu(tags: List<List<String>>) =
-        tags.filter { it.size >= 2 && it[0] == "r" }.map { MenuItem(label = it.getOrNull(2) ?: it[1], target = it[1]) }
+        tags.filter { it.size >= 2 && it[0] == "r" && it[1].length <= Limits.MAX_URL }
+            .take(Limits.MAX_PAGE_SECTIONS)
+            .map { MenuItem(label = (it.getOrNull(2) ?: it[1]).take(Limits.MAX_NAME), target = it[1]) }
 }

@@ -56,8 +56,9 @@ class Profiles(private val nostr: Nostr, private val cache: Cache) {
         val due = pubkeys.distinct().filter { force || !cache.isFresh("k0:$it", TTL_MS) }
         if (due.isEmpty()) return
         due.chunked(100).forEach { chunk ->
-            nostr.fetch(relays, Filter(kinds = listOf(Kinds.PROFILE), authors = chunk))
-            chunk.forEach { cache.markFetched("k0:$it") }
+            val r = nostr.fetch(relays, Filter(kinds = listOf(Kinds.PROFILE), authors = chunk))
+            // Offline or unanswered: stay stale so the next open retries (DS41-061).
+            if (r.answered > 0) chunk.forEach { cache.markFetched("k0:$it") }
         }
     }
 

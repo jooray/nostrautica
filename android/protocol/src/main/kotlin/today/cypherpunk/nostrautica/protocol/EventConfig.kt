@@ -86,8 +86,12 @@ data class EventConfig(
         val CHAT_INTEROP_RELAYS = listOf("wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat")
         private val CHAT_INTEROP_HOSTS = CHAT_INTEROP_RELAYS.map { URI(it).host }.toSet()
 
-        fun isChatInteropRelay(url: String): Boolean =
-            runCatching { URI(url).host?.lowercase() in CHAT_INTEROP_HOSTS }.getOrDefault(false)
+        fun isChatInteropRelay(url: String): Boolean {
+            if (urlScheme(url) == null) return false
+            val rest = url.trim().substringAfter(':').trimStart('/', '\\')
+            val host = rest.takeWhile { it != '/' && it != '?' && it != '#' && it != '\\' }.substringAfterLast('@').substringBefore(':')
+            return host.lowercase() in CHAT_INTEROP_HOSTS
+        }
 
         fun normalizeLang(lang: String?): String {
             val base = (lang ?: "en").trim().lowercase().split('-', '_').first()
@@ -98,7 +102,21 @@ data class EventConfig(
         private fun all(tags: List<List<String>>, name: String) = tags.filter { it.size >= 2 && it[0] == name }.map { it[1] }.filter { it.isNotEmpty() }
 
         private fun urlValues(tags: List<List<String>>, name: String, scheme: String) =
-            all(tags, name).filter { runCatching { URI(it).scheme == scheme && !URI(it).host.isNullOrEmpty() }.getOrDefault(false) }
+            all(tags, name).filter { urlScheme(it) == scheme }
+
+        /**
+         * The scheme `new URL(v).protocol` reports for a special-scheme URL (SB-80):
+         * lowercased ("WSS://x" is wss), and present when something follows the
+         * slashes ("wss:foo" parses as wss://foo/). java.net.URI kept the case and
+         * wanted a host, so relays the PWA and the coordinator use were dropped here.
+         */
+        internal fun urlScheme(v: String): String? {
+            val m = Regex("^([a-zA-Z][a-zA-Z0-9+.-]*):(.*)$").find(v.trim()) ?: return null
+            val rest = m.groupValues[2].trimStart('/', '\\')
+            val host = rest.takeWhile { it != '/' && it != '?' && it != '#' && it != '\\' }.substringAfterLast('@')
+            if (host.isEmpty() || host.any { it.isWhitespace() }) return null
+            return m.groupValues[1].lowercase()
+        }
 
         private fun intTag(tags: List<List<String>>, name: String, def: Int): Int {
             val raw = first(tags, name) ?: return def
@@ -124,7 +142,7 @@ data class EventConfig(
             var coordinator: String? = null
             var gen: Int? = null
             if (coordTag != null && coordTag.size >= 3 && coordTag[1].isHex32()) {
-                coordTag[2].toIntOrNull()?.takeIf { it >= 1 }?.let { coordinator = coordTag[1]; gen = it }
+                Wire.jsInteger(coordTag[2])?.takeIf { it >= 1 }?.let { coordinator = coordTag[1]; gen = it }
             }
             val relayTags = urlValues(tags, "relay", "wss")
             val chatRelays = LinkedHashSet<String>().apply {

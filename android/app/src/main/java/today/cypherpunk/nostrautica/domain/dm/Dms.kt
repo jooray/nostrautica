@@ -44,6 +44,7 @@ import today.cypherpunk.nostrautica.protocol.Wire
 import today.cypherpunk.nostrautica.protocol.nowSec
 import today.cypherpunk.nostrautica.signer.Session
 import today.cypherpunk.nostrautica.signer.SignerNeedsUser
+import today.cypherpunk.nostrautica.signer.SignerUnavailable
 import today.cypherpunk.nostrautica.signer.silently
 
 /** The DM service, registered lazily from this file. */
@@ -215,7 +216,13 @@ class Dms(
             val r = nostr.fetch(relays, inboxFilter(me, until = until, limit = DmLogic.HISTORY_PAGE_LIMIT), timeoutMs = 10_000)
             if (r.answered == 0) break
             r.events.forEach { ids += it.id }
-            if (r.events.size < DmLogic.HISTORY_PAGE_LIMIT) { complete = true; until = null; break }
+            if (r.events.size < DmLogic.HISTORY_PAGE_LIMIT) {
+                // A short page is the end only if EVERY inbox relay answered: one that
+                // timed out or sent CLOSED may hold older DMs. Otherwise keep the cursor
+                // and walk this window again on a later scan.
+                if (r.complete) { complete = true; until = null }
+                break
+            }
             until = DmLogic.nextHistoryUntil(until, r.events.minOf { it.createdAt })
             page++
         }
@@ -257,6 +264,8 @@ class Dms(
                 throw e
             } catch (e: SignerNeedsUser) {
                 break // ciphertext stays ciphertext until the user opens Messages
+            } catch (e: SignerUnavailable) {
+                break // a remote signer that didn't answer this one won't answer the next either
             } catch (e: GiftWrap.UnwrapException) {
                 DmMemoEntry(null, wrap.createdAt) // foreign kind, forged seal, malformed: definitive
             } catch (e: Nip44.DecryptException) {
@@ -382,6 +391,7 @@ class Dms(
             val toPeer = async { nostr.publish(out.toRecipient, inboxRelays(peer), me, "dm") }
             val toSelf = async { nostr.publish(out.toSelf, inboxRelays(me), me, "dm") }
             val results = listOf(toPeer.await(), toSelf.await())
+            (results[0] as? Nostr.PublishResult.Rejected)?.let { throw Nostr.PublishRejected(it.reason) }
             if (results.all { it is Nostr.PublishResult.Published }) results[0] else Nostr.PublishResult.Queued
         }
     }

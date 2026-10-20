@@ -2,6 +2,8 @@ package today.cypherpunk.nostrautica.ui.shell
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.ui.semantics.Role as A11yRole
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -141,7 +143,9 @@ fun BottomBar(items: List<NavItem>) {
         Row(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.navigationBars).height(64.dp)) {
             for (item in items) {
                 Column(
-                    Modifier.weight(1f).fillMaxSize().clickable(onClick = item.onClick),
+                    // selectable merges the icon and label into one node, as clickable already did, and
+                    // adds what TalkBack was missing: the Tab role and which tab is selected (SB-38).
+                    Modifier.weight(1f).fillMaxSize().selectable(selected = item.active, role = A11yRole.Tab, onClick = item.onClick),
                     horizontalAlignment = Alignment.CenterHorizontally,
                 ) {
                     Box(Modifier.width(28.dp).height(2.dp).background(if (item.active) t.accent else Color.Transparent))
@@ -291,7 +295,7 @@ fun EventScaffold(naddr: String, back: Pair<String, () -> Unit>? = null, content
 fun MenuRow(icon: ImageVector, label: String, onClick: () -> Unit) {
     val t = LocalTokens.current
     Row(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(t.bgElev).clickable(onClick = onClick).padding(16.dp),
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(t.bgElev).clickable(role = A11yRole.Button, onClick = onClick).padding(16.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Icon(icon, null, Modifier.size(20.dp), tint = t.textDim)

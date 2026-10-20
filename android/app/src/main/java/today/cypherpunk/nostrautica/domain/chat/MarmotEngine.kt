@@ -65,12 +65,24 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
 
     /** Hold the runtime open. Pair every call with [release]. */
     override suspend fun acquire() {
-        withContext(Dispatchers.IO) {
-            lock.withLock {
-                closeJob?.cancel(); closeJob = null
-                refs++
-                if (marmot == null) marmot = open()
+        // A reference counts only once open() succeeded, and an acquire that fails or is
+        // cancelled afterwards (withContext rethrows a cancellation even when its block
+        // finished) gives it back: the caller never got it, so it never calls release(),
+        // and a leaked ref kept the native runtime, its database and sockets open for the
+        // life of the process (DS41-060).
+        var counted = false
+        try {
+            withContext(Dispatchers.IO) {
+                lock.withLock {
+                    closeJob?.cancel(); closeJob = null
+                    if (marmot == null) marmot = open()
+                    refs++
+                    counted = true
+                }
             }
+        } catch (e: Throwable) {
+            if (counted) release()
+            throw e
         }
     }
 

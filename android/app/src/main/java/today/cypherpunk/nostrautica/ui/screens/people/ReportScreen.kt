@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -118,15 +119,20 @@ private fun reportHtml(s: I18n.Strings, title: String, date: String, summary: St
     append("<p class='g'>").append(esc(generated)).append("</p></body></html>")
 }
 
-/** Print through the system dialog (which also offers "Save as PDF"). */
-private fun printHtml(ctx: Context, jobName: String, html: String, keep: (WebView?) -> Unit) {
+/**
+ * Print through the system dialog (which also offers "Save as PDF"). The print
+ * adapter renders from [WebView] while the dialog is open, so the view must outlive
+ * print(); [keep] holds it, and the caller destroys it on the next print and when
+ * the screen goes away (SB-40: it used to be dropped without destroy(), leaking
+ * the view and its renderer on every print).
+ */
+private fun printHtml(ctx: Context, jobName: String, html: String, keep: (WebView) -> Unit) {
     val wv = WebView(ctx)
     keep(wv)
     wv.webViewClient = object : WebViewClient() {
         override fun onPageFinished(view: WebView, url: String?) {
             val pm = ctx.getSystemService(PrintManager::class.java)
             pm?.print(jobName, view.createPrintDocumentAdapter(jobName), PrintAttributes.Builder().build())
-            keep(null)
         }
     }
     wv.loadDataWithBaseURL(null, html, "text/html", "UTF-8", null)
@@ -194,6 +200,7 @@ fun ReportBody(padding: PaddingValues) {
     var outcome by remember { mutableStateOf<Social.FollowAllResult?>(null) }
     var followError by remember { mutableStateOf<String?>(null) }
     var printer by remember { mutableStateOf<WebView?>(null) }
+    DisposableEffect(Unit) { onDispose { printer?.destroy(); printer = null } }
     val saveTxt = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
         if (uri != null) runCatching { ctx.contentResolver.openOutputStream(uri)?.use { it.write(Report.npubList(report.allPeople).toByteArray()) } }
     }
@@ -204,7 +211,7 @@ fun ReportBody(padding: PaddingValues) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(s.t("report.kicker").uppercase(), Modifier.weight(1f), color = t.textDim, fontSize = 12.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 1.sp)
                 SmallButton(s.t("report.print"), {
-                    printHtml(ctx, s.t("report.title"), reportHtml(s, ev.ctx.title, dl, ev.ctx.summary, report, generated)) { printer = it }
+                    printHtml(ctx, s.t("report.title"), reportHtml(s, ev.ctx.title, dl, ev.ctx.summary, report, generated)) { printer?.destroy(); printer = it }
                 })
             }
         }

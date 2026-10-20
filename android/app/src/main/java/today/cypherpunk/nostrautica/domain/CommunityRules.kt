@@ -78,13 +78,18 @@ object CommunityRules {
      */
     fun <T> sortChildren(list: List<T>, nowSec: Long, start: (T) -> Long?, title: (T) -> String, coordinate: (T) -> String): List<T> {
         fun rank(c: T): Int { val s = start(c); return if (s == null) 1 else if (s >= nowSec) 0 else 2 }
+        // The PWA breaks ties with String.localeCompare (the runtime locale's collation);
+        // a Collator for the device locale does the same here. String.compareTo is raw
+        // UTF-16 order, which put "Banana" before "apple" (SB-81).
+        val collator = java.text.Collator.getInstance()
         return list.sortedWith { a, b ->
             val ra = rank(a); val rb = rank(b)
             if (ra != rb) return@sortedWith ra.compareTo(rb)
             val sa = start(a); val sb = start(b)
             if (ra == 0 && sa != sb) return@sortedWith sa!!.compareTo(sb!!)
             if (ra == 2 && sa != sb) return@sortedWith sb!!.compareTo(sa!!)
-            title(a).compareTo(title(b)).takeIf { it != 0 } ?: coordinate(a).compareTo(coordinate(b))
+            collator.compare(title(a), title(b)).takeIf { it != 0 } ?: collator.compare(coordinate(a), coordinate(b)).takeIf { it != 0 }
+                ?: coordinate(a).compareTo(coordinate(b))
         }
     }
 
