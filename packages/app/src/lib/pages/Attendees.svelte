@@ -536,6 +536,14 @@
     else next.add(f);
     activeFilters = next;
   }
+  // A filter over a set we have not loaded yet would filter everyone out and
+  // say "No one matches", which reads as lost data, and stays that way for the
+  // session if the social fetch failed (audit DS41-018). Such a chip is disabled
+  // until its set is known, with a note saying why.
+  const filterKnown = (f: FilterKey): boolean =>
+    f === "following" ? followsKnown : settings !== null;
+  const anyFilterUnknown = $derived(!followsKnown || settings === null);
+
   function passesFilter(pubkey: string): boolean {
     for (const f of activeFilters) {
       if (f === "following") {
@@ -942,6 +950,8 @@
           class="btn inline"
           aria-pressed={activeFilters.has(f)}
           class:primary={activeFilters.has(f)}
+          disabled={!filterKnown(f)}
+          aria-describedby={filterKnown(f) ? undefined : "attendees-filters-note"}
           onclick={() => toggleFilter(f)}
         >
           {t(filterLabels[f])}
@@ -951,6 +961,11 @@
         <button class="btn inline" onclick={clearFilters}>{t("attendees.filter.clear")}</button>
       {/if}
     </div>
+    {#if anyFilterUnknown}
+      <p id="attendees-filters-note" class="muted filters-note">
+        {settled ? t("attendees.filter.unavailable") : t("attendees.filter.loading")}
+      </p>
+    {/if}
   {/if}
 
   {#if visible.length === 0}
@@ -1120,6 +1135,10 @@
   .filters {
     flex-wrap: wrap;
     margin: 0.5rem 0 0.1rem;
+  }
+  .filters-note {
+    font-size: 0.8rem;
+    margin: 0.2rem 0 0;
   }
   .roster {
     padding: 0.25rem 0.9rem;
