@@ -1,6 +1,8 @@
 package today.cypherpunk.nostrautica.domain
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.MapSerializer
@@ -126,7 +128,12 @@ class Grants(
      * Returns the coordinates that gained keys. [force] = "Search my whole history".
      * [maxUnwraps] bounds signer round trips (each wrap costs two on a remote signer).
      */
-    suspend fun receive(signer: NostrSigner, force: Boolean = false, maxUnwraps: Int = 60, outcome: ScanOutcome = ScanOutcome(), interactive: Boolean = true): Set<String> = lock.withLock {
+    suspend fun receive(signer: NostrSigner, force: Boolean = false, maxUnwraps: Int = 60, outcome: ScanOutcome = ScanOutcome(), interactive: Boolean = true): Set<String> =
+        // Off the main thread: Home and Join call this from a LaunchedEffect, and the scan does
+        // Keystore, database and network work.
+        withContext(Dispatchers.IO) { scan(signer, force, maxUnwraps, outcome, interactive) }
+
+    private suspend fun scan(signer: NostrSigner, force: Boolean, maxUnwraps: Int, outcome: ScanOutcome, interactive: Boolean): Set<String> = lock.withLock {
         val pubkey = signer.pubkey
         val held = keys.list(pubkey)
         val last = prefs.getLong("grants-backfilled:$pubkey").takeIf { it > 0 }
@@ -150,11 +157,14 @@ class Grants(
         var unwrapped = 0
         var failed = 0
         var budget = maxUnwraps
-        val heldNow = { keys.list(pubkey) }
+        // The held keys, re-read only after this scan changes them: keys.list() Keystore-
+        // decrypts every event's record, and once per wrap that was ~50,000 AES-GCM calls on
+        // a weekly backfill of a mature account, all behind SecureStore's lock (DS41-057).
+        var heldNow = held
 
         for (wrap in wraps.sortedByDescending { it.createdAt }) {
             if (wrap.tags.none { it.size >= 2 && it[0] == "p" && it[1] == pubkey }) continue
-            if (satisfied(memo[wrap.id], heldNow())) continue
+            if (satisfied(memo[wrap.id], heldNow)) continue
             if (!signer.isLocal && budget-- <= 0) { outcome.truncated = true; break }
             outcome.attempted++
             val rumor = try {
@@ -188,6 +198,7 @@ class Grants(
                                 memo[wrap.id] = MemoEntry(done = true); dirty = true
                             } else {
                                 keys.applyOrganizerGrant(pubkey, g.a, g.eck, g.eidNsec, g.einboxNsec)
+                                heldNow = keys.list(pubkey)
                                 gained += g.a
                                 memo[wrap.id] = MemoEntry(g.a, g.eck.map { it.id }, organizer = true); dirty = true
                             }
@@ -207,6 +218,7 @@ class Grants(
                                 memo[wrap.id] = MemoEntry(done = true); dirty = true
                             } else {
                                 keys.addEckVersions(pubkey, g.a, g.eck, if (g.role == "organizer") "organizer" else "attendee")
+                                heldNow = keys.list(pubkey)
                                 gained += g.a
                                 // §15.3: kept only when it is for the community the event's newest config
                                 // names and verifies as an authority's signature over THIS attendee.
