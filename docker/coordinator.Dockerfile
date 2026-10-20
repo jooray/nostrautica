@@ -30,7 +30,12 @@ COPY patches ./patches
 # package is gone, and a COPY naming it fails the whole build. check-pins.mjs
 # asserts every COPY source here exists, so a retired package can't strand it again.
 COPY packages/protocol ./packages/protocol
-COPY packages/coordinator ./packages/coordinator
+# The coordinator's manifests and sources only, never the whole directory: on a
+# working tree (or the coordinator host) it also holds `.env`, `coordinator.toml`
+# and the database. .dockerignore keeps them out of the context as well; this is
+# the second lock (audit DS41-072).
+COPY packages/coordinator/package.json packages/coordinator/tsconfig.json ./packages/coordinator/
+COPY packages/coordinator/src ./packages/coordinator/src
 COPY packages/vendor/marmot-ts ./packages/vendor/marmot-ts
 
 RUN pnpm install --frozen-lockfile --filter @nostrautica/coordinator... \

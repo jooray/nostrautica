@@ -1,0 +1,34 @@
+# Build context for docker/coordinator.Dockerfile (audit DS41-072).
+#
+# The release gate builds from `git archive HEAD`, where none of this exists. A
+# build run from a working tree, and above all on the coordinator host, where
+# `.env`, `coordinator.toml` and the SQLite database are provisioned in place,
+# would otherwise send them to the daemon and bake them into an image layer
+# (NOSTRAUTICA_COORDINATOR_NSEC, VENICE_API_KEY, attendee PII). Deleting a file
+# in a later layer does not remove it from the earlier one.
+
+# Secrets and runtime state
+**/.env
+**/.env.*
+**/coordinator.toml
+**/local-test.toml
+**/*.ncryptsec
+**/*.sqlite
+**/*.sqlite-*
+**/*.sqlite.*
+**/coordinator.out
+**/RELEASE_ID
+
+# Local build output and dependencies: the image installs and builds its own
+**/node_modules
+**/dist
+**/build
+**/.svelte-kit
+docs-site-build
+.pnpm-store
+
+# Not needed in the image
+.git
+.claude
+**/*.log
+e2e/test-results
