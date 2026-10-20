@@ -115,7 +115,15 @@ export function plainChatMessages(messages: readonly ChatMessage[]): ChatMessage
 export class ChatTabCoordinator {
   role: TabRole = "pending";
   /** Whether leadership is guaranteed single-writer (Web Locks path). Off it, followers are read-only. */
-  readonly usingWebLocks: boolean;
+  get usingWebLocks(): boolean {
+    return !!this.locks && !this.lockRequestFailed;
+  }
+  /**
+   * The Web Locks request itself rejected, so this tab fell back to the ping
+   * election (SB-102). From then on it behaves exactly like a tab that never had
+   * Web Locks: no single-writer guarantee, read-only as a follower.
+   */
+  private lockRequestFailed = false;
   /** The coordinate the leader is currently serving, as seen by a follower (for read-only detection). */
   leaderCoordinate: string | undefined;
 
@@ -145,7 +153,6 @@ export class ChatTabCoordinator {
     this.locks = opts.locks !== undefined ? opts.locks : defaultLocks();
     const makeChannel = opts.createChannel ?? defaultChannel;
     this.channel = makeChannel(`nostrautica-chat:${opts.scope}`);
-    this.usingWebLocks = !!this.locks;
     this.pingWindowMs = opts.pingWindowMs ?? 300;
     this.ackTimeoutMs = opts.ackTimeoutMs ?? 8000;
     // A rejoin is revoke-publish → key-package rotate+publish → attest-publish →
@@ -194,8 +201,14 @@ export class ChatTabCoordinator {
         await new Promise<void>((res) => (this.stopHolding = res));
       })
       .catch(() => {
-        // A locks failure shouldn't strand chat — fall back to leading.
-        if (!this.settled) this.becomeLeader();
+        // A locks failure shouldn't strand chat, but it is not evidence that no
+        // other tab holds the lock either: leading unconditionally here could put
+        // a second MarmotClient on the shared MLS store next to a live leader
+        // (audit SB-102). Ask the other tabs instead, as a tab without Web Locks
+        // would — a leader answers the ping, and only silence makes us lead.
+        if (this.settled || this.disposed) return;
+        this.lockRequestFailed = true;
+        void this.electWithPing();
       });
     return Promise.resolve();
   }
@@ -264,7 +277,7 @@ export class ChatTabCoordinator {
         return;
       case "leader-hello":
         // Someone leads. In the ping fallback (not yet settled), become a follower.
-        if (!this.locks && !this.settled) this.becomeFollower();
+        if (!this.usingWebLocks && !this.settled) this.becomeFollower();
         return;
       case "sync":
         // A freshly-joined follower wants the current snapshot — the session

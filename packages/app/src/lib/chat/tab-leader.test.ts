@@ -129,6 +129,42 @@ describe("ChatTabCoordinator — Web Locks leader election", () => {
     c.dispose();
   });
 
+  it("a rejected lock request asks the other tabs instead of leading blindly (SB-102)", async () => {
+    const leader = new ChatTabCoordinator({ scope: SCOPE, locks, createChannel: bus.make, onRoleChange: () => {} });
+    await leader.whenSettled;
+    const broken: LockManagerLike = {
+      request: async () => {
+        throw new Error("SecurityError: lock request failed");
+      },
+    };
+    const second = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks: broken,
+      createChannel: bus.make,
+      onRoleChange: () => {},
+      pingWindowMs: 50,
+    });
+    await second.whenSettled;
+    expect(leader.role).toBe("leader");
+    expect(second.role).toBe("follower"); // never two MLS writers
+    expect(second.usingWebLocks).toBe(false); // read-only, like the ping path
+    leader.dispose();
+    second.dispose();
+  });
+
+  it("a rejected lock request with nobody else around still leads (SB-102)", async () => {
+    const lone = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks: { request: async () => Promise.reject(new Error("nope")) },
+      createChannel: bus.make,
+      onRoleChange: () => {},
+      pingWindowMs: 5,
+    });
+    await lone.whenSettled;
+    expect(lone.role).toBe("leader");
+    lone.dispose();
+  });
+
   it("a second tab becomes a follower while the first holds the lock", async () => {
     const leader = new ChatTabCoordinator({ scope: SCOPE, locks, createChannel: bus.make, onRoleChange: () => {} });
     await leader.whenSettled;
