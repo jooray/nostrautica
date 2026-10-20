@@ -3905,7 +3905,7 @@ export class Coordinator {
       status: "published",
       published_at: publishedAt,
     };
-    const event = buildTalkEntry(this.publishKeys(state), state.coordinate, content, this.nextCreatedAt);
+    const event = buildTalkEntry(this.publishKeys(state), state.coordinate, fitTalkContent(content), this.nextCreatedAt);
     await this.publish(event, state.configRelays);
     // Record the publish-time ECK id (audit COORD-7): post-rotation deletion must
     // address the entry under the ECK it was published with, not the current one.
@@ -6833,6 +6833,32 @@ function blindedDFor(eck: Uint8Array, coordinate: string, pubkey: string): strin
  * `reasoning` is length-capped (word boundary) and URLs neutralized so injected
  * text can't smuggle clickable links into clients.
  */
+/**
+ * A 31610 whose content fits one NIP-44 payload (audit DS41-043). The stored
+ * transcript may be up to MAX_TRANSCRIPT_TEXT (100,000) characters, and a long
+ * keynote's alone is past the 65,535-byte ceiling, so `eckEncrypt` threw and the
+ * talk could never be published. Only the transcript is shortened, cut at a
+ * character boundary and marked with a trailing ellipsis; the full text still
+ * feeds the speaker's profile.
+ */
+export function fitTalkContent(content: TalkContent): TalkContent {
+  const size = (c: TalkContent) => utf8ToBytes(JSON.stringify(c)).length;
+  const transcript = content.transcript;
+  let bytes = size(content);
+  if (bytes <= NIP44_MAX_PLAINTEXT_BYTES || !transcript) return content;
+  let text = transcript.text;
+  while (bytes > NIP44_MAX_PLAINTEXT_BYTES && text.length > 0) {
+    // Scale by the overshoot, then a little more, so this converges in a few steps
+    // however multi-byte the text is.
+    const keep = Math.max(0, Math.floor((text.length * NIP44_MAX_PLAINTEXT_BYTES) / bytes) - 64);
+    text = text.slice(0, keep);
+    // Never leave half a surrogate pair at the cut.
+    if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+    bytes = size({ ...content, transcript: { ...transcript, text: text + "…" } });
+  }
+  return { ...content, transcript: { ...transcript, text: text + "…" } };
+}
+
 export function sanitizeMatchList(list: MatchListContent): MatchListContent {
   const out: MatchListContent = {
     ...list,

@@ -53,7 +53,7 @@ import {
   type EckVersion,
 } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
-import { Coordinator, sanitizeMatchList, type Transport } from "./coordinator.js";
+import { Coordinator, sanitizeMatchList, fitTalkContent, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
 import type { RoleRoutes } from "./providers/types.js";
 import type { ChatMls } from "./chat/mls.js";
@@ -7002,4 +7002,38 @@ describe("audit DS41-034 — a match list always fits one NIP-44 payload", () =>
     // A short list is untouched.
     expect(sanitizeMatchList({ v: 2, computed_at: 1, matches: matches.slice(0, 3) }).matches).toHaveLength(3);
   });
+});
+
+/**
+ * Audit DS41-043. MAX_TRANSCRIPT_TEXT allows 100,000 characters, and the stored
+ * transcript went into the ECK-encrypted 31610 verbatim: a long keynote's
+ * transcript alone is past NIP-44's 65,535 bytes, so the talk could never publish.
+ */
+describe("audit DS41-043 — a long talk transcript still publishes", () => {
+  const base = {
+    v: 2 as const,
+    pubkey: "a".repeat(64),
+    talk_d: "t1",
+    title: "Keynote",
+    description: "",
+    speakers: [],
+    external_url: "https://example.com/talk",
+    external_kind: "youtube" as any,
+    lang: "en",
+    revision: 1,
+    status: "published" as const,
+    published_at: 1,
+  };
+  for (const [label, text] of [["ascii", "word ".repeat(20_000)], ["cjk", "演講".repeat(50_000)]] as const) {
+    it(`trims an oversized ${label} transcript to fit, and leaves a small one alone`, () => {
+      const content = { ...base, transcript: { x: "b".repeat(64), text, lang: "en", source: "stt" as const, updated_at: 1 } };
+      const fitted = fitTalkContent(content);
+      expect(new TextEncoder().encode(JSON.stringify(fitted)).length).toBeLessThanOrEqual(65_535);
+      expect(fitted.transcript!.text.endsWith("…")).toBe(true);
+      expect(text.startsWith(fitted.transcript!.text.slice(0, -1))).toBe(true);
+      expect(() => eckEncrypt(new Uint8Array(32), JSON.stringify(fitted))).not.toThrow();
+      const small = { ...content, transcript: { ...content.transcript, text: "short" } };
+      expect(fitTalkContent(small)).toBe(small);
+    });
+  }
 });
