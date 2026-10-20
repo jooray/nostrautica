@@ -190,6 +190,10 @@
     if (edited) return refreshGuard.hold("profile");
   });
 
+  function aiFieldsEdited(): boolean {
+    return hideAll || AI_PROFILE_FIELDS.some((f) => values[f] !== initial[f] || hide[f]);
+  }
+
   const isList = (f: AiProfileField) => f !== "summary";
 
   function fieldToString(f: AiProfileField, ai: DirectoryEntryContent["ai_profile"]): string {
@@ -216,19 +220,23 @@
     try {
       if (!session.signer) return router.go({ name: "login" });
       const pubkey = await session.signer.getPublicKey();
-      await connectNdk();
       // Cache-first paint, mirroring Attendee.svelte's fetchDirectoryEntry usage:
       // paint whatever this device already decrypted for THIS attendee (e.g. from
       // the People-tab warm-up prefetch, or an earlier visit) before the network
-      // round-trip lands.
+      // round-trip lands. The paint has to clear `loading` too, and come before
+      // connectNdk(): the page body is gated on it, so a cached profile used to
+      // sit behind "Loading…" until every relay read settled (audit DS41-019).
       const cachedCtx = cachedEventContext(naddr);
       if (cachedCtx) {
+        ctx = cachedCtx;
         const cached = cachedDirectoryEntry(cachedCtx.coordinate, pubkey);
         if (cached) {
           entry = cached;
           loadFromEntry(entry);
+          loading = false;
         }
       }
+      await connectNdk();
       ctx = await loadEventContext(naddr);
       const fetched = await fetchDirectoryEntry(ctx, pubkey);
       // Only overwrite on a POSITIVE answer (same rule Attendee.svelte's SWR
@@ -242,7 +250,9 @@
       // so it must not be less forgiving than a plain cache read.
       if (fetched) {
         entry = fetched;
-        loadFromEntry(entry);
+        // The cached paint is interactive now, so the member may already be
+        // editing the AI fields. Don't reset their edits under them.
+        if (!aiFieldsEdited()) loadFromEntry(entry);
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);

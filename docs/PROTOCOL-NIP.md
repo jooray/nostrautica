@@ -107,7 +107,7 @@ per the tolerant-parse rule, which is stricter than intended rather than looser.
   silently misparsed under the wrong semantics; forward compatibility is achieved by
   bumping `v` and shipping clients first.
 
-Custom kinds occupy the addressable block `31600`–`31611` and the gift-wrap rumor block
+Custom kinds occupy the addressable block `31600`–`31612` and the gift-wrap rumor block
 `21600`–`21610`.
 
 ## 3. Ordering, replaceability, and revisions
@@ -236,10 +236,34 @@ therefore has protocol consequences beyond the coordinator's own state:
   the coordinator currently named in the newest fetchable `31600`, or by `E_id`. Records
   authored by a formerly assigned coordinator are ignored once a newer config no longer
   names it.
+- **One roster author.** While the newest `31600` names a coordinator, the roster
+  (31604) and directory (31603) are the coordinator's to write: an organizer client
+  **MUST NOT** publish an `E_id`-authored 31604 then, and routes approvals and removals
+  as `21604` commands instead. It **SHOULD** decide that from a freshly read `31600`,
+  not a cached one, since another organizer device may have attached a coordinator
+  since: two authors on one address are resolved by `created_at` alone, and the
+  coordinator's next republish silently drops whoever only the `E_id` roster listed.
+  The detach/replace rotation (above) is the one exception: it republishes under the new
+  key before the coordinator-less `31600` goes out.
 - **Handover republish.** A newly attached coordinator **MUST** republish the event's
   member records (directory, roster, match lists, published talks) under its own key (bootstrapping from the previous coordinator's still-decryptable records where custody
   allows, and from reprocessing otherwise), so that record-authority pinning (above) never
   leaves members without a readable directory.
+- **Handover roster authority.** Being able to decrypt a `31604` is not authority to
+  define membership: its `d` is the event's public `d`, so anyone can publish there, and
+  every current or former attendee holds an ECK version that decrypts it. A bootstrapping
+  coordinator **MUST** adopt a roster (every page of it, §6.2) and the directory entries it
+  seeds from only when it is authored by `E_id` or by the coordinator named in the
+  `prev_coordinator` field of the `E_id`-sealed `21603` that installed it, and **MUST
+  NOT** adopt one from any other author, whether or not that author is an attendee.
+  Roles (an `organizer` entry is an MLS co-admin, §4) are adopted only from those
+  authors. A `21603` without `prev_coordinator` (a first attach, or an organizer client
+  that predates the field) means only an `E_id`-authored roster is adoptable; a
+  coordinator **MUST NOT** fall back to any other author. The organizer's client **MUST**
+  set `prev_coordinator` when the attach replaces a different coordinator named by the
+  newest `31600`, and omits it otherwise. Because the replace/detach key rotation above
+  republishes the roster under `E_id`, a handover from a pre-field client still keeps the
+  organizer's approvals.
 
 ## 4. Encryption model
 
@@ -263,7 +287,42 @@ media) with no bespoke cryptography.
 - ECK versions are `{id, key}`; grants carry the full version list; receivers
   **union-merge** (a stale grant never downgrades custody). The current version is the
   highest `id`; rotation on revocation is forward-only and honest about it (old ciphertext
-  stays readable to whoever held the old key).
+  stays readable to whoever held the old key). See §4.1 for what identifies a version.
+
+### 4.1 ECK version identity across organizer devices
+
+A rotating party numbers the new version `max(held ids) + 1` and draws the key at
+random, so two organizer devices (or an organizer and a co-organizer) that rotate
+concurrently both mint the same `id` with **different keys**. A version is therefore
+identified by `(id, key)`, never by `id` alone:
+
+- **Fingerprint.** `fp(key) = hex(sha256(utf8("nostrautica:eck-fp:") ‖ key_bytes))[0..16]`
+  (8 bytes, 16 lowercase hex). One-way and domain-separated: it names a key without
+  revealing it.
+- **Tag.** A writer of an ECK-encrypted record SHOULD put the fingerprint of the key it
+  encrypted under as a third element of the `eck` tag: `["eck", "<id>", "<fp>"]`. Every
+  `["eck", <version>]` tag in §6 may carry it. A reader that does not know it reads
+  `t[1]` exactly as before. A reader that does decrypts with the held key matching
+  `(id, fp)`, and a record whose `(id, fp)` it does not hold is "written under a key this
+  device lacks", not a corrupt record. Without `fp`, a reader tries every held key with
+  that `id`.
+- **Union.** Every merge of version lists (grants 21602/21603/21605, the 30078
+  event-keys backup, local stores) MUST dedupe by `(id, key)` and keep **both** keys of
+  a same-`id` pair. Keeping one strands everyone who was granted the other.
+- **Current version.** The highest `id`; of two keys under that `id`, the one with the
+  **lowest fingerprint**. Every holder of the same set computes the same answer.
+- **Healing.** A collision is resolved by moving forward: the next rotation mints
+  `max id + 1` (unique again) and re-grants the full list, both colliding keys included,
+  so nothing already encrypted becomes unreadable to someone who held it. An organizer
+  client that detects a collision at its current `id` SHOULD offer that rotation.
+- **Guard.** A client MUST NOT rotate when the newest 31600 or the current 31604 shows a
+  version newer than (or a key different from) what it holds; it reports "keys changed
+  on another device" instead (§3.7). That closes the sequential case; the rules above
+  handle two rotations that genuinely overlap in time.
+
+Compatibility: an older reader keeps one key of a collided pair (union-by-id) and may
+fail to read records written under the other until the healing rotation, after which
+the current version is unique and it reads normally again.
 
 ## 5. Gift wraps
 
@@ -367,7 +426,35 @@ silently drop them.
   - `["max_talk_sec", <int>]`: talk cap, default 900; `"0"` means unlimited.
   - `["matching", "on"|"off"]`: default `"off"` (only the literal `"on"` enables it).
   - `["match_visibility", "pair"|"event"]`: default `"pair"`.
-  - `["approval", "manual"|"invite"|"manual+invite"]`: default `"manual"`.
+  - `["approval", "manual"|"invite"|"manual+invite"|"open"]`: default `"manual"`
+    (`"open"` is the community default, §1.1). A coordinator **MUST** enforce it on
+    every `21600` it decides:
+    - `"manual"`: every direct join waits for the organizer, including one carrying a
+      valid invite (§7), and no invite claim is consumed. Two exceptions. The
+      organizer's own self-join: a valid invite whose `31601` entry carries
+      `label: "organizer-self"` is verified and claimed like any invite and
+      auto-approves. Only `E_id` can write that label, and organizer clients mint
+      such a code only for the organizer's own participant enrollment. And a verified
+      `member_of` proof on a community (§15.4): linking a child event is the
+      community organizer's consent, so approval for the child admits to the
+      community whatever its own mode.
+    - `"invite"`: a valid entitlement (invite, or a `member_of` proof on a community)
+      auto-approves. Anything else is **rejected**: no proof at all, or a code that is
+      unknown, already used up or expired. The coordinator does not queue a rejected
+      join. The organizer client still sees it in `E_inbox`, so the organizer remains
+      free to approve the person by hand, and the coordinator honours that `21604
+      approve` even for someone it rejected. A valid entitlement refused only because
+      the roster is full stays pending, as everywhere else.
+    - `"manual+invite"` and `"open"`: a valid entitlement auto-approves, and everything
+      else waits for the organizer.
+
+    **Compatibility.** No wire change. A coordinator that predates enforcement treats
+    every value as `"manual+invite"`. In a `"manual"` event it auto-approves valid
+    invites, which is looser than declared, and in an `"invite"` event it queues
+    instead of rejecting. Organizer clients that predate the `organizer-self` label
+    get their self-join queued under `"manual"`. That is stricter than intended, and
+    the organizer can approve themselves from the queue. An organizer client without
+    a coordinator applies the policy itself.
   - `["eck", <int>]`: **bootstrap only**: the ECK version in force when this config
     was last signed by `E_id` (default/floor 1). It is **NOT** the authority for the
     *current* ECK version. Because a coordinator cannot sign the `E_id`-authored 31600,
@@ -653,7 +740,7 @@ payload keeps the strict literal-2 parse of §2.
   ```
   {
     v: 2,
-    sections: EventPageSection[] (default []),   // PUBLIC layout
+    sections: EventPageSection[] ≤50 (default []), // PUBLIC layout
     sources: ExternalFeed[] (default []),        // PUBLIC curated feeds
     private?: string                             // ECK ciphertext (below)
   }
@@ -695,8 +782,8 @@ payload keeps the strict literal-2 parse of §2.
   ```
   {
     v: 2,
-    menu: (MenuItem & { pos: int ≥0 })[] (default []),
-    sections: (EventPageSection & { pos: int ≥0 })[] (default [])
+    menu: (MenuItem & { pos: int ≥0 })[] ≤50 (default []),
+    sections: (EventPageSection & { pos: int ≥0 })[] ≤50 (default [])
   }
   ```
   `MenuItem = { label: string ≤200, target: string ≤2048 }` (an https URL or a
@@ -727,7 +814,7 @@ payload keeps the strict literal-2 parse of §2.
     talk_d: string 1..64,
     title: string 1..200,
     description: string ≤2000 (default ""),
-    speakers: hex32[] (default []),   // co-speakers; the submitter is implicit
+    speakers: hex32[] ≤50 (default []), // co-speakers; the submitter is implicit
     media?: MediaDescriptor,          // kind MUST be "talk"; present for recording/upload
     external_url?: https URL ≤2048,   // XOR with media: a YouTube or direct-mp4 URL
     external_kind?: "youtube" | "video",  // required when external_url is set
@@ -768,7 +855,7 @@ payload keeps the strict literal-2 parse of §2.
       talks: bool (default false),
       chat: string[] ≤30 (default [])     // Marmot chat-relay URLs, when offered
     } (default {}),
-    privacy?: { [role: string]: string },  // per-role disclosure tier, e.g. "private"
+    privacy?: { [role: string ≤64]: string ≤200 } ≤32 entries, // per-role tier, e.g. "private"
     terms_url?: https-string ≤2048,
     pricing?: {
       model: "free"|"per_user"|"per_event"|"negotiated"|"external",
@@ -828,7 +915,7 @@ relay-visible event on its own.
     v: 2,
     a: <coordinate>,
     role: "attendee" | "organizer",
-    eck: [{ id: int >0, key: base64(32 bytes) }],
+    eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
     granted_by: hex32,
     parent?: { a: <31612-coordinate>, by: hex32, sig: hex64 }
   }
@@ -849,12 +936,17 @@ relay-visible event on its own.
     a: <coordinate>,
     gen: int >0,
     inbox_nsec: hex32,
-    eck: [{ id: int >0, key: base64(32 bytes) }],
-    config_relays: string[] ≤30
+    eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
+    config_relays: string[] ≤30,
+    prev_coordinator?: hex32
   }
   ```
 - Seal author **MUST** equal the coordinate's `E_id`. Install authorization and the `gen`
   rules are §3.5.
+- `prev_coordinator` (optional, additive) is the pubkey of the coordinator this install
+  replaces: the one the newest `31600` named when the organizer attached this one, if
+  different. It is the only key other than `E_id` whose roster the handover bootstrap may
+  adopt (§3.7). A coordinator that predates the field ignores it.
 
 #### `21604`: Admin Command
 
@@ -884,15 +976,26 @@ relay-visible event on its own.
     a: <coordinate>,
     eid_nsec: hex32,
     einbox_nsec: hex32,
-    eck: [{ id: int >0, key: base64(32 bytes) }],
+    eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
     config_relays: string[] ≤30,
-    granted_by: hex32
+    granted_by: hex32,
+    organizers?: hex32[] ≤32,          // accounts known to hold custody, sender included
+    prior_einbox_nsecs?: hex32[] ≤64   // retired E_inbox secrets (§3.7)
   }
   ```
 - Seal author **MUST be exactly `E_id`**; `granted_by` **MUST** equal the seal author.
   Grants full, irrevocable custody of `E_id`, `E_inbox`, and every known ECK version, a
   co-organizer is cryptographically indistinguishable from the event's creator (§13).
   Receivers union-merge the granted ECK versions the same way `21602` does.
+- **Re-issue on rotation.** A co-organizer is a different account and not an attendee,
+  so it receives neither the attendee re-grants nor the rotating account's own 30078
+  backup. A client that rotates the ECK and/or `E_inbox` (revocation, detach/replace,
+  collision repair, §4.1) **SHOULD** send a fresh `21605` to every account it knows holds
+  custody: the ones it granted to, plus those named in `organizers` of grants it
+  received. Receivers record `organizers` (minus themselves) for their own rotations,
+  and keep an inbox they already held as retired rather than dropping it when the grant
+  names a different one; the current inbox is the one the newest `31600` names.
+  Both fields are optional; an older receiver ignores them.
 
 #### `21606`: Coordinator Status
 
@@ -923,6 +1026,17 @@ relay-visible event on its own.
   A status is a poison/health report (the poison fields set), a billing update (`billing`
   set), or both. A rumor sent to an affected attendee is scoped to that attendee's own
   submission/talk pipeline failures; billing status is sent only to organizers.
+
+  **Advisory: recompute suggested.** When a live edit of the space record (31923/31612)
+  changes its `title`, `summary` or `t` tags after pair scores exist, the coordinator
+  sends the organizer `{ stage: "event_context", error_category: "recompute_suggested",
+  at }` with no `state` and no `pubkey`. Every scoring prompt embeds those fields, but
+  stored scores are keyed on the two profiles only, so they keep the old framing until
+  the organizer sends a `21604 recompute`. The coordinator **MUST NOT** recompute on its
+  own, because a recompute is paid work on every pair. Clients **SHOULD** offer a
+  Recompute action and dismiss per notice (`at` included), so that a later edit raises
+  a fresh notice. A client that renders only `state: "poison"` ignores the advisory,
+  which is the intended fallback. This is additive and needs no `v` bump.
 
 #### `21607`: Chat Device Attestation
 
@@ -965,7 +1079,7 @@ relay-visible event on its own.
       seeks?: string[≤200] ≤50
     },
     hidden?: bool,                 // publish the directory entry with NO ai_profile
-    hidden_fields?: ("summary"|"skills"|"interests"|"offers"|"seeks")[],
+    hidden_fields?: ("summary"|"skills"|"interests"|"offers"|"seeks")[] ≤5,
     report?: string ≤2000          // free-text "this is inaccurate" note to the organizer
   }
   ```
@@ -987,7 +1101,7 @@ relay-visible event on its own.
     talk_d: string 1..64,          // stable per-speaker id; editing resubmits the same id
     title: string 1..200,
     description: string ≤2000 (default ""),
-    speakers: hex32[] (default []),  // co-speakers; the submitter is implicit
+    speakers: hex32[] ≤50 (default []), // co-speakers; the submitter is implicit
     media?: MediaDescriptor,         // XOR external_url (exactly one required)
     external_url?: https URL ≤2048,  // YouTube or direct-mp4 URL hosted off-Blossom
     external_kind?: "youtube" | "video",   // required when external_url is set
@@ -1041,7 +1155,8 @@ An invite code is a throwaway nsec, transported only in the URL fragment
   serialize to the same bytes.
 - Verification is stateless: `sha256(invite-pubkey) ∈ newest 31601` ∧ signature valid.
 - **Single-use:** the coordinator claims per invite pubkey, **first-processed wins**;
-  later uses fall back to the manual approval queue (a benign failure mode). This is
+  later uses fall back to the manual approval queue (a benign failure mode), or are
+  rejected in an `approval: "invite"` event (§6.2). This is
   eventually consistent by design: the organizer client and the coordinator do not share
   claim state, so a code can independently be "used" once locally by each.
 

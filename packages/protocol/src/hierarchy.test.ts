@@ -77,6 +77,13 @@ describe("space hierarchy (§15)", () => {
     expect(verifyMembershipProof({ by: "zz", sig: "zz" }, community, meetup, attendee, authorities)).toBe(false);
   });
 
+  it("gives a malformed child no authorities instead of throwing (SB-29)", () => {
+    const coordinator = getPublicKey(coordSk);
+    for (const bad of ["not-a-coordinate", "", "31923:XYZ:ev"]) {
+      expect(membershipAuthorities(bad, { coordinator })).toEqual([]);
+    }
+  });
+
   it("carries the proof in a join request tag and a key grant", () => {
     const proof = makeMembershipProof(eventSk, community, meetup, attendee);
     const tags = [["a", community], memberOfTag(meetup, proof), ["member_of", "junk"]];

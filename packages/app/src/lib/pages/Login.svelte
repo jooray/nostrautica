@@ -11,6 +11,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { npubEncode } from "nostr-tools/nip19";
 
   /** Raw thrown value: ErrorState categorizes it and keeps the technical
    *  text behind a disclosure, as every other async surface does. */
@@ -63,9 +64,53 @@
   function done() {
     router.go({ name: "home" });
   }
+
+  // A `#/login?nsec=` recovery link is staged, never auto-imported (SB-129): the
+  // person sees which account it is and says yes first. Same identity as the one
+  // already signed in → nothing to ask.
+  const linkKey = $derived(
+    session.pendingLinkKey && session.pendingLinkKey.pubkey !== session.pubkey
+      ? session.pendingLinkKey
+      : null,
+  );
+
+  const confirmLink = () => {
+    error = null;
+    busy = true;
+    (async () => {
+      try {
+        if (await session.confirmLinkKey()) done();
+      } catch (e) {
+        error = e;
+      } finally {
+        busy = false;
+      }
+    })();
+  };
 </script>
 
-{#if session.loggedIn && session.freshLocalKey}
+{#if linkKey}
+  <h1>{t("login.link.title")}</h1>
+  <div class="card warn">
+    <p class="muted" style="margin:0">{t("login.link.account")}</p>
+    <p style="font-family:monospace;word-break:break-all;margin:0.25rem 0 0.75rem">
+      {npubEncode(linkKey.pubkey)}
+    </p>
+    <p>{t("login.link.warnStranger")}</p>
+    {#if session.loggedIn}
+      <p><strong>{t("login.link.warnReplace")}</strong></p>
+    {/if}
+    {#if error}
+      <ErrorState {error} body="login.failed" />
+    {/if}
+    <div class="row">
+      <button class="btn primary" onclick={confirmLink} disabled={busy}>{t("login.link.confirm")}</button>
+      <button class="btn" onclick={() => session.cancelLinkKey()} disabled={busy}>
+        {t("login.link.cancel")}
+      </button>
+    </div>
+  </div>
+{:else if session.loggedIn && session.freshLocalKey}
   <h1>{t("login.youreIn")}</h1>
   <div class="card">
     <p class="muted">
@@ -123,6 +168,7 @@
         accept="image/*"
         onchange={onPicFile}
         label={t("login.photoAdd")}
+        iconOnly
       >
         {#if picPreview}
           <img src={picPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />

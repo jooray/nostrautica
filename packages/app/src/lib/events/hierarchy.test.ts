@@ -54,6 +54,7 @@ import {
   verifyQueueMembership,
   loadChildren,
   linkedParentFor,
+  fetchNewestConfig,
   grantParentField,
   __resetLinkMemoForTests,
 } from "./hierarchy.js";
@@ -258,6 +259,27 @@ describe("loadChildren", () => {
       loadByCoordinate,
     );
     expect(list.map((x) => x.title)).toEqual(["next", "later", "past"]);
+  });
+});
+
+describe("fetchNewestConfig re-checks what the relay returned (audit SB-10)", () => {
+  it("ignores a newer config of the same E_id under a different d, a different author, or kind", async () => {
+    const mine = configEvent(eventCfg(), 1000);
+    // A hostile relay ignores `#d` and serves the E_id's NEWER config for another
+    // space: same author, so its signature verifies just as well.
+    const otherD = configEvent(config(EVENT_EID, "meetup-nov", { coordinator: COORDINATOR, coordinatorGen: 1 }), 2000);
+    const otherAuthor = { ...configEvent(config(OTHER, "meetup-oct"), 3000), pubkey: OTHER };
+    const otherKind = { ...configEvent(eventCfg(), 4000), kind: KIND_ROSTER };
+    fetchEvents.mockReset().mockResolvedValue([otherD, otherAuthor, otherKind, mine]);
+    const cfg = await fetchNewestConfig(EVENT);
+    expect(cfg?.d).toBe("meetup-oct");
+    expect(cfg?.inbox).toBe(mine.tags.find((t) => t[0] === "inbox")![1]);
+    expect(cfg?.coordinator).toBeUndefined();
+  });
+
+  it("returns nothing when no candidate is the requested record", async () => {
+    fetchEvents.mockReset().mockResolvedValue([configEvent(config(EVENT_EID, "meetup-nov"), 2000)]);
+    expect(await fetchNewestConfig(EVENT)).toBeUndefined();
   });
 });
 

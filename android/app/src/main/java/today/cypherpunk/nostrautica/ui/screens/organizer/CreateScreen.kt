@@ -436,8 +436,16 @@ private fun CreateBody(p: androidx.compose.foundation.layout.PaddingValues) {
                     NumberField(maxVideo, { maxVideo = it }, s.t("create.field.maxVideo"), enabled = !videoUnlimited, decimal = true, modifier = Modifier.weight(1f))
                 }
                 ToggleRow(s.t("create.field.noLimit"), videoUnlimited, { videoUnlimited = it })
-                // A community is always "open" (the kind description says so); only events choose.
-                if (!community) ChoiceField(s.t("create.field.approval"), listOf("manual" to s.t("create.approval.manual"), "invite" to s.t("create.approval.invite"), "manual+invite" to s.t("create.approval.both")), approval, { approval = it })
+                // Communities choose too, as on the web (Create.svelte): "open" is only their default,
+                // and an organizer who wants every join reviewed must be able to pick "manual".
+                // "open" is listed for communities so the default reads as itself rather than a raw
+                // value; the coordinator treats it like "manual+invite" (PROTOCOL-NIP §6.2).
+                ChoiceField(
+                    s.t("create.field.approval"),
+                    (if (community) listOf("open" to s.t("create.approval.open")) else emptyList()) +
+                        listOf("manual" to s.t("create.approval.manual"), "invite" to s.t("create.approval.invite"), "manual+invite" to s.t("create.approval.both")),
+                    approval, { approval = it },
+                )
                 ChoiceField(s.t("create.field.matching"), listOf(true to s.t("create.matching.on"), false to s.t("create.matching.off")), matching, { matching = it })
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Checkbox(enrollSelf, { enrollSelf = it })

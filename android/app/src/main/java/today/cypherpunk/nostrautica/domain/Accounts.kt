@@ -101,8 +101,16 @@ class Accounts(private val session: Session, private val nostr: Nostr, private v
     /**
      * created_at = max(now, previous + 1) for a replaceable/addressable event
      * (nostr/monotonic.ts, NIP §3.2), so a quick second edit never loses to the first.
+     *
+     * "Previous" includes the relays' current winner, as in the PWA: a floor taken
+     * from this phone's store alone lets a same-second write from another device
+     * (the PWA on the organizer's laptop) TIE with ours, and §3.1 then breaks the tie
+     * on the lowest id, discarding one of the two at random (SB-94). The read lands
+     * in the store; offline it returns at once and the local floor still applies.
      */
-    suspend fun monotonicCreatedAt(kind: Int, author: String, d: String? = null): Long = monoLock.withLock {
+    suspend fun monotonicCreatedAt(kind: Int, author: String, d: String? = null, relays: Collection<String> = Relays.READ): Long = monoLock.withLock {
+        val f = Filter(kinds = listOf(kind), authors = listOf(author), tags = if (d != null) mapOf("d" to listOf(d)) else emptyMap())
+        try { nostr.fetch(relays, f, timeoutMs = 4_000) } catch (e: kotlinx.coroutines.CancellationException) { throw e } catch (e: Exception) { /* the local floor still applies */ }
         val prev = nostr.store.latest(kind, author, d)?.createdAt ?: 0
         maxOf(nowSec(), prev + 1)
     }
@@ -110,7 +118,7 @@ class Accounts(private val session: Session, private val nostr: Nostr, private v
     /** Sign and publish as the user. */
     suspend fun signAndPublish(kind: Int, content: String, tags: List<List<String>>, relays: List<String>, label: String? = null): Pair<NostrEvent, Nostr.PublishResult> {
         val d = tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1)
-        val created = if (Kinds.isReplaceable(kind) || Kinds.isAddressable(kind)) monotonicCreatedAt(kind, pubkey, d) else nowSec()
+        val created = if (Kinds.isReplaceable(kind) || Kinds.isAddressable(kind)) monotonicCreatedAt(kind, pubkey, d, (relays + Relays.READ).distinct()) else nowSec()
         val ev = signer.sign(UnsignedEvent(pubkey, created, kind, tags, content))
         return ev to nostr.publish(ev, relays, pubkey, label)
     }

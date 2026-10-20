@@ -88,7 +88,10 @@ object InboxFold {
                 by[pk] = req.copy(withdrawn = true, withdrawalRequestedPurge = w.purge)
             }
         }
-        return by.values.sortedBy { it.rumorCreatedAt }
+        // Oldest first; a same-second tie breaks on the lowest rumor id (§3.1, audit P4), never
+        // on map iteration order, which was HashMap order here and arrival order in the PWA (SB-82).
+        val idOf = { pk: String -> joinIds[pk] ?: withdrawals[pk]?.id ?: "" }
+        return by.entries.sortedWith(compareBy({ it.value.rumorCreatedAt }, { idOf(it.key) })).map { it.value }
     }
 
     /** talks.ts dedupePendingTalks: newest per (speaker, talk_d), minus already-published revisions. */

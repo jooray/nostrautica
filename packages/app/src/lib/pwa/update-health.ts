@@ -49,9 +49,11 @@ export class UpdateHealth {
 
   constructor(
     /**
-     * This bundle's `RELEASE_MANIFEST.releaseId`. It is also the `revision` the
-     * build stamps on the precached `index.html` entry (see vite.config.ts), so
-     * a served `sw.js` built from the same commit contains it verbatim. The
+     * This bundle's `RELEASE_MANIFEST.swRevision`: the `revision` the build
+     * stamps on the precached `index.html` entry (see vite.config.ts), so a
+     * served `sw.js` built from the same commit contains it verbatim. Not
+     * `releaseId`: on a tagged commit that is the bare tag name, which another
+     * commit re-cut under the same tag would also contain (audit SB-52). The
      * fallback "dev" id (and any empty id) disables drift checking entirely —
      * matching a three-letter string against a whole bundle would be noise.
      */

@@ -47,6 +47,7 @@ class AppContainer(val context: Context) {
     val social = Social(nostr, accounts)
 
     init {
+        nostr.activeOwner = { session.account.value?.pubkey }
         // After every grant scan, stored community proofs are re-evaluated (§15.5).
         grants.afterScan = { signer, children, interactive -> communities.autoJoin(signer, children, interactive) }
     }

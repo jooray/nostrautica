@@ -322,6 +322,10 @@ export const MAX_ICEBREAKER = 280;
  * which are "a subset of the roster" by construction.
  */
 export const MAX_ROSTER = 2000;
+/** Retired E_inbox secrets one event-keys backup / organizer grant carries. */
+export const MAX_PRIOR_INBOXES = 64;
+/** Organizer accounts (creator + co-organizers) one event's custody records name. */
+export const MAX_ORGANIZERS = 32;
 /**
  * Attendee entries in ONE 31604 page. Not the operative limit and not meant to
  * be: the 65,535-byte NIP-44 plaintext ceiling always binds first (the smallest
@@ -356,6 +360,22 @@ export const MAX_TRANSCRIPTS = 20;
 export const MAX_PAGE_SECTIONS = 50;
 /** Pinned naddr refs per event page; each one costs the client a fetch. */
 export const MAX_PINNED_REFS = 50;
+/**
+ * ECK versions in one grant/backup `eck` array (audit SB-26). One version per
+ * revocation or withdrawal, so a long-lived community can accumulate many — the
+ * cap is set at the NIP-44 plaintext ceiling instead: a `{"id":N,"key":"<44>"}`
+ * entry is ≥ 60 bytes, so even the leanest carrier (an unescaped 30078 backup)
+ * fits at most ~1 020 of them in 65 535 bytes, and the gift-wrapped grants fewer.
+ * It can therefore reject nothing deliverable; it makes the bound explicit rather
+ * than incidental, like every other array here.
+ */
+export const MAX_ECK_VERSIONS = 1024;
+/** Co-speakers on a talk (21609/31610, audit SB-27). The app sends none today. */
+export const MAX_TALK_SPEAKERS = 50;
+/** 31611 `privacy` map (audit SB-12): role names, tier strings, and entries. */
+export const MAX_PRIVACY_ROLES = 32;
+export const MAX_PRIVACY_ROLE = 64;
+export const MAX_PRIVACY_TIER = 200;
 
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
@@ -461,10 +481,27 @@ export interface InvitePolicy {
   uses: number;
   /** Unix seconds after which the code no longer auto-approves. */
   exp?: number;
+  /** The entry's organizer-facing label, carried so a coordinator can recognise
+   *  {@link ORGANIZER_SELF_INVITE_LABEL} (PROTOCOL-NIP.md §7). */
+  label?: string;
 }
 
-export function invitePolicyOf(entry: { uses?: number; exp?: number }): InvitePolicy {
-  return { uses: entry.uses ?? 1, ...(entry.exp !== undefined ? { exp: entry.exp } : {}) };
+/**
+ * The `31601` label of the code an organizer client mints for the organizer's
+ * OWN self-join (the create flow's "enroll me as a participant"). Under
+ * `approval: "manual"` a coordinator queues every join, including invite-backed
+ * ones (audit SB-124), and this label is how it tells the organizer's own join
+ * apart: the list is signed by `E_id`, so only the event authority can mark a
+ * code this way, and the code's nsec never leaves the organizer's device.
+ */
+export const ORGANIZER_SELF_INVITE_LABEL = "organizer-self";
+
+export function invitePolicyOf(entry: { uses?: number; exp?: number; label?: string }): InvitePolicy {
+  return {
+    uses: entry.uses ?? 1,
+    ...(entry.exp !== undefined ? { exp: entry.exp } : {}),
+    ...(entry.label !== undefined ? { label: entry.label } : {}),
+  };
 }
 
 // ── 21600 Join Request rumor content ─────────────────────────────────────────
@@ -533,8 +570,9 @@ export const profileCorrectionContentSchema = z.object({
   overrides: aiProfileOverrideSchema.optional(),
   // true = publish the directory entry with NO ai_profile (self-authored fallback).
   hidden: z.boolean().optional(),
-  // Blank specific generated fields (rather than override them).
-  hidden_fields: z.array(z.enum(AI_PROFILE_FIELDS)).optional(),
+  // Blank specific generated fields (rather than override them). At most one entry
+  // per field (audit SB-27): like `overrides`, a correction is stored durably.
+  hidden_fields: z.array(z.enum(AI_PROFILE_FIELDS)).max(AI_PROFILE_FIELDS.length).optional(),
   // Optional "this is inaccurate" note to the organizer. Minimally carried — the
   // owner deferred a full report-to-organizer flow (audit U10), so it is just a
   // free-text string with no elaborate handling here.
@@ -556,7 +594,7 @@ export const keyGrantContentSchema = z.object({
   v: version,
   a: eventCoordinate, // 31923 event coordinate (audit R18)
   role: z.enum(["attendee", "organizer"]),
-  eck: z.array(eckVersionSchema),
+  eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   granted_by: hex32,
   /**
    * §15: when this event belongs to a community, a proof the recipient may present
@@ -581,8 +619,16 @@ export const coordinatorGrantContentSchema = z.object({
   // detached for the coordinate — a replayed historical grant can never re-install.
   gen: z.number().int().positive(),
   inbox_nsec: secretKeyHex, // hex privkey of E_inbox
-  eck: z.array(eckVersionSchema),
+  eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   config_relays: z.array(z.string()).max(MAX_RELAYS),
+  // The outgoing coordinator this install takes over from (NIP §3.7, audit
+  // SB-122): the coordinator the newest 31600 named when the organizer attached
+  // this one, if it was a different one. Optional and additive — a coordinator that
+  // predates it ignores it, and a grant without it (an older organizer client, or a
+  // first attach) makes the handover bootstrap adopt only an E_id-authored roster.
+  // This is the ONLY way a roster authored by a key other than E_id becomes
+  // adoptable: it is vouched for by E_id, because the grant is E_id-sealed.
+  prev_coordinator: hex32.optional(),
 });
 export type CoordinatorGrantContent = z.infer<
   typeof coordinatorGrantContentSchema
@@ -691,7 +737,7 @@ export const talkSubmissionContentSchema = z
     talk_d: z.string().min(1).max(64), // stable per-speaker talk id (edit = same id)
     title: z.string().min(1).max(MAX_TALK_TITLE),
     description: z.string().max(MAX_TALK_DESC).default(""),
-    speakers: z.array(hex32).default([]), // co-speakers; the submitter is implicit
+    speakers: z.array(hex32).max(MAX_TALK_SPEAKERS).default([]), // co-speakers; the submitter is implicit
     media: mediaDescriptorSchema.optional(),
     external_url: httpsUrl(2048).optional(),
     external_kind: talkExternalKindSchema.optional(),
@@ -716,7 +762,7 @@ export const talkContentSchema = z
     talk_d: z.string().min(1).max(64),
     title: z.string().min(1).max(MAX_TALK_TITLE),
     description: z.string().max(MAX_TALK_DESC).default(""),
-    speakers: z.array(hex32).default([]),
+    speakers: z.array(hex32).max(MAX_TALK_SPEAKERS).default([]),
     // Recording/upload → a Blossom `media` descriptor; external → `external_url`
     // (+ `external_kind`). Exactly one, as on the submission (§8/§15).
     media: mediaDescriptorSchema.optional(),
@@ -768,9 +814,17 @@ export const organizerGrantContentSchema = z.object({
   a: eventCoordinate,
   eid_nsec: secretKeyHex, // E_id secret (hex) — lets a co-organizer edit the event
   einbox_nsec: secretKeyHex, // E_inbox secret (hex) — read submissions + approve
-  eck: z.array(eckVersionSchema),
+  eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   config_relays: z.array(z.string()).max(MAX_RELAYS),
   granted_by: hex32,
+  // Every ACCOUNT the sender knows holds organizer custody for this event, its own
+  // included (audit SB-90). A co-organizer is a different account, and only the
+  // devices that know of it can re-issue custody to it when the E_inbox / ECK
+  // rotate; carrying the set in the grant lets every holder do so. Additive.
+  organizers: z.array(hex32).max(MAX_ORGANIZERS).optional(),
+  // Retired E_inbox secrets, so a re-issued grant after a rotation still reads
+  // submissions sealed to the old inbox (NIP §3.7). Additive.
+  prior_einbox_nsecs: z.array(secretKeyHex).max(MAX_PRIOR_INBOXES).optional(),
 });
 export type OrganizerGrantContent = z.infer<typeof organizerGrantContentSchema>;
 
@@ -1151,7 +1205,10 @@ export type EventPageSection = z.infer<typeof eventPageSectionSchema>;
 
 export const menuItemSchema = z.object({
   label: z.string().max(MAX_NAME),
-  target: z.string().max(MAX_URL), // https: URL or nostr:naddr…
+  // Meant to be an https: URL or nostr:naddr…, but only length-checked, as the NIP
+  // says: a bad scheme here must not void the whole page. Renderers link nothing
+  // else (the app's resolveTarget drops every other scheme).
+  target: z.string().max(MAX_URL),
 });
 export type MenuItem = z.infer<typeof menuItemSchema>;
 
@@ -1175,7 +1232,9 @@ export type EventPagePrivate = z.infer<typeof eventPagePrivateSchema>;
 
 export const eventPageContentSchema = z.object({
   v: version,
-  sections: z.array(eventPageSectionSchema).default([]),
+  // Capped like the encrypted half (audit SB-11): this public half is exactly the
+  // payload that does NOT ride inside a NIP-44 ciphertext, so nothing else bounds it.
+  sections: z.array(eventPageSectionSchema).max(MAX_PAGE_SECTIONS).default([]),
   // Additive and defaulted: every 31608 published before external feeds existed
   // parses unchanged, and a writer that doesn't know the field omits it. Not
   // mirrored into the ECK `private` payload — see externalFeedSchema on why the
@@ -1194,6 +1253,27 @@ export const userSettingsSchema = z.object({
 });
 export type UserSettings = z.infer<typeof userSettingsSchema>;
 
+/**
+ * Removed entries a per-event settings clock keeps per field (tombstones), on
+ * top of the present ones. A tombstone is what stops another device's stale
+ * copy from resurrecting a removed favourite; past this many the oldest are
+ * dropped (a very old removal can then come back from a device that slept
+ * through it, the gentler failure than an unbounded payload).
+ */
+export const MAX_SETTINGS_TOMBSTONES = 200;
+const settingsStamps = z
+  .record(hex32, z.number().int().nonnegative())
+  .refine((r) => Object.keys(r).length <= MAX_ROSTER + MAX_SETTINGS_TOMBSTONES, {
+    message: "too many settings stamps",
+  });
+export const settingsClockSchema = z.object({
+  favorites: settingsStamps.default({}),
+  want_to_meet: settingsStamps.default({}),
+  met: settingsStamps.default({}),
+  notes: settingsStamps.default({}),
+});
+export type SettingsClock = z.infer<typeof settingsClockSchema>;
+
 export const perEventSettingsSchema = z.object({
   v: version,
   favorites: z.array(hex32).max(MAX_ROSTER).default([]),
@@ -1208,6 +1288,14 @@ export const perEventSettingsSchema = z.object({
       message: `too many notes (max ${MAX_NOTES})`,
     })
     .default({}),
+  // Per-entry change stamps for the cross-device merge (audit SB-88, see
+  // settings-merge.ts). ADDITIVE and optional, so the payload stays `v: 2`: a
+  // client that predates them reads the four fields above exactly as before
+  // (zod and kotlinx both drop unknown keys) and, when it writes, simply omits
+  // them, which a newer reader treats as a whole-document write at that event's
+  // created_at. `base` (ms) is the stamp of every entry the clock does not name.
+  clock: settingsClockSchema.optional(),
+  base: z.number().int().nonnegative().optional(),
 });
 export type PerEventSettings = z.infer<typeof perEventSettingsSchema>;
 
@@ -1249,11 +1337,23 @@ export const eventKeysBackupSchema = z.object({
   a: z.string().optional(),
   eid_nsec: secretKeyHex,
   einbox_nsec: secretKeyHex,
-  eck: z.array(eckVersionSchema),
+  eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   // Last coordinator install generation the organizer used (NIP §3.5). Absent = 0
   // (never attached, or a backup written before generations); a re-attach reads it
   // back and uses lastGen + 1, so generations strictly increase across devices.
   coordinator_gen: z.number().int().nonnegative().optional(),
+  // ECK versions minted by a rotation whose publishes were not yet confirmed when
+  // this backup was written (audit DS41-002): custody, but not current. Recovery
+  // restores them as staged and a client promotes one once it finds the 31604
+  // written under it. Additive: older readers ignore it.
+  pending_eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS).optional(),
+  // E_inbox secrets retired by a rotation (NIP §3.7), so a recovered device can
+  // still read submissions sealed to a pre-rotation inbox, and two devices that
+  // each rotated keep both (audit SB-89). Additive.
+  prior_einbox_nsecs: z.array(secretKeyHex).max(MAX_PRIOR_INBOXES).optional(),
+  // Other accounts this organizer has handed custody to (21605), so every device
+  // of the account re-issues it to them on a rotation (audit SB-90). Additive.
+  co_organizers: z.array(hex32).max(MAX_ORGANIZERS).optional(),
 });
 export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 
@@ -1295,6 +1395,17 @@ export const coordinatorStatusContentSchema = z.object({
 });
 export type CoordinatorStatusContent = z.infer<typeof coordinatorStatusContentSchema>;
 
+/**
+ * A 21606 advisory, not a failure (audit DS41-041): the event's title, summary or
+ * topics changed after matches were scored, and every pair score still reflects
+ * the old framing. Sent with `stage: EVENT_CONTEXT_STAGE`, `error_category:
+ * RECOMPUTE_SUGGESTED` and NO `state`, so a client that only renders
+ * `state: "poison"` ignores it. The organizer decides whether the paid recompute
+ * is worth it; nothing re-scores on its own.
+ */
+export const EVENT_CONTEXT_STAGE = "event_context";
+export const RECOMPUTE_SUGGESTED = "recompute_suggested";
+
 // ── 31611 Coordinator Announcement (discovery) ───────────────────────────────
 export const coordinatorPricingSchema = z.object({
   // How billing works — NOT necessarily the amount (may be negotiated off-band).
@@ -1324,7 +1435,14 @@ export const coordinatorAnnounceSchema = z.object({
     })
     .default({}),
   // Per-role privacy disclosure (role → tier string, e.g. "private"/"non-private").
-  privacy: z.record(z.string(), z.string()).optional(),
+  // Bounded (audit SB-12): the one record in a public kind, read before its author is
+  // trusted. A real coordinator lists a handful of model roles with one-word tiers.
+  privacy: z
+    .record(z.string().max(MAX_PRIVACY_ROLE), z.string().max(MAX_PRIVACY_TIER))
+    .refine((r) => Object.keys(r).length <= MAX_PRIVACY_ROLES, {
+      message: `too many privacy roles (max ${MAX_PRIVACY_ROLES})`,
+    })
+    .optional(),
   terms_url: httpsUrl(2048).optional(),
   pricing: coordinatorPricingSchema.optional(),
 });

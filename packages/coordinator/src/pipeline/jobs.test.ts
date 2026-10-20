@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/db.js";
-import { JobRunner } from "./jobs.js";
+import { JobRunner, MAX_LEASE_RECLAIMS } from "./jobs.js";
 
 function fixedClock(start = 1000) {
   let t = start;
@@ -142,20 +142,30 @@ describe("JobRunner (spec §9.2)", () => {
       const order: string[] = [];
       let release!: () => void;
       const held = new Promise<void>((r) => (release = r));
+      // Sequenced on the handlers themselves, not on wall-clock sleeps (audit
+      // SB-61): a 60 ms budget for the score job to be claimed was a flake on a
+      // loaded runner. If the regression returns, the score job never runs while
+      // the serial job is held, `scored` never resolves, and the test times out.
+      let serialStarted!: () => void;
+      const started = new Promise<void>((r) => (serialStarted = r));
+      let scored!: () => void;
+      const scoreRan = new Promise<void>((r) => (scored = r));
       runner.register("process_attendee", async () => {
         order.push("serial-start");
+        serialStarted();
         await held;
         order.push("serial-end");
       });
       runner.register("score_batch", async () => {
         order.push("score");
+        scored();
       });
       runner.enqueue("process_attendee", "p", {});
       const drain = runner.drain();
-      await new Promise((r) => setTimeout(r, 5));
+      await started;
       // Queued only AFTER the drain started and the serial lane was already held.
       runner.enqueue("score_batch", "s", {});
-      await new Promise((r) => setTimeout(r, 60));
+      await scoreRan;
       release();
       await drain;
       // The score job ran while the serial job was still blocked.
@@ -479,27 +489,40 @@ describe("job leases and crash recovery (audit H1)", () => {
   });
 
   it("heartbeats a long-running job so a second worker can't reclaim its lease (P0-6)", async () => {
-    const store = new Store();
-    // Real wall-clock `now` (default) so the heartbeat timer and the lease math
-    // agree. Short lease so the test is fast; the handler runs well past it.
-    const runner = new JobRunner(store, { leaseMs: 90, maxAttempts: 1 });
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    runner.register("slow", async () => {
-      await gate;
-    });
-    store.enqueueJob("slow", "k", {});
-    const running = runner.runOne(); // claims the job and parks on the gate
+    // Fake interval timer + an injected clock, advanced together (audit SB-61).
+    // This used real wall-clock time with a 90 ms lease, so one event-loop stall
+    // of a lease length (GC, a loaded CI runner) let the lease lapse and failed
+    // the only test of the heartbeat. Now the heartbeat timer and the lease math
+    // see the same, deterministic time.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      let t = 1_000_000;
+      const store = new Store();
+      const runner = new JobRunner(store, { leaseMs: 90, maxAttempts: 1, now: () => t });
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      runner.register("slow", async () => {
+        await gate;
+      });
+      store.enqueueJob("slow", "k", {});
+      const running = runner.runOne(); // claims the job and parks on the gate
+      await Promise.resolve();
 
-    // Park well past 2× the lease. With the heartbeat the lease is continuously
-    // extended; pre-fix (no heartbeat) it would have lapsed at ~90ms.
-    await new Promise((r) => setTimeout(r, 250));
-    const stolen = store.claimNextJob(Date.now(), "worker-2", 90);
-    expect(stolen).toBeUndefined(); // still owned by the original worker
+      // Park well past 2× the lease, one heartbeat interval (90/3) at a time.
+      // With the heartbeat the lease keeps moving; without it, it lapses at 90.
+      for (let i = 0; i < 9; i++) {
+        t += 30;
+        await vi.advanceTimersByTimeAsync(30);
+      }
+      const stolen = store.claimNextJob(t, "worker-2", 90);
+      expect(stolen).toBeUndefined(); // still owned by the original worker
 
-    release();
-    await running;
-    expect(store.pendingJobCount()).toBe(0); // completed by the original owner
+      release();
+      await running;
+      expect(store.pendingJobCount()).toBe(0); // completed by the original owner
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -762,5 +785,88 @@ describe("JobRunner — a deterministic failure must not buy the full paid tail"
       clock.advance(60_000);
     }
     expect(calls).toBe(2);
+  });
+});
+
+/**
+ * Audit SB-13. A throw inside a setInterval callback is an uncaughtException, and
+ * lifecycle.ts turns that into exit(1). The lease heartbeat and the queue reporter
+ * both write/read the store from a timer, so one SQLITE_BUSY killed the daemon.
+ */
+describe("JobRunner timers never throw out of a store error", () => {
+  it("a failing heartbeat and a failing queue report are logged, and the job still completes", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store, { leaseMs: 30 });
+    (store as any).heartbeatJob = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+    (store as any).jobStateCounts = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+    const warned: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((m: unknown) => void warned.push(String(m)));
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => void uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    const stopReporter = runner.startQueueReporter(5);
+    try {
+      runner.register("slow", () => new Promise((r) => setTimeout(r, 60)));
+      runner.enqueue("slow", "k", {});
+      await runner.drain();
+    } finally {
+      stopReporter();
+      process.off("uncaughtException", onUncaught);
+      warn.mockRestore();
+    }
+    expect(uncaught).toEqual([]);
+    expect(store.pendingJobCount()).toBe(0);
+    expect(warned.join("\n")).toMatch(/lease heartbeat failed/);
+    expect(warned.join("\n")).toMatch(/queue report failed/);
+  });
+});
+
+/**
+ * Audit DS41-032. Only a caught handler failure advanced `attempts`, so a job that
+ * kills the process (a native crash, an OOM on a pathological file) was reclaimed
+ * after every restart with its counter unchanged, forever.
+ */
+describe("a job that keeps killing its worker is poisoned", () => {
+  it("poisons after MAX_LEASE_RECLAIMS lease expiries, both recovery paths counted", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const poisoned: string[] = [];
+    const runner = new JobRunner(store, { now: clock.now, leaseMs: 1000, onPoison: (p) => void poisoned.push(p.error) });
+    let runs = 0;
+    runner.register("crashy", async () => {
+      runs++;
+    });
+    runner.enqueue("crashy", "k", {});
+    // Three "crashes": the job is claimed and its worker dies holding the lease.
+    for (let i = 0; i < MAX_LEASE_RECLAIMS; i++) {
+      expect(store.claimNextJob(clock.now(), `dead-${i}`, 1000)).toBeDefined();
+      clock.advance(2000);
+      if (i % 2 === 0) runner.recoverStrandedJobs(); // boot recovery; the claim arm covers the rest
+    }
+    await runner.drain();
+    expect(runs).toBe(0);
+    expect(store.poisonJobs()).toHaveLength(1);
+    expect(poisoned[0]).toMatch(/worker died/);
+  });
+
+  it("a graceful release does not count", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, { now: clock.now, leaseMs: 1000 });
+    let runs = 0;
+    runner.register("ok", async () => {
+      runs++;
+    });
+    runner.enqueue("ok", "k", {});
+    for (let i = 0; i < MAX_LEASE_RECLAIMS + 2; i++) {
+      const job = store.claimNextJob(clock.now(), `t-${i}`, 1000)!;
+      store.releaseJob(job.id, `t-${i}`);
+    }
+    await runner.drain();
+    expect(runs).toBe(1);
   });
 });

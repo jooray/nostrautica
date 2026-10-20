@@ -78,6 +78,8 @@ export class MarmotChat {
   private onInviteDecrypted?: () => void;
   /** Serializes the startup join and every welcome-driven join so two runs don't race the same welcome. */
   private joining?: Promise<number>;
+  /** Welcomes joined into THIS event's verified group (see {@link rejoin}). */
+  private joinedForThisEvent = 0;
   private readonly boundGroups = new Set<string>();
   /** Event-coordinate → nostr_group_id bindings (APPK-3), per chat identity. */
   private readonly eventGroups: ReturnType<typeof makeMarmotStores>["eventGroupStore"];
@@ -562,9 +564,12 @@ export class MarmotChat {
             console.warn(
               "marmot: joined another group — keeping this event's existing verified binding",
             );
+          } else {
+            this.joinedForThisEvent++;
           }
         } else if (advertised && joinedId === advertised) {
           await this.eventGroups.setItem(this.ctx.coordinate, joinedId).catch(() => {});
+          this.joinedForThisEvent++;
         } else {
           console.warn(
             "marmot: joined group left as an unbound candidate (no verified roster id match yet)",
@@ -980,7 +985,15 @@ export class MarmotChat {
     // its Welcome reached us before our own removal did and was left unread.
     // Join that instead of revoking: revoking would remove the very leaf the
     // Welcome is for and start the race again.
-    if ((await this.joinPendingAndBind().catch(() => 0)) > 0) return;
+    //
+    // Only a welcome for THIS event's group counts (audit DS41-050). The invite
+    // store is per chat identity, not per event, so the count joinPending returns
+    // includes another event's welcome on the same coordinator — and a user with
+    // one pending there pressed Rejoin here, saw "Rejoin requested", and nothing
+    // was sent for this event.
+    const joinedHereBefore = this.joinedForThisEvent;
+    await this.joinPendingAndBind().catch(() => 0);
+    if (this.joinedForThisEvent > joinedHereBefore) return;
     // A previous fail-closed refusal may have memoized "the roster advertises no
     // group id" for the life of this client (see currentEventGroups). Drop it, or
     // the rejoin below succeeds and routing still refuses afterwards.
@@ -991,6 +1004,11 @@ export class MarmotChat {
       op: "revoke",
       chatPubkey: this.identity.pubkey,
     });
+    // The coordinator orders a device's add/revoke by created_at and lets a tie
+    // through (DS41-049), because whole seconds are all a rumor carries. Make sure
+    // the add below is STRICTLY newer than this revoke, so it wins even when a relay
+    // (or the coordinator's boot replay) hands them over add-first.
+    await waitForNextSecond(Math.floor(Date.now() / 1000));
     // 2. Rotate the key package (same `d` slot, so the relay replaces in place —
     //    new event id, new init key, nothing the coordinator has consumed) and
     //    re-attest: `ensurePublished` re-sends op:"add" with a fresh proof of
@@ -1113,5 +1131,12 @@ function groupHasMember(group: MarmotGroupLike, pubkey: string): boolean {
     return getPubkeyLeafNodes(group.state, pubkey).length > 0;
   } catch {
     return false;
+  }
+}
+
+/** Resolve once the wall clock's whole second is past `sec` (at most ~1 s). */
+async function waitForNextSecond(sec: number): Promise<void> {
+  while (Math.floor(Date.now() / 1000) <= sec) {
+    await new Promise((r) => setTimeout(r, 1000 - (Date.now() % 1000) + 5));
   }
 }

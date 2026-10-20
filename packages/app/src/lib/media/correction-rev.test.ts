@@ -21,6 +21,7 @@ import {
   __setPersistBackend,
   __resetPersistForTests,
   setActiveCacheOwner,
+  cacheGet,
   type CacheEntry,
   type PersistBackend,
 } from "$lib/cache/persist.js";
@@ -130,6 +131,32 @@ describe("claimCorrectionRev (audit A-5)", () => {
     fetchEventsRelayOnly.mockRejectedValue(new Error("relay unreachable"));
     expect((await claimCorrectionRev(signer, ctx, BLINDING_KEY)).rev).toBe(2);
     expect(cachedCorrectionRev(COORDINATE)).toBe(2);
+  });
+
+  it("does not republish a blank self-copy when it could not read the real one", async () => {
+    // Audit DS41-005: a fresh device whose relay read fails has no self-copy at
+    // all. Recording the rev used to publish { media: [], correction_rev } over
+    // the attendee's real profile, media and intro.
+    fetchEventsRelayOnly.mockRejectedValue(new Error("relay unreachable"));
+    const { rev, record } = await claimCorrectionRev(signer, ctx, BLINDING_KEY);
+    await record();
+    expect(publishSigned).not.toHaveBeenCalled();
+    expect(cachedCorrectionRev(COORDINATE)).toBe(rev); // the local floor still holds
+  });
+
+  it("keeps the correction floor under the identity that claimed it (DS41-003 pattern)", async () => {
+    const other = "f".repeat(64);
+    fetchEventsRelayOnly.mockImplementation(async () => {
+      setActiveCacheOwner(other); // account switch while the self-copy read is out
+      return [await selfCopyEvent({ v: 2, a: COORDINATE, media: [], correction_rev: 3 })];
+    });
+    const { rev } = await claimCorrectionRev(signer, ctx, BLINDING_KEY);
+    expect(rev).toBe(4);
+    expect(cacheGet(`corrrev:${COORDINATE}`, other)).toBeUndefined();
+    expect(cacheGet(`selfcopy:${COORDINATE}`, other)).toBeUndefined();
+    // The switch bumped the cache generation (DS41-003), so the late write is
+    // dropped rather than filed anywhere; the published self-copy carries rev 4.
+    expect(cacheGet(`corrrev:${COORDINATE}`, pubkey)).toBeUndefined();
   });
 
   it("starts at 0 for an event that has never been corrected", async () => {

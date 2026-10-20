@@ -64,8 +64,13 @@ Zvoľte **Vytvoriť podujatie** a vyplňte formulár:
 - **Názov, zhrnutie, začiatok/koniec, miesto**: verejne viditeľné pre kohokoľvek
   s odkazom.
 - **Schvaľovanie** určuje, ako sa ľudia dostanú dnu:
-  - *Manuálne posúdenie*: každá žiadosť čaká na vaše schválenie.
+  - *Manuálne posúdenie*: každá žiadosť čaká na vaše schválenie, aj keď človek
+    prišiel cez pozývací odkaz. Výnimkou je len vaša vlastná registrácia ako
+    účastníka, tá prejde automaticky.
   - *Iba pozývacie kódy*: dnu sa dostanete len cez pozývací odkaz, inak nijako.
+    Keď je pripojený koordinátor, žiadosti bez platného kódu odmietne a do
+    frontu ich nezaradí. V Admin zozname ich však stále uvidíte, takže niekoho
+    môžete schváliť aj ručne.
   - *Pozývacie kódy + manuálne*: pozývacie odkazy schvaľujú automaticky (keď je
     pripojený koordinátor); ostatní čakajú na vás. **Odporúčané pre väčšinu
     podujatí.**

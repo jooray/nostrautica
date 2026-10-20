@@ -1,11 +1,12 @@
 <script lang="ts">
   import { eventShell } from "$lib/stores/event-shell.svelte.js";
-  import { onMount, onDestroy } from "svelte";
+  import { onMount, onDestroy, untrack } from "svelte";
+  import { reseed } from "$lib/util/form-seed.js";
   import Icon from "$lib/components/icons/Icon.svelte";
   import FileButton from "$lib/components/FileButton.svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { connectNdk, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
-  import { unionRelays, chatInteropRelays, chatRelaysOf } from "$lib/nostr/relays.js";
+  import { unionRelays, chatRelaysOf } from "$lib/nostr/relays.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
   import { receiveGrants } from "$lib/events/attendee.js";
@@ -19,7 +20,7 @@
     pollForOrganizerGrant,
   } from "$lib/events/organizer.js";
   import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
-  import { updateEventMetadata } from "$lib/events/event-metadata.js";
+  import { updateEventMetadata, type EventMetadataInput } from "$lib/events/event-metadata.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import {
@@ -58,12 +59,13 @@
   import ImageCropper from "$lib/components/ImageCropper.svelte";
   import { defaultEventBanner, defaultEventIcon, uploadPublicImage } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -115,16 +117,39 @@
     return local.toISOString().slice(0, 16);
   }
 
+  // What the form was seeded with, in the shape `updateEventMetadata` takes. The
+  // save sends it as the base so only the fields edited HERE override the newest
+  // relay copy; a stale page no longer reverts another device's edits (BUG-2).
+  let metadataBase: EventMetadataInput | undefined;
+
+  function metadataFormInput(): EventMetadataInput {
+    return {
+      title: metadataTitle.trim(),
+      summary: metadataSummary.trim(),
+      start: Math.floor(new Date(metadataStart).getTime() / 1000),
+      end: metadataEnd ? Math.floor(new Date(metadataEnd).getTime() / 1000) : undefined,
+      location: metadataLocation.trim() || undefined,
+      icon: metadataIcon.trim() || undefined,
+      banner: metadataBanner.trim() || undefined,
+    };
+  }
+
+  function seedMetadata(from: EventContext) {
+    metadataTitle = from.title;
+    metadataSummary = from.summary;
+    metadataStart = localDateTime(from.start);
+    metadataEnd = localDateTime(from.end);
+    metadataLocation = from.location ?? "";
+    metadataIcon = from.icon ?? "";
+    metadataBanner = from.banner ?? "";
+    metadataBase = metadataFormInput();
+    metadataSeededFor = from.coordinate;
+  }
+
   $effect(() => {
     if (!ctx || metadataSeededFor === ctx.coordinate) return;
-    metadataTitle = ctx.title;
-    metadataSummary = ctx.summary;
-    metadataStart = localDateTime(ctx.start);
-    metadataEnd = localDateTime(ctx.end);
-    metadataLocation = ctx.location ?? "";
-    metadataIcon = ctx.icon ?? "";
-    metadataBanner = ctx.banner ?? "";
-    metadataSeededFor = ctx.coordinate;
+    const from = ctx;
+    untrack(() => seedMetadata(from));
   });
 
   function pickMetadataImage(e: Event, which: "icon" | "banner") {
@@ -165,16 +190,15 @@
     metadataSaved = false;
     error = null;
     try {
-      const { ctx: updated, outcome } = await updateEventMetadata(ctx, {
-        title: metadataTitle.trim(),
-        summary: metadataSummary.trim(),
-        start: Math.floor(new Date(metadataStart).getTime() / 1000),
-        end: metadataEnd ? Math.floor(new Date(metadataEnd).getTime() / 1000) : undefined,
-        location: metadataLocation.trim() || undefined,
-        icon: metadataIcon.trim() || undefined,
-        banner: metadataBanner.trim() || undefined,
-      });
+      const { ctx: updated, outcome } = await updateEventMetadata(
+        ctx,
+        metadataFormInput(),
+        metadataBase,
+      );
       ctx = updated;
+      // Show what was published, other devices' edits included, and make it the
+      // base for the next save.
+      seedMetadata(updated);
       recentEvents.record({
         coordinate: ctx.coordinate,
         naddr: ctx.naddr,
@@ -449,8 +473,16 @@
   let talksMode = $state<"off" | "on" | "prerecord-first">("off");
   let savingTalks = $state(false);
   let talksSaved = $state(false);
+  // Re-seed only while untouched (audit SB-17): every save on this page replaces
+  // `ctx`, and re-assigning unconditionally reset unsaved edits in other cards.
+  // The seeds are plain (non-reactive) lets and the current value is read
+  // untracked, so a keystroke does not re-run these effects.
+  let talksSeed: typeof talksMode | undefined;
   $effect(() => {
-    if (ctx) talksMode = ctx.config.talks;
+    if (!ctx) return;
+    const next = ctx.config.talks;
+    talksMode = reseed(untrack(() => talksMode), talksSeed, next);
+    talksSeed = next;
   });
   async function saveTalks() {
     if (!ctx) return;
@@ -458,8 +490,9 @@
     talksSaved = false;
     error = null;
     try {
-      await updateEventConfig(ctx, { talks: talksMode });
-      ctx = { ...ctx, config: { ...ctx.config, talks: talksMode } };
+      // Adopt the config as published: it was built on the newest 31600, so it
+      // also carries whatever another device changed since this page loaded.
+      ctx = { ...ctx, config: await updateEventConfig(ctx, { talks: talksMode }) };
       talksSaved = true;
       setTimeout(() => (talksSaved = false), 1500);
     } catch (e) {
@@ -474,8 +507,12 @@
   let chatEnabled = $state(false);
   let savingChat = $state(false);
   let chatSaved = $state(false);
+  let chatSeed: boolean | undefined; // see talksSeed (SB-17)
   $effect(() => {
-    if (ctx) chatEnabled = ctx.config.chat.includes("marmot");
+    if (!ctx) return;
+    const next = ctx.config.chat.includes("marmot");
+    chatEnabled = reseed(untrack(() => chatEnabled), chatSeed, next);
+    chatSeed = next;
   });
   async function saveChat() {
     if (!ctx) return;
@@ -484,8 +521,7 @@
     error = null;
     try {
       const chat: ("marmot")[] = chatEnabled ? ["marmot"] : [];
-      await updateEventConfig(ctx, { chat });
-      ctx = { ...ctx, config: { ...ctx.config, chat } };
+      ctx = { ...ctx, config: await updateEventConfig(ctx, { chat }) };
       chatSaved = true;
       setTimeout(() => (chatSaved = false), 1500);
     } catch (e) {
@@ -504,8 +540,12 @@
   let retentionInput = $state<number | null>(null);
   let savingRetention = $state(false);
   let retentionSaved = $state(false);
+  let retentionSeed: number | null | undefined; // see talksSeed (SB-17)
   $effect(() => {
-    if (ctx) retentionInput = ctx.config.retentionDays ?? null;
+    if (!ctx) return;
+    const next = ctx.config.retentionDays ?? null;
+    retentionInput = reseed(untrack(() => retentionInput), retentionSeed, next);
+    retentionSeed = next;
   });
   const retentionDirty = $derived(!!ctx && (retentionInput ?? undefined) !== ctx.config.retentionDays);
   async function saveRetention() {
@@ -523,8 +563,7 @@
     retentionSaved = false;
     error = null;
     try {
-      await updateEventConfig(ctx, { retentionDays });
-      ctx = { ...ctx, config: { ...ctx.config, retentionDays } };
+      ctx = { ...ctx, config: await updateEventConfig(ctx, { retentionDays }) };
       retentionSaved = true;
       setTimeout(() => (retentionSaved = false), 1500);
     } catch (e) {
@@ -541,8 +580,12 @@
   let relaysInput = $state("");
   let savingRelays = $state(false);
   let relaysSaved = $state(false);
+  let relaysSeed: string | undefined; // see talksSeed (SB-17)
   $effect(() => {
-    if (ctx) relaysInput = ctx.config.relays.join("\n");
+    if (!ctx) return;
+    const next = ctx.config.relays.join("\n");
+    relaysInput = reseed(untrack(() => relaysInput), relaysSeed, next);
+    relaysSeed = next;
   });
   function parseRelaysInput(): string[] {
     return unionRelays(
@@ -571,22 +614,13 @@
     relaysSaved = false;
     error = null;
     try {
-      await updateEventConfig(ctx, { relays });
       // The saved set is exactly what was typed. Chat-enabled events also carry a
       // separate `chat_relay` set (updateEventConfig keeps the Marmot interop pair
       // in it), which is deliberately NOT mixed back into this box: those relays
       // accept only chat kinds, and showing them here invited an organizer to
       // treat them as event relays — which is how they ended up rejecting every
       // config/roster/deletion publish in the first place.
-      const chatRelays = unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays));
-      ctx = {
-        ...ctx,
-        config: {
-          ...ctx.config,
-          relays,
-          chatRelays: ctx.config.chat.length > 0 ? chatRelays : chatRelaysOf(ctx.config),
-        },
-      };
+      ctx = { ...ctx, config: await updateEventConfig(ctx, { relays }) };
       relaysInput = relays.join("\n");
       relaysSaved = true;
       setTimeout(() => (relaysSaved = false), 1500);
@@ -772,7 +806,7 @@
     if (f.since !== undefined) {
       parts.push(
         t("admin.page.feeds.sinceLabel", {
-          date: new Date(f.since * 1000).toLocaleDateString(),
+          date: new Date(f.since * 1000).toLocaleDateString(i18n.locale),
         }),
       );
     }
@@ -989,7 +1023,7 @@
       {/if}
       {#if grantCheckedAt !== undefined}
         {t("admin.grant.lastChecked", {
-          time: new Date(grantCheckedAt).toLocaleTimeString(),
+          time: new Date(grantCheckedAt).toLocaleTimeString(i18n.locale),
         })}
       {/if}
     </p>
@@ -1145,9 +1179,10 @@
         {/each}
       </div>
     {/if}
-    <input placeholder={t("admin.page.labelPlaceholder")} bind:value={menuLabel} />
+    <input placeholder={t("admin.page.labelPlaceholder")} aria-label={t("admin.page.labelPlaceholder")} bind:value={menuLabel} />
     <input
       placeholder={t("admin.page.targetPlaceholder")}
+      aria-label={t("admin.page.targetPlaceholder")}
       bind:value={menuTarget}
       style="margin-top:0.5rem"
     />
@@ -1381,6 +1416,7 @@
       rows="8"
       class="mono"
       placeholder={t("admin.theme.placeholder")}
+      aria-label={t("admin.theme.title")}
       bind:value={themeCss}
     ></textarea>
     <p class="muted" style="margin:0.25rem 0" class:danger-text={themeOver}>
@@ -1412,8 +1448,8 @@
           {#each coordinators.filter((c) => c.pubkey !== ctx?.config.coordinator) as c (c.pubkey)}
             <div class="card coord-card">
               <div class="row" style="gap:0.6rem;align-items:flex-start">
-                {#if c.announce.picture}
-                  <img src={c.announce.picture} alt="" class="coord-logo" />
+                {#if safeImageSrc(c.announce.picture)}
+                  <img src={safeImageSrc(c.announce.picture)} alt="" class="coord-logo" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />
                 {/if}
                 <div style="flex:1;min-width:0">
                   <strong>{c.announce.name}</strong>
@@ -1453,7 +1489,7 @@
       <!-- Advanced / fallback: paste an npub directly. -->
       <details style="margin-top:0.5rem">
         <summary class="muted" style="cursor:pointer">{t("admin.coordinator.paste")}</summary>
-        <input style="margin-top:0.5rem" placeholder={t("admin.coordinator.placeholder")} bind:value={coordinatorInput} />
+        <input style="margin-top:0.5rem" placeholder={t("admin.coordinator.placeholder")} aria-label={t("admin.coordinator.paste")} bind:value={coordinatorInput} />
         <button class="btn" style="margin-top:0.5rem" onclick={attach} disabled={attaching}>
           {attaching ? t("admin.coordinator.attaching") : replace ? t("admin.coordinator.replace") : t("admin.coordinator.attach")}
         </button>
@@ -1467,7 +1503,7 @@
         <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
       {#if coordAnnounce}
         <div class="row" style="gap:0.6rem;align-items:center;margin:0.35rem 0">
-          {#if coordAnnounce.announce.picture}<img src={coordAnnounce.announce.picture} alt="" class="coord-logo" />{/if}
+          {#if safeImageSrc(coordAnnounce.announce.picture)}<img src={safeImageSrc(coordAnnounce.announce.picture)} alt="" class="coord-logo" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />{/if}
           <div>
             <strong>{coordAnnounce.announce.name}</strong>
             <span class="badge">{pricingLabel(coordAnnounce.announce)}</span>
@@ -1538,7 +1574,7 @@
   <div class="card">
     <div class="field-label">{t("admin.talks.title")}</div>
     <p class="muted">{t("admin.talks.body")}</p>
-    <select bind:value={talksMode}>
+    <select bind:value={talksMode} aria-label={t("admin.talks.title")}>
       <option value="off">{t("create.talks.off")}</option>
       <option value="on">{t("create.talks.on")}</option>
       <!-- Prerecord-first is defined by an event's timeline: "watch ahead, meet
@@ -1645,7 +1681,7 @@
     <p class="muted">
       {t("admin.coorg.body")}
     </p>
-    <input placeholder={t("admin.coorg.placeholder")} bind:value={coOrgInput} />
+    <input placeholder={t("admin.coorg.placeholder")} aria-label={t("admin.coorg.title")} bind:value={coOrgInput} />
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={addCoOrg} disabled={addingCoOrg || !coOrgInput.trim()}>
         {addingCoOrg ? t("admin.coorg.adding") : t("admin.coorg.add")}

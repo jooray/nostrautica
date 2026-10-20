@@ -61,12 +61,12 @@
 #     Restart=always (below) covers a first start that fails on DNS/relays.
 #
 # NOTE ON THE DEPLOY PATH: `restart-coordinator.sh` (invoked by the post-receive
-# hook) currently stops/starts the daemon itself with pgrep + setsid. Once this unit
-# owns the lifecycle, that script must drive `systemctl --user restart` instead —
-# otherwise the two fight and a manually started daemon holds the single-daemon
-# SQLite lock the unit's copy then fails to acquire. That migration is tracked
-# separately; do not enable this unit expecting the current deploy script to
-# cooperate with it.
+# hook) detects this unit (`systemctl --user cat nostrautica-coordinator`) and,
+# when it is installed, only runs `systemctl --user restart` and waits for the
+# daemon's readiness line; it starts nothing itself. Its pgrep + setsid path is a
+# fallback for hosts WITHOUT the unit. Keep it that way: if the script ever
+# started a daemon while this unit is installed, the two would fight over the
+# single-daemon SQLite lock and the loser would exit immediately.
 
 [Unit]
 Description=Nostrautica coordinator (user-scoped, /home/nostrautica deployment)

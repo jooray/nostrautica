@@ -34,14 +34,19 @@ const loadSelfCopy = vi.fn(async () => undefined as { rev?: number } | undefined
 // The join seeds the local self-copy so the intro flow that follows has
 // something to fall back on when its own relay read comes back empty.
 const cacheSelfCopy = vi.fn();
-vi.mock("$lib/media/submit.js", () => ({
+// claimSubmissionRev is the REAL one: its persisted high-water mark is what the
+// DS41-008 case below is about.
+vi.mock("$lib/media/submit.js", async (importOriginal) => ({
+  claimSubmissionRev: (await importOriginal<typeof import("$lib/media/submit.js")>()).claimSubmissionRev,
+  captureSelfCopyScope: (await importOriginal<typeof import("$lib/media/submit.js")>()).captureSelfCopyScope,
   loadSelfCopy: (...args: unknown[]) => loadSelfCopy(...(args as [])),
   cacheSelfCopy: (...args: unknown[]) => cacheSelfCopy(...(args as [])),
 }));
 
-import { sendJoinRequest, joinPollGapMs, joinLanding, POLL_RELAX_AFTER_MS } from "./join.js";
+import { sendJoinRequest, joinPollGapMs, joinLanding, joinNeedsInvite, POLL_RELAX_AFTER_MS } from "./join.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
+import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
 
 const fakeSigner = {
   getPublicKey: async () => "a".repeat(64),
@@ -69,6 +74,8 @@ function submissionContent(): unknown | undefined {
 describe("sendJoinRequest — 21601 profile submission carries a valid rev", () => {
   beforeEach(() => {
     wrapCalls.length = 0;
+    __resetPersistForTests();
+    setActiveCacheOwner("a".repeat(64));
     loadSelfCopy.mockReset();
     loadSelfCopy.mockResolvedValue(undefined);
     cacheSelfCopy.mockClear();
@@ -95,6 +102,18 @@ describe("sendJoinRequest — 21601 profile submission carries a valid rev", () 
     await sendJoinRequest(fakeSigner, ctx, { name: "Ada", profile }, blindingKey);
     const parsed = profileSubmissionContentSchema.parse(submissionContent());
     expect(parsed.rev).toBe(0);
+  });
+
+  it("never re-sends a rev this device already sent when the read comes back empty", async () => {
+    // Audit DS41-008: the coordinator already holds rev 3 from this device; then
+    // the relay read fails and there is no local self-copy. `(undefined ?? -1) + 1`
+    // re-sent rev 0, which the coordinator drops as stale.
+    loadSelfCopy.mockResolvedValue({ rev: 2 });
+    await sendJoinRequest(fakeSigner, ctx, { name: "Ada", profile }, blindingKey);
+    wrapCalls.length = 0;
+    loadSelfCopy.mockRejectedValue(new Error("relay down"));
+    await sendJoinRequest(fakeSigner, ctx, { name: "Ada", profile }, blindingKey);
+    expect(profileSubmissionContentSchema.parse(submissionContent()).rev).toBe(4);
   });
 
   it("seeds the local self-copy with the fields just typed", async () => {
@@ -153,6 +172,19 @@ describe("joinPollGapMs", () => {
  * Observed in production 2026-09-17: one join, `invite=no → manual queue`, and
  * then nothing, because the second attempt produced no network traffic at all.
  */
+// Manual e2e BUG-3: a code-less join to an `invite` space is rejected by the
+// coordinator (NIP §6.2), so the form must say so instead of sending it and
+// promising a review.
+describe("joinNeedsInvite", () => {
+  it("blocks a code-less join only when the space is invite-only", () => {
+    expect(joinNeedsInvite("invite", false)).toBe(true);
+    expect(joinNeedsInvite("invite", true)).toBe(false);
+    for (const mode of ["manual", "manual+invite", "open", undefined] as const) {
+      expect(joinNeedsInvite(mode, false)).toBe(false);
+    }
+  });
+});
+
 describe("joinLanding", () => {
   it("shows the form to somebody who has done nothing yet", () => {
     expect(joinLanding({ approved: false, joinSent: false, hasInvite: false })).toBe("form");

@@ -88,6 +88,14 @@
     installStaleChunkRecovery();
     // H-5: drop this identity's owner state here if another tab logs it out.
     initSessionBroadcast((owner) => session.applyRemoteLogout(owner));
+    // SB-95: the broadcast misses a tab the browser froze in the background, so
+    // re-check the persisted login whenever this tab comes back to the front.
+    const recheckSession = () => {
+      if (document.visibilityState === "visible") void session.verifyPersistedIdentity();
+    };
+    document.addEventListener("visibilitychange", recheckSession);
+    window.addEventListener("pageshow", recheckSession);
+    window.addEventListener("focus", recheckSession);
     theme.init();
     i18n.init();
     online.init();

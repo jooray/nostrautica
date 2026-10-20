@@ -11,6 +11,11 @@ coverage/
 !.env.example
 *.sqlite
 *.sqlite-*
+# Copies of a coordinator database under a suffixed name: the daemon's own
+# pre-migration backup (`coordinator.sqlite.v5-<stamp>.bak`), a backup's
+# `.meta.json` sidecar, and the rollback recipe's `coordinator.sqlite.failed-<date>`.
+# They hold attendee PII in cleartext, and `*.sqlite-*` matches none of them.
+*.sqlite.*
 coordinator.toml
 !coordinator.example.toml
 *.ncryptsec

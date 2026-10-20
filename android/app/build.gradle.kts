@@ -10,7 +10,7 @@ plugins {
 
 // Optional release signing with the shared publisher key, kept outside the repo
 // (~/.apk-signing-keystore/signing.properties, or APP_SIGNING_PROPERTIES).
-// Without it the release APK is built unsigned.
+// Without it a release build fails (see preReleaseBuild below).
 val signingProperties = Properties().apply {
     val path = System.getenv("APP_SIGNING_PROPERTIES")
         ?: "${System.getProperty("user.home")}/.apk-signing-keystore/signing.properties"
@@ -29,10 +29,11 @@ android {
         applicationId = "today.cypherpunk.nostrautica"
         minSdk = 26
         targetSdk = 37
-        // Bump both on every release (docs/VERSIONING.md). versionName tracks the
-        // root package.json so Settings → About and bug reports line up with the PWA.
-        versionCode = 5
-        versionName = "0.12.0"
+        // Bump both on every release (docs/VERSIONING.md). versionName must equal the
+        // root package.json version: assembleRelease fails otherwise (see below), and
+        // tools/release-check.sh also requires versionCode above the last release's.
+        versionCode = 6
+        versionName = "0.13.0"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Empty in every real build. For testing against the local stack the PWA's
         // e2e uses (docs/E2E-TESTING-GUIDE.md): -PdevRelays=ws://10.0.2.2:7777
@@ -108,6 +109,42 @@ android {
     }
 }
 
+// A release build without the signing properties used to succeed with an UNSIGNED
+// APK, which only fails at install time (or after publishing). Fail the build
+// instead; -PunsignedRelease=true opts in deliberately (e.g. a reproducibility check
+// that signs separately).
+val hasReleaseSigning = signingProperties.getProperty("storeFile") != null
+val allowUnsignedRelease = project.findProperty("unsignedRelease") == "true"
+
+// versionName must equal the root package.json version (audit SB-56), so Settings →
+// About, bug reports and the android-v<version> GitHub release all name the same
+// release. Checked, not derived: deriving it would hand a PWA-only bump (root 0.12.1)
+// to the next Android build under an unchanged versionCode. A mismatch fails the
+// release build and says which file to bump; debug builds are not checked.
+val appVersionName: String = android.defaultConfig.versionName!!
+val rootVersion: String = run {
+    @Suppress("UNCHECKED_CAST")
+    val pkg = groovy.json.JsonSlurper().parse(rootProject.file("../package.json")) as Map<String, Any?>
+    pkg["version"] as String
+}
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    doFirst {
+        if (!hasReleaseSigning && !allowUnsignedRelease) {
+            throw GradleException(
+                "release signing properties not found (~/.apk-signing-keystore/signing.properties or " +
+                    "APP_SIGNING_PROPERTIES); refusing to build an unsigned release. Pass -PunsignedRelease=true to build one anyway.",
+            )
+        }
+        if (appVersionName != rootVersion) {
+            throw GradleException(
+                "versionName \"$appVersionName\" (android/app/build.gradle.kts) differs from the root package.json " +
+                    "version \"$rootVersion\". Bump versionName and versionCode together with the root version " +
+                    "(docs/VERSIONING.md), or bump the root version if this is a release.",
+            )
+        }
+    }
+}
+
 ksp {
     arg("room.schemaLocation", "$projectDir/schemas")
 }
@@ -122,13 +159,10 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.process)
-    implementation(libs.androidx.navigation.compose)
-    implementation(libs.androidx.browser)
     implementation(libs.androidx.exifinterface)
     implementation(libs.androidx.room.runtime)
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
-    implementation(libs.androidx.datastore.preferences)
 
     implementation(platform(libs.compose.bom))
     implementation(libs.compose.ui)

@@ -28,6 +28,7 @@ require_private = true            # default privacy policy: private/TEE-tier mod
 # node_url = "https://api.routstr.com/v1"
 # mint = "https://mint.example"
 # wallet_db = "cashu-wallet.sqlite"
+# amount_sats = 50                 # fixed sats per request; default: 1 sat per 1,000 estimated tokens (prompt + output budget)
 
 [stt]
 provider = "venice-stt"           # only implemented STT provider

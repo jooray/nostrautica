@@ -1,6 +1,8 @@
 package today.cypherpunk.nostrautica.domain
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.MapSerializer
@@ -66,6 +68,7 @@ class Grants(
     data class MemoEntry(val coordinate: String? = null, val versions: List<Int> = emptyList(), val organizer: Boolean = false, val done: Boolean = false)
 
     private val lock = Mutex()
+    private val joinLock = Mutex()
 
     private fun satisfied(e: MemoEntry?, held: List<EventKeys>): Boolean {
         if (e == null) return false
@@ -79,8 +82,16 @@ class Grants(
         return (Relays.DEFAULT + accounts.inboxRelays(pubkey) + hints).map(RelayPool::normalize).distinct()
     }
 
+    /**
+     * [ended]: the answering relays ran out of history (what Home reports as a full
+     * scan). [complete]: that, AND every relay answered, the only evidence strong
+     * enough to latch the weekly backfill (a short page from one relay while
+     * another timed out or sent CLOSED says nothing about the silent one).
+     */
+    private data class WrapRead(val wraps: List<NostrEvent>, val ended: Boolean, val complete: Boolean)
+
     /** Page back through 1059s `#p` = me (newest first). */
-    private suspend fun readWraps(pubkey: String, relays: List<String>, since: Long): Pair<List<NostrEvent>, Boolean> {
+    private suspend fun readWraps(pubkey: String, relays: List<String>, since: Long): WrapRead {
         val seen = LinkedHashMap<String, NostrEvent>()
         var until: Long? = null
         repeat(MAX_PAGES) {
@@ -91,11 +102,11 @@ class Grants(
                 if (seen.put(w.id, w) == null) added++
                 if (oldest == null || w.createdAt < oldest!!) oldest = w.createdAt
             }
-            if (r.events.size < PAGE_SIZE) return seen.values.toList() to (r.answered > 0)
-            if (added == 0 || oldest == null) return seen.values.toList() to false
+            if (r.events.size < PAGE_SIZE) return WrapRead(seen.values.toList(), r.answered > 0, r.complete)
+            if (added == 0 || oldest == null) return WrapRead(seen.values.toList(), false, false)
             until = oldest
         }
-        return seen.values.toList() to false
+        return WrapRead(seen.values.toList(), false, false)
     }
 
     fun authenticateKeyGrant(rumor: Rumor, grant: KeyGrantContent, config: EventConfig?): Boolean {
@@ -118,7 +129,40 @@ class Grants(
      * Returns the coordinates that gained keys. [force] = "Search my whole history".
      * [maxUnwraps] bounds signer round trips (each wrap costs two on a remote signer).
      */
-    suspend fun receive(signer: NostrSigner, force: Boolean = false, maxUnwraps: Int = 60, outcome: ScanOutcome = ScanOutcome(), interactive: Boolean = true): Set<String> = lock.withLock {
+    suspend fun receive(signer: NostrSigner, force: Boolean = false, maxUnwraps: Int = 60, outcome: ScanOutcome = ScanOutcome(), interactive: Boolean = true): Set<String> =
+        // Off the main thread: Home and Join call this from a LaunchedEffect, and the scan does
+        // Keystore, database and network work.
+        withContext(Dispatchers.IO) {
+            val (gained, newProofChildren) = scan(signer, force, maxUnwraps, outcome, interactive)
+            communityJoin(signer, newProofChildren, signer.isLocal || interactive)
+            gained
+        }
+
+    /**
+     * §15.5: join the community of any event the person consented to, from the proofs just
+     * stored AND from earlier ones (a grant is memoized once processed, so a join that failed
+     * then would otherwise never be retried). Fail-soft: it must not be able to fail the scan.
+     *
+     * Outside the scan lock (SB-23): a join does relay round trips and signs, and with a NIP-55
+     * signer that waits on the user in the signer's consent screen; another screen's grant scan
+     * must not queue behind that. Its own lock is only tried, never waited on: a join already
+     * running covers this pass, because every pass re-reads all stored proofs.
+     */
+    private suspend fun communityJoin(signer: NostrSigner, newProofChildren: Set<String>, interactive: Boolean) {
+        val hook = afterScan ?: return
+        if (!joinLock.tryLock()) return
+        try {
+            hook(signer, newProofChildren, interactive)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("Grants", "community auto-join skipped: ${e.javaClass.simpleName}")
+        } finally {
+            joinLock.unlock()
+        }
+    }
+
+    private suspend fun scan(signer: NostrSigner, force: Boolean, maxUnwraps: Int, outcome: ScanOutcome, interactive: Boolean): Pair<Set<String>, Set<String>> = lock.withLock {
         val pubkey = signer.pubkey
         val held = keys.list(pubkey)
         val last = prefs.getLong("grants-backfilled:$pubkey").takeIf { it > 0 }
@@ -126,8 +170,8 @@ class Grants(
         val full = force || backfillExpired || held.isEmpty()
         val relays = scanRelays(pubkey, held)
         val since = if (full) 0 else nowSec() - LOOKBACK_SEC
-        val (wraps, complete) = readWraps(pubkey, relays, since)
-        if (!complete) outcome.truncated = true
+        val (wraps, ended, complete) = readWraps(pubkey, relays, since)
+        if (!ended) outcome.truncated = true
         nostr.store.put(wraps)
 
         val memoSer = MapSerializer(String.serializer(), MemoEntry.serializer())
@@ -142,11 +186,14 @@ class Grants(
         var unwrapped = 0
         var failed = 0
         var budget = maxUnwraps
-        val heldNow = { keys.list(pubkey) }
+        // The held keys, re-read only after this scan changes them: keys.list() Keystore-
+        // decrypts every event's record, and once per wrap that was ~50,000 AES-GCM calls on
+        // a weekly backfill of a mature account, all behind SecureStore's lock (DS41-057).
+        var heldNow = held
 
         for (wrap in wraps.sortedByDescending { it.createdAt }) {
             if (wrap.tags.none { it.size >= 2 && it[0] == "p" && it[1] == pubkey }) continue
-            if (satisfied(memo[wrap.id], heldNow())) continue
+            if (satisfied(memo[wrap.id], heldNow)) continue
             if (!signer.isLocal && budget-- <= 0) { outcome.truncated = true; break }
             outcome.attempted++
             val rumor = try {
@@ -162,6 +209,9 @@ class Grants(
                 // the user is waiting for them come from the Join/Overview screens,
                 // which call receive() interactively; a background scan stops here.
                 outcome.truncated = true; break
+            } catch (e: today.cypherpunk.nostrautica.signer.SignerUnavailable) {
+                // A remote signer that didn't answer this wrap won't answer the next: stop, don't wait again per wrap.
+                failed++; outcome.truncated = true; break
             } catch (e: Exception) {
                 failed++; continue // transient: not memoized, retried next scan
             }
@@ -176,7 +226,8 @@ class Grants(
                             if (!authenticateOrganizerGrant(rumor, g, config)) {
                                 memo[wrap.id] = MemoEntry(done = true); dirty = true
                             } else {
-                                keys.applyOrganizerGrant(pubkey, g.a, g.eck, g.eidNsec, g.einboxNsec)
+                                keys.applyOrganizerGrant(pubkey, g.a, g.eck, g.eidNsec, g.einboxNsec, g.priorEinboxNsecs, g.organizers)
+                                heldNow = keys.list(pubkey)
                                 gained += g.a
                                 memo[wrap.id] = MemoEntry(g.a, g.eck.map { it.id }, organizer = true); dirty = true
                             }
@@ -196,6 +247,7 @@ class Grants(
                                 memo[wrap.id] = MemoEntry(done = true); dirty = true
                             } else {
                                 keys.addEckVersions(pubkey, g.a, g.eck, if (g.role == "organizer") "organizer" else "attendee")
+                                heldNow = keys.list(pubkey)
                                 gained += g.a
                                 // §15.3: kept only when it is for the community the event's newest config
                                 // names and verifies as an authority's signature over THIS attendee.
@@ -221,17 +273,7 @@ class Grants(
             while (memo.size > MAX_MEMO) memo.remove(memo.keys.first())
             cache.put(pubkey, MEMO_KEY, memoSer, memo, nowSec())
         }
-        // §15.5: join the community of any event the person consented to, from the proofs just
-        // stored AND from earlier ones (a grant is memoized once processed, so a join that failed
-        // then would otherwise never be retried). Fail-soft: it must not be able to fail the scan.
-        try {
-            afterScan?.invoke(signer, newProofChildren, signer.isLocal || interactive)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            android.util.Log.w("Grants", "community auto-join skipped: ${e.javaClass.simpleName}")
-        }
-        gained
+        gained to newProofChildren
     }
 
     /** 21606 to this attendee about their own pipeline items (attendee-status.ts), latest per stage. */

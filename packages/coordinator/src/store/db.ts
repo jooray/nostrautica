@@ -232,6 +232,15 @@ function applyBaselineDDL(db: DatabaseSync): void {
       /* column already exists */
     }
   }
+  // Migration (audit SB-07): the last usable end time of the space record, so a
+  // revision without `end`/`start` cannot zero the retention anchor, including
+  // across a restart. Plain defaulted column: an older binary ignores it, and an
+  // upsert of the events row (ON CONFLICT DO UPDATE) leaves it alone.
+  try {
+    db.exec("ALTER TABLE events ADD COLUMN event_end_sec INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
   // Migration (audit C9): the CANDIDATE relay set of an in-progress handover (coord-1).
   try {
     db.exec("ALTER TABLE events ADD COLUMN pending_relays TEXT");
@@ -276,6 +285,39 @@ function applyBaselineDDL(db: DatabaseSync): void {
     /* column already exists */
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim_priority ON jobs (state, next_run_at, priority, id)");
+  // Migration (audit DS41-030): event-wide job_status rows are keyed with pubkey ""
+  // now, not NULL (NULLs never matched the upsert's ON CONFLICT, so each poison
+  // added a row). Collapse the duplicates already written to the newest one and
+  // re-key it. Idempotent: a second run finds no NULL rows. No version bump; an
+  // older binary reads "" as a falsy pubkey, which is how it treated NULL.
+  db.exec(`
+    DELETE FROM job_status WHERE pubkey IS NULL AND EXISTS (
+      SELECT 1 FROM job_status j2
+       WHERE j2.coordinate = job_status.coordinate AND j2.stage = job_status.stage
+         AND (j2.pubkey = '' OR (j2.pubkey IS NULL AND (j2.updated_at > job_status.updated_at
+              OR (j2.updated_at = job_status.updated_at AND j2.rowid > job_status.rowid))))
+    );
+    UPDATE job_status SET pubkey = '' WHERE pubkey IS NULL;
+  `);
+  // Migration (audit DS41-032): how many times a job was picked up again after its
+  // lease ran out, i.e. after the process holding it died. Same reasoning as
+  // `priority`: a plain defaulted column, invisible to an older binary, so no
+  // SCHEMA_VERSION bump.
+  try {
+    db.exec("ALTER TABLE jobs ADD COLUMN reclaims INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (audit DS41-040): how many times STT came back empty for a blob that
+  // plainly held audio. A new table only this binary touches, so no SCHEMA_VERSION
+  // bump: an older binary ignores it, and a rollback only forgets the counts.
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS stt_empty_attempts (
+      blob_sha256 TEXT PRIMARY KEY,
+      attempts INTEGER NOT NULL,
+      last_at INTEGER NOT NULL
+    )`,
+  );
 }
 
 /**
@@ -886,6 +928,8 @@ export interface JobRow {
   worker_token: string | null;
   /** Scheduling class, written from the type at enqueue ({@link jobPriority}). */
   priority: number;
+  /** Times the job was recovered from an expired lease (its worker died; DS41-032). */
+  reclaims: number;
 }
 
 /** A stored attendee row (audit Q11: typed instead of `any` at the pipeline boundary). */
@@ -1571,6 +1615,21 @@ export class Store {
     if (migrated > 0) {
       console.log(`[store] migrated ${migrated} plaintext event-key row(s) to at-rest encryption`);
     }
+    // Command resume progress (audit SB-125): an ECK rotation records the new key
+    // here, written in the clear before this fix. Same idempotent one-way pass.
+    const progressRows = this.db
+      .prepare(
+        "SELECT rowid, progress_json FROM command_watermarks WHERE progress_json IS NOT NULL AND progress_json NOT LIKE ? AND progress_json NOT LIKE ?",
+      )
+      .all(`${ENC_PREFIX}%`, `${ENC_PACKED_PREFIX}%`) as { rowid: number; progress_json: string }[];
+    for (const row of progressRows) {
+      this.db
+        .prepare("UPDATE command_watermarks SET progress_json = ? WHERE rowid = ?")
+        .run(this.protect(row.progress_json), row.rowid);
+    }
+    if (progressRows.length > 0) {
+      console.log(`[store] migrated ${progressRows.length} plaintext command-progress row(s) to at-rest encryption`);
+    }
   }
 
   // ── rumor dedupe ──────────────────────────────────────────────────────────
@@ -1724,6 +1783,17 @@ export class Store {
       return undefined;
     }
   }
+  /** The last usable end time (unix seconds) seen on the space record, or 0
+   *  (audit SB-07: the retention anchor must survive a record without dates). */
+  getRetentionAnchor(coordinate: string): number {
+    const row = this.db.prepare("SELECT event_end_sec FROM events WHERE coordinate = ?").get(coordinate) as
+      | { event_end_sec: number }
+      | undefined;
+    return row?.event_end_sec ?? 0;
+  }
+  setRetentionAnchor(coordinate: string, endSec: number): void {
+    this.db.prepare("UPDATE events SET event_end_sec = ? WHERE coordinate = ?").run(endSec, coordinate);
+  }
   /** Clear a pending handover's candidate set (promoted, or abandoned). */
   clearPendingRelays(coordinate: string): void {
     this.db.prepare("UPDATE events SET pending_relays = NULL WHERE coordinate = ?").run(coordinate);
@@ -1832,18 +1902,32 @@ export class Store {
     const row = this.getCommandWatermark(coordinate, subject);
     if (!row?.progress_json) return {};
     try {
-      const v = JSON.parse(row.progress_json);
+      const v = JSON.parse(this.reveal(row.progress_json));
       return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
     } catch {
       return {};
     }
   }
   /** Persist resume progress for a subject's current operation, only while it is
-   *  still the recorded rumor (audit C1: ECK-rotation state machine). */
+   *  still the recorded rumor (audit C1: ECK-rotation state machine).
+   *
+   *  `protect()`ed like `events.eck_json` (audit SB-125): the revoke's progress is
+   *  the freshly minted ECK itself, and stored in the clear it handed every reader
+   *  of the database file, its WAL or an unencrypted backup the event's CURRENT
+   *  content key. */
   setCommandOpProgress(coordinate: string, subject: string, rumorId: string, progress: Record<string, unknown>): void {
     this.db
       .prepare("UPDATE command_watermarks SET progress_json = ? WHERE coordinate = ? AND subject = ? AND rumor_id = ?")
-      .run(JSON.stringify(progress), coordinate, subject, rumorId);
+      .run(this.protect(JSON.stringify(progress)), coordinate, subject, rumorId);
+  }
+
+  /**
+   * Drop every resume-progress blob for an event (audit SB-125). Detach must delete
+   * the ECK custody (NIP §3.5), and an ECK rotation's progress holds a key. The
+   * watermarks themselves stay: they are the replay bar for old commands.
+   */
+  clearCommandProgressForEvent(coordinate: string): void {
+    this.db.prepare("UPDATE command_watermarks SET progress_json = NULL WHERE coordinate = ?").run(coordinate);
   }
 
   // ── install generation / detach tombstone (NIP §3.5) ──────────────────────
@@ -2073,6 +2157,8 @@ export class Store {
     this.db
       .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at) VALUES (?, ?, ?, ?)")
       .run(blobSha256, text, lang ?? null, now);
+    // A cached answer settles the blob; any empty-STT count before it is history.
+    this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?").run(blobSha256);
     if (owner) {
       this.db
         .prepare(
@@ -2080,6 +2166,40 @@ export class Store {
         )
         .run(blobSha256, owner.coordinate, owner.pubkey, now);
     }
+  }
+
+  /**
+   * Empty-STT attempts for a blob (audit DS41-040): how many times the provider
+   * returned no text for audio long enough to hold speech. Bounded by the caller,
+   * which turns the last one into a media-policy rejection.
+   */
+  emptySttAttempts(blobSha256: string): number {
+    const row = this.db
+      .prepare("SELECT attempts FROM stt_empty_attempts WHERE blob_sha256 = ?")
+      .get(blobSha256) as { attempts: number } | undefined;
+    return row?.attempts ?? 0;
+  }
+  /** Count one more empty STT answer for a blob; returns the new total. */
+  recordEmptyStt(blobSha256: string, now: number): number {
+    this.db
+      .prepare(
+        `INSERT INTO stt_empty_attempts (blob_sha256, attempts, last_at) VALUES (?, 1, ?)
+         ON CONFLICT(blob_sha256) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at`,
+      )
+      .run(blobSha256, now);
+    return this.emptySttAttempts(blobSha256);
+  }
+  /**
+   * Forget the empty-STT counts for every media blob this attendee submitted —
+   * the organizer's `reprocess` is a deliberate request to try their media again,
+   * so a recording given up on during a provider outage gets a fresh budget.
+   * Returns how many counters were cleared.
+   */
+  clearEmptySttForSubject(coordinate: string, pubkey: string): number {
+    let n = 0;
+    const del = this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?");
+    for (const x of this.subjectMediaBlobs(coordinate, pubkey)) n += Number(del.run(x).changes);
+    return n;
   }
 
   /** Record an ownership reference to a content-addressed transcript (audit C5)
@@ -2316,7 +2436,13 @@ export class Store {
   /** Transcript texts of a speaker's talks (spec §9.2): fed into their ai_profile. */
   talkTranscriptsForSpeaker(coordinate: string, pubkey: string): string[] {
     const rows = this.db
-      .prepare("SELECT transcript_json FROM talks WHERE coordinate = ? AND pubkey = ? AND transcript_json IS NOT NULL")
+      // Only talks the speaker still offers for matching and the organizer has not
+      // rejected (audit DS41-039): a rejected talk, or one resubmitted with
+      // process_for_matching off (which keeps the stored transcript when the media
+      // is unchanged), kept feeding the profile and other people's match reasoning.
+      .prepare(
+        "SELECT transcript_json FROM talks WHERE coordinate = ? AND pubkey = ? AND transcript_json IS NOT NULL AND status != 'rejected' AND process_for_matching = 1",
+      )
       .all(coordinate, pubkey) as { transcript_json: string }[];
     const out: string[] = [];
     for (const r of rows) {
@@ -2470,6 +2596,11 @@ export class Store {
     }
   }
   /** Drop all cached pair scores for an event (forces a full re-score). */
+  /** Whether any pair score is stored for this event (DS41-041: is a recompute worth suggesting?). */
+  hasPairs(coordinate: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM pairs WHERE coordinate = ? LIMIT 1").get(coordinate);
+  }
+
   clearPairs(coordinate: string): void {
     this.db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(coordinate);
   }
@@ -2482,22 +2613,11 @@ export class Store {
   }
 
   /**
-   * Full purge of an attendee's stored derived artifacts (NIP §6.3 21610,
-   * `delete_data: true`). Removes the coordinator's private DB copies of everything
-   * derived from the attendee's submission — the attendee row (profile, ai_profile,
-   * transcripts_json, correction), their submissions, their per-account nostr
-   * summary, their talks, and the content-addressed STT transcripts for every media
-   * blob they submitted (intro + talk media). Cached pair scores are already dropped
-   * by `clearPairsInvolving` on the revoke path. Idempotent.
-   *
-   * `delete_data: false` withdrawals do NOT call this — those artifacts are retained
-   * so a later re-approval avoids reprocessing spend (chiefly re-running STT).
+   * Every media ciphertext hash (`x`) a subject submitted: their stored profile
+   * media (`profile_json.__media`), their talk media (`talks.media_json`), and the
+   * transcript ownership refs the pipeline recorded for them.
    */
-  purgeAttendeeArtifacts(coordinate: string, pubkey: string): void {
-    // Collect every media ciphertext hash (`x`) this attendee submitted, so LEGACY
-    // transcript rows (written before ownership refs existed, audit C5) can still be
-    // attributed and dropped. Sources: the attendee's stored profile media
-    // (`profile_json.__media`) and their talk media (`talks.media_json`).
+  private subjectMediaBlobs(coordinate: string, pubkey: string): Set<string> {
     const blobHashes = new Set<string>();
     const att = this.db
       .prepare("SELECT profile_json FROM attendees WHERE coordinate = ? AND pubkey = ?")
@@ -2521,6 +2641,31 @@ export class Store {
         /* ignore */
       }
     }
+    for (const r of this.db
+      .prepare("SELECT blob_sha256 FROM transcript_refs WHERE coordinate = ? AND pubkey = ?")
+      .all(coordinate, pubkey) as { blob_sha256: string }[]) {
+      blobHashes.add(r.blob_sha256);
+    }
+    return blobHashes;
+  }
+
+  /**
+   * Full purge of an attendee's stored derived artifacts (NIP §6.3 21610,
+   * `delete_data: true`). Removes the coordinator's private DB copies of everything
+   * derived from the attendee's submission — the attendee row (profile, ai_profile,
+   * transcripts_json, correction), their submissions, their per-account nostr
+   * summary, their talks, and the content-addressed STT transcripts for every media
+   * blob they submitted (intro + talk media). Cached pair scores are already dropped
+   * by `clearPairsInvolving` on the revoke path. Idempotent.
+   *
+   * `delete_data: false` withdrawals do NOT call this — those artifacts are retained
+   * so a later re-approval avoids reprocessing spend (chiefly re-running STT).
+   */
+  purgeAttendeeArtifacts(coordinate: string, pubkey: string): void {
+    // Collect every media ciphertext hash (`x`) this attendee submitted, so LEGACY
+    // transcript rows (written before ownership refs existed, audit C5) can still be
+    // attributed and dropped.
+    const blobHashes = this.subjectMediaBlobs(coordinate, pubkey);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.purgeSubjectInTxn(coordinate, pubkey, blobHashes);
@@ -2531,6 +2676,11 @@ export class Store {
       // later reapproval (audit R2); the event is still live, so it is security state.
       this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
       this.db.prepare("DELETE FROM marmot_chat_links WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
+      // Their organizer-visible pipeline status (stage + error category) is
+      // attendee-identifying too (audit DS41-036). The `usage` row is deliberately
+      // KEPT: per-event spend is the SUM of those rows, so deleting it would refund
+      // the event's budget and reset this person's per-attendee cap on a rejoin.
+      this.db.prepare("DELETE FROM job_status WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
       this.db.exec("COMMIT");
     } catch (e) {
       // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
@@ -2692,8 +2842,12 @@ export class Store {
       "SELECT COUNT(*) AS n FROM transcript_refs WHERE blob_sha256 = ?",
     );
     const delTranscript = this.db.prepare("DELETE FROM transcripts WHERE blob_sha256 = ?");
+    const delEmptyStt = this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?");
     for (const x of ownedBlobs) {
-      if ((transcriptRefCount.get(x) as { n: number }).n === 0) delTranscript.run(x);
+      if ((transcriptRefCount.get(x) as { n: number }).n === 0) {
+        delTranscript.run(x);
+        delEmptyStt.run(x);
+      }
     }
     // ── pipeline artifacts ──
     const ownedArtifacts = this.db
@@ -2998,13 +3152,17 @@ export class Store {
         this.db.exec("COMMIT");
         return undefined;
       }
+      // Taking a `running` row is taking it from a worker whose lease ran out: a
+      // crash, a SIGKILL, an OOM. Counted, so a job that kills the process every
+      // time it runs is eventually poisoned instead of reclaimed forever (DS41-032).
+      const reclaims = (row.reclaims ?? 0) + (row.state === "running" ? 1 : 0);
       this.db
         .prepare(
-          "UPDATE jobs SET state = 'running', claimed_at = ?, lease_until = ?, worker_token = ? WHERE id = ?",
+          "UPDATE jobs SET state = 'running', claimed_at = ?, lease_until = ?, worker_token = ?, reclaims = ? WHERE id = ?",
         )
-        .run(now, now + leaseMs, workerToken, row.id);
+        .run(now, now + leaseMs, workerToken, reclaims, row.id);
       this.db.exec("COMMIT");
-      return { ...row, state: "running", claimed_at: now, lease_until: now + leaseMs, worker_token: workerToken };
+      return { ...row, state: "running", claimed_at: now, lease_until: now + leaseMs, worker_token: workerToken, reclaims };
     } catch (e) {
       try {
         this.db.exec("ROLLBACK");
@@ -3079,7 +3237,7 @@ export class Store {
   reclaimExpiredLeases(now: number): number {
     const info = this.db
       .prepare(
-        "UPDATE jobs SET state = 'pending', worker_token = NULL, lease_until = NULL WHERE state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?",
+        "UPDATE jobs SET state = 'pending', worker_token = NULL, lease_until = NULL, reclaims = reclaims + 1 WHERE state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?",
       )
       .run(now);
     return Number(info.changes);
@@ -3521,7 +3679,10 @@ export class Store {
       .run({
         coordinate: row.coordinate,
         stage: row.stage,
-        pubkey: row.pubkey ?? null,
+        // "" (not NULL) for an event-wide stage: SQLite treats NULLs in a PRIMARY KEY
+        // as distinct, so ON CONFLICT never matched and every poison of score_batch /
+        // config_effects appended another row (audit DS41-030).
+        pubkey: row.pubkey ?? "",
         state: row.state,
         attempts: row.attempts,
         error_category: row.error_category,
@@ -3532,7 +3693,9 @@ export class Store {
 
   poisonStatuses(coordinate: string): JobStatusRow[] {
     return this.db
-      .prepare("SELECT * FROM job_status WHERE coordinate = ? AND state = 'poison'")
+      .prepare(
+        "SELECT coordinate, stage, NULLIF(pubkey, '') AS pubkey, state, attempts, error_category, retryable, updated_at FROM job_status WHERE coordinate = ? AND state = 'poison'",
+      )
       .all(coordinate) as any;
   }
 

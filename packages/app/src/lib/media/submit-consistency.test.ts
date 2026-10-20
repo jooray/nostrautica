@@ -20,6 +20,10 @@ vi.mock("$lib/cache/persist.js", () => ({
   // Real callers await the boot bulk read before touching a record they will
   // write back in full; here the mocked mirror is warm from the start.
   whenCacheReady: async () => {},
+  // Self-copy writes are filed under the owner captured at the start of the
+  // operation, behind the generation fence (DS41-003 pattern).
+  activeCacheOwner: () => "a".repeat(64),
+  cacheGeneration: () => 0,
 }));
 vi.mock("$lib/nostr/ndk.js", () => ({
   fetchEvents: mocks.fetchEvents,

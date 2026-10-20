@@ -8,7 +8,7 @@
     cachedEventContext,
     type EventContext,
   } from "$lib/events/event-context.js";
-  import { sendJoinRequest, joinPollGapMs, joinLanding } from "$lib/events/join.js";
+  import { sendJoinRequest, joinPollGapMs, joinLanding, joinNeedsInvite } from "$lib/events/join.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { loadLinkedParent, type LinkedParent } from "$lib/events/hierarchy.js";
   import { communityStanding, recordParentConsent } from "$lib/events/community-join.js";
@@ -39,12 +39,13 @@
     prefetchAttendeesTab,
     prefetchGrants,
   } from "$lib/nostr/prefetch.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
   import { recoverFromStaleChunk } from "$lib/stale-chunk.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let { naddr, code: codeParam }: { naddr: string; code?: string } = $props();
 
@@ -108,6 +109,8 @@
   const LOAD_GUARD_MS = 12_000;
   /** Monotonic pass token so a stalled load can't clobber the retry that replaced it. */
   let loadToken = 0;
+  /** An invite-only space and no code in hand: say so, don't send (BUG-3). */
+  const inviteRequired = $derived(joinNeedsInvite(ctx?.config.approval, !!code));
   let busy = $state(false);
   let sent = $state(false);
   let sentQueued = $state(false); // join request is in the offline outbox (UX-15)
@@ -340,7 +343,7 @@
   const checkedLabel = $derived(
     lastCheckedAt === null
       ? ""
-      : new Date(lastCheckedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+      : new Date(lastCheckedAt).toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit" }),
   );
 
   // Post-approval routing (U1): lead with "Record your intro" unless one already
@@ -404,7 +407,7 @@
 
   async function submit() {
     error = null;
-    if (!ctx) return;
+    if (!ctx || inviteRequired) return;
     busy = true;
     try {
       let displayName: string;
@@ -622,6 +625,11 @@
     <p>
       {#if code}
         {t("join.waiting.invite")}
+      {:else if inviteRequired}
+        <!-- A code-less request already out (sent before this check existed, or
+             from another client): the coordinator rejected it, and only a manual
+             approval can still let the person in. -->
+        {t("join.waiting.inviteOnly")}
       {:else}
         {t("join.waiting.manual")}
       {/if}
@@ -689,6 +697,12 @@
     </p>
   {/if}
 
+  {#if inviteRequired}
+    <div class="card warn" role="alert">
+      <strong>{t("join.inviteOnly.title")}</strong>
+      <p style="margin:0.25rem 0 0">{t("join.inviteOnly.body")}</p>
+    </div>
+  {:else}
   {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
   <!-- A real <form> (the card element itself), not a bare div + onclick: Enter in
        any field submits, and the browser gives the on-screen keyboard a "go" key
@@ -720,8 +734,8 @@
       {:else}
         {#if profileState === "loaded"}
           <div class="row" style="gap:0.75rem;align-items:center">
-            {#if existingPicture}
-              <img src={existingPicture} alt="" width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
+            {#if safeImageSrc(existingPicture)}
+              <img src={safeImageSrc(existingPicture)} alt="" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
             {/if}
             {#if existingAbout}
               <div>
@@ -772,6 +786,7 @@
           accept="image/*"
           onchange={onPicFile}
           label={t("join.photoAdd")}
+          iconOnly
         >
           {#if newPicPreview}
             <img src={newPicPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />
@@ -879,5 +894,6 @@
       {busy ? t("join.sending") : session.loggedIn ? t("join.send") : t("join.createAndJoin")}
     </button>
   </form>
+  {/if}
 
 {/if}

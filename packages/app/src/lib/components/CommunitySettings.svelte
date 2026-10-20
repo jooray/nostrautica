@@ -13,7 +13,7 @@
    * Removing a link never revokes memberships already granted.
    */
   import { onMount } from "svelte";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { isCommunityCoordinate } from "@nostrautica/protocol";
   import {
     listOrganizedCommunities,
@@ -120,7 +120,7 @@
   }
 
   function when(start?: number): string {
-    return start ? new Date(start * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" }) : "";
+    return start ? new Date(start * 1000).toLocaleDateString(i18n.locale, { day: "numeric", month: "short", year: "numeric" }) : "";
   }
 </script>
 

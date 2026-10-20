@@ -879,6 +879,13 @@
         <option value="manual">{t("create.approval.manual")}</option>
         <option value="invite">{t("create.approval.invite")}</option>
         <option value="manual+invite">{t("create.approval.both")}</option>
+        <!-- A community defaults to "open" (the mode switch above), which had no
+             option here, so the select showed nothing selected. Same admission as
+             manual+invite (NIP §6.2), offered where it is the default, and kept
+             for a duplicated space that already uses it. -->
+        {#if isCommunity || approval === "open"}
+          <option value="open">{t("create.approval.open")}</option>
+        {/if}
       </select>
     </div>
     <div>

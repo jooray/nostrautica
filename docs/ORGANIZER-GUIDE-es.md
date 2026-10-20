@@ -67,9 +67,13 @@ Elige **Crear un evento** y completa el formulario:
 - **Título, resumen, inicio, fin y ubicación**: visibles públicamente para
   cualquiera que tenga el enlace.
 - **Aprobación** decide cómo entra la gente:
-  - *Revisión manual*: cada solicitud espera tu aprobación.
+  - *Revisión manual*: cada solicitud espera tu aprobación, también la de
+    quien llega con un enlace de invitación. La única excepción es tu propia
+    inscripción como participante, que se aprueba sola.
   - *Solo códigos de invitación*: se entra únicamente con un enlace de
-    invitación, de ninguna otra forma.
+    invitación, de ninguna otra forma. Con un coordinador conectado, las
+    solicitudes sin un código válido se rechazan en vez de quedar en espera.
+    Igual las ves en tu lista de Admin, así que puedes aprobar a alguien a mano.
   - *Códigos de invitación + manual*: los enlaces de invitación aprueban
     automáticamente (con un coordinador conectado); quienes no tengan código
     esperan tu aprobación. **Recomendado para la mayoría de los eventos.**

@@ -43,9 +43,12 @@ system protects, what it deliberately leaks, and who must be trusted.
   convenience trade-off (spec §5.2), stated plainly in the UI; the key rides the
   URL fragment (never sent to a server) but email itself is not confidential.
 - **Event CSS is trusted-organizer UI control, not a secret-safe boundary.** It can
-  spoof in-event UI and emit allowed image/network beacons. Some themed event
-  routes currently reveal sensitive values; `font-src 'self'` limits one remote
-  font exfiltration technique but does not make those surfaces safe.
+  spoof in-event UI and emit allowed image/network beacons. It is kept away from
+  secrets by a guard, not by being safe: every surface that shows one (admin
+  invite nsecs/QR, key backup, chat device handoff) removes the event stylesheet
+  synchronously while it is on screen (spec §7.4, NIP §13). A secret-bearing
+  surface that forgets to enter the guard would be exposed to the theme again.
+  `font-src 'self'` separately shuts the remote-font text exfiltration channel.
 - **Third-party talk embeds disclose the viewer to the host.** A talk submitted as
   an external URL renders as a YouTube embed (spec §7, `media/external.ts`), and
   the CSP admits `frame-src https://www.youtube-nocookie.com` for exactly that.
@@ -72,6 +75,17 @@ system protects, what it deliberately leaks, and who must be trusted.
   unencrypted-backup disclosure reveals attendee bios, transcripts, inferred
   interests, and pairwise reasoning without the coordinator identity key. Operators
   must protect the database file and encrypt backups at rest accordingly.
+- **A detached coordinator keeps what it learned** (audit SB-16). A detach deletes
+  the coordinator's custody of the event (the `E_inbox` key and every ECK), so it
+  cannot read anything published after that. It does not delete the attendee-derived
+  data it already holds: profiles, AI profiles, transcripts, pair reasoning, talks
+  and summaries. That data is removed only by the retention sweep (hourly, for an
+  installed event whose 31600 declares `retention`, once its end time plus the
+  declared days has passed) or by the operator. The sweep covers installed events
+  only, so in practice a detached event's data stays on the old coordinator until
+  it is re-attached there and its window elapses, or until the operator deletes it.
+  An organizer replacing a coordinator should treat the old one as still holding
+  everything it processed. See COORDINATOR-OPERATOR-GUIDE.md §9.
 - **LLM / STT provider**: sees plaintext transcripts and summaries. Mitigations:
   v1 prefers Venice private/TEE-tier models (`require_private`); v2 uses
   operator-chosen Routstr nodes.
@@ -107,6 +121,26 @@ system protects, what it deliberately leaks, and who must be trusted.
   chat devices are automatically promoted to MLS co-admins as the backstop when a
   backup is unavailable.
 
+## Coordinator handover
+
+When the organizer replaces a coordinator, the new one rebuilds the member list from
+the previous roster (NIP §3.7). It trusts that roster only from the event identity
+(`E_id`) or from the outgoing coordinator that the `E_id`-sealed install grant names
+(`prev_coordinator`). Anyone holding an ECK, including a revoked attendee using a fresh
+key, can encrypt a roster that decrypts correctly. Before this rule, such a roster could
+make the attacker an approved organizer on the new coordinator: an MLS co-admin with
+the current ECK. Two consequences remain:
+
+- **A malicious outgoing coordinator is still trusted for the handover.** The organizer
+  chose it and the grant names it, so its last roster is adopted. It can add pubkeys to
+  that roster. Rotating the keys on replace limits what it can read afterwards, but not
+  what it hands over. The roster is still bounded by the roster and attendee caps.
+- **A grant from an older organizer client names no outgoing coordinator.** The new
+  coordinator then adopts only an `E_id`-authored roster, plus the invite approvals it
+  rebuilds from the inbox history. The client's replace flow rewrites the roster under
+  `E_id`, so approvals normally survive. If that rewrite did not happen, the approvals
+  are missing until the organizer re-approves those people.
+
 ## Revocation honesty
 
 Rotation is **forward-only** (spec §6.3). Anyone who ever held a decryption key can
@@ -117,11 +151,22 @@ protecting future content only. For conference intro videos and match lists (dat
 of bounded sensitivity and time-bounded relevance), this is an accepted trade-off,
 stated in the UI where organizers configure events and where they revoke.
 
+**Concurrent rotations across organizer devices.** Two organizer devices (or an
+organizer and a co-organizer) that revoke at the same moment each mint "v(n+1)" with
+different keys. The protocol keeps both keys everywhere and heals by a further rotation
+(NIP §4.1), so no one loses access to content they held a key for. What it cannot
+recover is the losing device's roster: a person removed only on that device is on the
+surviving roster, and the repair re-grants everyone on it. The organizer is told to
+check and revoke again. A co-organizer's account learns about a rotation only from the
+fresh 21605 the rotating device re-issues; one this device never heard of (neither
+granted by it nor named in a grant it received) stays on the old keys and sees "keys
+changed on another device".
+
 ## Client hygiene
 
 - Local keys in IndexedDB (not localStorage strings where avoidable).
 - NIP-49 (`ncryptsec`) for any at-rest key export.
-- `#/login?nsec=` is consumed and stripped from the URL/history immediately on open.
+- `#/login?nsec=` is consumed and stripped from the URL/history immediately on open, and the key is imported only after the person confirms the account it belongs to (anyone can mint such a link for an identity they control).
 - No third-party scripts. CSP: `default-src 'self'`; `connect-src` limited to
   `wss:`/`https:` (relays + Blossom).
 - NIP-04 is lint-banned project-wide; NIP-44 is always requested with the scheme

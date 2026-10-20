@@ -52,7 +52,7 @@ export const messages = {
     "outbox.failed.one": "{n} couldn't be sent",
     "outbox.failed.many": "{n} couldn't be sent",
     "outbox.failed.title": "Unsent items",
-    "outbox.item": "Item (kind {kind})",
+    "outbox.item": "Nostr kind {kind}",
     "outbox.retry": "Retry",
     "outbox.discard": "Discard",
     "outbox.syncStatus": "Sync status",
@@ -62,6 +62,17 @@ export const messages = {
     "outbox.retries.one": "{n} retry",
     "outbox.retries.many": "{n} retries",
     "outbox.waiting.title": "Waiting to send",
+    "outbox.kind.message": "Private message or request",
+    "outbox.kind.profile": "Profile update",
+    "outbox.kind.follows": "Follow list",
+    "outbox.kind.deletion": "Deletion",
+    "outbox.kind.post": "Post",
+    "outbox.kind.rsvp": "RSVP",
+    "outbox.kind.event": "Event update",
+    "outbox.kind.settings": "Settings update",
+    "outbox.kind.other": "Change",
+    "outbox.discardConfirm": "Discard for good?",
+    "outbox.details": "Details",
     "conn.relayBlocked": "Connected to the internet, but no relay is reachable. This network may be blocking connections. Your changes are saved and will sync once a relay connects.",
     "conn.syncing": "Reconnected, sending your saved changes…",
     "logistics.happeningNow": "Happening now",
@@ -155,6 +166,14 @@ export const messages = {
       "A Nostr identity was just created for you. Back it up now so you never lose access.",
     "login.continue": "Continue",
     "login.alreadyLoggedIn": "You're already logged in.",
+    "login.link.title": "Sign in with the key from this link?",
+    "login.link.account": "This link signs you in as:",
+    "login.link.warnStranger":
+      "Only continue if this is your own recovery link, for example from your backup email. Whoever made a link like this controls the account it signs you into and can read everything you do with it.",
+    "login.link.warnReplace":
+      "This replaces the identity signed in on this device now. If its key is not backed up, it will be lost.",
+    "login.link.confirm": "Sign in with this key",
+    "login.link.cancel": "Cancel",
     "login.welcome": "Welcome",
     "login.failed": "Couldn't log in.",
     "login.createIdentity": "Create an identity",
@@ -302,6 +321,7 @@ export const messages = {
     "create.approval.manual": "Manual review",
     "create.approval.invite": "Invite codes only",
     "create.approval.both": "Invite codes + manual",
+    "create.approval.open": "Open (invite codes + manual)",
     "create.field.matching": "AI matchmaking",
     "create.matching.on": "On (needs a coordinator)",
     "create.matching.off": "Off",
@@ -557,6 +577,9 @@ export const messages = {
       "Waiting for auto-approval… If it doesn't arrive, the organizer will review your request manually.",
     "join.waiting.manual":
       "The organizer will review your request. You'll get access as soon as they approve.",
+    "join.waiting.inviteOnly": "Joining here needs an invite, and your request had none, so it was not approved automatically. The organizer can still let you in by hand. To get in right away, open the invite link they sent you.",
+    "join.inviteOnly.title": "Invite only",
+    "join.inviteOnly.body": "Only people with an invite link can join here. Open the invite link the organizer sent you, or ask them for one.",
     "join.backToEvent": "Back to event",
     "join.myEvents": "My events",
     "join.notThrough": "Didn't go through?",
@@ -713,6 +736,7 @@ export const messages = {
     // above only covers an EMPTY roster; this covers a full but unconfirmed one.
     "attendees.asOf": "Showing a saved list, as of {time}. No relay has answered since.",
     "attendees.asOf.unknown": "Showing a saved list. This device cannot tell how old it is.",
+    "feed.stale": "Showing the copy saved on this device. No relay answered, so newer posts may be missing.",
 
     // Attendee
     "attendee.youFollow": "You follow",
@@ -1125,6 +1149,7 @@ export const messages = {
     "admin.requests.approving": "Approving…",
     "admin.requests.approveAll": "Approve all ({n})",
     "admin.requests.invite": "invite",
+    "admin.requests.noInvite": "no invite, not auto-approved",
     "admin.requests.withdrew": "Asked to leave after sending this request. Approving now would re-admit them.",
     "admin.requests.withdrew.purge": "Asked to leave and to have their data deleted, after sending this request. Approving now would re-admit them.",
     "admin.people.withdrew":
@@ -1175,6 +1200,20 @@ export const messages = {
     "admin.freshness": "Updated {ago}",
     "admin.requests.bulkSummary": "{approved} approved, {retry} need retry",
     "admin.requests.bulk.queued": "Queued…",
+    "admin.requests.bulk.outbox": "Waiting to send. It goes out when you're back online.",
+    "admin.command.approveQueued":
+      "No connection right now. The approval is saved on this device and goes to the coordinator when you're back online. The request stays in the queue until then.",
+    "admin.command.revokeQueued":
+      "No connection right now. The removal is saved on this device and goes to the coordinator when you're back online. Until then this person still has access.",
+    "admin.keys.changedElsewhere":
+      "This event's keys were changed on another device, and this device still has the old ones. Join requests and approvals from here may be missing or fail. Open the event on that device, or have it send this account a fresh organizer grant.",
+    "admin.keys.collision":
+      "This event's member key was changed on two devices at the same time, so some people may not be able to read the member list. Repair it here: everyone on the roster gets one new key that also opens both old ones.",
+    "admin.keys.collisionCoordinator":
+      "This event's member key was changed on two devices at the same time. Detach and re-attach the coordinator to give everyone one new key.",
+    "admin.keys.repair": "Repair keys",
+    "admin.keys.repaired":
+      "Keys repaired. Everyone on the roster has been sent the new key. If someone was removed on the other device at the same time, check People and remove them again.",
     "admin.requests.bulk.publishing": "Publishing…",
     "admin.requests.bulk.failed": "Couldn't approve, try again.",
     "admin.requests.bulk.retry": "Retry",
@@ -1228,6 +1267,9 @@ export const messages = {
     "admin.poison.retry": "Retry",
     "admin.poison.retrying": "Retrying…",
     "admin.poison.dismiss": "Dismiss",
+    "admin.contextChanged.title": "Event details changed",
+    "admin.contextChanged.body":
+      "The title, summary or topics changed after matches were scored, so the current matches still reflect the old description. Recompute to score everyone against the new one. This runs the AI again for every pair.",
 
     // Not found
     "notfound.title": "Not found",
@@ -1557,6 +1599,8 @@ export const messages = {
     "attendees.search.label": "Search attendees",
     "attendees.search.placeholder": "Search by name, bio, or skill…",
     "attendees.filter.label": "Filters",
+    "attendees.filter.loading": "Loading your lists…",
+    "attendees.filter.unavailable": "Your lists couldn't be loaded, so these filters are off for now.",
     "attendees.filter.wantToMeet": "Want to meet",
     "attendees.filter.met": "Met",
     "attendees.filter.favorites": "Favorites",
@@ -1786,7 +1830,7 @@ export const messages = {
     "outbox.failed.few": "{n} sa nepodarilo odoslať",
     "outbox.failed.many": "{n} sa nepodarilo odoslať",
     "outbox.failed.title": "Neodoslané položky",
-    "outbox.item": "Položka (typ {kind})",
+    "outbox.item": "Nostr typ {kind}",
     "outbox.retry": "Skúsiť znova",
     "outbox.discard": "Zahodiť",
     "outbox.syncStatus": "Stav synchronizácie",
@@ -1795,6 +1839,17 @@ export const messages = {
     "outbox.retries.few": "{n} pokusy",
     "outbox.retries.many": "{n} pokusov",
     "outbox.waiting.title": "Čaká na odoslanie",
+    "outbox.kind.message": "Súkromná správa alebo žiadosť",
+    "outbox.kind.profile": "Úprava profilu",
+    "outbox.kind.follows": "Zoznam sledovaných",
+    "outbox.kind.deletion": "Vymazanie",
+    "outbox.kind.post": "Príspevok",
+    "outbox.kind.rsvp": "Potvrdenie účasti",
+    "outbox.kind.event": "Úprava podujatia",
+    "outbox.kind.settings": "Úprava nastavení",
+    "outbox.kind.other": "Zmena",
+    "outbox.discardConfirm": "Naozaj zahodiť?",
+    "outbox.details": "Podrobnosti",
     "conn.relayBlocked": "Pripojené k internetu, ale žiadne relé nie je dostupné. Táto sieť možno blokuje spojenia. Vaše zmeny sú uložené a zosynchronizujú sa, keď sa pripojí relé.",
     "conn.syncing": "Znova pripojené, odosielam vaše uložené zmeny…",
     "logistics.happeningNow": "Práve prebieha",
@@ -1881,6 +1936,14 @@ export const messages = {
       "Práve sme pre vás vytvorili identitu na Nostri. Zálohujte si ju teraz, aby ste o prístup nikdy neprišli.",
     "login.continue": "Pokračovať",
     "login.alreadyLoggedIn": "Už ste prihlásení.",
+    "login.link.title": "Prihlásiť sa kľúčom z tohto odkazu?",
+    "login.link.account": "Tento odkaz vás prihlási ako:",
+    "login.link.warnStranger":
+      "Pokračujte, len ak je to váš vlastný záchranný odkaz, napríklad z vášho zálohového e-mailu. Kto takýto odkaz vytvoril, ovláda účet, do ktorého vás prihlási, a vidí všetko, čo pod ním urobíte.",
+    "login.link.warnReplace":
+      "Nahradí identitu, ktorá je teraz na tomto zariadení prihlásená. Ak jej kľúč nemáte zálohovaný, stratíte ho.",
+    "login.link.confirm": "Prihlásiť sa týmto kľúčom",
+    "login.link.cancel": "Zrušiť",
     "login.welcome": "Vitajte",
     "login.failed": "Prihlásenie sa nepodarilo.",
     "login.createIdentity": "Vytvoriť identitu",
@@ -2018,6 +2081,7 @@ export const messages = {
     "create.approval.manual": "Manuálne posúdenie",
     "create.approval.invite": "Iba pozývacie kódy",
     "create.approval.both": "Pozývacie kódy + manuálne",
+    "create.approval.open": "Otvorené (pozývacie kódy + manuálne)",
     "create.field.talks": "Prednahraté prednášky",
     "create.field.talks.body":
       "Umožnite účastníkom pridávať prednášky, ktoré si ostatní môžu pozrieť. Vypnuté ponechá podujatie ako bežné stretnutie.",
@@ -2274,6 +2338,9 @@ export const messages = {
       "Čaká sa na automatické schválenie… Ak nepríde, organizátor posúdi vašu žiadosť manuálne.",
     "join.waiting.manual":
       "Organizátor posúdi vašu žiadosť. Prístup získate hneď po schválení.",
+    "join.waiting.inviteOnly": "Na pripojenie treba pozvánku a vaša žiadosť ju nemala, preto nebola schválená automaticky. Organizátor vás ešte môže prijať ručne. Ak sa chcete pripojiť hneď, otvorte pozývací odkaz, ktorý vám poslal.",
+    "join.inviteOnly.title": "Iba na pozvánku",
+    "join.inviteOnly.body": "Pripojiť sa tu môžu len ľudia s pozývacím odkazom. Otvorte odkaz, ktorý vám poslal organizátor, alebo ho oň požiadajte.",
     "join.backToEvent": "Späť na podujatie",
     "join.myEvents": "Moje podujatia",
     "join.notThrough": "Neprešlo to?",
@@ -2427,6 +2494,7 @@ export const messages = {
     "attendees.name": "Účastník",
     "attendees.asOf": "Zobrazuje sa uložený zoznam, stav k {time}. Odvtedy neodpovedal žiadny relay.",
     "attendees.asOf.unknown": "Zobrazuje sa uložený zoznam. Toto zariadenie nevie, aký je starý.",
+    "feed.stale": "Zobrazuje sa kópia uložená v tomto zariadení. Neodpovedal žiadny relay, takže novšie príspevky môžu chýbať.",
 
     // Attendee
     "attendee.youFollow": "Sledujete",
@@ -2839,6 +2907,7 @@ export const messages = {
     "admin.requests.approving": "Schvaľuje sa…",
     "admin.requests.approveAll": "Schváliť všetky ({n})",
     "admin.requests.invite": "pozvánka",
+    "admin.requests.noInvite": "bez pozvánky, neschválené automaticky",
     "admin.requests.withdrew": "Táto osoba po odoslaní žiadosti požiadala o odchod. Schválením ju teraz znova prijmete.",
     "admin.requests.withdrew.purge": "Táto osoba po odoslaní žiadosti požiadala o odchod a o vymazanie svojich údajov. Schválením ju teraz znova prijmete.",
     "admin.people.withdrew":
@@ -2890,6 +2959,20 @@ export const messages = {
     "admin.freshness": "Aktualizované {ago}",
     "admin.requests.bulkSummary": "{approved} schválených, {retry} treba zopakovať",
     "admin.requests.bulk.queued": "V poradí…",
+    "admin.requests.bulk.outbox": "Čaká na odoslanie. Odíde po obnovení pripojenia.",
+    "admin.command.approveQueued":
+      "Momentálne nie ste pripojení. Schválenie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy žiadosť zostáva v poradí.",
+    "admin.command.revokeQueued":
+      "Momentálne nie ste pripojení. Odobratie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy má táto osoba stále prístup.",
+    "admin.keys.changedElsewhere":
+      "Kľúče tohto podujatia sa zmenili na inom zariadení a toto zariadenie má stále tie staré. Žiadosti o vstup a schvaľovanie odtiaľto môžu chýbať alebo zlyhať. Otvorte podujatie na tom zariadení alebo ho požiadajte, aby tomuto účtu poslalo nové organizátorské oprávnenie.",
+    "admin.keys.collision":
+      "Kľúč pre členov tohto podujatia sa zmenil na dvoch zariadeniach naraz, takže niektorí ľudia možno nevidia zoznam členov. Opravte to tu: každý na zozname dostane jeden nový kľúč, ktorým otvorí aj oba staré.",
+    "admin.keys.collisionCoordinator":
+      "Kľúč pre členov tohto podujatia sa zmenil na dvoch zariadeniach naraz. Odpojte a znova pripojte koordinátora, aby všetci dostali jeden nový kľúč.",
+    "admin.keys.repair": "Opraviť kľúče",
+    "admin.keys.repaired":
+      "Kľúče sú opravené. Všetci na zozname dostali nový kľúč. Ak niekoho v tom istom čase odobrali na druhom zariadení, skontrolujte Ľudí a odoberte ho znova.",
     "admin.requests.bulk.publishing": "Zverejňuje sa…",
     "admin.requests.bulk.failed": "Nepodarilo sa schváliť, skúste znova.",
     "admin.requests.bulk.retry": "Zopakovať",
@@ -2945,6 +3028,9 @@ export const messages = {
     "admin.poison.retry": "Skúsiť znova",
     "admin.poison.retrying": "Skúšam znova…",
     "admin.poison.dismiss": "Zavrieť",
+    "admin.contextChanged.title": "Údaje o podujatí sa zmenili",
+    "admin.contextChanged.body":
+      "Názov, zhrnutie alebo témy sa zmenili až po vyhodnotení spojení, takže súčasné spojenia stále vychádzajú zo starého popisu. Prepočítajte ich, aby sa všetci vyhodnotili podľa nového. AI sa pritom znova spustí pre každú dvojicu.",
 
     // Not found
     "notfound.title": "Nenájdené",
@@ -3258,6 +3344,8 @@ export const messages = {
     "attendees.search.label": "Hľadať účastníkov",
     "attendees.search.placeholder": "Hľadať podľa mena, popisu alebo zručnosti…",
     "attendees.filter.label": "Filtre",
+    "attendees.filter.loading": "Načítavajú sa vaše zoznamy…",
+    "attendees.filter.unavailable": "Vaše zoznamy sa nepodarilo načítať, preto sú tieto filtre zatiaľ vypnuté.",
     "attendees.filter.wantToMeet": "Chcem stretnúť",
     "attendees.filter.met": "Stretnuté",
     "attendees.filter.favorites": "Obľúbené",
@@ -3493,7 +3581,7 @@ export const messages = {
     "outbox.failed.few": "{n} se nepodařilo odeslat",
     "outbox.failed.many": "{n} se nepodařilo odeslat",
     "outbox.failed.title": "Neodeslané položky",
-    "outbox.item": "Položka (typ {kind})",
+    "outbox.item": "Nostr typ {kind}",
     "outbox.retry": "Zkusit znovu",
     "outbox.discard": "Zahodit",
     "outbox.syncStatus": "Stav synchronizace",
@@ -3502,6 +3590,17 @@ export const messages = {
     "outbox.retries.few": "{n} pokusy",
     "outbox.retries.many": "{n} pokusů",
     "outbox.waiting.title": "Čeká na odeslání",
+    "outbox.kind.message": "Soukromá zpráva nebo žádost",
+    "outbox.kind.profile": "Úprava profilu",
+    "outbox.kind.follows": "Seznam sledovaných",
+    "outbox.kind.deletion": "Smazání",
+    "outbox.kind.post": "Příspěvek",
+    "outbox.kind.rsvp": "Potvrzení účasti",
+    "outbox.kind.event": "Úprava akce",
+    "outbox.kind.settings": "Úprava nastavení",
+    "outbox.kind.other": "Změna",
+    "outbox.discardConfirm": "Opravdu zahodit?",
+    "outbox.details": "Podrobnosti",
     "conn.relayBlocked": "Připojeno k internetu, ale žádné relé není dostupné. Tato síť možná blokuje spojení. Vaše změny jsou uložené a zsynchronizují se, jakmile se relé připojí.",
     "conn.syncing": "Znovu připojeno, odesílám vaše uložené změny…",
     "logistics.happeningNow": "Právě probíhá",
@@ -3587,6 +3686,14 @@ export const messages = {
       "Právě jsme pro vás vytvořili identitu na Nostru. Zazálohujte si ji teď, abyste o přístup nikdy nepřišli.",
     "login.continue": "Pokračovat",
     "login.alreadyLoggedIn": "Už jste přihlášeni.",
+    "login.link.title": "Přihlásit se klíčem z tohoto odkazu?",
+    "login.link.account": "Tento odkaz vás přihlásí jako:",
+    "login.link.warnStranger":
+      "Pokračujte, jen pokud je to váš vlastní záchranný odkaz, například z vašeho zálohovacího e-mailu. Kdo takový odkaz vytvořil, ovládá účet, do kterého vás přihlásí, a vidí vše, co pod ním uděláte.",
+    "login.link.warnReplace":
+      "Nahradí identitu, která je teď na tomto zařízení přihlášená. Pokud její klíč nemáte zálohovaný, přijdete o něj.",
+    "login.link.confirm": "Přihlásit se tímto klíčem",
+    "login.link.cancel": "Zrušit",
     "login.welcome": "Vítejte",
     "login.failed": "Přihlášení se nezdařilo.",
     "login.createIdentity": "Vytvořit identitu",
@@ -3724,6 +3831,7 @@ export const messages = {
     "create.approval.manual": "Ruční posouzení",
     "create.approval.invite": "Pouze pozvánkové kódy",
     "create.approval.both": "Pozvánkové kódy + ruční",
+    "create.approval.open": "Otevřené (pozvánkové kódy + ruční)",
     "create.field.matching": "AI párování",
     "create.matching.on": "Zapnuto (potřebuje koordinátora)",
     "create.matching.off": "Vypnuto",
@@ -3980,6 +4088,9 @@ export const messages = {
       "Čeká se na automatické schválení… Pokud nepřijde, organizátor posoudí vaši žádost ručně.",
     "join.waiting.manual":
       "Organizátor posoudí vaši žádost. Přístup získáte hned po schválení.",
+    "join.waiting.inviteOnly": "K připojení je potřeba pozvánka a vaše žádost žádnou neměla, proto nebyla schválena automaticky. Organizátor vás ještě může přijmout ručně. Pokud se chcete připojit hned, otevřete odkaz na pozvánku, který vám poslal.",
+    "join.inviteOnly.title": "Jen na pozvánku",
+    "join.inviteOnly.body": "Připojit se tu mohou jen lidé s odkazem na pozvánku. Otevřete odkaz, který vám poslal organizátor, nebo ho o něj požádejte.",
     "join.backToEvent": "Zpět na akci",
     "join.myEvents": "Moje akce",
     "join.notThrough": "Neprošlo to?",
@@ -4132,6 +4243,7 @@ export const messages = {
     "attendees.name": "Účastník",
     "attendees.asOf": "Zobrazuje se uložený seznam, stav k {time}. Od té doby neodpověděl žádný relay.",
     "attendees.asOf.unknown": "Zobrazuje se uložený seznam. Toto zařízení neví, jak je starý.",
+    "feed.stale": "Zobrazuje se kopie uložená v tomto zařízení. Neodpověděl žádný relay, takže novější příspěvky mohou chybět.",
 
     // Účastník
     "attendee.youFollow": "Sledujete",
@@ -4543,6 +4655,7 @@ export const messages = {
     "admin.requests.approving": "Schvalování…",
     "admin.requests.approveAll": "Schválit všechny ({n})",
     "admin.requests.invite": "pozvánka",
+    "admin.requests.noInvite": "bez pozvánky, neschváleno automaticky",
     "admin.requests.withdrew": "Tato osoba po odeslání žádosti požádala o odchod. Schválením ji nyní znovu přijmete.",
     "admin.requests.withdrew.purge": "Tato osoba po odeslání žádosti požádala o odchod a o smazání svých údajů. Schválením ji nyní znovu přijmete.",
     "admin.people.withdrew":
@@ -4594,6 +4707,20 @@ export const messages = {
     "admin.freshness": "Aktualizováno {ago}",
     "admin.requests.bulkSummary": "{approved} schváleno, {retry} vyžaduje opakování",
     "admin.requests.bulk.queued": "Ve frontě…",
+    "admin.requests.bulk.outbox": "Čeká na odeslání. Odejde po obnovení připojení.",
+    "admin.command.approveQueued":
+      "Momentálně nejste připojeni. Schválení je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby žádost zůstává ve frontě.",
+    "admin.command.revokeQueued":
+      "Momentálně nejste připojeni. Odebrání je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby má tato osoba stále přístup.",
+    "admin.keys.changedElsewhere":
+      "Klíče této akce se změnily na jiném zařízení a toto zařízení má pořád ty staré. Žádosti o vstup a schvalování odsud mohou chybět nebo selhat. Otevřete akci na tom zařízení, nebo ho požádejte, aby tomuto účtu poslalo nové organizátorské oprávnění.",
+    "admin.keys.collision":
+      "Klíč pro členy této akce se změnil na dvou zařízeních současně, takže někteří lidé možná nevidí seznam členů. Opravte to tady: každý na seznamu dostane jeden nový klíč, kterým otevře i oba staré.",
+    "admin.keys.collisionCoordinator":
+      "Klíč pro členy této akce se změnil na dvou zařízeních současně. Odpojte a znovu připojte koordinátora, aby všichni dostali jeden nový klíč.",
+    "admin.keys.repair": "Opravit klíče",
+    "admin.keys.repaired":
+      "Klíče jsou opravené. Všichni na seznamu dostali nový klíč. Pokud někoho ve stejnou chvíli odebrali na druhém zařízení, zkontrolujte Lidi a odeberte ho znovu.",
     "admin.requests.bulk.publishing": "Zveřejňuje se…",
     "admin.requests.bulk.failed": "Nepodařilo se schválit, zkuste znovu.",
     "admin.requests.bulk.retry": "Zopakovat",
@@ -4649,6 +4776,9 @@ export const messages = {
     "admin.poison.retry": "Zkusit znovu",
     "admin.poison.retrying": "Zkouším znovu…",
     "admin.poison.dismiss": "Zavřít",
+    "admin.contextChanged.title": "Údaje o akci se změnily",
+    "admin.contextChanged.body":
+      "Název, shrnutí nebo témata se změnily až po vyhodnocení spojení, takže současná spojení pořád vycházejí ze starého popisu. Přepočítejte je, aby se všichni vyhodnotili podle nového. AI se přitom znovu spustí pro každou dvojici.",
 
     // Nenalezeno
     "notfound.title": "Nenalezeno",
@@ -4970,6 +5100,8 @@ export const messages = {
     "attendees.search.label": "Hledat účastníky",
     "attendees.search.placeholder": "Hledat podle jména, popisu nebo dovednosti…",
     "attendees.filter.label": "Filtry",
+    "attendees.filter.loading": "Načítají se vaše seznamy…",
+    "attendees.filter.unavailable": "Vaše seznamy se nepodařilo načíst, proto jsou tyto filtry zatím vypnuté.",
     "attendees.filter.wantToMeet": "Chci potkat",
     "attendees.filter.met": "Potkáno",
     "attendees.filter.favorites": "Oblíbení",
@@ -5207,7 +5339,7 @@ export const messages = {
     "outbox.failed.one": "{n} konnte nicht gesendet werden",
     "outbox.failed.many": "{n} konnten nicht gesendet werden",
     "outbox.failed.title": "Nicht gesendete Einträge",
-    "outbox.item": "Eintrag (Art {kind})",
+    "outbox.item": "Nostr-Art {kind}",
     "outbox.retry": "Erneut versuchen",
     "outbox.discard": "Verwerfen",
     "outbox.syncStatus": "Synchronisierungsstatus",
@@ -5217,6 +5349,17 @@ export const messages = {
     "outbox.retries.one": "{n} Wiederholung",
     "outbox.retries.many": "{n} Wiederholungen",
     "outbox.waiting.title": "Wartet auf das Senden",
+    "outbox.kind.message": "Private Nachricht oder Anfrage",
+    "outbox.kind.profile": "Profiländerung",
+    "outbox.kind.follows": "Folgeliste",
+    "outbox.kind.deletion": "Löschung",
+    "outbox.kind.post": "Beitrag",
+    "outbox.kind.rsvp": "Zusage",
+    "outbox.kind.event": "Event-Änderung",
+    "outbox.kind.settings": "Änderung der Einstellungen",
+    "outbox.kind.other": "Änderung",
+    "outbox.discardConfirm": "Endgültig verwerfen?",
+    "outbox.details": "Details",
     "conn.relayBlocked": "Mit dem Internet verbunden, aber kein Relay ist erreichbar. Dieses Netzwerk blockiert möglicherweise Verbindungen. Deine Änderungen sind gespeichert und werden synchronisiert, sobald ein Relay sich verbindet.",
     "conn.syncing": "Wieder verbunden, deine gespeicherten Änderungen werden gesendet…",
     "logistics.happeningNow": "Findet gerade statt",
@@ -5310,6 +5453,14 @@ export const messages = {
       "Für dich wurde gerade eine Nostr-Identität erstellt. Sichere sie jetzt, damit du nie den Zugriff verlierst.",
     "login.continue": "Weiter",
     "login.alreadyLoggedIn": "Du bist bereits angemeldet.",
+    "login.link.title": "Mit dem Schlüssel aus diesem Link anmelden?",
+    "login.link.account": "Dieser Link meldet dich an als:",
+    "login.link.warnStranger":
+      "Fahre nur fort, wenn das dein eigener Wiederherstellungslink ist, zum Beispiel aus deiner Backup-E-Mail. Wer einen solchen Link erstellt hat, kontrolliert das Konto, in das er dich anmeldet, und kann alles lesen, was du damit tust.",
+    "login.link.warnReplace":
+      "Das ersetzt die Identität, die auf diesem Gerät gerade angemeldet ist. Wenn ihr Schlüssel nicht gesichert ist, geht er verloren.",
+    "login.link.confirm": "Mit diesem Schlüssel anmelden",
+    "login.link.cancel": "Abbrechen",
     "login.welcome": "Willkommen",
     "login.failed": "Anmeldung fehlgeschlagen.",
     "login.createIdentity": "Identität erstellen",
@@ -5457,6 +5608,7 @@ export const messages = {
     "create.approval.manual": "Manuelle Prüfung",
     "create.approval.invite": "Nur Einladungscodes",
     "create.approval.both": "Einladungscodes + manuell",
+    "create.approval.open": "Offen (Einladungscodes + manuell)",
     "create.field.matching": "KI-Matchmaking",
     "create.matching.on": "An (benötigt einen Coordinator)",
     "create.matching.off": "Aus",
@@ -5703,6 +5855,9 @@ export const messages = {
     "join.requestSent": "Anfrage gesendet",
     "join.waiting.invite": "Warten auf automatische Genehmigung… Falls sie nicht kommt, prüft der Veranstalter deine Anfrage manuell.",
     "join.waiting.manual": "Der Veranstalter prüft deine Anfrage. Du bekommst Zugang, sobald sie genehmigt wird.",
+    "join.waiting.inviteOnly": "Für den Beitritt braucht es eine Einladung, und deine Anfrage hatte keine. Deshalb wurde sie nicht automatisch genehmigt. Der Veranstalter kann dich trotzdem von Hand aufnehmen. Um sofort beizutreten, öffne den Einladungslink, den er dir geschickt hat.",
+    "join.inviteOnly.title": "Nur mit Einladung",
+    "join.inviteOnly.body": "Hier kann nur beitreten, wer einen Einladungslink hat. Öffne den Link, den dir der Veranstalter geschickt hat, oder bitte ihn um einen.",
     "join.backToEvent": "Zurück zum Event",
     "join.myEvents": "Meine Events",
     "join.notThrough": "Nicht angekommen?",
@@ -5847,6 +6002,7 @@ export const messages = {
     // unbestätigte ab.
     "attendees.asOf": "Zeigt eine gespeicherte Liste, Stand {time}. Seitdem hat kein Relay geantwortet.",
     "attendees.asOf.unknown": "Zeigt eine gespeicherte Liste. Dieses Gerät kann nicht sagen, wie alt sie ist.",
+    "feed.stale": "Zeigt die auf diesem Gerät gespeicherte Kopie. Kein Relay hat geantwortet, neuere Beiträge können fehlen.",
 
     // Teilnehmende Person
     "attendee.youFollow": "Du folgst",
@@ -6244,6 +6400,7 @@ export const messages = {
     "admin.requests.approving": "Genehmigt…",
     "admin.requests.approveAll": "Alle genehmigen ({n})",
     "admin.requests.invite": "Einladung",
+    "admin.requests.noInvite": "ohne Einladung, nicht automatisch genehmigt",
     "admin.requests.withdrew": "Hat nach dem Senden dieser Anfrage um Austritt gebeten. Eine Genehmigung würde die Person wieder aufnehmen.",
     "admin.requests.withdrew.purge": "Hat nach dem Senden dieser Anfrage um Austritt und um Löschung der eigenen Daten gebeten. Eine Genehmigung würde die Person wieder aufnehmen.",
     "admin.people.withdrew":
@@ -6294,6 +6451,20 @@ export const messages = {
     "admin.freshness": "Aktualisiert {ago}",
     "admin.requests.bulkSummary": "{approved} genehmigt, {retry} benötigen einen erneuten Versuch",
     "admin.requests.bulk.queued": "Eingereiht…",
+    "admin.requests.bulk.outbox": "Wartet auf Versand. Geht raus, sobald du wieder online bist.",
+    "admin.command.approveQueued":
+      "Gerade keine Verbindung. Die Freigabe ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin bleibt die Anfrage in der Warteschlange.",
+    "admin.command.revokeQueued":
+      "Gerade keine Verbindung. Das Entfernen ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin hat diese Person weiterhin Zugriff.",
+    "admin.keys.changedElsewhere":
+      "Die Schlüssel dieses Events wurden auf einem anderen Gerät geändert, und dieses Gerät hat noch die alten. Beitrittsanfragen und Freigaben von hier können fehlen oder fehlschlagen. Öffne das Event auf jenem Gerät oder lass es diesem Konto eine neue Organisator-Freigabe schicken.",
+    "admin.keys.collision":
+      "Der Mitgliederschlüssel dieses Events wurde auf zwei Geräten gleichzeitig geändert, daher können manche die Mitgliederliste vielleicht nicht lesen. Repariere es hier: Alle auf der Liste bekommen einen neuen Schlüssel, der auch beide alten öffnet.",
+    "admin.keys.collisionCoordinator":
+      "Der Mitgliederschlüssel dieses Events wurde auf zwei Geräten gleichzeitig geändert. Trenne den Coordinator und hänge ihn wieder an, damit alle einen neuen Schlüssel bekommen.",
+    "admin.keys.repair": "Schlüssel reparieren",
+    "admin.keys.repaired":
+      "Schlüssel repariert. Alle auf der Liste haben den neuen Schlüssel bekommen. Falls jemand zur selben Zeit auf dem anderen Gerät entfernt wurde, prüfe die Personen und entferne ihn erneut.",
     "admin.requests.bulk.publishing": "Veröffentlicht…",
     "admin.requests.bulk.failed": "Genehmigung fehlgeschlagen, versuch es erneut.",
     "admin.requests.bulk.retry": "Erneut versuchen",
@@ -6347,6 +6518,9 @@ export const messages = {
     "admin.poison.retry": "Erneut versuchen",
     "admin.poison.retrying": "Versucht erneut…",
     "admin.poison.dismiss": "Verwerfen",
+    "admin.contextChanged.title": "Veranstaltungsdetails geändert",
+    "admin.contextChanged.body":
+      "Titel, Zusammenfassung oder Themen haben sich geändert, nachdem die Matches bewertet wurden. Die aktuellen Matches beruhen also noch auf der alten Beschreibung. Berechne sie neu, damit alle nach der neuen bewertet werden. Dabei läuft die KI für jedes Paar erneut.",
 
     // Nicht gefunden
     "notfound.title": "Nicht gefunden",
@@ -6675,6 +6849,8 @@ export const messages = {
     "attendees.search.label": "Teilnehmende suchen",
     "attendees.search.placeholder": "Nach Name, Bio oder Skill suchen…",
     "attendees.filter.label": "Filter",
+    "attendees.filter.loading": "Deine Listen werden geladen…",
+    "attendees.filter.unavailable": "Deine Listen konnten nicht geladen werden, deshalb sind diese Filter vorerst aus.",
     "attendees.filter.wantToMeet": "Möchte ich treffen",
     "attendees.filter.met": "Getroffen",
     "attendees.filter.favorites": "Favoriten",
@@ -6904,7 +7080,7 @@ export const messages = {
     "outbox.failed.one": "{n} elemento no se pudo enviar",
     "outbox.failed.many": "{n} elementos no se pudieron enviar",
     "outbox.failed.title": "Elementos sin enviar",
-    "outbox.item": "Elemento (tipo {kind})",
+    "outbox.item": "Tipo de Nostr {kind}",
     "outbox.retry": "Reintentar",
     "outbox.discard": "Descartar",
     "outbox.syncStatus": "Estado de la sincronización",
@@ -6914,6 +7090,17 @@ export const messages = {
     "outbox.retries.one": "{n} reintento",
     "outbox.retries.many": "{n} reintentos",
     "outbox.waiting.title": "Esperando para enviarse",
+    "outbox.kind.message": "Mensaje o solicitud privada",
+    "outbox.kind.profile": "Cambio de perfil",
+    "outbox.kind.follows": "Lista de seguidos",
+    "outbox.kind.deletion": "Eliminación",
+    "outbox.kind.post": "Publicación",
+    "outbox.kind.rsvp": "Confirmación de asistencia",
+    "outbox.kind.event": "Cambio del evento",
+    "outbox.kind.settings": "Cambio de ajustes",
+    "outbox.kind.other": "Cambio",
+    "outbox.discardConfirm": "¿Descartar definitivamente?",
+    "outbox.details": "Detalles",
     "conn.relayBlocked": "Conectado a internet, pero no se puede llegar a ningún relay. Es posible que esta red esté bloqueando las conexiones. Tus cambios están guardados y se sincronizarán en cuanto se conecte un relay.",
     "conn.syncing": "Reconectado, enviando tus cambios guardados…",
     "logistics.happeningNow": "Sucediendo ahora",
@@ -7008,6 +7195,14 @@ export const messages = {
       "Se acaba de crear una identidad de Nostr para ti. Haz una copia de seguridad ahora para no perder nunca el acceso.",
     "login.continue": "Continuar",
     "login.alreadyLoggedIn": "Ya iniciaste sesión.",
+    "login.link.title": "¿Iniciar sesión con la clave de este enlace?",
+    "login.link.account": "Este enlace inicia tu sesión como:",
+    "login.link.warnStranger":
+      "Continúa solo si es tu propio enlace de recuperación, por ejemplo el de tu correo de copia de seguridad. Quien haya creado un enlace así controla la cuenta con la que te hace iniciar sesión y puede leer todo lo que hagas con ella.",
+    "login.link.warnReplace":
+      "Esto reemplaza la identidad con la que este dispositivo tiene la sesión iniciada ahora. Si su clave no tiene copia de seguridad, se perderá.",
+    "login.link.confirm": "Iniciar sesión con esta clave",
+    "login.link.cancel": "Cancelar",
     "login.welcome": "Te damos la bienvenida",
     "login.failed": "No se pudo iniciar sesión.",
     "login.createIdentity": "Crear una identidad",
@@ -7157,6 +7352,7 @@ export const messages = {
     "create.approval.manual": "Revisión manual",
     "create.approval.invite": "Solo códigos de invitación",
     "create.approval.both": "Códigos de invitación + manual",
+    "create.approval.open": "Abierta (códigos de invitación + manual)",
     "create.field.matching": "Emparejamiento con IA",
     "create.matching.on": "Activado (necesita un coordinador)",
     "create.matching.off": "Desactivado",
@@ -7411,6 +7607,9 @@ export const messages = {
       "Esperando la aprobación automática… Si no llega, el organizador revisará tu solicitud manualmente.",
     "join.waiting.manual":
       "El organizador revisará tu solicitud. Tendrás acceso en cuanto la aprueben.",
+    "join.waiting.inviteOnly": "Para unirte hace falta una invitación y tu solicitud no la tenía, así que no se aprobó automáticamente. El organizador aún puede admitirte a mano. Para entrar ahora mismo, abre el enlace de invitación que te envió.",
+    "join.inviteOnly.title": "Solo con invitación",
+    "join.inviteOnly.body": "Solo pueden unirse aquí quienes tengan un enlace de invitación. Abre el enlace que te envió el organizador o pídele uno.",
     "join.backToEvent": "Volver al evento",
     "join.myEvents": "Mis eventos",
     "join.notThrough": "¿No llegó?",
@@ -7570,6 +7769,7 @@ export const messages = {
     // confirmar.
     "attendees.asOf": "Mostrando una lista guardada, del {time}. Ningún relay ha respondido desde entonces.",
     "attendees.asOf.unknown": "Mostrando una lista guardada. Este dispositivo no puede saber qué antigüedad tiene.",
+    "feed.stale": "Mostrando la copia guardada en este dispositivo. Ningún relay respondió, así que pueden faltar publicaciones más recientes.",
 
     // Asistente
     "attendee.youFollow": "Sigues",
@@ -7981,6 +8181,7 @@ export const messages = {
     "admin.requests.approving": "Aprobando…",
     "admin.requests.approveAll": "Aprobar todas ({n})",
     "admin.requests.invite": "invitación",
+    "admin.requests.noInvite": "sin invitación, no aprobada automáticamente",
     "admin.requests.withdrew": "Pidió salir después de enviar esta solicitud. Aprobarla ahora significaría volver a admitir a esa persona.",
     "admin.requests.withdrew.purge": "Pidió salir y que se eliminen sus datos, después de enviar esta solicitud. Aprobarla ahora significaría volver a admitir a esa persona.",
     "admin.people.withdrew":
@@ -8031,6 +8232,20 @@ export const messages = {
     "admin.freshness": "Actualizado {ago}",
     "admin.requests.bulkSummary": "{approved} aprobadas, {retry} necesitan reintento",
     "admin.requests.bulk.queued": "En cola…",
+    "admin.requests.bulk.outbox": "Pendiente de envío. Saldrá cuando vuelvas a estar en línea.",
+    "admin.command.approveQueued":
+      "Ahora mismo no hay conexión. La aprobación está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces la solicitud sigue en la cola.",
+    "admin.command.revokeQueued":
+      "Ahora mismo no hay conexión. La retirada está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces esta persona sigue teniendo acceso.",
+    "admin.keys.changedElsewhere":
+      "Las claves de este evento se cambiaron en otro dispositivo y este todavía tiene las antiguas. Puede que falten solicitudes de acceso o que las aprobaciones desde aquí fallen. Abre el evento en ese dispositivo o pídele que envíe a esta cuenta una nueva concesión de organizador.",
+    "admin.keys.collision":
+      "La clave de miembros de este evento se cambió en dos dispositivos a la vez, así que puede que algunas personas no puedan leer la lista de miembros. Repáralo aquí: todos en la lista reciben una clave nueva que también abre las dos antiguas.",
+    "admin.keys.collisionCoordinator":
+      "La clave de miembros de este evento se cambió en dos dispositivos a la vez. Desconecta y vuelve a conectar el coordinador para que todos reciban una clave nueva.",
+    "admin.keys.repair": "Reparar claves",
+    "admin.keys.repaired":
+      "Claves reparadas. Todos en la lista han recibido la clave nueva. Si alguien fue retirado en el otro dispositivo al mismo tiempo, revisa Personas y retíralo de nuevo.",
     "admin.requests.bulk.publishing": "Publicando…",
     "admin.requests.bulk.failed": "No se pudo aprobar, vuelve a intentarlo.",
     "admin.requests.bulk.retry": "Reintentar",
@@ -8084,6 +8299,9 @@ export const messages = {
     "admin.poison.retry": "Reintentar",
     "admin.poison.retrying": "Reintentando…",
     "admin.poison.dismiss": "Descartar",
+    "admin.contextChanged.title": "Cambiaron los datos del evento",
+    "admin.contextChanged.body":
+      "El título, el resumen o los temas cambiaron después de calcular las coincidencias, así que las actuales todavía se basan en la descripción anterior. Recalcúlalas para evaluar a todos con la nueva. Esto vuelve a ejecutar la IA para cada pareja.",
 
     // No encontrado
     "notfound.title": "No encontrado",
@@ -8413,6 +8631,8 @@ export const messages = {
     "attendees.search.label": "Buscar asistentes",
     "attendees.search.placeholder": "Busca por nombre, biografía o habilidad…",
     "attendees.filter.label": "Filtros",
+    "attendees.filter.loading": "Cargando tus listas…",
+    "attendees.filter.unavailable": "No se pudieron cargar tus listas, así que estos filtros están desactivados por ahora.",
     "attendees.filter.wantToMeet": "Quiero conocer",
     "attendees.filter.met": "Conocidos",
     "attendees.filter.favorites": "Favoritos",

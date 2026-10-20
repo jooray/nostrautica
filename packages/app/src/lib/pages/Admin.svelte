@@ -41,6 +41,9 @@
     sendAdminCommand,
     checkForOrganizerGrant,
     pollForOrganizerGrant,
+    checkOrganizerKeys,
+    repairEventKeys,
+    CoordinatorAttachedError,
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
@@ -63,7 +66,7 @@
   } from "$lib/events/invite-export.js";
   import { redeemedInvitePubkeys } from "$lib/events/invite-sheet.js";
   import { cachedProfiles } from "$lib/events/social.js";
-  import { fetchCoordinatorStatuses, cachedCoordinatorStatuses } from "$lib/events/coordinator-status.js";
+  import { fetchCoordinatorStatuses, cachedCoordinatorStatuses, latestContextNotice, contextNoticeId } from "$lib/events/coordinator-status.js";
   import { enrollOrganizerAsParticipant } from "$lib/events/create.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
@@ -85,6 +88,7 @@
   import AdminPeople from "$lib/components/AdminPeople.svelte";
   import AdminQueue from "$lib/components/AdminQueue.svelte";
   import { t, tp, i18n } from "$lib/i18n/i18n.svelte.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -235,8 +239,49 @@
     }
   }
 
+  // ── Custody across devices (audit SB-90, SB-86, SB-91) ─────────────────────
+  // Every refresh reads the newest 31600 once (no signer): routing approvals
+  // through a coordinator that another device attached since this page loaded
+  // (SB-91), and telling the organizer when another device rotated the keys
+  // (SB-90) or two devices rotated at once (SB-86). The first check on open also
+  // folds in the account's key backup, which is how this device learns about a
+  // rotation its sibling made.
+  let keyStatus = $state<{ changedElsewhere: boolean; collision: boolean } | null>(null);
+  let repairing = $state(false);
+  let repaired = $state(false);
+
+  async function refreshKeyStatus(reconcile: boolean): Promise<void> {
+    const c = ctx;
+    if (!c) return;
+    const bk = reconcile && session.signer ? await deriveBlindingKey(session.signer).catch(() => undefined) : undefined;
+    const st = await checkOrganizerKeys(c, { organizer: session.signer, blindingKey: bk, reconcile }).catch(() => undefined);
+    if (!st || destroyed || ctx !== c) return;
+    keyStatus = { changedElsewhere: st.changedElsewhere, collision: st.collision };
+    if ((st.config.coordinator ?? null) !== (c.config.coordinator ?? null) || st.config.inbox !== c.config.inbox) {
+      ctx = { ...c, config: st.config };
+    }
+    keys = (await loadEventKeys(c.coordinate)) ?? keys;
+  }
+
+  async function repairKeys() {
+    if (!ctx || !session.signer || repairing) return;
+    repairing = true;
+    try {
+      await repairEventKeys(session.signer, ctx, await deriveBlindingKey(session.signer));
+      repaired = true;
+      await refreshKeyStatus(false);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      repairing = false;
+    }
+  }
+
   async function refresh() {
     if (!ctx || !keys) return;
+    // In parallel with the queue scan; the local approve/revoke paths re-check the
+    // noted config themselves, so nothing waits on it.
+    void refreshKeyStatus(false);
     // Fetch pending + roster CONCURRENTLY and assign atomically (same tick): a
     // sequential `pending = await fetchPending(...)` followed by a separate
     // `await fetchRoster(...)` opens a window where `pending` already includes
@@ -362,7 +407,7 @@
       // user-facing slices (pending + updates) settle, rather than lingering for
       // the slowest background member. network-settled (finally) still waits for
       // everything, so perf marks stay meaningful.
-      const background = Promise.allSettled([refreshLiveness()]);
+      const background = Promise.allSettled([refreshLiveness(), refreshKeyStatus(true)]);
       await Promise.allSettled([refresh()]);
       refreshing = false;
       await background;
@@ -561,6 +606,18 @@
       (s) => s.state === "poison" && !dismissedStatuses.has(statusId(s)),
     ),
   );
+
+  // DS41-041: the coordinator's advisory that the event's title/summary/topics
+  // changed after matches were scored.
+  const contextNotice = $derived(latestContextNotice(coordStatuses, dismissedStatuses));
+  function dismissContextNotice(s: CoordinatorStatusContent) {
+    dismissedStatuses = new Set([...dismissedStatuses, contextNoticeId(s)]);
+    persistDismissed();
+  }
+  async function recomputeForContext(s: CoordinatorStatusContent) {
+    await recomputeMatches();
+    if (!error) dismissContextNotice(s);
+  }
 
   // Latest billing signal from the coordinator (payment_required / grace).
   // Payment is external for now — we just surface the reason + a checkout link,
@@ -916,18 +973,38 @@
 
   /** Approve one attendee by pubkey (coordinator command or local approve).
    *  Throws on failure so the bulk runner can record a per-item outcome. */
-  async function approveOne(pubkey: string): Promise<void> {
+  async function approveOne(pubkey: string, retried = false): Promise<"done" | "queued"> {
+    if (!ctx || !session.signer) throw new Error("not ready");
+    try {
+      return await approveOnce(pubkey);
+    } catch (e) {
+      // Another device attached a coordinator since this page last looked (SB-91):
+      // adopt the newest config and route this approval through it instead.
+      if (!(e instanceof CoordinatorAttachedError) || retried) throw e;
+      await refreshKeyStatus(false);
+      if (!ctx?.config.coordinator) throw e;
+      return approveOne(pubkey, true);
+    }
+  }
+
+  async function approveOnce(pubkey: string): Promise<"done" | "queued"> {
     if (!ctx || !session.signer) throw new Error("not ready");
     if (ctx.config.coordinator) {
       // Route through the coordinator so IT grants + publishes the directory
       // (attendees discover directory/roster/matches under the coordinator key).
-      await sendAdminCommand(ctx, "approve", { pubkey });
+      // A command that only reached the outbox has not approved anyone yet (audit
+      // SB-03): keep the request in the queue and say it is waiting to send.
+      if ((await sendAdminCommand(ctx, "approve", { pubkey })) === "queued") {
+        opStatus.queued(t("admin.command.approveQueued"));
+        return "queued";
+      }
     } else {
       const req = pending.find((r) => r.attendeePubkey === pubkey);
       if (!req) throw new Error(t("admin.reprocess.noIntake"));
       await approveAttendee(session.signer, ctx, req);
     }
     approvedSet = new Set([...approvedSet, pubkey]);
+    return "done";
   }
 
   // Per-request busy guard (audit UX-27): a double-tap must not fire two
@@ -987,8 +1064,7 @@
   async function runBulkItem(pubkey: string) {
     setBulk(pubkey, "publishing");
     try {
-      await approveOne(pubkey);
-      setBulk(pubkey, "confirmed");
+      setBulk(pubkey, (await approveOne(pubkey)) === "queued" ? "outbox" : "confirmed");
     } catch (e) {
       setBulk(pubkey, "failed", e instanceof Error ? e.message : String(e));
     }
@@ -1004,11 +1080,16 @@
 
   // Inline, screenshotable revoke confirmation lives in AdminPeople (which owns the
   // confirm state); the parent performs the revoke and updates its data model.
-  async function revoke(pubkey: string) {
+  async function revoke(pubkey: string, retried = false) {
     if (!ctx || !session.signer) return;
     try {
       if (ctx.config.coordinator) {
-        await sendAdminCommand(ctx, "revoke", { pubkey });
+        // Queued is not revoked (audit SB-03): until the coordinator acts, the
+        // member still holds their chat leaf and roster place. Don't say "Revoked".
+        if ((await sendAdminCommand(ctx, "revoke", { pubkey })) === "queued") {
+          opStatus.queued(t("admin.command.revokeQueued"));
+          return;
+        }
       } else {
         // Pass the blinding key: revoke mints a new ECK, and without this the
         // rotated key never reaches the organizer's own 30078 backup.
@@ -1017,6 +1098,11 @@
       revokedSet = new Set([...revokedSet, pubkey]);
       approvedSet = new Set([...approvedSet].filter((p) => p !== pubkey));
     } catch (e) {
+      // A coordinator attached elsewhere (SB-91): the removal is its to make.
+      if (e instanceof CoordinatorAttachedError && !retried) {
+        await refreshKeyStatus(false);
+        if (ctx?.config.coordinator) return revoke(pubkey, true);
+      }
       error = e instanceof Error ? e.message : String(e);
     }
   }
@@ -1043,6 +1129,21 @@
 <AdminTabs {naddr} />
 
 {#if error}<div class="card warn">{error}</div>{/if}
+
+{#if keyStatus?.changedElsewhere}
+  <div class="card warn" role="status">{t("admin.keys.changedElsewhere")}</div>
+{:else if keyStatus?.collision && !repaired}
+  <div class="card warn" role="status">
+    {#if ctx?.config.coordinator}
+      <p style="margin:0">{t("admin.keys.collisionCoordinator")}</p>
+    {:else}
+      <p>{t("admin.keys.collision")}</p>
+      <button class="btn inline" disabled={repairing} onclick={() => void repairKeys()}>{t("admin.keys.repair")}</button>
+    {/if}
+  </div>
+{:else if repaired}
+  <div class="card" role="status">{t("admin.keys.repaired")}</div>
+{/if}
 
 {#if notOrganizer}
   <div class="card">
@@ -1074,7 +1175,7 @@
       {/if}
       {#if grantCheckedAt !== undefined}
         {t("admin.grant.lastChecked", {
-          time: new Date(grantCheckedAt).toLocaleTimeString(),
+          time: new Date(grantCheckedAt).toLocaleTimeString(i18n.locale),
         })}
       {/if}
     </p>
@@ -1197,6 +1298,20 @@
     </div>
   {/if}
 
+  {#if contextNotice}
+    {@const notice = contextNotice}
+    <div class="card" style="margin-bottom:0.75rem;border-left:3px solid var(--accent)">
+      <strong>{t("admin.contextChanged.title")}</strong>
+      <p class="muted" style="margin:0.25rem 0">{t("admin.contextChanged.body")}</p>
+      <div class="row">
+        <button class="btn inline primary" onclick={() => recomputeForContext(notice)} disabled={recomputing}>
+          {recomputing ? t("admin.coordinator.recomputing") : t("admin.coordinator.recompute")}
+        </button>
+        <button class="btn inline" onclick={() => dismissContextNotice(notice)}>{t("admin.poison.dismiss")}</button>
+      </div>
+    </div>
+  {/if}
+
   {#if poisonStatuses.length}
     <div class="stack" style="margin-bottom:0.75rem">
       {#each poisonStatuses as s (statusId(s))}
@@ -1263,6 +1378,7 @@
 
   <AdminQueue
     requests={pendingRequests}
+    inviteOnly={ctx?.config.approval === "invite"}
     relays={ctx?.config.relays ?? []}
     filterActive={peopleFilterActive}
     {matchedPubkeys}

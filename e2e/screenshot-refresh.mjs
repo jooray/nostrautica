@@ -1552,7 +1552,7 @@ async function main() {
   // banner, so shooting it here — after invites/approvals/revoke have given
   // the metrics grid something real to show instead of an all-zero empty
   // state — reproduces it cleanly instead of by hand. Desktop reuses the
-  // 1280x900 convention from audit-ux-verify.mjs / marmot-chat-verify.mjs;
+  // 1280x900 desktop convention of the earlier one-off verification scripts;
   // resizing Olga's OWN page keeps her logged-in organizer session instead of
   // needing a fresh, empty context just for one wide shot. Dark added for
   // both viewports (previously light-only, leaving 6 dark files missing

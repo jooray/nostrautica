@@ -42,7 +42,7 @@
 
 <div class="card">
   <div class="field-label">{t("settings.language")}</div>
-  <div class="row" role="group" aria-label={t("settings.language")}>
+  <div class="row" style="flex-wrap:wrap" role="group" aria-label={t("settings.language")}>
     {#each LOCALES as loc (loc)}
       <button class="btn inline" aria-pressed={i18n.locale === loc} class:primary={i18n.locale === loc} onclick={() => i18n.set(loc)}>
         {LOCALE_NAMES[loc]}

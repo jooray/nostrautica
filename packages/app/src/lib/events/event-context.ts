@@ -14,7 +14,7 @@ import {
   pickLatest,
 } from "@nostrautica/protocol";
 import { fetchEvents, addRelays } from "$lib/nostr/ndk.js";
-import { onlyVerified } from "$lib/nostr/verify.js";
+import { onlyVerified, onlyAddressed } from "$lib/nostr/verify.js";
 import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 import { cacheGet, cacheSet, ANON } from "$lib/cache/persist.js";
 import { swr } from "$lib/cache/swr.js";
@@ -111,10 +111,16 @@ export async function loadEventContext(
 
   // Authority boundary (audit APPK-1): these fetches feed latest-by-created_at
   // picks the whole app trusts, so every candidate is signature-re-verified
-  // here even though NDK already validates relay traffic.
+  // here even though NDK already validates relay traffic. The two addressable
+  // reads also re-check kind/author/`d` (audit SB-10): a relay need not honour
+  // the filter, and another of this E_id's configs verifies just as well.
   const [configEvents, eventEvents, profileEvents] = await Promise.all([
-    fetchEvents({ kinds: [KIND_EVENT_CONFIG], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
-    fetchEvents({ kinds: [kind], authors: [pubkey], "#d": [identifier] }).then(onlyVerified),
+    fetchEvents({ kinds: [KIND_EVENT_CONFIG], authors: [pubkey], "#d": [identifier] }).then((evs) =>
+      onlyAddressed(onlyVerified(evs), KIND_EVENT_CONFIG, pubkey, identifier),
+    ),
+    fetchEvents({ kinds: [kind], authors: [pubkey], "#d": [identifier] }).then((evs) =>
+      onlyAddressed(onlyVerified(evs), kind, pubkey, identifier),
+    ),
     fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] }).then(onlyVerified),
   ]);
 
@@ -143,7 +149,9 @@ export async function loadEventContext(
   if (opts.adoptLang !== false && !session.loggedIn) i18n.adoptEventLang(config.lang);
 
   // E_id's kind-0 carries the small icon (picture) and, as a fallback, the banner.
-  const profileEvent = profileEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // §3.1 latest-wins (lowest id on a created_at tie), like the coordinator — a
+  // timestamp-only sort keeps relay arrival order on a tie (audit DS41-013).
+  const profileEvent = pickLatest(profileEvents);
   let kind0: Record<string, any> = {};
   if (profileEvent) {
     try {
@@ -153,7 +161,9 @@ export async function loadEventContext(
     }
   }
 
-  const evt = eventEvents.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // The space record carries the event's END, which anchors the coordinator's
+  // retention sweep; it picks with pickLatest, so must we (audit SB-92).
+  const evt = pickLatest(eventEvents);
   const ctx: EventContext = {
     naddr,
     coordinate,

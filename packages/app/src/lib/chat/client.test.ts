@@ -50,6 +50,8 @@ const shared = vi.hoisted(() => ({
   liveFetchCount: new Map<string, number>(),
   /** Ordered trace of the publish-side calls a rejoin makes (order is the point). */
   calls: [] as string[],
+  /** Wall-clock second each attestation was sent at (what its created_at would be). */
+  attestSecs: [] as { op: string; sec: number }[],
   /** The pre-0.7.0 `web-` slot the identity still remembers, if any. */
   legacyClientId: undefined as string | undefined,
   /** The label the user last chose for this device, if any (identity.ts store). */
@@ -279,6 +281,7 @@ vi.mock("./attest.js", () => ({
   sendChatKeyAttestation: vi.fn(
     async (_signer: unknown, _ctx: unknown, input: { op: string; label?: string }) => {
       shared.calls.push(`attest:${input.op}`);
+      shared.attestSecs.push({ op: input.op, sec: Math.floor(Date.now() / 1000) });
       if (input.op === "add") shared.attestedLabels.push(input.label);
       // The real one returns whether the wrap reached a relay (false = outbox only).
       return true;
@@ -831,6 +834,20 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
     expect(opts.relays).toEqual(["wss://r"]);
   });
 
+  // DS41-049: the coordinator orders a device's add/revoke by created_at (whole
+  // seconds) and lets a tie through, so the re-attest must be strictly newer than
+  // the revoke or an add-first delivery leaves the device revoked.
+  it("sends the re-attestation in a LATER second than the revoke", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-x", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    shared.attestSecs.length = 0;
+    await chat.rejoin();
+    const revoke = shared.attestSecs.find((a) => a.op === "revoke")!;
+    const add = shared.attestSecs.find((a) => a.op === "add")!;
+    expect(add.sec).toBeGreaterThan(revoke.sec);
+  });
+
   it("joins the welcome that follows and routes sends to the new group", async () => {
     shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-rejoined", attendees: [] });
     const chat = await MarmotChat.create({ accountSigner, ctx });
@@ -1117,6 +1134,27 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
 
     expect(lastClient.joinedFrom).toEqual(["welcome-waiting"]);
     expect(shared.calls.filter((c) => c.startsWith("attest:revoke"))).toEqual([]);
+  });
+
+  // DS41-050: the invite store is per chat identity, so a welcome for ANOTHER
+  // event on the same coordinator sits in the same unread list. Joining it is not
+  // a rejoin of this event and must not short-circuit the revoke/re-attest.
+  it("rejoin still re-enrols when the waiting Welcome is for another event", async () => {
+    const identity = "c".repeat(64);
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-this", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    lastClient.invites.unread.push({
+      id: "welcome-other-event",
+      pubkey: COORD,
+      mlsId: "0011223344556677",
+      nostrGroupId: "gid-other-event",
+      members: [COORD, identity],
+    } as never);
+    shared.calls.length = 0;
+
+    await chat.rejoin({ force: true });
+
+    expect(shared.calls).toEqual(["attest:revoke", "kp:rotate", "kp:ensurePublished", "attest:add"]);
   });
 
   it("never discards a group we still hold a leaf in", async () => {

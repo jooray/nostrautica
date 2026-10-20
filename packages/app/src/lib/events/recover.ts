@@ -20,14 +20,19 @@ import {
   makeCoordinate,
   parseCoordinate,
   hexToBytes,
+  blindedD,
+  compareLatest,
+  unionEck,
+  mergeEventKeysBackups,
   type EventKeysBackup,
 } from "@nostrautica/protocol";
+import { deriveBlindingKey } from "./blinding.js";
 import { getPublicKey } from "nostr-tools/pure";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { DEFAULT_RELAYS } from "$lib/nostr/relays.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
-import { loadEventKeys, listEventKeys, saveEventKeys } from "./keystore.js";
+import { loadEventKeys, listEventKeys, saveEventKeys, activeKeystoreOwner } from "./keystore.js";
 import {
   startScanBudget,
   emptyOutcome,
@@ -85,7 +90,11 @@ function saveBackupMemo(memo: Record<string, true>): void {
  * directly; older ones are reconstructed from the E_id key + the event's
  * published 31600 config (its `d` tag), fetched from relays.
  */
-async function resolveCoordinate(backup: EventKeysBackup): Promise<string | undefined> {
+async function resolveCoordinate(
+  backup: EventKeysBackup,
+  backupD: string,
+  signer: AppSigner,
+): Promise<string | undefined> {
   if (backup.a) {
     try {
       parseCoordinate(backup.a);
@@ -104,32 +113,81 @@ async function resolveCoordinate(backup: EventKeysBackup): Promise<string | unde
     { kinds: [KIND_EVENT_CONFIG], authors: [eidPubkey] },
     DEFAULT_RELAYS,
   ).catch(() => []);
-  const latest = configs.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  const d = latest?.tags.find((t) => t[0] === "d")?.[1];
-  return d ? makeCoordinate(eidPubkey, d) : undefined;
+  // Every distinct `d` this E_id has published a 31600 at is a candidate. "The
+  // newest config" was not an answer to "which event is this backup for": with
+  // two events under one E_id it picked whichever was edited last (and on a
+  // created_at tie, whichever the relay sent first), and restored the backup's
+  // E_id/inbox secrets into that coordinate (audit SB-93).
+  const ds = [
+    ...new Set(
+      configs
+        .filter((e) => e.pubkey === eidPubkey)
+        .map((e) => e.tags.find((t) => t[0] === "d")?.[1])
+        .filter((d): d is string => !!d),
+    ),
+  ];
+  if (ds.length <= 1) return ds[0] ? makeCoordinate(eidPubkey, ds[0]) : undefined;
+  // Several: the backup's own `d` is blinded over its coordinate, so recompute it
+  // for each candidate and take the one that matches. Costs a blinding-key
+  // derivation, only on this legacy (no `a`) path. No match → unresolved, which
+  // stays retryable (nothing is memoized for it).
+  let blindingKey: Uint8Array;
+  try {
+    blindingKey = await deriveBlindingKey(signer);
+  } catch {
+    return undefined;
+  }
+  const ownPubkey = await signer.getPublicKey();
+  for (const d of ds) {
+    const coordinate = makeCoordinate(eidPubkey, d);
+    if (`${EVENTKEYS_PREFIX}${blindedD(blindingKey, coordinate, ownPubkey)}` === backupD) return coordinate;
+  }
+  return undefined;
 }
 
 /**
- * Restore a backup into the keystore, merging with any existing local record so
- * a fresher local ECK set (e.g. after a revocation rotation) is never clobbered
- * by an older backup — union the ECK versions, keep local secrets when present.
+ * Restore a backup into the keystore, merging with any existing local record the
+ * same way a backup write does (`mergeEventKeysBackups`, audit SB-89): ECK
+ * versions unioned by (id, key) so the other key of a same-id collision is added
+ * (NIP §4.1, SB-86), staged versions kept staged, the higher install generation,
+ * and EVERY E_inbox secret kept: the local current one stays current (Admin
+ * adopts the one the newest 31600 names) and the rest, the backup's included,
+ * become prior inboxes that still read old submissions. This used to keep only
+ * the local inbox and drop the record's prior list altogether.
  */
-async function restore(coordinate: string, backup: EventKeysBackup): Promise<void> {
-  const existing = await loadEventKeys(coordinate).catch(() => undefined);
-  const byId = new Map<number, { id: number; key: string }>();
-  for (const v of existing?.eck ?? []) byId.set(v.id, v);
-  for (const v of backup.eck) if (!byId.has(v.id)) byId.set(v.id, v);
+async function restore(coordinate: string, backup: EventKeysBackup, owner: string): Promise<void> {
+  const existing = await loadEventKeys(coordinate, owner).catch(() => undefined);
+  const local: EventKeysBackup | undefined =
+    existing?.eidNsecHex && existing.einboxNsecHex
+      ? {
+          v: 2,
+          a: coordinate,
+          eid_nsec: existing.eidNsecHex,
+          einbox_nsec: existing.einboxNsecHex,
+          eck: existing.eck,
+          coordinator_gen: existing.coordinatorGen ?? 0,
+          ...(existing.pendingEck?.length ? { pending_eck: existing.pendingEck } : {}),
+          ...(existing.priorEinboxNsecs?.length ? { prior_einbox_nsecs: existing.priorEinboxNsecs } : {}),
+          ...(existing.coOrganizers?.length ? { co_organizers: existing.coOrganizers } : {}),
+        }
+      : undefined;
+  const merged = local
+    ? mergeEventKeysBackups(local, backup)
+    : mergeEventKeysBackups({ ...backup, eck: unionEck(existing?.eck ?? [], backup.eck) }, backup);
   await saveEventKeys({
+    ...(existing ?? {}),
     coordinate,
     role: "organizer",
-    eck: [...byId.values()].sort((a, b) => a.id - b.id),
-    eidNsecHex: existing?.eidNsecHex ?? backup.eid_nsec,
-    einboxNsecHex: existing?.einboxNsecHex ?? backup.einbox_nsec,
-    // The install generation (NIP §3.5) only grows — keep the higher of the local
-    // record and the backup so a re-attach on a fresh device still increments past
-    // the last-used gen instead of colliding at gen 1.
-    coordinatorGen: Math.max(existing?.coordinatorGen ?? 0, backup.coordinator_gen ?? 0) || undefined,
-  });
+    eck: merged.eck,
+    eidNsecHex: existing?.eidNsecHex ?? merged.eid_nsec,
+    einboxNsecHex: merged.einbox_nsec,
+    priorEinboxNsecs: merged.prior_einbox_nsecs,
+    // The install generation (NIP §3.5) only grows.
+    coordinatorGen: merged.coordinator_gen || undefined,
+    // Staged versions stay staged (DS41-002); loadRoster promotes the one in use.
+    pendingEck: merged.pending_eck,
+    coOrganizers: merged.co_organizers,
+  }, owner);
 }
 
 /**
@@ -186,7 +244,8 @@ export async function recoverEventKeys(
     // coordinate because the coordinate only exists after the decrypt, and the
     // decrypt is the thing the budget below is rationing: this way a truncated pass
     // has spent its allowance on the newest backups rather than an arbitrary set.
-    const ordered = [...events].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+    const ordered = [...events].sort(compareLatest); // §3.1 order, ties by lowest id
+
     for (const e of ordered) {
       const d = e.tags.find((t) => t[0] === "d")?.[1];
       if (!d || !d.startsWith(EVENTKEYS_PREFIX)) continue;
@@ -218,9 +277,18 @@ export async function recoverEventKeys(
       }
       outcome.succeeded++;
       decrypted++;
-      const coordinate = await resolveCoordinate(backup);
+      const coordinate = await resolveCoordinate(backup, d, signer);
       if (!coordinate) continue;
-      await restore(coordinate, backup);
+      // The session moved on while we awaited the signer/relays (audit DS41-001):
+      // a logout, or a switch to another account. This backup is `pubkey`'s
+      // custody, and the write used to resolve its owner NOW — filing A's E_id
+      // and E_inbox nsecs under B. Stop instead; nothing below is memoized, so
+      // the next session of this identity re-reads it.
+      if (activeKeystoreOwner() !== pubkey) {
+        outcome.truncated = true;
+        break;
+      }
+      await restore(coordinate, backup, pubkey);
       // Definitive: decrypted, resolved, and written to the keystore. Only now —
       // a backup whose coordinate could not be resolved stays un-memoized, since
       // that depends on a 31600 read that may simply have failed this time.

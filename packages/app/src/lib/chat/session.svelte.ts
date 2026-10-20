@@ -296,11 +296,23 @@ class ChatSessionStore {
     this.chat = chat;
     this.chatPubkey = chat.identity.pubkey;
     this.recomputeReadOnly();
+    // Coalesced per microtask (audit DS41-054). Opening a room replays its whole
+    // history synchronously through onMessage, and each message used to cost a
+    // full copy + sort of the list AND a structured clone of it to every follower
+    // tab: quadratic in the room's size, on the screen attendees use most. One
+    // burst is now one merge and one broadcast; a lone live message is unchanged.
+    let pending: ChatMessage[] = [];
     chat.onMessage = (m) => {
       if (tok !== this.token) return;
-      this.ingest(m);
-      // Mirror the fresh list to follower tabs.
-      coordinator.broadcastState(ctx.coordinate, this.messages);
+      pending.push(m);
+      if (pending.length > 1) return; // a flush is already scheduled
+      queueMicrotask(() => {
+        const batch = pending;
+        pending = [];
+        if (tok !== this.token) return;
+        // Mirror the fresh list to follower tabs.
+        if (this.ingest(batch)) coordinator.broadcastState(ctx.coordinate, this.messages);
+      });
     };
     chat.onStateChange = () => {
       if (tok !== this.token) return;
@@ -349,10 +361,20 @@ class ChatSessionStore {
     coordinator.broadcastMembers(coordinate, devices);
   }
 
-  /** De-dupe by inner rumor id, keep chronological order (Bug 4 echo-safe). */
-  private ingest(m: ChatMessage): void {
-    if (this.messages.some((x) => x.id === m.id)) return;
-    this.messages = [...this.messages, m].sort((a, b) => a.createdAt - b.createdAt);
+  /** De-dupe by inner rumor id, keep chronological order (Bug 4 echo-safe).
+   *  Returns whether anything new was added. The sort is stable, so messages with
+   *  the same `createdAt` keep their arrival order, as when they came one by one. */
+  private ingest(batch: ChatMessage[]): boolean {
+    const ids = new Set(this.messages.map((x) => x.id));
+    const fresh: ChatMessage[] = [];
+    for (const m of batch) {
+      if (ids.has(m.id)) continue;
+      ids.add(m.id);
+      fresh.push(m);
+    }
+    if (fresh.length === 0) return false;
+    this.messages = [...this.messages, ...fresh].sort((a, b) => a.createdAt - b.createdAt);
+    return true;
   }
 
   /** A follower is read-only unless the Web Locks leader is serving THIS event. */
@@ -437,8 +459,20 @@ class ChatSessionStore {
    *  problem Rejoin exists for), as opposed to a transport failure. */
   private async demoteIfUnroutable(): Promise<boolean> {
     const gid = await this.chat?.nostrGroupId().catch(() => undefined);
-    if (gid) return false;
-    if (this.phase === "ready") this.phase = "setup";
+    if (!gid) {
+      if (this.phase === "ready") this.phase = "setup";
+      return true;
+    }
+    // Holding a group is not being in it (audit DS41-052): a removed member keeps
+    // the group state, so `gid` resolves while every send fails. Ask about the
+    // LEAF, as syncPhase does — and, like it, leave an unreadable member list
+    // (undefined) alone rather than demote a room we could not inspect.
+    const members = await Promise.resolve()
+      .then(() => this.chat?.groupMemberPubkeys())
+      .catch(() => undefined);
+    const me = this.chat?.identity.pubkey;
+    if (!members || !me || members.includes(me)) return false;
+    if (this.phase === "ready") this.phase = "evicted";
     return true;
   }
 

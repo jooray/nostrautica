@@ -22,18 +22,29 @@
  * - Theme-aware screenshots: an image reference ending in `-light.png` with an
  *   existing `-dark.png` sibling renders BOTH, and CSS shows the one matching
  *   the active theme.
- * - Internal `*.md` links become `*.html`; everything is relative so the site
- *   works from any base path (deployed under /docs/, same origin as /app).
+ * - Internal `*.md` links become `*.html`, and every link the generator writes
+ *   is relative. The site is deployed under /docs/ beside /app, and the "Open
+ *   the app" links assume exactly that (`../app/`); other bases need that link
+ *   changed (audit SB-116).
+ * - A link that leaves docs/ (`../packages/…`) points at a repo file that is not
+ *   deployed, so it is rewritten to the file on GitHub, and the link checker
+ *   fails on any other relative target the built site does not contain (audit
+ *   SB-106, SB-111). External links are not fetched.
+ * - Each page declares its language from the filename (`-sk.md` → `sk`) and
+ *   links its translations with hreflang (audit SB-105).
+ * - The output directory's previously built pages and images are removed first,
+ *   so a deleted or renamed doc stops being published (audit SB-110).
  *
  * Usage: node scripts/build-docs.mjs [outDir]   (default docs-site-build)
  * `outDir` may be relative (resolved against the repo root) or absolute
  * (used as-is, audit O7).
  */
 import { marked } from "marked";
-import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, cpSync, existsSync, readdirSync, rmSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { join, dirname, resolve, isAbsolute } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { runInNewContext } from "node:vm";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const DOCS = join(ROOT, "docs");
@@ -130,6 +141,12 @@ header.site a.brand { color:var(--text); text-decoration:none; font-weight:700; 
 header.site a.brand span { color:var(--accent) }
 button.theme { background:var(--bg-elev2); color:var(--text); border:1px solid var(--border);
   border-radius:999px; width:2.2rem; height:2.2rem; cursor:pointer; font-size:1rem; }
+header.site nav { display:flex; align-items:center; gap:0.85rem; font-size:0.9rem; }
+header.site .langs { display:flex; gap:0.4rem; }
+header.site .langs a[aria-current] { color:var(--text); font-weight:600; }
+a.skip { position:absolute; left:-9999px; top:0; z-index:10; background:var(--bg-elev);
+  padding:0.5rem 0.9rem; border:1px solid var(--border); border-radius:8px; }
+a.skip:focus { left:0.75rem; top:0.75rem; }
 h1 { font-size:2rem; letter-spacing:-0.03em; line-height:1.15; margin:2rem 0 1rem; text-wrap:balance }
 h2 { font-size:1.35rem; letter-spacing:-0.02em; margin-top:2.25rem; text-wrap:balance }
 h3 { font-size:1.1rem; margin-top:1.75rem }
@@ -159,37 +176,129 @@ img { max-width:100%; border-radius:12px }
 footer { margin-top:3rem; color:var(--text-dim); font-size:0.85rem; border-top:1px solid var(--border); padding-top:1rem }
 `;
 
-const THEME_JS = /* js */ `
+/**
+ * Theme bootstrap. Every storage access is guarded: with cookies blocked (Safari
+ * private mode and friends) `localStorage` throws, which used to abort the whole
+ * script before the toggle was wired, leaving a dead button stuck on dark
+ * (audit SB-107). The key is the landing page's, so a choice made on one of the
+ * two static sites carries to the other; the old docs-only key is still read
+ * once (audit SB-119). The app keeps its own key on purpose: its preference has
+ * a third value ("system") and is mirrored into the account's settings.
+ */
+const THEME_KEY = "nostrautica-theme";
+export const THEME_JS = /* js */ `
 (function () {
-  var saved = localStorage.getItem("nostrautica-docs:theme");
-  var theme = saved || (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+  function get(k) { try { return localStorage.getItem(k); } catch (e) { return null; } }
+  var saved = get("${THEME_KEY}") || get("nostrautica-docs:theme");
+  var theme = saved === "light" || saved === "dark" ? saved
+    : (window.matchMedia && matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
   document.documentElement.setAttribute("data-theme", theme);
-  window.__toggleTheme = function () {
+  function toggle() {
     theme = theme === "dark" ? "light" : "dark";
     document.documentElement.setAttribute("data-theme", theme);
-    localStorage.setItem("nostrautica-docs:theme", theme);
-  };
+    try { localStorage.setItem("${THEME_KEY}", theme); } catch (e) { /* session only */ }
+  }
+  document.addEventListener("DOMContentLoaded", function () {
+    var b = document.getElementById("theme-toggle");
+    if (b) b.addEventListener("click", toggle);
+  });
 })();
 `;
+/** CSP hash of the one inline script, so the policy needs no 'unsafe-inline' for scripts. */
+const THEME_JS_HASH = `sha256-${createHash("sha256").update(THEME_JS).digest("base64")}`;
 
-function page(title, body, { home = false } = {}) {
+/**
+ * The docs render `marked` output, which passes raw HTML through. A CSP keeps a
+ * stray <script> or remote embed in a markdown file from running or loading
+ * (audit SB-114): the only script allowed is the theme bootstrap, by hash.
+ */
+export const DOCS_CSP = [
+  "default-src 'self'",
+  `script-src '${THEME_JS_HASH}'`,
+  "style-src 'self' 'unsafe-inline'",
+  "img-src 'self' data:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
+// Same mark as the landing page's favicon.
+const FAVICON =
+  "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath fill='%236d28d9' d='M50 2c4 38 8 42 46 48-38 6-42 10-46 48-4-38-8-42-46-48 38-6 42-10 46-48Z'/%3E%3C/svg%3E";
+
+const LANG_NAMES = { en: "English", sk: "Slovensky", cs: "Česky", de: "Deutsch", es: "Español" };
+
+/** `ORGANIZER-GUIDE-sk.md` → "sk"; anything without a language suffix is English. */
+export function langOf(file) {
+  return /-(sk|cs|de|es)\.md$/.exec(file)?.[1] ?? "en";
+}
+
+/**
+ * The translations of `file` that exist in `files`, as [lang, html filename]
+ * pairs (including `file` itself). Empty when the doc has no translation.
+ */
+export function alternatesOf(file, files) {
+  const base = file.replace(/-(sk|cs|de|es)\.md$/, ".md").replace(/-en\.md$/, ".md");
+  const stem = base.replace(/\.md$/, "");
+  const out = [];
+  for (const lang of Object.keys(LANG_NAMES)) {
+    const candidates = lang === "en" ? [`${stem}.md`, `${stem}-en.md`] : [`${stem}-${lang}.md`];
+    const hit = candidates.find((c) => files.includes(c));
+    if (hit) out.push([lang, hit.replace(/\.md$/, ".html")]);
+  }
+  return out.length > 1 ? out : [];
+}
+
+const escapeAttr = (s) => s.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+
+/** First paragraph of the rendered body as plain text, for <meta name="description">. */
+export function summaryOf(html) {
+  const p = /<p>([\s\S]*?)<\/p>/.exec(html)?.[1] ?? "";
+  const text = p
+    .replace(/<[^>]+>/g, "")
+    .replace(/&[a-z#0-9]+;/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return text.length > 160 ? `${text.slice(0, 157).replace(/\s+\S*$/, "")}…` : text;
+}
+
+function page(title, body, { home = false, lang = "en", description = "", alternates = [] } = {}) {
+  const altLinks = alternates
+    .map(([l, href]) => `<link rel="alternate" hreflang="${l}" href="${href}" />`)
+    .concat(alternates.length ? [`<link rel="alternate" hreflang="x-default" href="${alternates[0][1]}" />`] : [])
+    .join("\n");
+  const langNav = alternates
+    .map(([l, href]) =>
+      l === lang
+        ? `<a aria-current="page" lang="${l}" hreflang="${l}" href="${href}">${l.toUpperCase()}</a>`
+        : `<a lang="${l}" hreflang="${l}" href="${href}" title="${LANG_NAMES[l]}">${l.toUpperCase()}</a>`,
+    )
+    .join(" ");
   return `<!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="${lang}" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="${DOCS_CSP}" />
 <title>${title} · Nostrautica Docs</title>
+${description ? `<meta name="description" content="${escapeAttr(description)}" />\n` : ""}<link rel="icon" href="${FAVICON}" />
+${altLinks}
 <style>${CSS}</style>
 <script>${THEME_JS}</script>
 </head>
 <body>
+<a class="skip" href="#content">Skip to content</a>
 <header class="site"><div class="wrap">
-  <a class="brand" href="${home ? "#" : "index.html"}"><span>✦</span> Nostrautica docs</a>
-  <button class="theme" title="Toggle dark/light" onclick="__toggleTheme()">◐</button>
+  <a class="brand" href="${home ? "#" : "index.html"}"><span aria-hidden="true">✦</span> Nostrautica docs</a>
+  <nav aria-label="Documentation">
+    ${home ? "" : `<a href="index.html">All docs</a>`}
+    ${langNav ? `<span class="langs" aria-label="Language">${langNav}</span>` : ""}
+    <button type="button" class="theme" id="theme-toggle" aria-label="Toggle dark or light theme" title="Toggle dark/light"><span aria-hidden="true">◐</span></button>
+  </nav>
 </div></header>
-<main class="wrap">
+<main class="wrap" id="content">
 ${body}
-<footer>Nostrautica: Nostr-native event matchmaking. <a href="/app">Open the app</a> · <a href="index.html">Docs index</a></footer>
+<footer>Nostrautica: Nostr-native event matchmaking. <a href="../app/">Open the app</a> · <a href="index.html">Docs index</a></footer>
 </main>
 </body>
 </html>`;
@@ -245,11 +354,27 @@ function themeAwareImages(html) {
   });
 }
 
+/** Where a repo file outside docs/ can be read, since the site doesn't deploy it. */
+export const REPO_BLOB = "https://github.com/jooray/nostrautica/blob/main/";
+
+/**
+ * Rewrite links that climb out of docs/ (`../packages/…`) to the file on
+ * GitHub. On GitHub the relative link works; on the deployed site it was a 404
+ * in all five organizer guides (audit SB-106). Only files that exist in the repo
+ * are rewritten, so a typo stays relative and the link checker catches it.
+ */
+export function rewriteRepoLinks(html, root) {
+  return html.replace(/href="\.\.\/([^"#]+)(#[^"]*)?"/g, (m, path, hash = "") =>
+    existsSync(join(root, path)) ? `href="${REPO_BLOB}${path}${hash}"` : m,
+  );
+}
+
 function render(mdFile) {
   let md = readFileSync(join(DOCS, mdFile), "utf8");
   md = md.replace(/<!--[\s\S]*?-->/g, ""); // strip build/TODO comments
   let html = mdToHtml(md);
   html = html.replace(/href="(?:\.\/)?([A-Za-z0-9_-]+)\.md(#[^"]*)?"/g, 'href="$1.html$2"');
+  html = rewriteRepoLinks(html, ROOT);
   html = themeAwareImages(html);
   return html;
 }
@@ -263,7 +388,10 @@ function render(mdFile) {
  *               deliberately-unpublished `archive/`/`internal/` areas (or any
  *               source doc that isn't published). Reported, not fatal.
  */
-export function checkInternalLinks(pages) {
+/** Relative links to what is deployed next to the docs (see the header comment). */
+const SIBLING_ROUTES = ["../app/"];
+
+export function checkInternalLinks(pages, { exists } = {}) {
   const idsByPage = new Map();
   for (const [name, html] of pages) {
     const set = new Set();
@@ -275,9 +403,10 @@ export function checkInternalLinks(pages) {
   for (const [name, html] of pages) {
     for (const m of html.matchAll(/href="([^"#][^"]*)"|href="(#[^"]*)"/g)) {
       const href = m[1] ?? m[2];
-      if (/^(https?:|mailto:|tel:|\/\/)/i.test(href)) continue; // external
+      if (/^([a-z][a-z0-9+.-]*:|\/\/)/i.test(href)) continue; // external, data:, mailto: …
       if (href.startsWith("/")) continue; // site-absolute (e.g. /app)
       if (href === "#") continue;
+      if (SIBLING_ROUTES.includes(href)) continue; // deployed beside /docs/, not in it
       const hashAt = href.indexOf("#");
       const path = hashAt === -1 ? href : href.slice(0, hashAt);
       const anchor = hashAt === -1 ? "" : href.slice(hashAt + 1);
@@ -299,15 +428,36 @@ export function checkInternalLinks(pages) {
         }
         if (anchor && !idsByPage.get(path).has(anchor))
           errors.push(`${name}: link "${href}" → anchor "#${anchor}" missing in ${path}`);
+        continue;
       }
-      // other relative targets (e.g. images/) are not link-checked here
+      // Any other relative target (images/…, a stray ../ path) must be a file in
+      // the built site. This used to be skipped, so a ../packages/….toml link
+      // 404'd in production behind a green "link check passed" (SB-106/SB-111).
+      if (exists && !exists(decodeURI(path)))
+        errors.push(`${name}: link "${href}" points at a file the site does not contain`);
     }
   }
   return { errors, warnings };
 }
 
 /** Build the whole docs site into `outDir`. Exits non-zero on broken links. */
+/**
+ * Remove what a previous build wrote: top-level pages and the images copy.
+ * Without this a deleted or renamed doc kept its old page, the deploy rsynced
+ * it, and the link checker never saw it because it only checks this run's
+ * pages (audit SB-110). Deliberately narrow (not an rm -rf of outDir), since
+ * outDir may be any absolute path the caller passes.
+ */
+export function cleanOutDir(outDir) {
+  if (!existsSync(outDir)) return;
+  for (const e of readdirSync(outDir, { withFileTypes: true })) {
+    if (e.isFile() && e.name.endsWith(".html")) rmSync(join(outDir, e.name));
+  }
+  rmSync(join(outDir, "images"), { recursive: true, force: true });
+}
+
 export function build(outDir) {
+  cleanOutDir(outDir);
   mkdirSync(outDir, { recursive: true });
   if (existsSync(join(DOCS, "images"))) cpSync(join(DOCS, "images"), join(outDir, "images"), { recursive: true });
 
@@ -328,7 +478,12 @@ export function build(outDir) {
   for (const file of topLevelDocs) {
     const out = file.replace(/\.md$/, ".html");
     const title = titleByFile.get(file) ?? file.replace(/\.md$/, "");
-    const html = page(title, render(file));
+    const body = render(file);
+    const html = page(title, body, {
+      lang: langOf(file),
+      description: summaryOf(body),
+      alternates: alternatesOf(file, topLevelDocs),
+    });
     writeFileSync(join(outDir, out), html);
     pages.set(out, html);
   }
@@ -340,14 +495,15 @@ export function build(outDir) {
   for (const r of reports) {
     const out = `testing-${r.replace(/\.md$/, ".html")}`;
     const md = readFileSync(join(DOCS, "testing", r), "utf8").replace(/<!--[\s\S]*?-->/g, "");
-    const html = page(r.replace(/\.md$/, ""), mdToHtml(md));
+    const body = mdToHtml(md);
+    const html = page(r.replace(/\.md$/, ""), body, { description: summaryOf(body) });
     writeFileSync(join(outDir, out), html);
     pages.set(out, html);
   }
 
   const indexBody = [
     `<h1>Nostrautica documentation</h1>`,
-    `<p class="section-blurb">Meet the right people at events: intro videos, AI matchmaking, and a portable identity you keep. <a href="/app">Open the app →</a></p>`,
+    `<p class="section-blurb">Meet the right people at events: intro videos, AI matchmaking, and a portable identity you keep. <a href="../app/">Open the app →</a></p>`,
     ...SECTIONS.map((s) => {
       const cards = s.docs
         .filter((d) => existsSync(join(DOCS, d.file)))
@@ -368,11 +524,16 @@ export function build(outDir) {
       return `<h2>${s.title}</h2>${s.blurb ? `<p class="section-blurb">${s.blurb}</p>` : ""}\n${cards}\n${reportCards}`;
     }),
   ].join("\n");
-  const indexHtml = page("Documentation", indexBody, { home: true });
+  const indexHtml = page("Documentation", indexBody, {
+    home: true,
+    description: "Nostrautica documentation: guides for organizers and attendees in five languages, plus the protocol, threat model and operations docs.",
+  });
   writeFileSync(join(outDir, "index.html"), indexHtml);
   pages.set("index.html", indexHtml);
 
-  const { errors, warnings } = checkInternalLinks(pages);
+  const { errors, warnings } = checkInternalLinks(pages, {
+    exists: (p) => existsSync(join(outDir, p)),
+  });
   for (const w of warnings) console.warn(`[docs] warning: ${w}`);
   if (errors.length) {
     console.error(`[docs] link check FAILED: ${errors.length} broken internal link(s):`);
@@ -398,6 +559,22 @@ export function build(outDir) {
     throw new Error(`landing page references ${staleVersions.length} asset(s) with a stale ?v= stamp`);
   }
 
+  const copyDrift = checkLandingCopy(ROOT);
+  if (copyDrift.length) {
+    console.error(`[docs] landing copy check FAILED: ${copyDrift.length} static string(s) differ from i18n.js:`);
+    for (const m of copyDrift) console.error(`  ✗ ${m}`);
+    process.exitCode = 1;
+    throw new Error(`landing page static text differs from the English dictionary in ${copyDrift.length} place(s)`);
+  }
+
+  const cspProblems = checkLandingCsp(ROOT);
+  if (cspProblems.length) {
+    console.error(`[docs] landing CSP check FAILED:`);
+    for (const m of cspProblems) console.error(`  ✗ ${m}`);
+    process.exitCode = 1;
+    throw new Error(`landing page CSP does not allow its inline script(s)`);
+  }
+
   const missingImages = checkGuideImages(ROOT);
   if (missingImages.length) {
     console.error(`[docs] guide image check FAILED: ${missingImages.length} missing file(s):`);
@@ -409,7 +586,7 @@ export function build(outDir) {
   console.log(
     `[docs] built ${pages.size} pages → ${outDir}` +
       (warnings.length ? ` (${warnings.length} link warning(s))` : "") +
-      `; link check passed; landing assets OK; asset stamps OK; guide images OK`,
+      `; internal link check passed (external links are not fetched); landing assets OK; asset stamps OK; landing copy + CSP OK; guide images OK`,
   );
   return { pages, errors, warnings };
 }
@@ -500,6 +677,63 @@ export function checkGuideImages(root) {
     }
   }
   return [...missing].sort();
+}
+
+/**
+ * The landing page's static English text must match the English dictionary.
+ *
+ * `applyLang` overwrites every data-i18n element from web/assets/i18n.js on
+ * load, so a stale static string is invisible in a browser with JS, but it is
+ * what crawlers, no-JS readers and the first paint see. Four had drifted, one
+ * of them a different product claim altogether (audit SB-109).
+ */
+export function checkLandingCopy(root) {
+  const landing = join(root, "web", "index.html");
+  const dictFile = join(root, "web", "assets", "i18n.js");
+  if (!existsSync(landing) || !existsSync(dictFile)) return [];
+  const ctx = { window: {} };
+  runInNewContext(readFileSync(dictFile, "utf8"), ctx);
+  const en = ctx.window.NOSTRAUTICA_I18N?.en ?? {};
+  const html = readFileSync(landing, "utf8");
+  const decode = (s) =>
+    s
+      .replace(/&nbsp;/g, " ")
+      .replace(/&lt;/g, "<")
+      .replace(/&gt;/g, ">")
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;|&apos;/g, "'")
+      .replace(/&amp;/g, "&");
+  const norm = (s) => s.replace(/\s+/g, " ").trim();
+  const drift = [];
+  const re = /<([a-z0-9]+)\b[^>]*?\sdata-i18n(-html)?="([^"]+)"[^>]*>([\s\S]*?)<\/\1>/g;
+  for (const [, , isHtml, key, inner] of html.matchAll(re)) {
+    if (!(key in en)) {
+      drift.push(`data-i18n="${key}" has no English dictionary entry`);
+      continue;
+    }
+    const shown = isHtml ? norm(inner) : norm(decode(inner));
+    if (shown !== norm(en[key])) drift.push(`${key}: index.html says "${shown}" but i18n.js says "${norm(en[key])}"`);
+  }
+  return drift;
+}
+
+/**
+ * Every inline <script> on the landing page must be allowed by a hash in its
+ * CSP meta, or the browser silently refuses to run it (the theme bootstrap
+ * would stop applying before paint). Returns the problems, with the hash to use.
+ */
+export function checkLandingCsp(root) {
+  const landing = join(root, "web", "index.html");
+  if (!existsSync(landing)) return [];
+  const html = readFileSync(landing, "utf8");
+  const csp = /<meta http-equiv="Content-Security-Policy" content="([^"]+)"/.exec(html)?.[1];
+  if (!csp) return ["web/index.html has no Content-Security-Policy meta"];
+  const problems = [];
+  for (const [, body] of html.matchAll(/<script>([\s\S]*?)<\/script>/g)) {
+    const hash = `sha256-${createHash("sha256").update(body).digest("base64")}`;
+    if (!csp.includes(`'${hash}'`)) problems.push(`inline script not allowed by the CSP; its hash is '${hash}'`);
+  }
+  return problems;
 }
 
 export function checkLandingAssets(root) {

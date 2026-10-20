@@ -1,6 +1,7 @@
 package today.cypherpunk.nostrautica.domain.content
 
 import kotlinx.serialization.Serializable
+import today.cypherpunk.nostrautica.protocol.EckIdentity
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.Kinds
 import today.cypherpunk.nostrautica.protocol.Nip44
@@ -36,12 +37,12 @@ object TalkLogic {
         val trusted = events.filter { it.kind == Kinds.TALK && it.pubkey in authors && it.d != null }
         val live = PostLogic.applyDeletions(trusted, deletions.filter { it.pubkey in authors })
         val latestByD = live.groupBy { it.d!! }.mapNotNull { (_, v) -> Ordering.pickLatest(v) }
-        val newestKey = eck.maxByOrNull { it.id }
+        val newestKey = EckIdentity.canonical(eck)
         var newer = false
         var newestAt = 0L
         val best = LinkedHashMap<String, Pair<TalkItem, NostrEvent>>()
         for (e in latestByD) {
-            val key = e.tag("eck")?.toIntOrNull()?.let { id -> eck.firstOrNull { it.id == id } } ?: newestKey ?: continue
+            val key = EckIdentity.readTag(e.tags)?.let { EckIdentity.candidates(eck, it).firstOrNull() } ?: newestKey ?: continue
             val bytes = key.bytes()
             val talk = when (val r = runCatching { Wire.parseSafe(TalkContent.serializer(), Nip44.eckDecrypt(bytes, e.content)) }.getOrNull()) {
                 is Wire.Result.Ok -> r.value

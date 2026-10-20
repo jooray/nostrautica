@@ -69,6 +69,12 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     var report by mutableStateOf(Invites.Report())
     var reportBusy by mutableStateOf(false)
     var posts by mutableStateOf<List<Organizer.Post>>(emptyList())
+    /** SB-90/SB-86: the custody check's result; SB-91: its config decides the routing. */
+    var keyStatus by mutableStateOf<Organizer.KeyStatus?>(null)
+    var repairing by mutableStateOf(false)
+    var repaired by mutableStateOf(false)
+    /** The coordinator the NEWEST config names (SB-91), else the screen's. */
+    val coordinatorNow: String? get() = keyStatus.let { if (it != null) it.config.coordinator else cfg.coordinator }
 
     /** Requests whose `member_of` proof verified (§15.4), by attendee pubkey. Unverified claims show nothing at all. */
     data class VerifiedMember(val child: String, val title: String)
@@ -89,6 +95,7 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     val visibleTalks get() = talks.filter { "${it.pubkey}:${it.talkD}" !in moderated }
     val approvedPeople get() = AdminModel.buildApprovedPeople(roster, approvedSet, revokedSet, pending, directory, statuses)
     val poison get() = statuses.filter { it.state == "poison" && AdminModel.statusId(it) !in dismissed }
+    val contextNotice get() = AdminModel.contextNotice(statuses, dismissed)
     val billing get() = statuses.filter { it.billing != null && it.billing!!.state != "ok" }.maxByOrNull { it.at }?.billing
 
     fun overview() = AdminModel.buildOverview(AdminModel.OverviewInput(
@@ -140,6 +147,7 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     suspend fun refresh() = refreshLock.withLock {
         val k = keys ?: return@withLock
         refreshing = true
+        scope.launch { refreshKeyStatus() }
         try {
             val (fresh, mem) = kotlinx.coroutines.coroutineScope {
                 val inbox = async { org.readInbox(ctx, k) }
@@ -163,6 +171,17 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
         }
     }
 
+    /** organizer.ts checkOrganizerKeys, once per open with [reconcile], then on every refresh. */
+    suspend fun refreshKeyStatus(reconcile: Boolean = false) {
+        runCatching { org.checkKeys(ctx, reconcile) }.getOrNull()?.let { keyStatus = it; keys = org.keysFor(coordinate) ?: keys }
+    }
+
+    fun repairKeys() = scope.launch {
+        if (repairing) return@launch
+        repairing = true
+        try { org.repairKeys(ctx); repaired = true; refreshKeyStatus() } catch (e: Exception) { error = msg(e) } finally { repairing = false }
+    }
+
     suspend fun refreshLiveness() {
         if (cfg.coordinator == null) return
         livenessChecked = false
@@ -181,11 +200,20 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
 
     fun setReview(pk: String, state: String?) = scope.launch { review = org.setReview(coordinate, review, pk, state) }
 
-    private suspend fun approveOne(pk: String) {
-        if (cfg.coordinator != null) org.sendAdminCommand(ctx, "approve", mapOf("pubkey" to pk))
-        else {
-            val req = pending.firstOrNull { it.attendeePubkey == pk } ?: throw IllegalStateException(strings().t("admin.reprocess.noIntake"))
-            org.approve(ctx, req)
+    private suspend fun approveOne(pk: String, retried: Boolean = false) {
+        val coord = coordinatorNow
+        try {
+            if (coord != null) org.sendAdminCommandTo(ctx, coord, "approve", mapOf("pubkey" to pk))
+            else {
+                val req = pending.firstOrNull { it.attendeePubkey == pk } ?: throw IllegalStateException(strings().t("admin.reprocess.noIntake"))
+                org.approve(ctx, req)
+            }
+        } catch (e: Organizer.CoordinatorAttached) {
+            // Attached from another device since the last check (SB-91): route through it.
+            if (retried) throw e
+            refreshKeyStatus()
+            if (coordinatorNow == null) throw e
+            return approveOne(pk, true)
         }
         approvedSet = approvedSet + pk
     }
@@ -227,8 +255,16 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     fun retryBulk(pk: String) = scope.launch { runBulk(pk) }
 
     fun revoke(pk: String) = scope.launch {
+        suspend fun once() {
+            val coord = coordinatorNow
+            if (coord != null) org.sendAdminCommandTo(ctx, coord, "revoke", mapOf("pubkey" to pk)) else org.revokeClient(ctx, pk)
+        }
         runCatching {
-            if (cfg.coordinator != null) org.sendAdminCommand(ctx, "revoke", mapOf("pubkey" to pk)) else org.revokeClient(ctx, pk)
+            try { once() } catch (e: Organizer.CoordinatorAttached) {
+                refreshKeyStatus() // attached elsewhere (SB-91): the removal is the coordinator's
+                if (coordinatorNow == null) throw e
+                once()
+            }
             revokedSet = revokedSet + pk
             approvedSet = approvedSet - pk
         }.onFailure { error = msg(it) }
@@ -265,6 +301,20 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     fun recompute() = scope.launch {
         recomputing = true
         runCatching { org.sendAdminCommand(ctx, "recompute") }.onFailure { error = msg(it) }
+        recomputing = false
+    }
+
+    fun dismissContextNotice(s: CoordinatorStatusContent) {
+        dismissed = dismissed + AdminModel.contextNoticeId(s)
+        scope.launch { org.saveDismissed(coordinate, dismissed) }
+    }
+
+    /** Recompute in answer to the event-context advisory (DS41-041), then retire it. */
+    fun recomputeForContext(s: CoordinatorStatusContent) = scope.launch {
+        recomputing = true
+        runCatching { org.sendAdminCommand(ctx, "recompute") }
+            .onSuccess { dismissContextNotice(s) }
+            .onFailure { error = msg(it) }
         recomputing = false
     }
 

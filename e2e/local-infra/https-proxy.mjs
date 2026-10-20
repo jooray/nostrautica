@@ -7,10 +7,12 @@ import fs from "node:fs";
 
 const TARGET_PORT = process.env.PROXY_TARGET_PORT || 3000;
 const LISTEN_PORT = process.env.PROXY_LISTEN_PORT || 8443;
+// Same cert as the wss relay proxy; the orchestrator passes its TLS_DIR.
+const TLS_DIR = process.env.TLS_DIR ?? "/tmp/nostrautica-tls";
 
 const options = {
-  key: fs.readFileSync("/tmp/nostrautica-tls/key.pem"),
-  cert: fs.readFileSync("/tmp/nostrautica-tls/cert.pem"),
+  key: fs.readFileSync(`${TLS_DIR}/key.pem`),
+  cert: fs.readFileSync(`${TLS_DIR}/cert.pem`),
 };
 
 const server = https.createServer(options, (req, res) => {

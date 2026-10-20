@@ -54,11 +54,14 @@ STOP_TIMEOUT=45   # > the 30s drain, so a normally-draining daemon is given time
 # The old 45s was measured when fewer events were installed. The 2026-09-04 deploy
 # came in at 44s against a 45s limit. That is not a margin, it is a coin flip.
 #
-# What costs the time is per-event startup — install, invite-list refresh, chat
-# roster scan, E_inbox backfill — roughly 9-12s per installed event, serialized.
-# (This comment used to blame the coordinator-inbox backfill growing with wrap
-# history; a 2026-09-10 restart measured 52s with the wrap count DOWN to 45, so
-# that was wrong. See docs/DEPLOYMENT.md "Startup time" for the phase breakdown.)
+# Per-event startup used to cost 9-12s per installed event, serialized: the chat
+# roster scan read key packages one member at a time, and events restored one
+# after another. Both are fixed (one batched read per roster, RESTORE_CONCURRENCY
+# events at once): a sub-second per event now. What is left is mostly the
+# coordinator-inbox backfill (~5s at 45 wraps) and the kind 31611 announce
+# publish (up to ~4.4s when no relay acks). The daemon prints its own `[boot]`
+# phase breakdown just before the readiness line; docs/DEPLOYMENT.md "Startup
+# time" says how to read it.
 #
 # So: a hard fail far above anything normal, plus a SOFT threshold that warns
 # without failing. The warning is the part that matters — a bigger limit alone
@@ -78,10 +81,11 @@ fail() { echo "!!! $* — coordinator is NOT running $(date -Is)"; exit 1; }
 warn_if_slow() {
   [ "$1" -ge "$READY_WARN" ] || return 0
   echo "!!! WARNING: startup took ${1}s (soft threshold ${READY_WARN}s, hard limit ${READY_TIMEOUT}s)."
-  echo "!!! Boot cost is dominated by per-event startup (install + invite refresh +"
-  echo "!!! chat roster scan + E_inbox backfill), roughly 9-12s per installed event,"
-  echo "!!! serialized — it does not come back down on its own. Look into it before it"
-  echo "!!! reaches the hard limit; see \"Startup time\" in docs/DEPLOYMENT.md."
+  echo "!!! Read the daemon's own [boot] phase lines just before its readiness line:"
+  echo "!!!   grep -a '\[boot\]' $LOG | tail -20"
+  echo "!!! The usual suspects are the coordinator-inbox backfill and the 31611 announce"
+  echo "!!! publish, or a per-event phase if many more events are installed. Look into it"
+  echo "!!! before it reaches the hard limit; see \"Startup time\" in docs/DEPLOYMENT.md."
 }
 
 # --- Preferred path: systemd owns the lifecycle ---------------------------------
@@ -100,6 +104,26 @@ warn_if_slow() {
 # evidence that did not exist for the original outage.
 UNIT="nostrautica-coordinator"
 if systemctl --user cat "$UNIT" >/dev/null 2>&1; then
+  # A daemon this unit did not start (a leftover legacy setsid instance, or one
+  # started by hand) holds the single-daemon SQLite lock. Restarting the unit then
+  # starts a process that exits at once on that lock, Restart=always retries until
+  # StartLimitBurst marks the unit failed, and the OLD build keeps serving while
+  # this deploy fails its readiness wait (audit DS41-033). Refuse up front, with
+  # the instruction, rather than restart into a known conflict. Deliberately no
+  # automatic kill: an unexplained second daemon is for a human to look at.
+  # Membership is read from /proc/<pid>/cgroup, which names the unit's cgroup.
+  foreign=""
+  for pid in $(running_pids); do
+    [ -r "/proc/$pid/cgroup" ] || continue
+    grep -q "/$UNIT.service" "/proc/$pid/cgroup" 2>/dev/null || foreign="$foreign $pid"
+  done
+  if [ -n "$foreign" ]; then
+    echo "!!! a coordinator NOT managed by $UNIT is running (pid(s):$foreign) and holds the database lock."
+    echo "!!! Restarting the unit now would crash-loop against it while the old build keeps serving."
+    echo "!!! Stop it (kill -TERM$foreign; wait for it to exit, up to ~45s), then re-run this script."
+    echo "!!! refusing to restart $UNIT while an unmanaged coordinator is running — the OLD build is still serving $(date -Is)"
+    exit 1
+  fi
   log_offset=0
   [ -f "$LOG" ] && log_offset="$(wc -c < "$LOG" | tr -d ' ')"
   echo "=== coordinator restarting via systemd --user ($UNIT) $(date -Is) ==="

@@ -222,6 +222,13 @@ export function splitRoster(roster: RosterContent): RosterContent[] {
  * once (first occurrence) — pages are addressed replaceables and a shrunken
  * roster leaves stale higher pages on relays that `pages` tells readers not to
  * ask for, but deduping here means even a confused read cannot double-count.
+ *
+ * The result is a LOGICAL roster, not a publishable page: it can hold more than
+ * `MAX_ROSTER_PAGE` members, so it goes back on the wire only through
+ * {@link splitRoster}. It is capped at `MAX_ROSTER` (audit SB-28): no honest
+ * writer can produce more (splitRoster refuses to), while a hostile page set of
+ * `MAX_ROSTER_PAGES` × `MAX_ROSTER_PAGE` would otherwise merge to 28 000 members.
+ * Members past the cap are dropped in page order, so page 0 always survives.
  */
 export function mergeRosterPages(pages: RosterContent[]): RosterContent {
   const page0 = pages[0];
@@ -230,6 +237,7 @@ export function mergeRosterPages(pages: RosterContent[]): RosterContent {
   const attendees: RosterContent["attendees"] = [];
   for (const page of pages) {
     for (const attendee of page.attendees) {
+      if (attendees.length >= MAX_ROSTER) break;
       if (seen.has(attendee.pubkey)) continue;
       seen.add(attendee.pubkey);
       attendees.push(attendee);

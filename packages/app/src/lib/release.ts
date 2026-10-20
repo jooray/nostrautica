@@ -10,6 +10,8 @@
  */
 export interface ReleaseManifest {
   releaseId: string;
+  /** Service-worker precache revision for index.html: releaseId + commit SHA. */
+  swRevision: string;
   gitSha: string;
   appVersion: string;
   protocolVersion: string;
@@ -23,6 +25,7 @@ declare const __RELEASE_MANIFEST__: ReleaseManifest | undefined;
 
 const FALLBACK: ReleaseManifest = {
   releaseId: "dev",
+  swRevision: "dev",
   gitSha: "unknown",
   appVersion: "0.0.0",
   protocolVersion: "0.0.0",

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseProviderAnnouncement, RoutstrLlm } from "./routstr.js";
+import { parseProviderAnnouncement, RoutstrLlm, estimateRequestTokens } from "./routstr.js";
 
 describe("Routstr provider discovery (kind 38421)", () => {
   it("extracts endpoint (u) and mint tags", () => {
@@ -63,5 +63,43 @@ describe("RoutstrLlm proof accounting on failure (COORD-5 / H-4)", () => {
     await expect(llm.completeStructured(req)).rejects.toThrow(/502/);
     expect(fail).toHaveBeenCalledTimes(1);
     vi.unstubAllGlobals();
+  });
+});
+
+/** Audit SB-06: Routstr kept the flat 120 s deadline Venice outgrew. */
+describe("RoutstrLlm completion deadline scales with max_tokens", () => {
+  it("gives a 12,000-token score batch the same 300 s Venice does", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_u: unknown, init: RequestInit) =>
+          new Promise((_r, rej) => init.signal?.addEventListener("abort", () => rej(init.signal!.reason))),
+      ),
+    );
+    const llm = new RoutstrLlm({
+      nodeUrl: "https://node/v1",
+      payment: { prepare: async () => ({}), settle: async () => {}, fail: async () => {} },
+      net: { allowInsecure: true },
+    });
+    let outcome = "pending";
+    const p = llm
+      .completeStructured({ system: "s", user: "u", schema: {}, schemaName: "n", model: "m", maxTokens: 12_000 })
+      .then(() => (outcome = "resolved"), (e: Error) => (outcome = e.message));
+    await vi.advanceTimersByTimeAsync(130_000);
+    expect(outcome).toBe("pending"); // the flat 120 s used to have fired by now
+    await vi.advanceTimersByTimeAsync(171_000);
+    await p;
+    expect(outcome).toMatch(/timeout/);
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+});
+
+/** Audit DS41-044: funding came from max_tokens alone, i.e. 1 sat for an unbudgeted call. */
+describe("estimateRequestTokens", () => {
+  it("counts the prompt as well as the output budget", () => {
+    expect(estimateRequestTokens({ system: "s".repeat(4000), user: "u".repeat(36000) })).toBe(10_000 + 4096);
+    expect(estimateRequestTokens({ system: "", user: "", maxTokens: 12_000 })).toBe(12_000);
   });
 });

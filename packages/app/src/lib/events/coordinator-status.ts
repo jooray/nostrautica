@@ -20,6 +20,8 @@ import {
   unwrapRumor,
   hexToBytes,
   coordinatorStatusContentSchema,
+  EVENT_CONTEXT_STAGE,
+  RECOMPUTE_SUGGESTED,
   type CoordinatorStatusContent,
   type Rumor,
 } from "@nostrautica/protocol";
@@ -74,6 +76,29 @@ export function dedupeLatestStatuses(
     if (!prev || s.at > prev.at) latest.set(key, s);
   }
   return [...latest.values()];
+}
+
+/**
+ * Dismissal id for the event-context advisory (DS41-041). Unlike a poison item's
+ * id it carries `at`, so dismissing one notice never hides the one a LATER edit
+ * of the title/summary/topics raises.
+ */
+export function contextNoticeId(s: CoordinatorStatusContent): string {
+  return `${s.a}${s.stage}${s.pubkey ?? ""}@${s.at}`;
+}
+
+/**
+ * The coordinator's newest "event details changed, recompute?" advisory, unless
+ * the organizer dismissed (or acted on) that very one.
+ */
+export function latestContextNotice(
+  statuses: CoordinatorStatusContent[],
+  dismissed: ReadonlySet<string>,
+): CoordinatorStatusContent | undefined {
+  const newest = statuses
+    .filter((s) => s.stage === EVENT_CONTEXT_STAGE && s.error_category === RECOMPUTE_SUGGESTED)
+    .sort((a, b) => b.at - a.at)[0];
+  return newest && !dismissed.has(contextNoticeId(newest)) ? newest : undefined;
 }
 
 /**

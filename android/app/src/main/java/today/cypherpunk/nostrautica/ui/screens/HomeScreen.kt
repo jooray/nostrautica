@@ -39,6 +39,7 @@ import today.cypherpunk.nostrautica.domain.ScanOutcome
 import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.protocol.Coordinate
 import today.cypherpunk.nostrautica.signer.Session
+import today.cypherpunk.nostrautica.signer.silently
 import today.cypherpunk.nostrautica.ui.LocalContainer
 import today.cypherpunk.nostrautica.ui.LocalRouter
 import today.cypherpunk.nostrautica.ui.components.Card
@@ -84,18 +85,29 @@ suspend fun loadHomeEvents(c: AppContainer, account: Session.Account?): List<Hom
     }.awaitAll().sortedWith(compareByDescending<HomeEvent> { it.role == Role.ORGANIZER || it.role == Role.ATTENDEE }.thenByDescending { it.ctx?.start ?: it.at })
 }
 
-/** The grants + self-copy scan, at most every [SCAN_INTERVAL_MS] unless forced. */
-suspend fun scanForEvents(c: AppContainer, account: Session.Account, force: Boolean): ScanOutcome {
+/**
+ * The grants + self-copy scan, at most every [SCAN_INTERVAL_MS] unless forced.
+ *
+ * [interactive] = the user asked (Retry, "search my whole history"). The automatic
+ * scan on opening Home is silent: a remote signer answers only what it can without
+ * UI, so it can't turn into ~150 signer prompts or a minutes-long "scanning" with a
+ * bunker (DS41-059). What it couldn't read shows up as an incomplete scan with a
+ * Retry, and the Join / waiting screens unwrap interactively where the user waits.
+ */
+suspend fun scanForEvents(c: AppContainer, account: Session.Account, force: Boolean, interactive: Boolean = true): ScanOutcome {
     val outcome = ScanOutcome()
     val key = "homescan:${account.pubkey}"
     if (!force && c.cache.isFresh(key, SCAN_INTERVAL_MS)) return outcome
-    runCatching { c.grants.receive(account.signer, force = force, outcome = outcome) }.onFailure { outcome.truncated = true }
+    runCatching { c.grants.receive(account.signer, force = force, outcome = outcome, interactive = interactive) }.onFailure { outcome.truncated = true }
     runCatching {
-        c.membership.discoverJoined(account.signer).forEach { (coord, at) ->
+        val joined = if (interactive || account.signer.isLocal) c.membership.discoverJoined(account.signer)
+            else silently { c.membership.discoverJoined(account.signer) }
+        joined.forEach { (coord, at) ->
             c.cache.put(account.pubkey, "joined:$coord", Long.serializer(), at, at)
         }
     }
-    c.cache.markFetched(key)
+    // An incomplete scan stays due, so the Retry it shows really rescans.
+    if (!outcome.truncated) c.cache.markFetched(key)
     c.membership.bump()
     return outcome
 }
@@ -131,7 +143,7 @@ fun HomeScreen() {
     LaunchedEffect(account) {
         val a = account ?: return@LaunchedEffect
         scanning = true
-        outcome = scanForEvents(c, a, force = false)
+        outcome = scanForEvents(c, a, force = false, interactive = false)
         scanning = false
     }
 

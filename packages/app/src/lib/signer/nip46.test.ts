@@ -423,6 +423,35 @@ describe("fromBunkerUri unions the pointer's relays with our own", () => {
     );
   });
 
+  it("never dials a plaintext remote relay a pasted link names (SB-08)", async () => {
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["ws://attacker.example", "wss://relay.example", "ws://localhost:7777"],
+      secret: null,
+    });
+    fromBunker.mockReturnValue(fakeBunker());
+    const signer = await Nip46Signer.fromBunkerUri(
+      `bunker://${PUBKEY}?relay=ws%3A%2F%2Fattacker.example&relay=wss%3A%2F%2Frelay.example`,
+    );
+    const transport = fromBunker.mock.calls[0][1] as { relays: string[] };
+    expect(transport.relays).not.toContain("ws://attacker.example");
+    expect(transport.relays).toContain("wss://relay.example");
+    expect(transport.relays).toContain("ws://localhost:7777"); // the local e2e stack
+    expect(signer.serialize().bunker.relays).toEqual(["wss://relay.example", "ws://localhost:7777"]);
+  });
+
+  it("refuses a link whose only relays are plaintext remote ones (SB-08)", async () => {
+    parseBunkerInput.mockResolvedValue({
+      pubkey: PUBKEY,
+      relays: ["ws://attacker.example"],
+      secret: null,
+    });
+    await expect(
+      Nip46Signer.fromBunkerUri(`bunker://${PUBKEY}?relay=ws%3A%2F%2Fattacker.example`),
+    ).rejects.toThrow(/valid bunker link/);
+    expect(fromBunker).not.toHaveBeenCalled();
+  });
+
   it("rejects a link with no relay before touching the network", async () => {
     await expect(Nip46Signer.fromBunkerUri(`bunker://${PUBKEY}`)).rejects.toThrow(
       /valid bunker link/,
@@ -454,6 +483,17 @@ describe("persisted restore", () => {
     fromBunker.mockReturnValue(bunker);
     await Nip46Signer.fromPersisted(persisted);
     expect(bunker.connect).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a plaintext remote relay a pre-SB-08 session persisted", async () => {
+    fromBunker.mockReturnValue(fakeBunker());
+    const signer = await Nip46Signer.fromPersisted({
+      ...persisted,
+      bunker: { ...persisted.bunker, relays: ["ws://attacker.example", "wss://relay.example"] },
+    });
+    const transport = fromBunker.mock.calls[0][1] as { relays: string[] };
+    expect(transport.relays).not.toContain("ws://attacker.example");
+    expect(signer.serialize().bunker.relays).toEqual(["wss://relay.example"]);
   });
 
   it("rejects an invalid user pubkey", async () => {

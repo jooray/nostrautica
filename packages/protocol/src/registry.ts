@@ -12,8 +12,8 @@
  * Invariants asserted in registry.test.ts:
  *  - every custom `KIND_*` constant in the custom ranges appears here exactly once;
  *  - every entry's `constant` resolves to its `kind`;
- *  - the addressable kinds are EXACTLY 31600–31611 and the rumor kinds EXACTLY
- *    21600–21610;
+ *  - the addressable kinds are EXACTLY 31600–31612 and the rumor kinds EXACTLY
+ *    21600–21610 (CUSTOM_ADDRESSABLE_RANGE / CUSTOM_RUMOR_RANGE below);
  *  - every rumor-class kind is in `RUMOR_KINDS`;
  *  - every non-null `schemaExport` is a real export of the schemas module.
  */
@@ -265,7 +265,8 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "coordinatorGrantContentSchema",
     sealing: "gift-wrap",
     author: "`E_id` → coordinator",
-    notes: "Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5.",
+    notes:
+      "Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5. Optional `prev_coordinator` names the replaced coordinator, the only non-`E_id` roster author the handover may adopt (§3.7).",
   },
   {
     constant: "KIND_ADMIN_COMMAND",

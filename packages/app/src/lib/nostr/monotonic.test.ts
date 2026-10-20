@@ -153,6 +153,26 @@ describe("publishMonotonic", () => {
     expect(createdAt).toBe(NOW); // no watermark yet, relay unknown → now
   });
 
+  // Manual e2e BUG-7: offline, the floor read could only time out, holding an
+  // offline save on "Publishing…" for its full timeout before it was queued.
+  it("skips the relay read when the browser knows it is offline", async () => {
+    vi.stubGlobal("navigator", { onLine: false });
+    try {
+      publishOrQueue.mockResolvedValue(false);
+      const { createdAt, published } = await publishMonotonic({
+        kind: 31600,
+        author: AUTHOR,
+        identifier: "d1",
+        sign: (t) => signed(t),
+      });
+      expect(fetchEventsRelayOnly).not.toHaveBeenCalled();
+      expect(createdAt).toBe(NOW);
+      expect(published).toBe(false);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("builds replaceable addresses without a d, addressable with one", () => {
     expect(eventAddress(10050, AUTHOR)).toBe(`10050:${AUTHOR}`);
     expect(eventAddress(31600, AUTHOR, "d1")).toBe(`31600:${AUTHOR}:d1`);

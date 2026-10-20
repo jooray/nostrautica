@@ -194,3 +194,23 @@ describe("standing decisions on the People surface", () => {
     expect(decls).toMatch(/max-width:\s*68ch/);
   });
 });
+
+/**
+ * Audit DS41-018. The filter chips were tappable while follows and per-event
+ * settings were still loading (or after their fetch had failed, swallowed by
+ * `.catch(() => {})`). Tapping "Following" then filtered against an empty set
+ * and the page said "No one matches your search and filters", which reads as
+ * data loss, for the whole session if the fetch had failed.
+ */
+describe("filter chips wait for the set they filter on", () => {
+  const src = read("src/lib/pages/Attendees.svelte");
+
+  it("disables a chip until its set is known", () => {
+    expect(src).toMatch(/f === "following" \? followsKnown : settings !== null/);
+    expect(src).toMatch(/disabled=\{!filterKnown\(f\)\}/);
+  });
+
+  it("says whether the lists are still loading or failed", () => {
+    expect(src).toMatch(/settled \? t\("attendees\.filter\.unavailable"\) : t\("attendees\.filter\.loading"\)/);
+  });
+});

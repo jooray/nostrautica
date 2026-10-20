@@ -99,25 +99,46 @@ class Nostr(
         data class Published(val okRelays: List<String>) : PublishResult
         /** Nobody took it yet; it is in the outbox and will go out later. */
         data object Queued : PublishResult
+        /**
+         * Nobody took it and nobody will: every relay refused it for good (blocked,
+         * invalid, auth-required, …), or there was no relay to send to. Nothing was
+         * queued, so a caller must not say "queued".
+         */
+        data class Rejected(val reason: String) : PublishResult
     }
+
+    /** What a caller throws when a [PublishResult.Rejected] means the action failed; the message is a string key. */
+    class PublishRejected(val reason: String) : Exception("publish.rejected")
 
     suspend fun publish(event: NostrEvent, relays: Collection<String>, owner: String, label: String? = null): PublishResult {
         store.put(event)
         val targets = relays.map(RelayPool::normalize).distinct()
+        // Never report Queued without an outbox row behind it (SB-35).
+        if (targets.isEmpty()) return PublishResult.Rejected("no relays to publish to")
         var missing = targets
+        val last = HashMap<String, RelayPool.PublishOutcome>()
         if (_network.value) {
             for (backoff in listOf(0L, 500L, 2_000L)) {
                 delay(backoff)
                 val outcomes = pool.publish(event, missing)
+                last.putAll(outcomes)
                 missing = missing.filter { outcomes[it] !is RelayPool.PublishOutcome.Ok }
                 val rejectedPermanently = outcomes.values.filterIsInstance<RelayPool.PublishOutcome.Rejected>()
                     .all { !isRetryable(it.reason) } && outcomes.values.none { it is RelayPool.PublishOutcome.Timeout }
-                if (missing.isEmpty() || (missing.size < targets.size && rejectedPermanently)) break
+                if (missing.isEmpty() || rejectedPermanently) break
             }
         }
         val ok = targets - missing.toSet()
-        if (missing.isNotEmpty()) enqueue(event, targets, missing, owner, label, partial = ok.isNotEmpty())
-        return if (ok.isNotEmpty()) PublishResult.Published(ok) else PublishResult.Queued
+        // A relay that refused for good is not retried: queueing it would park a row whose
+        // Retry can never succeed, behind a "queued" the relay already answered (DS41-064).
+        val refused = missing.filter { isPermanentRejection(last[it]) }
+        val retryable = missing - refused.toSet()
+        if (retryable.isNotEmpty()) enqueue(event, targets, retryable, owner, label, partial = ok.isNotEmpty())
+        return when {
+            ok.isNotEmpty() -> PublishResult.Published(ok)
+            retryable.isNotEmpty() -> PublishResult.Queued
+            else -> PublishResult.Rejected((last[refused.first()] as RelayPool.PublishOutcome.Rejected).reason)
+        }
     }
 
     private suspend fun enqueue(event: NostrEvent, relays: List<String>, missing: List<String>, owner: String, label: String?, partial: Boolean) {
@@ -130,7 +151,16 @@ class Nostr(
         ))
     }
 
-    fun observeOutbox(owner: String) = outbox.observe(owner)
+    /**
+     * The owner's unsent actions: what the user is waiting on, for "queued" labels and
+     * the logout warning (publish-queue.ts listQueued / pendingCount). A partial row is
+     * left out. Its event already reached a relay, so it has been sent; the row only
+     * carries it on to the relays that have not acknowledged it. Counting it kept a
+     * delivered DM labelled "queued" for as long as one of the recipient's inbox relays
+     * stayed dead (manual e2e BUG-5). Such a row still gets its bounded retries in
+     * [flush] and is dropped quietly after the last one.
+     */
+    fun observeUnsent(owner: String): Flow<List<OutboxRow>> = outbox.observe(owner).map { unsent(it) }
 
     suspend fun discard(id: String) = outbox.delete(id)
 
@@ -141,22 +171,37 @@ class Nostr(
 
     suspend fun discardOwner(owner: String) = outbox.deleteOwner(owner)
 
+    /**
+     * The signed-in account (set by AppContainer). The flusher only touches that
+     * owner's rows, like the PWA's publish-queue: on a shared phone account B never
+     * publishes account A's queued actions, and signed out nothing is flushed.
+     */
+    @Volatile var activeOwner: () -> String? = { null }
+
     /** Retry what is due. Called on reconnect, on foreground, and after a publish elsewhere succeeds. */
     suspend fun flush(force: Boolean) = flushLock.withLock {
         if (!_network.value) return@withLock
+        val owner = activeOwner() ?: return@withLock
         val list = ListSerializer(String.serializer())
         val now = System.currentTimeMillis()
-        for (row in outbox.all()) {
+        for (row in outbox.forOwner(owner)) {
             if (row.failed && !force) continue
             val due = row.lastAttemptAt + BACKOFF_MS[minOf(row.attempts, BACKOFF_MS.size - 1)]
             if (!force && now < due) continue
             val event = NostrEvent.fromJsonString(row.json) ?: run { outbox.delete(row.id); null } ?: continue
             val missing = json.decodeFromString(list, row.missing)
             val outcomes = pool.publish(event, missing)
-            val still = missing.filter { outcomes[it] !is RelayPool.PublishOutcome.Ok }
-            val reachedAny = still.size < missing.size || row.partial
+            val notOk = missing.filter { outcomes[it] !is RelayPool.PublishOutcome.Ok }
+            // Relays that refused for good leave the row; retrying them can't help.
+            val still = notOk.filterNot { isPermanentRejection(outcomes[it]) }
+            val reachedAny = notOk.size < missing.size || row.partial
             when {
-                still.isEmpty() -> outbox.delete(row.id)
+                still.isEmpty() && notOk.isEmpty() -> outbox.delete(row.id)
+                still.isEmpty() -> {
+                    // Only permanent refusals are left: done if it reached someone, else failed for the user to see.
+                    if (reachedAny) outbox.delete(row.id)
+                    else outbox.put(row.copy(attempts = row.attempts + 1, lastAttemptAt = now, failed = true, missing = json.encodeToString(list, notOk)))
+                }
                 row.attempts + 1 >= MAX_ATTEMPTS -> {
                     // A partially delivered event already exists on the network: stop quietly.
                     if (reachedAny) outbox.delete(row.id)
@@ -175,8 +220,15 @@ class Nostr(
     fun onBackground() = pool.setForeground(false)
 
     companion object {
+        /** [observeUnsent]'s rule: a row that reached at least one relay is not unsent. */
+        fun unsent(rows: List<OutboxRow>): List<OutboxRow> = rows.filterNot { it.partial }
+
         private val BACKOFF_MS = longArrayOf(0, 15_000, 60_000, 300_000, 900_000)
         private const val MAX_ATTEMPTS = 5
+
+        /** A relay's answer that no retry can change. */
+        fun isPermanentRejection(o: RelayPool.PublishOutcome?): Boolean =
+            o is RelayPool.PublishOutcome.Rejected && !isRetryable(o.reason)
 
         /** nostr/errors.ts: rate limits and transient errors retry; policy refusals don't. */
         fun isRetryable(reason: String): Boolean {

@@ -6,7 +6,7 @@ This document separates supported deployment modes. They use the same static PWA
 
 ### nsite reference workflow
 
-`.github/workflows/deploy.yml` builds tagged releases and publishes with `nsyte` using a NIP-46 bunker capability. This is a reference Nostr-native delivery path. It uses an SPA fallback and hash routing.
+`.github/workflows/deploy.yml` runs the release gate, builds the PWA and publishes it with `nsyte` using a NIP-46 bunker capability. It runs only when dispatched by hand from the GitHub Actions tab: release tags are not pushed to the public mirror, so nothing publishes the nsite automatically when a release is tagged. This is a reference Nostr-native delivery path. It uses an SPA fallback and hash routing.
 
 nsite gateways control their response headers. They cannot be assumed to provide the same CSP, anti-framing, cache-control, or other HTTP-header policy as a conventional host. Treat nsite as a delivery option, not as equivalent to a configured web origin.
 
@@ -166,7 +166,7 @@ past the readiness line, which only makes the metric lie.
 
 ### Runtime
 
-The Dockerfile and systemd unit are reference deployment material, not a complete production runbook. The coordinator needs Node 22.5+, ffmpeg/ffprobe, protected provider credentials, a stable coordinator identity, relay connectivity, and durable writable SQLite storage.
+The Dockerfile and systemd unit are reference deployment material, not a complete production runbook. The coordinator needs Node 22.13+ (`node:sqlite` is behind a flag before 22.13), ffmpeg/ffprobe, protected provider credentials, a stable coordinator identity, relay connectivity, and durable writable SQLite storage.
 
 The SQLite volume is not disposable when Marmot chat or Cashu is enabled. See [COORDINATOR-OPERATOR-GUIDE.md](COORDINATOR-OPERATOR-GUIDE.md) for backup, restore, lifecycle, and operational limitations.
 
@@ -176,19 +176,40 @@ The public reference instance is an operator-managed conventional static host pl
 
 ## Release Verification
 
+**Nothing runs these steps for you on the production path.** The GitHub
+Actions release gate (`.github/workflows/release-gate.yml`) runs on the public
+mirror, for pull requests, mirror syncs and the manual nsite deploy. The
+reference production instance deploys by a push to a separate private remote,
+and a red gate does not stop that push. Until the deploy itself runs the gate,
+these steps are a checklist the person pushing has to follow.
+
 1. Run `pnpm check`.
 2. Build the PWA and run a **clean-context coordinator Docker build**: it must succeed from a checkout with no working-tree state:
 
    ```sh
    rel="$(git describe --tags --always --dirty)"; sha="$(git rev-parse HEAD)"; ts="$(git show -s --format=%cI HEAD)"
-   git archive HEAD | (mkdir -p /tmp/cc && tar -x -C /tmp/cc)
+   cc="$(mktemp -d)"   # a FRESH directory: tar -x overlays onto whatever is there
+   git archive HEAD | tar -x -C "$cc"
    docker build -f docker/coordinator.Dockerfile \
      --build-arg RELEASE_ID="$rel" --build-arg GIT_SHA="$sha" --build-arg BUILD_TIMESTAMP="$ts" \
-     /tmp/cc
+     "$cc"
+   rm -rf "$cc"
    ```
 
+   Never extract into a directory a previous run used. `pnpm-workspace.yaml` globs
+   `packages/vendor/*` from disk, so a package retired since that run would survive
+   in it, change the workspace graph, and fail `--frozen-lockfile` (or worse, pass
+   against code that is no longer in the repo).
+
    The image's dependency layer copies the lockfile, `patches/`, and the vendored Marmot/MLS workspace packages before `pnpm install --frozen-lockfile`, and pins the base image by digest, so this build is reproducible from a clean checkout. Keep it in the release gate. A `git archive` checkout has no `.git`, so the coordinator's own git-describe provenance is unavailable inside the container: pass the `RELEASE_ID`/`GIT_SHA`/`BUILD_TIMESTAMP` build args (as above) so the running daemon reports the real release instead of `v<pkg>` / `gitSha: unknown`. OCI image labels (`org.opencontainers.image.*`) are set from the same args.
-3. Verify app and landing HTTP status, CSP/header policy for the chosen host, and service-worker update behavior.
+3. Verify app and landing HTTP status, CSP/header policy for the chosen host, and service-worker update behavior. Confirm the build you meant is the one being served: the shell's precache revision in `sw.js` ends in the commit's 12-character SHA (see [VERSIONING.md](VERSIONING.md)):
+
+   ```sh
+   curl -s https://<host>/app/sw.js | grep -oE 'index.html",revision:"[^"]*"'
+   git rev-parse --short=12 HEAD
+   ```
+
+   A deploy that printed success but whose build step failed serves the previous `sw.js`, so this check catches it and an HTTP 200 does not.
 4. Exercise an event flow appropriate to the release: join, approval, media where applicable, and coordinator health.
 5. Record the Git revision and deployed app/coordinator versions.
 
@@ -212,9 +233,17 @@ sqlite3 -readonly "$HOME/nostrautica/packages/coordinator/coordinator.sqlite" "P
 git show <target-ref>:packages/coordinator/src/store/db.ts | grep 'SCHEMA_VERSION ='
 ```
 
-If the live number is higher, you need the pre-migration backup (the operator
-notes' migration checklist takes one before every schema-bumping push, named for
-the version it CONTAINS). No backup, no rollback, go forward with a fix instead.
+If the live number is higher, you need a pre-migration backup. No backup, no
+rollback, go forward with a fix instead. Look in these places, in this order:
+
+| What | Where | Written by |
+|---|---|---|
+| Automatic pre-migration backup | beside the database: `$HOME/nostrautica/packages/coordinator/coordinator.sqlite.v<N>-<timestamp>.bak` | the daemon itself, whenever it finds a pending migration (`VACUUM INTO`) |
+| `backup` CLI snapshot | wherever its destination argument pointed (the operator guide's examples use `/home/nostrautica/backups/`) | an operator or a timer, see [COORDINATOR-OPERATOR-GUIDE.md](COORDINATOR-OPERATOR-GUIDE.md) §5 |
+| Hand-taken copy | wherever the operator put it (`$HOME/` in the reference deployment's checklist) | an operator, with `sqlite3 … ".backup '…'"` |
+
+Every name states the schema version the file CONTAINS (`v<N>`), not the one it
+precedes: restore the one whose `v<N>` the build you are rolling back to knows.
 
 **Static site (landing / `/app` / `/docs`).** The build is a pure function of the
 commit, so rolling back is re-deploying the older commit; nothing on the serving
@@ -227,8 +256,8 @@ git push origin <good-sha>:main --force-with-lease
 `--force-with-lease`, not `--force`: it refuses if someone else has pushed since
 you last fetched, which during an incident is exactly the case you cannot afford
 to guess about. Then verify the served bundle is the one you meant, using the
-marker-grep in the release-verification section above: the OK markers only prove
-a build ran.
+`sw.js` revision check in the release-verification section above: the OK markers
+only prove a build ran.
 
 **Coordinator.** The same push redeploys and restarts it. Two things to check
 afterwards, in this order:
@@ -251,7 +280,7 @@ ssh <coordinator-host> 'set -e
   DB="$HOME/nostrautica/packages/coordinator/coordinator.sqlite"
   mv "$DB" "$DB.failed-$(date +%Y%m%d-%H%M%S)"   # keep it — it is the only copy of what went wrong
   rm -f "$DB-wal" "$DB-shm"                       # stale WAL/shm belong to the file you just moved
-  cp "$HOME/coordinator.sqlite.vN-<timestamp>.bak" "$DB"
+  cp "$HOME/nostrautica/packages/coordinator/coordinator.sqlite.vN-<timestamp>.bak" "$DB"   # or the backup you chose above
   systemctl --user start nostrautica-coordinator'
 ```
 

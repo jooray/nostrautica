@@ -21,6 +21,8 @@ object Kinds {
 
     const val CALENDAR_EVENT = 31923
     const val CALENDAR_RSVP = 31925
+    const val CALENDAR = 31924 // calendar collection (kinds.ts KIND_CALENDAR); unused here
+    const val ROUTSTR_PROVIDER = 38421 // kinds.ts KIND_ROUTSTR_PROVIDER; coordinator-side only
 
     const val EVENT_CONFIG = 31600
     const val INVITE_LIST = 31601
@@ -58,6 +60,13 @@ object Kinds {
         ORGANIZER_GRANT, COORDINATOR_STATUS, CHAT_KEY_ATTESTATION, PROFILE_CORRECTION,
         TALK_SUBMISSION, ATTENDEE_WITHDRAWAL,
     )
+
+    /**
+     * → a coordinator's key (kinds.ts COORDINATOR_RUMOR_KINDS). This app is never a
+     * coordinator; mirrored so a future coordinator role can't fall back to the
+     * global [RUMOR_KINDS] allowlist (SB-83).
+     */
+    val COORDINATOR_RUMOR_KINDS: Set<Int> = setOf(COORDINATOR_GRANT, ADMIN_COMMAND, CHAT_KEY_ATTESTATION)
 
     /** Attendee → E_inbox (§6.1). */
     val EVENT_INBOX_RUMOR_KINDS: Set<Int> =

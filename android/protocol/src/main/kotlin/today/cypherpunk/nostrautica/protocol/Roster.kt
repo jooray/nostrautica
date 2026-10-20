@@ -50,7 +50,8 @@ object Roster {
     fun merge(pages: List<RosterContent>): RosterContent {
         val page0 = pages.firstOrNull() ?: error("cannot merge an empty roster page set")
         val seen = HashSet<String>()
-        val attendees = pages.flatMap { it.attendees }.filter { seen.add(it.pubkey) }
+        // At most MAX_ROSTER members, in page order (mergeRosterPages, SB-28/SB-123).
+        val attendees = pages.flatMap { it.attendees }.filter { seen.add(it.pubkey) }.take(Limits.MAX_ROSTER)
         return RosterContent(Wire.PROTOCOL_VERSION, page0.eckCurrent, page0.nostrGroupId, null, attendees)
     }
 }

@@ -169,6 +169,8 @@ class JoinFlow(
                 rsvp?.let { e -> async { nostr.publish(e, ctx.relays, pk, "rsvp") } },
             ).map { it.await() }
         }
+        // The join request itself refused by every event relay: an error, not "queued" (DS41-064).
+        (results[0] as? Nostr.PublishResult.Rejected)?.let { throw Nostr.PublishRejected(it.reason) }
         return results.all { it is Nostr.PublishResult.Published }
     }
 

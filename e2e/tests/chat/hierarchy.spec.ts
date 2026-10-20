@@ -1,6 +1,6 @@
 import { test, expect, type BrowserContext, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
-import { newUser } from "../helpers.js";
+import { newUser, ownPubkeyHex } from "../helpers.js";
 
 /**
  * Space hierarchy E2E (PROTOCOL-NIP.md §15): a community and the dated events that
@@ -193,14 +193,21 @@ test.describe.serial(
     test("S2 — joining the event with the disclosure on makes the person a community member", async ({ browser }) => {
       test.setTimeout(240_000);
       const nina = await user(browser, "Nina Joiner");
+      // The daemon logs a join decision as `[join] <first 8 hex of the attendee
+      // pubkey> invite=yes|no [member_of <child>] → AUTO-APPROVED` (coordinator.ts,
+      // entitlement.ts). The attendee pubkey is the signer's own, the one /#/me shows.
+      const ninaShort = (await ownPubkeyHex(nina)).slice(0, 8);
       await joinWithInvite(nina, invites[0], { communityTitle: COMMUNITY });
       await expectApproved(nina, eventNaddr);
 
-      // Automatically a member of the community: the coordinator decided it...
-      await expect.poll(() => /invite=no.*AUTO-APPROVED/.test(coordinatorLog()) || /member_of|member-of|memberOf/i.test(coordinatorLog()), {
-        timeout: 90_000,
-      }).toBe(true);
-      expect(coordinatorLog()).toMatch(/AUTO-APPROVED/);
+      // Automatically a member of the community: the coordinator decided it, on
+      // the member_of proof. Scoped to NINA, no invite, granted by member_of (audit
+      // SB-60). Her event join used a valid invite and logs `invite=yes →
+      // AUTO-APPROVED` first, and the log is cumulative across the suite, so the old
+      // bare /AUTO-APPROVED/ (behind a poll whose /member_of/i disjunct any mention
+      // satisfied) passed even if the community join was granted some other way.
+      const communityDecision = new RegExp(`\\[join\\] ${ninaShort} invite=no member_of .*→ AUTO-APPROVED`);
+      await expect.poll(() => communityDecision.test(coordinatorLog()), { timeout: 90_000 }).toBe(true);
 
       // ...and so does the app: the community opens as a member and Nina is on its roster.
       await expectApproved(nina, communityNaddr);
@@ -269,11 +276,19 @@ test.describe.serial(
       await expect(olga.getByText("Dana Early").first()).toBeVisible({ timeout: 60_000 });
     });
 
-    test("S5 — a direct join to the community with its own invite code still works", async ({ browser }) => {
+    test("S5 — a direct join to the manual community with its own invite code waits for the organizer", async ({ browser }) => {
       test.setTimeout(240_000);
       const own = await inviteLinks(olga, communityNaddr, 1);
       const rita = await user(browser, "Rita Direct");
+      const ritaShort = (await ownPubkeyHex(rita)).slice(0, 8);
       await joinWithInvite(rita, own[0]);
+      // `approval: "manual"` is enforced (SB-124): a valid code alone does not
+      // admit; only member_of proofs from linked events do (§15.4, S2).
+      const queued = new RegExp(`\\[join\\] ${ritaShort} invite=yes approval=manual → manual queue`);
+      await expect.poll(() => queued.test(coordinatorLog()), { timeout: 90_000 }).toBe(true);
+      await olga.goto(`/#/e/${communityNaddr}/admin`);
+      await expect(olga.getByText("Rita Direct").first()).toBeVisible({ timeout: 60_000 });
+      await olga.getByRole("button", { name: /^approve$/i }).first().click();
       await expectApproved(rita, communityNaddr);
       await olga.goto(`/#/e/${communityNaddr}/attendees`);
       await expect(olga.getByText("Rita Direct").first()).toBeVisible({ timeout: 60_000 });

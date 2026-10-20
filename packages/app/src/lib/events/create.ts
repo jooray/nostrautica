@@ -20,6 +20,7 @@ import {
   coordinateToNaddr,
   buildEventConfig,
   blindedD,
+  ORGANIZER_SELF_INVITE_LABEL,
   type Approval,
   type EventConfig,
   type MatchVisibility,
@@ -32,7 +33,7 @@ import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publi
 import { DEFAULT_RELAYS, chatInteropRelays } from "$lib/nostr/relays.js";
 import { saveEventKeys } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
-import { generateInvites, approveAttendee } from "./organizer.js";
+import { generateInvites, approveAttendee, CoordinatorAttachedError } from "./organizer.js";
 import { sendJoinRequest } from "./join.js";
 import { fetchProfiles } from "./social.js";
 
@@ -272,7 +273,11 @@ export async function createEvent(
     eck: [{ id: 1, key: bytesToBase64(eck) }],
     eidNsecHex: bytesToHex(eidSk),
     einboxNsecHex: bytesToHex(einboxSk),
-  });
+    // The creating identity, not whoever is active once the publishes above
+    // settle (audit DS41-001): those can take a while on bad Wi-Fi, and an
+    // account switch in that window would otherwise hand this event's E_id to
+    // the next account. The 30078 backup above was encrypted to this key too.
+  }, ownPubkey);
 
   return {
     coordinate,
@@ -339,24 +344,32 @@ export async function enrollOrganizerAsParticipant(
     links: [],
   };
 
-  const [invite] = await generateInvites(organizer, ctx, 1, appBaseUrl, "organizer-self");
+  const [invite] = await generateInvites(organizer, ctx, 1, appBaseUrl, ORGANIZER_SELF_INVITE_LABEL);
   await sendJoinRequest(
     organizer,
     ctx,
     { name, profile, inviteNsec: invite?.nsec },
     blindingKey,
   );
-  await approveAttendee(
-    organizer,
-    ctx,
-    {
-      attendeePubkey: pubkey,
-      name,
-      message: "",
-      rsvpPublic: false,
-      profile,
-      rumorCreatedAt: Math.floor(Date.now() / 1000),
-    },
-    "organizer",
-  );
+  try {
+    await approveAttendee(
+      organizer,
+      ctx,
+      {
+        attendeePubkey: pubkey,
+        name,
+        message: "",
+        rsvpPublic: false,
+        profile,
+        rumorCreatedAt: Math.floor(Date.now() / 1000),
+      },
+      "organizer",
+    );
+  } catch (e) {
+    // With a coordinator attached the roster has ONE author, the coordinator
+    // (audit SB-91): it approves the join request above through the invite, and an
+    // E_id-authored self-approval would be a second roster competing on the same
+    // address. Nothing else to do here.
+    if (!(e instanceof CoordinatorAttachedError)) throw e;
+  }
 }

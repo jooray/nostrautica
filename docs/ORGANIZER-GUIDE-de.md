@@ -68,9 +68,13 @@ Wähle **Event erstellen** und fülle das Formular aus:
 - **Titel, Zusammenfassung, Beginn/Ende, Ort**: für alle mit dem Link
   öffentlich sichtbar.
 - **Genehmigung** legt fest, wie Leute hineinkommen:
-  - *Manuelle Prüfung*: Jede Anfrage wartet auf deine Genehmigung.
+  - *Manuelle Prüfung*: Jede Anfrage wartet auf deine Genehmigung, auch wenn
+    jemand über einen Einladungslink kommt. Einzige Ausnahme ist deine eigene
+    Anmeldung als Teilnehmer, die automatisch durchgeht.
   - *Nur Einladungscodes*: Nur über einen Einladungslink kommt man hinein,
-    sonst gar nicht.
+    sonst gar nicht. Mit verbundenem Koordinator werden Anfragen ohne gültigen
+    Code abgewiesen statt eingereiht. In deiner Admin-Liste siehst du sie
+    trotzdem, du kannst also jemanden auch von Hand genehmigen.
   - *Einladungscodes + manuell*: Einladungslinks genehmigen automatisch
     (wenn ein Coordinator angebunden ist); alle anderen warten auf dich.
     **Für die meisten Events empfohlen.**

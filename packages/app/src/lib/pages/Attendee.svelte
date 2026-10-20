@@ -36,7 +36,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from "svelte";
   import { decode, nprofileEncode } from "nostr-tools/nip19";
-  import { KIND_PROFILE, hasAiProfileContent } from "@nostrautica/protocol";
+  import { KIND_PROFILE, hasAiProfileContent, pickLatest } from "@nostrautica/protocol";
   import type { DirectoryEntryContent, Match, PerEventSettings } from "@nostrautica/protocol";
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
@@ -135,7 +135,7 @@
       // when possible (no whole-directory re-pull just to show one person).
       void fetchEvents({ kinds: [KIND_PROFILE], authors: [pubkey] })
         .then((events) => {
-          const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+          const latest = pickLatest(events);
           if (latest) {
             try {
               kind0 = JSON.parse(latest.content);

@@ -8,10 +8,25 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { runInNewContext } from "node:vm";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveOutDir, checkInternalLinks, checkLandingAssets } from "./build-docs.mjs";
+import {
+  resolveOutDir,
+  checkInternalLinks,
+  checkLandingAssets,
+  langOf,
+  alternatesOf,
+  rewriteRepoLinks,
+  REPO_BLOB,
+  cleanOutDir,
+  THEME_JS,
+  DOCS_CSP,
+  checkLandingCopy,
+  checkLandingCsp,
+} from "./build-docs.mjs";
 
 const ROOT = "/repo/root";
 
@@ -142,4 +157,133 @@ test("checkLandingAssets: a query string or fragment does not make a real file l
     ["assets/screenshots/hero.png"],
   );
   assert.deepEqual(checkLandingAssets(root), []);
+});
+
+/* ── Audit SB-105..SB-116 ─────────────────────────────────────────────────── */
+
+test("langOf: the filename's language suffix, else English (SB-105)", () => {
+  assert.equal(langOf("ORGANIZER-GUIDE-sk.md"), "sk");
+  assert.equal(langOf("PARTICIPANT-GUIDE-es.md"), "es");
+  assert.equal(langOf("ELEVATOR-PITCH-en.md"), "en");
+  assert.equal(langOf("THREAT-MODEL.md"), "en");
+});
+
+test("alternatesOf: links every existing translation, nothing for a lone doc (SB-105)", () => {
+  const files = ["G.md", "G-sk.md", "G-de.md", "P-en.md", "P-sk.md", "SPEC.md"];
+  assert.deepEqual(alternatesOf("G-sk.md", files), [
+    ["en", "G.html"],
+    ["sk", "G-sk.html"],
+    ["de", "G-de.html"],
+  ]);
+  assert.deepEqual(alternatesOf("P-sk.md", files), [
+    ["en", "P-en.html"],
+    ["sk", "P-sk.html"],
+  ]);
+  assert.deepEqual(alternatesOf("SPEC.md", files), []);
+});
+
+test("rewriteRepoLinks: ../ links to real repo files go to GitHub, typos stay (SB-106)", () => {
+  const root = mkdtempSync(join(tmpdir(), "repo-"));
+  mkdirSync(join(root, "packages", "c"), { recursive: true });
+  writeFileSync(join(root, "packages", "c", "x.toml"), "");
+  const out = rewriteRepoLinks(
+    `<a href="../packages/c/x.toml">a</a><a href="../packages/c/nope.toml">b</a>`,
+    root,
+  );
+  assert.ok(out.includes(`href="${REPO_BLOB}packages/c/x.toml"`));
+  assert.ok(out.includes(`href="../packages/c/nope.toml"`));
+});
+
+test("checkInternalLinks: a relative non-page target must exist in the site (SB-106/SB-111)", () => {
+  const pages = new Map([
+    [
+      "a.html",
+      `<a href="../packages/c/x.toml">t</a><a href="images/ok.png">i</a><a href="../app/">app</a><a href="data:image/svg+xml,x">d</a>`,
+    ],
+  ]);
+  const { errors } = checkInternalLinks(pages, { exists: (p) => p === "images/ok.png" });
+  assert.equal(errors.length, 1);
+  assert.ok(errors[0].includes("../packages/c/x.toml"));
+});
+
+test("cleanOutDir: removes stale pages and images, leaves other files (SB-110)", () => {
+  const out = mkdtempSync(join(tmpdir(), "docs-out-"));
+  mkdirSync(join(out, "images"));
+  writeFileSync(join(out, "images", "old.png"), "x");
+  writeFileSync(join(out, "DELETED-DOC.html"), "x");
+  writeFileSync(join(out, "keep.txt"), "x");
+  cleanOutDir(out);
+  assert.equal(existsSync(join(out, "DELETED-DOC.html")), false);
+  assert.equal(existsSync(join(out, "images")), false);
+  assert.equal(existsSync(join(out, "keep.txt")), true);
+});
+
+test("THEME_JS: survives a localStorage that throws, and the toggle still works (SB-107)", () => {
+  const attrs = {};
+  let onReady;
+  let onClick;
+  const throwing = () => {
+    throw new Error("SecurityError: The operation is insecure.");
+  };
+  const ctx = {
+    localStorage: { getItem: throwing, setItem: throwing },
+    matchMedia: () => ({ matches: false }),
+    document: {
+      documentElement: { setAttribute: (k, v) => (attrs[k] = v) },
+      addEventListener: (_e, fn) => (onReady = fn),
+      getElementById: () => ({ addEventListener: (_e, fn) => (onClick = fn) }),
+    },
+  };
+  ctx.window = ctx;
+  runInNewContext(THEME_JS, ctx);
+  assert.equal(attrs["data-theme"], "dark");
+  onReady();
+  onClick();
+  assert.equal(attrs["data-theme"], "light");
+});
+
+function landingCopyFixture(html, en) {
+  const root = mkdtempSync(join(tmpdir(), "landing-copy-"));
+  mkdirSync(join(root, "web", "assets"), { recursive: true });
+  writeFileSync(join(root, "web", "index.html"), html);
+  writeFileSync(
+    join(root, "web", "assets", "i18n.js"),
+    `(function (root) { root.NOSTRAUTICA_I18N = { en: ${JSON.stringify(en)} }; })(window);`,
+  );
+  return root;
+}
+
+test("checkLandingCopy: static text that drifted from the dictionary is reported (SB-109)", () => {
+  const root = landingCopyFixture(
+    `<p data-i18n="a">Same &amp; fine</p><span data-i18n="b">Matches keep updating</span>`,
+    { a: "Same & fine", b: "Nostrautica is your conference's app" },
+  );
+  const drift = checkLandingCopy(root);
+  assert.equal(drift.length, 1);
+  assert.ok(drift[0].startsWith("b:"));
+});
+
+test("checkLandingCopy: the real landing page matches its dictionary", () => {
+  assert.deepEqual(checkLandingCopy(resolve(import.meta.dirname, "..")), []);
+});
+
+test("checkLandingCsp: an inline script missing from the CSP is reported with its hash (SB-114)", () => {
+  const root = mkdtempSync(join(tmpdir(), "landing-csp-"));
+  mkdirSync(join(root, "web"), { recursive: true });
+  const body = "console.log(1)";
+  const hash = createHash("sha256").update(body).digest("base64");
+  writeFileSync(
+    join(root, "web", "index.html"),
+    `<meta http-equiv="Content-Security-Policy" content="script-src 'self'"><script>${body}</script>`,
+  );
+  const problems = checkLandingCsp(root);
+  assert.equal(problems.length, 1);
+  assert.ok(problems[0].includes(`sha256-${hash}`));
+  assert.deepEqual(checkLandingCsp(resolve(import.meta.dirname, "..")), []);
+});
+
+test("DOCS_CSP: allows exactly the theme script by hash (SB-114)", () => {
+  const hash = createHash("sha256").update(THEME_JS).digest("base64");
+  assert.ok(DOCS_CSP.includes(`script-src 'sha256-${hash}'`));
+  assert.ok(!/script-src[^;]*unsafe-inline/.test(DOCS_CSP));
 });

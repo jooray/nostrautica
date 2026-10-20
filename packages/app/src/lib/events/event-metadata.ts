@@ -4,6 +4,7 @@ import {
   KIND_PROFILE,
   hexToBytes,
   parseCoordinate,
+  pickLatest,
 } from "@nostrautica/protocol";
 import { fetchEvents } from "$lib/nostr/ndk.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
@@ -30,8 +31,36 @@ export interface EventMetadataInput {
 // `d` (the address identifier) is preserved separately below, never dropped.
 const MANAGED_TAGS = new Set(["title", "summary", "start", "end", "location", "image", "D"]);
 
-function latest<T extends { created_at?: number }>(events: T[]): T | undefined {
-  return events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+type MetadataField = keyof EventMetadataInput;
+const METADATA_FIELDS: MetadataField[] = ["title", "summary", "start", "end", "location", "icon", "banner"];
+
+function tagValue(tags: string[][], name: string): string | undefined {
+  return tags.find((t) => t[0] === name)?.[1];
+}
+
+/**
+ * The metadata the newest relay copies carry, read the way event-context reads
+ * it (calendar tags first, then the event-identity kind-0), so a field the user
+ * did not touch is republished exactly as it currently stands.
+ */
+function metadataOnRelays(
+  calendar: { tags: string[][] },
+  profile: Record<string, unknown>,
+): EventMetadataInput {
+  const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
+  return {
+    title: tagValue(calendar.tags, "title") ?? str(profile.name) ?? "",
+    summary: tagValue(calendar.tags, "summary") ?? str(profile.about) ?? "",
+    start: Number(tagValue(calendar.tags, "start")) || 0,
+    end: Number(tagValue(calendar.tags, "end")) || undefined,
+    location: tagValue(calendar.tags, "location") || undefined,
+    icon: str(profile.picture),
+    banner: tagValue(calendar.tags, "image") || str(profile.banner),
+  };
+}
+
+function latest<T extends { id: string; created_at?: number }>(events: T[]): T | undefined {
+  return pickLatest(events); // §3.1 tie-break, not arrival order (audit DS41-013)
 }
 
 /**
@@ -47,9 +76,17 @@ export interface UpdateMetadataResult {
   outcome: PublishOutcome;
 }
 
+/**
+ * `base` is what the form was seeded with. When given, only the fields that
+ * differ from it are taken from `input`; every other field comes from the
+ * NEWEST 31923/kind-0 on the relays. Without it a stale Settings page on a
+ * second device republished its whole snapshot and silently reverted fields
+ * another device had saved since (e2e BUG-2, the 31923 twin of SB-87).
+ */
 export async function updateEventMetadata(
   ctx: EventContext,
-  input: EventMetadataInput,
+  edited: EventMetadataInput,
+  base?: EventMetadataInput,
 ): Promise<UpdateMetadataResult> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
@@ -73,6 +110,17 @@ export async function updateEventMetadata(
     } catch {
       profile = {};
     }
+  }
+  // Rebuild from the newest relay copy and apply only what the user changed.
+  // No relay copy (unreadable, or a brand-new record): the form is all we have.
+  let input = edited;
+  if (base && priorCalendar) {
+    const onRelays = metadataOnRelays(priorCalendar, profile);
+    input = { ...onRelays };
+    for (const field of METADATA_FIELDS) {
+      if (edited[field] !== base[field]) (input as Record<MetadataField, unknown>)[field] = edited[field];
+    }
+    if (!input.start) input.start = edited.start;
   }
 
   const preservedTags = (priorCalendar?.tags ?? [["d", identifier]]).filter(

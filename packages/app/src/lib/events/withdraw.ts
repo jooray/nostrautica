@@ -24,7 +24,13 @@ import type { EventContext } from "$lib/events/event-context.js";
 import { signerWrap } from "$lib/events/giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
 import { deriveBlindingKey } from "$lib/events/blinding.js";
-import { loadSelfCopy, resolveBlossomServers, fetchUserBlossomServers } from "$lib/media/submit.js";
+import {
+  loadSelfCopy,
+  loadLibraryFull,
+  cachedLibrary,
+  resolveBlossomServers,
+  fetchUserBlossomServers,
+} from "$lib/media/submit.js";
 import { deleteBlob } from "$lib/blossom/client.js";
 
 export interface WithdrawResult {
@@ -66,16 +72,33 @@ export async function withdrawFromEvent(
   // 2. Best-effort local teardown — the attendee's own media + self-copy. Any
   //    failure here is swallowed: the coordinator's revoke chain is what actually
   //    removes the attendee, and Blossom deletion is never a privacy guarantee.
+  //
+  //    Only once the 21610 has actually gone out (audit DS41-006). A queued one
+  //    may never be delivered — logging out discards this owner's outbox — and
+  //    tearing down first left the attendee in the event with their intro media
+  //    and self-copy already deleted. Queued: keep everything; the coordinator's
+  //    own purge still runs when the withdrawal arrives.
   let blobsAttempted = 0;
   let blobsDeleted = 0;
+  if (!sent) return { sent, blobsAttempted, blobsDeleted };
   try {
     const blindingKey = await deriveBlindingKey(signer);
     const self = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
 
     // 2a. Delete own Blossom blobs by ciphertext hash across every server the media
     //     might live on (the event's + the user's own 10063 servers).
+    //
+    //     Never a blob the reuse library still points at (DS41-006). Default
+    //     reuse keeps the SAME ciphertext hash at every event, so deleting it here
+    //     broke the clip in the library and at every other event that reused it.
+    //     If the library can't be read, nothing is known to be safe to delete.
     const blobHashes = new Set<string>();
     for (const m of self?.media ?? []) if (m.x) blobHashes.add(m.x);
+    if (blobHashes.size > 0) {
+      const library = await loadLibraryFull(signer, blindingKey).catch(() => undefined);
+      if (!library?.known) blobHashes.clear();
+      for (const d of [...(library?.media ?? []), ...(cachedLibrary() ?? [])]) blobHashes.delete(d.x);
+    }
     if (blobHashes.size > 0) {
       const userServers = await fetchUserBlossomServers(signer).catch(() => []);
       const servers = [...new Set([...resolveBlossomServers(ctx), ...userServers])];

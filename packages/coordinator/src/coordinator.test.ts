@@ -7,6 +7,7 @@ import {
   inviteHash,
   generateEck,
   bytesToBase64,
+  canonicalEck,
   base64ToBytes,
   bytesToHex,
   eckDecrypt,
@@ -53,7 +54,7 @@ import {
   type EckVersion,
 } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
-import { Coordinator, type Transport } from "./coordinator.js";
+import { Coordinator, sanitizeMatchList, fitTalkContent, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
 import type { RoleRoutes } from "./providers/types.js";
 import type { ChatMls } from "./chat/mls.js";
@@ -425,6 +426,11 @@ async function setup(
     eidSk?: Uint8Array;
     transport?: FakeTransport;
     extraConfigTags?: string[][];
+    /** The seeded 31600 `approval` (SB-124). Defaults to "manual+invite" — the
+     *  PWA's recommended mode and the one every invite test was written against. */
+    approval?: "manual" | "invite" | "manual+invite" | "open";
+    /** 31601 labels for the harness invites, by index (SB-124: "organizer-self"). */
+    inviteLabels?: (string | undefined)[];
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
@@ -446,8 +452,8 @@ async function setup(
   const transport = opts.transport ?? new FakeTransport();
   transport.seed.push(
     { kind: spaceKind, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : []), ...(opts.extraConfigTags ?? [])], content: "", id: "e2", sig: "" } as any,
-    { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : []), ...(opts.extraConfigTags ?? []), ["approval", opts.approval ?? "manual+invite"]], content: "", id: "e2", sig: "" } as any,
+    { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk, i) => ({ h: inviteHash(getPublicKey(sk)), ...(opts.inviteLabels?.[i] ? { label: opts.inviteLabels[i] } : {}) })) }), id: "e3", sig: "" } as any,
     ...(opts.extraSeed?.({ eidPubkey, d, coordPubkey, inboxPubkey: getPublicKey(einboxSk) }) ?? []),
   );
 
@@ -2087,6 +2093,29 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     const attendee = h.store.getAttendee(h.coordinate, pk)!;
     expect(attendee.ai_profile_json).toBeTruthy();
   });
+
+  /** Audit DS41-039: rejected / opted-out talks kept feeding the profile. */
+  it("a rejected or opted-out talk stops feeding the profile, and the profile is re-derived", async () => {
+    const h = await setup(0, { talks: "on", matching: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    h.stt.setTranscript("651", "A talk about zero-knowledge proofs.");
+    h.stt.setTranscript("652", "Another talk about mixnets.");
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "ZK", media: talkMedia(651, "1b".repeat(32)), processForMatching: true });
+    await submitTalk(h, speakerSk, { talkD: "t2", title: "Mix", media: talkMedia(652, "1c".repeat(32)), processForMatching: true });
+    await h.coordinator.jobs.drain();
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toHaveLength(2);
+
+    await admin(h, "talk_reject", { pubkey: pk, talk_d: "t1" });
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toEqual(["Another talk about mixnets."]);
+    // Same media, now without process_for_matching: the stored transcript is kept
+    // on the row but no longer counts.
+    await submitTalk(h, speakerSk, { talkD: "t2", title: "Mix", media: talkMedia(652, "1c".repeat(32)), revision: 1 });
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toEqual([]);
+    const keys = (h.store as any).db.prepare("SELECT dedupe_key FROM jobs WHERE dedupe_key LIKE '%talk-out%'").all().map((r: any) => r.dedupe_key);
+    expect(keys).toHaveLength(2);
+  });
 });
 
 /** Decode every gift-wrapped kind-21602 key grant addressed to `recipientSk`. */
@@ -3331,6 +3360,16 @@ describe("audit COORD-8 — relay handover re-creates subscriptions", () => {
     expect(inboxSubs[1]!.closed).toBe(false);
     expect(inboxSubs[1]!.relays).toEqual(["wss://new.relay"]);
   });
+
+  it("repeated handovers do not grow the stop() list (audit SB-32)", async () => {
+    const h = await setup();
+    const closers = (h.coordinator as any).closers as Set<unknown>;
+    const before = closers.size;
+    for (let i = 0; i < 5; i++) {
+      await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", `wss://r${i}.relay`]], 10 + i));
+    }
+    expect(closers.size).toBe(before);
+  });
 });
 
 /** A minimal ChatMls stub (COORD-9 tests). */
@@ -3501,6 +3540,31 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     expect(statusWraps.length).toBeGreaterThan(0);
   });
 
+  // DS41-048 / SB-97: the durable chat jobs are the same operations the live
+  // attestation / revoke paths run, so they must wait on the same member lock.
+  it("chat_sync_member waits for the member lock a live path holds", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto"); // auto-approved → job enqueued
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+
+    let release!: () => void;
+    const held = (h.coordinator as any).withSubjectLock(
+      h.coordinate,
+      `member:${pk}`,
+      () => new Promise<void>((r) => (release = r)),
+    );
+    const drained = h.coordinator.jobs.drain();
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(mls.invited).toEqual([]); // still waiting on the lock
+    release();
+    await held;
+    await drained;
+    expect(mls.invited).toEqual([devicePk]);
+  });
+
   it("revoke enqueues chat_revoke_member; the member's keys are MLS-removed on drain", async () => {
     const mls = new StubMls();
     const h = await setup(0, { chat: true, chatMls: mls });
@@ -3510,6 +3574,41 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     await admin(h, "revoke", { pubkey: pk });
     await h.coordinator.jobs.drain();
     expect(mls.removed).toEqual([[pk]]);
+  });
+
+  // DS41-047: chat turned off freezes the group but keeps every leaf, and turning it
+  // back on re-activates the same group. A revoke in between must still remove.
+  it("a revoke while chat is OFF still enqueues and performs the MLS remove", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    (h.coordinator as any).marmot.freeze(h.coordinate);
+    (h.coordinator as any).events.get(h.coordinate).chat = false;
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+    expect(mls.removed).toEqual([[pk]]);
+  });
+
+  // DS41-053: subscribeChat was the last line of ensureChat, so any throw in the
+  // chat setup left a live event with no 30443 watcher and no 445 ingest.
+  it("a throwing chat setup still opens the 30443 + 445 subscriptions", async () => {
+    class FailingRelaysMls extends StubMls {
+      override async ensureRelays(): Promise<void> {
+        throw new Error("simulated: routing-relay commit got no relay ack");
+      }
+    }
+    const h = await setup(0, { chat: true, chatMls: new FailingRelaysMls(), skipAutoInstall: true });
+    await expect(
+      h.coordinator.installEvent({
+        coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+        gen: 1, source: "grant", backfill: "full",
+      }),
+    ).rejects.toThrow(/no relay ack/);
+    const open = h.transport.subs.filter((s: any) => !s.closed);
+    expect(open.some((s: any) => s.filter?.kinds?.includes(30443))).toBe(true);
+    expect(open.some((s: any) => s.filter?.kinds?.includes(445))).toBe(true);
   });
 
   it("detach freezes the group and emits a chat-orphaned 21606 (reliability tail 6e)", async () => {
@@ -3805,6 +3904,18 @@ describe("audit COORD-13 — roster embeddings are cached by profile hash + mode
     h.coordinator.jobs.enqueue("match_recompute", "re-embed-check", { coordinate: h.coordinate, pubkey: aPk });
     await h.coordinator.jobs.drain();
     expect(h.llm.embedCalls).toBe(callsAfterFirst); // all embeddings came from the cache
+  });
+
+  it("…and re-reads (decrypts) none of them from the store either (audit SB-15)", async () => {
+    const h = await setup(0, { prefilter: { threshold: 1, topM: 5, randomN: 1 } });
+    const aPk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const spy = vi.spyOn(h.store, "getArtifact");
+    h.coordinator.jobs.enqueue("match_recompute", "re-read-check", { coordinate: h.coordinate, pubkey: aPk });
+    await h.coordinator.jobs.drain();
+    expect(spy.mock.calls.filter((c) => c[0] === "roster_embedding")).toHaveLength(0);
+    spy.mockRestore();
   });
 });
 
@@ -4590,6 +4701,68 @@ function secondCoordinator(h: Harness, coordSkB: Uint8Array): { coordinator: Coo
   return { coordinator, store: storeB };
 }
 
+/**
+ * Hand the event over from coordinator A (the harness's) to a fresh coordinator B
+ * the way the organizer's client does it: a newer 31600 names B at gen 2, and an
+ * E_id-sealed 21603 goes to B's inbox through the REAL grant path
+ * (handleCoordinatorWrap → installEvent → bootstrapHandover), so the wire field
+ * `prev_coordinator` is exercised end to end. `prev` omitted = a grant from an
+ * organizer client that predates the field (NIP §3.7, audit SB-122).
+ */
+async function handOverTo(
+  h: Harness,
+  coordSkB: Uint8Array,
+  opts: { prev?: string; cfgId?: string } = {},
+): Promise<{ coordinator: Coordinator; store: Store }> {
+  const identifier = h.coordinate.split(":").slice(2).join(":");
+  const coordPkB = getPublicKey(coordSkB);
+  h.transport.seed.push({
+    kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: opts.cfgId ?? "cfg-b", sig: "", content: "",
+    tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
+  } as any);
+  const b = secondCoordinator(h, coordSkB);
+  const grantWrap = wrapRumor(h.eidSk, coordPkB, {
+    kind: KIND_COORDINATOR_GRANT,
+    content: {
+      v: 2,
+      a: h.coordinate,
+      gen: 2,
+      inbox_nsec: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      config_relays: ["wss://test"],
+      ...(opts.prev ? { prev_coordinator: opts.prev } : {}),
+    },
+  });
+  await b.coordinator.handleCoordinatorWrap(grantWrap as any);
+  expect(b.store.getEvent(h.coordinate), "B installed the event").toBeDefined();
+  await b.coordinator.jobs.drain();
+  return b;
+}
+
+/** A 31604 at the event's public `d`, ECK-encrypted, authored by `pubkey`. */
+function seedRoster(
+  h: Harness,
+  pubkey: string,
+  attendees: { pubkey: string; role: "attendee" | "organizer" }[],
+  opts: { id: string; createdAt?: number },
+): void {
+  const identifier = h.coordinate.split(":").slice(2).join(":");
+  h.transport.seed.push({
+    kind: KIND_ROSTER,
+    pubkey,
+    created_at: opts.createdAt ?? Math.floor(h.clock.t / 1000) + 60,
+    id: opts.id,
+    sig: "",
+    tags: [["d", identifier], ["a", h.coordinate]],
+    content: eckEncrypt(h.eck, JSON.stringify({ v: 2, eck_current: 1, attendees: attendees.map((a) => ({ ...a, d: "x" })) })),
+  } as any);
+}
+
+/** Every gift wrap published to (a 21602 key grant, for these tests) `pubkey`. */
+function wrapsTo(h: Harness, pubkey: string): NostrEvent[] {
+  return h.transport.published.filter((e) => e.kind === 1059 && e.tags.some((t) => t[0] === "p" && t[1] === pubkey));
+}
+
 describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
   it("a replacement coordinator republishes a complete directory/roster under its own key", async () => {
     // Coordinator A installs + processes two invite-approved attendees.
@@ -4603,27 +4776,14 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
     expect(h.transport.published.some((e) => e.kind === KIND_ROSTER && e.pubkey === getPublicKey(h.coordSk))).toBe(true);
 
     // The organizer replaces A with B: a NEWER 31600 names B at gen 2 (same E_inbox
-    // + same ECK granted to B, so B can decrypt A's still-published records).
-    const identifier = h.coordinate.split(":").slice(2).join(":");
+    // + same ECK granted to B, so B can decrypt A's still-published records), and the
+    // E_id-sealed grant names A as the outgoing coordinator — the only thing that
+    // makes A's roster adoptable (SB-122). B's E_inbox backfill sees no joins here
+    // (the harness delivered them to A directly), so everything B knows came from
+    // A's roster.
     const coordSkB = generateSecretKey();
     const coordPkB = getPublicKey(coordSkB);
-    h.transport.seed.push({
-      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-b", sig: "", content: "",
-      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
-    } as any);
-
-    // Install B as a fresh grant at gen 2 → runs the handover bootstrap.
-    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
-    await coordB.installEvent({
-      coordinate: h.coordinate,
-      inboxSkHex: bytesToHex(h.einboxSk),
-      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
-      configRelays: ["wss://test"],
-      gen: 2,
-      source: "grant",
-      backfill: "full",
-    });
-    await coordB.jobs.drain();
+    const { store: storeB } = await handOverTo(h, coordSkB, { prev: getPublicKey(h.coordSk) });
 
     // B reconstructed the approved set from A's roster.
     const approvedB = storeB.approvedAttendees(h.coordinate).map((a) => a.pubkey).sort();
@@ -4679,24 +4839,7 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
       content: eckEncrypt(h.eck, JSON.stringify(forged)),
     } as any);
 
-    const coordSkB = generateSecretKey();
-    const coordPkB = getPublicKey(coordSkB);
-    h.transport.seed.push({
-      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-b2", sig: "", content: "",
-      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
-    } as any);
-
-    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
-    await coordB.installEvent({
-      coordinate: h.coordinate,
-      inboxSkHex: bytesToHex(h.einboxSk),
-      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
-      configRelays: ["wss://test"],
-      gen: 2,
-      source: "grant",
-      backfill: "full",
-    });
-    await coordB.jobs.drain();
+    const { store: storeB } = await handOverTo(h, generateSecretKey(), { prev: getPublicKey(h.coordSk), cfgId: "cfg-b2" });
 
     // Mallory is nowhere in B's state, and never received a key grant.
     expect(storeB.getAttendee(h.coordinate, malloryPk)).toBeUndefined();
@@ -4707,6 +4850,143 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
 
     // The genuine attendee, reconstructed from A's real roster, is unaffected.
     expect(storeB.getAttendee(h.coordinate, alicePk)?.status).toBe("approved");
+  });
+
+  /**
+   * Audit SB-123. Every page is schema-capped at 700 entries but the merge was
+   * not, so a paginated roster could seed up to 40 × 700 "approved" members — each
+   * granted the ECK and handed paid pipeline work — past the 2,000-member cap that
+   * every join and approval is held to.
+   */
+  it("adopts nothing from a merged roster larger than the roster cap", async () => {
+    // The forger here is the outgoing coordinator the grant NAMES — a roster
+    // authority, so this exercises the cap itself rather than the SB-122 author
+    // check (which would refuse a stranger's roster before the cap is reached).
+    const h = await setup();
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const forgerSk = generateSecretKey();
+    const forgerPk = getPublicKey(forgerSk);
+    const pages = 5; // 5 × 450 = 2,250 > MAX_ROSTER (a full 700-entry page is past NIP-44)
+    for (let p = 0; p < pages; p++) {
+      const attendees = Array.from({ length: 450 }, () => ({
+        pubkey: getPublicKey(generateSecretKey()),
+        d: "x",
+        role: "attendee" as const,
+      }));
+      const content = { v: 3, eck_current: 1, ...(p === 0 ? { pages } : {}), attendees };
+      h.transport.seed.push({
+        kind: KIND_ROSTER,
+        pubkey: forgerPk,
+        created_at: Math.floor(h.clock.t / 1000),
+        id: `big-roster-${p}`,
+        sig: "",
+        tags: [["d", rosterPageD(identifier, p)], ["a", h.coordinate]],
+        content: eckEncrypt(h.eck, JSON.stringify(content)),
+      } as any);
+    }
+    const coordSkB = generateSecretKey();
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-big", sig: "", content: "",
+      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", getPublicKey(coordSkB), "2"]],
+    } as any);
+    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
+    await coordB.installEvent({
+      coordinate: h.coordinate,
+      inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"],
+      gen: 2,
+      source: "grant",
+      backfill: "full",
+      prevCoordinator: forgerPk,
+    });
+    expect(storeB.attendeeCount(h.coordinate)).toBe(0);
+  });
+
+  /**
+   * Audit SB-122. The attendee-planted case above is stopped by any author check;
+   * the hole was a FRESH key. An attendee mints throwaway key K, encrypts a roster
+   * naming K as an organizer under the ECK they hold, and publishes it at the
+   * event's public `d`, newest of all. K is no attendee, so the old "an attendee is
+   * never a roster authority" check let it through, and B seeded K approved +
+   * organizer (MLS co-admin) and granted it the ECK.
+   */
+  it("SB-122: a roster forged by a throwaway key holding the ECK adopts nothing", async () => {
+    const h = await setup();
+    const alicePk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const throwawayPk = getPublicKey(generateSecretKey());
+    const victimPk = getPublicKey(generateSecretKey()); // e.g. a revoked attendee to re-instate
+    seedRoster(
+      h,
+      throwawayPk,
+      [{ pubkey: throwawayPk, role: "organizer" }, { pubkey: victimPk, role: "attendee" }],
+      { id: "throwaway-roster", createdAt: Math.floor(h.clock.t / 1000) + 600 },
+    );
+
+    const { store: storeB } = await handOverTo(h, generateSecretKey(), { prev: getPublicKey(h.coordSk) });
+
+    for (const pk of [throwawayPk, victimPk]) {
+      expect(storeB.getAttendee(h.coordinate, pk), pk.slice(0, 8)).toBeUndefined();
+      expect(wrapsTo(h, pk), pk.slice(0, 8)).toHaveLength(0);
+    }
+    // The newest AUTHORIZED roster (A's) was adopted instead.
+    expect(storeB.getAttendee(h.coordinate, alicePk)?.status).toBe("approved");
+  });
+
+  it("SB-122: the throwaway roster is refused even when no other roster exists", async () => {
+    // Nothing to fall back to: the forgery is the only 31604 at the address.
+    const h = await setup();
+    const throwawayPk = getPublicKey(generateSecretKey());
+    seedRoster(h, throwawayPk, [{ pubkey: throwawayPk, role: "organizer" }], { id: "only-roster" });
+    const { store: storeB } = await handOverTo(h, generateSecretKey(), { prev: getPublicKey(h.coordSk) });
+    expect(storeB.attendeeCount(h.coordinate)).toBe(0);
+    expect(wrapsTo(h, throwawayPk)).toHaveLength(0);
+  });
+
+  it("SB-122: a roster from the outgoing coordinator the grant names is adopted, roles included", async () => {
+    const h = await setup();
+    const coordPkA = getPublicKey(h.coordSk);
+    const coOrgPk = getPublicKey(generateSecretKey());
+    const memberPk = getPublicKey(generateSecretKey());
+    seedRoster(h, coordPkA, [{ pubkey: coOrgPk, role: "organizer" }, { pubkey: memberPk, role: "attendee" }], { id: "a-roster" });
+
+    const { store: storeB } = await handOverTo(h, generateSecretKey(), { prev: coordPkA });
+
+    expect(storeB.getAttendee(h.coordinate, coOrgPk)).toMatchObject({ status: "approved", role: "organizer" });
+    expect(storeB.getAttendee(h.coordinate, memberPk)).toMatchObject({ status: "approved", role: "attendee" });
+    expect(wrapsTo(h, coOrgPk).length).toBeGreaterThan(0);
+  });
+
+  it("SB-122: a legacy grant without prev_coordinator adopts only an E_id-authored roster", async () => {
+    // Older organizer client: no prev_coordinator. A's roster — the very one the
+    // test above adopts — is now NOT adoptable (fail safe: nobody vouched for A),
+    // and neither is a throwaway's; E_id's roster is.
+    const h = await setup();
+    const coordPkA = getPublicKey(h.coordSk);
+    const fromA = getPublicKey(generateSecretKey());
+    const fromEid = getPublicKey(generateSecretKey());
+    const throwawayPk = getPublicKey(generateSecretKey());
+    const t = Math.floor(h.clock.t / 1000);
+    seedRoster(h, getPublicKey(h.eidSk), [{ pubkey: fromEid, role: "organizer" }], { id: "eid-roster", createdAt: t + 10 });
+    seedRoster(h, coordPkA, [{ pubkey: fromA, role: "attendee" }], { id: "a-roster", createdAt: t + 20 });
+    seedRoster(h, throwawayPk, [{ pubkey: throwawayPk, role: "organizer" }], { id: "k-roster", createdAt: t + 30 });
+
+    const { store: storeB } = await handOverTo(h, generateSecretKey());
+
+    expect(storeB.getAttendee(h.coordinate, fromEid)).toMatchObject({ status: "approved", role: "organizer" });
+    expect(storeB.getAttendee(h.coordinate, fromA)).toBeUndefined();
+    expect(storeB.getAttendee(h.coordinate, throwawayPk)).toBeUndefined();
+    expect(wrapsTo(h, throwawayPk)).toHaveLength(0);
+    expect(wrapsTo(h, fromA)).toHaveLength(0);
+  });
+
+  it("SB-122: a legacy grant with only a coordinator-authored roster adopts nothing", async () => {
+    const h = await setup();
+    const fromA = getPublicKey(generateSecretKey());
+    seedRoster(h, getPublicKey(h.coordSk), [{ pubkey: fromA, role: "organizer" }], { id: "a-only" });
+    const { store: storeB } = await handOverTo(h, generateSecretKey());
+    expect(storeB.attendeeCount(h.coordinate)).toBe(0);
   });
 });
 
@@ -5094,6 +5374,29 @@ describe("audit P9 — 31923 metadata selection uses the latest-event comparator
       tags: [["d", "cypherpunk"], ["title", "Stale"], ["end", "1"]], content: "", sig: "",
     } as any);
     expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
+  });
+
+  /** Audit SB-07: a record without `end`/`start` zeroed the anchor, so the
+   *  retention sweep skipped the event forever, restarts included. */
+  it("a newer 31923 without dates keeps the anchor, live and after a restart", async () => {
+    const h = await setup(0, { eventEndSec: 1000 });
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(31923) && s.filter.kinds?.includes(31600),
+    )!;
+    const undated = {
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: 20, id: "ev-undated",
+      tags: [["d", "cypherpunk"], ["title", "Renamed"]], content: "", sig: "",
+    } as any;
+    cfgSub.onEvent(undated);
+    expect(h.coordinator.scoringContextOf(h.coordinate)).toMatchObject({ title: "Renamed" });
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(1000);
+    // The relay now holds the undated record as the newest one; a restart reads it.
+    h.transport.seed.push(undated);
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"], gen: 1, source: "restore",
+    });
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(1000);
   });
 });
 
@@ -5633,6 +5936,84 @@ describe("audit C1 — commands resume to full completion after a partial failur
     // allowed to RESUME (pre-fix: rejected as stale), so the group was finally created.
     expect(h.store.getEvent(h.coordinate)).toBeDefined();
     expect(h.store.getMarmotGroup(h.coordinate)).toBeDefined();
+  });
+});
+
+/**
+ * Audit SB-121 / SB-127. The same-gen "resume" exception accepted a fresh 21603 for
+ * an install that had COMPLETED (the event row exists and is not tombstoned either
+ * way), and wrote the grant's ECK list verbatim. A grant signed before a revoke
+ * carries only v1, so the replay dropped the coordinator-minted v2 and the revoked
+ * attendee could read everything published afterwards.
+ */
+describe("audit SB-121 — a same-gen grant never rolls back a revocation", () => {
+  async function revokeOne(h: Harness): Promise<void> {
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+  }
+  function replayGrant(h: Harness): any {
+    return wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"],
+      },
+    });
+  }
+  const heldIds = (h: Harness) => (JSON.parse(h.store.getEvent(h.coordinate)!.eck_json) as EckVersion[]).map((v) => v.id);
+
+  it("rejects a same-gen grant for an install that already completed", async () => {
+    const h = await setup();
+    await revokeOne(h);
+    expect(heldIds(h)).toEqual([1, 2]);
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((m: unknown) => void logs.push(String(m)));
+    try {
+      await h.coordinator.handleCoordinatorWrap(replayGrant(h));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(heldIds(h)).toEqual([1, 2]);
+    expect(logs.join("\n")).toMatch(/already installed at gen 1/);
+    expect(logs.join("\n")).not.toMatch(/resuming a partially-completed install/);
+  });
+
+  it("a genuine resume union-merges the ECK set instead of replacing it", async () => {
+    const h = await setup();
+    await revokeOne(h);
+    // As if the daemon had crashed mid-install: nothing marks the install complete.
+    (h.coordinator as any).completedInstallGen.clear();
+    await h.coordinator.handleCoordinatorWrap(replayGrant(h));
+    expect(heldIds(h)).toEqual([1, 2]);
+    const live = (h.coordinator as any).events.get(h.coordinate);
+    expect(Math.max(...live.eck.map((v: EckVersion) => v.id))).toBe(2);
+  });
+
+  // Audit SB-86 (NIP §4.1): a second key under an id already held is another
+  // device's concurrent rotation, not a duplicate. Union-by-id dropped it, and
+  // everyone granted that key lost the event.
+  it("keeps a second key under an already-held id, and picks the canonical one as current", async () => {
+    const h = await setup();
+    await revokeOne(h);
+    (h.coordinator as any).completedInstallGen.clear();
+    const otherV2 = bytesToBase64(new Uint8Array(32).fill(0x5a));
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }, { id: 2, key: otherV2 }], config_relays: ["wss://test"],
+      },
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    expect(heldIds(h)).toEqual([1, 2, 2]);
+    const held = JSON.parse(h.store.getEvent(h.coordinate)!.eck_json) as EckVersion[];
+    const want = canonicalEck(held)!;
+    const live = (h.coordinator as any).events.get(h.coordinate);
+    expect((h.coordinator as any).currentEck(live).id).toBe(2);
+    expect(bytesToBase64((h.coordinator as any).currentEck(live).bytes)).toBe(want.key);
   });
 });
 
@@ -6639,7 +7020,7 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
   /** A community coordinator and an event coordinator that are DIFFERENT daemons
    *  sharing only the relay (a shared FakeTransport), so the community side can only
    *  learn about the event from the event's own published 31600. */
-  async function pair(o: { parentListsChild?: boolean; childNamesParent?: boolean } = {}) {
+  async function pair(o: { parentListsChild?: boolean; childNamesParent?: boolean; parentApproval?: "manual" | "invite" | "manual+invite" | "open" } = {}) {
     const transport = new FakeTransport();
     const pEidSk = generateSecretKey();
     const cEidSk = generateSecretKey();
@@ -6650,6 +7031,7 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
       eidSk: pEidSk,
       transport,
       extraConfigTags: o.parentListsChild === false ? [] : [["child", cCoord]],
+      ...(o.parentApproval ? { approval: o.parentApproval } : {}),
     });
     const child = await setup(0, {
       eidSk: cEidSk,
@@ -6707,6 +7089,21 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
     expect(statusOf(parent, pk)).toBe("approved");
     // The community's coordinator issued its own key grant for the community.
     expect(grantsTo(parent, sk, pCoord).length).toBe(1);
+  });
+
+  // §15.4 vs SB-124: a `manual` community queues direct joins, invite or not, but
+  // a verified proof from a linked event still admits — linking is the consent.
+  it("a manual community still admits a verified member_of proof, but queues a direct invite join", async () => {
+    const { parent, child, pCoord, cCoord } = await pair({ parentApproval: "manual" });
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    await joinCommunity(parent, sk, memberOf(cCoord, makeMembershipProof(child.coordSk, pCoord, cCoord, pk)));
+    expect(statusOf(parent, pk)).toBe("approved");
+    expect(grantsTo(parent, sk, pCoord).length).toBe(1);
+
+    // A forged proof is no exception.
+    const forger = await joinCommunity(parent, generateSecretKey(), memberOf(cCoord, { by: getPublicKey(child.coordSk), sig: "ab".repeat(64) }));
+    expect(statusOf(parent, forger)).toBe("pending");
   });
 
   it("an event grant has no proof when the community does not list the event, or the event names no parent", async () => {
@@ -6872,5 +7269,379 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
     expect(statusOf(h, pk)).toBe("approved");
     // The installed event answers from live state: no relay read of its 31600.
     expect(h.transport.fetches.slice(fetchesBefore).some((f) => f.kinds?.includes(31600) && f.authors?.includes(childEid))).toBe(false);
+  });
+});
+
+/**
+ * Audit SB-99. detachEvent awaits job handlers but not inbound ones, and the join
+ * handler reads the invite list from relays mid-flight. A detach in that window
+ * left the join to publish a grant carrying the deleted ECK and a roster for a
+ * torn-down event.
+ */
+describe("audit SB-99 — a join in flight across a detach publishes nothing", () => {
+  it("drops the decision when the event was detached during the invite fetch", async () => {
+    const h = await setup();
+    h.transport.beforeFetch = (filter) => {
+      if (filter.kinds?.includes(31601)) {
+        h.transport.beforeFetch = undefined;
+        void h.coordinator.detachEvent(h.coordinate, { reason: "test detach", gen: 1 });
+      }
+    };
+    (h.coordinator as any).inviteHashCache.clear();
+    const before = h.transport.published.length;
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(grantsTo(h, sk)).toHaveLength(0);
+    expect(h.transport.published.slice(before).some((e) => e.kind === KIND_ROSTER)).toBe(false);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+  });
+});
+
+/** Audit SB-24: building the roster ran one chat-key query per attendee. */
+describe("audit SB-24 — the roster reads the event's chat keys in one query", () => {
+  it("does not query chat keys per attendee", async () => {
+    const h = await setup();
+    for (let i = 0; i < 5; i++) await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const perAccount = vi.spyOn(h.store, "chatKeysForAccount");
+    const perEvent = vi.spyOn(h.store, "activeChatKeys");
+    const state = (h.coordinator as any).events.get(h.coordinate);
+    const roster = (h.coordinator as any).buildRosterContent(state);
+    expect(roster.attendees).toHaveLength(5);
+    expect(perAccount).not.toHaveBeenCalled();
+    expect(perEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** Audit DS41-046: the revoked attendee's own 31605 stayed readable to them. */
+describe("audit DS41-046 — revoke deletes the match list published to the removed attendee", () => {
+  it("the revoke's NIP-09 deletion names their 31605 at the pre-rotation d", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const listD = blindedD(h.eck, h.coordinate, pk);
+    expect(latestMatchList(h.transport, sk, getPublicKey(h.coordSk), listD)).toBeDefined();
+    const before = h.transport.published.length;
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+    const want = `${KIND_MATCH_LIST}:${getPublicKey(h.coordSk)}:${listD}`;
+    const deletions = h.transport.published.slice(before).filter((e) => e.kind === KIND_DELETION);
+    expect(deletions.some((e) => e.tags.some((t) => t[0] === "a" && t[1] === want))).toBe(true);
+  });
+});
+
+/** Audit DS41-042 / SB-98: a forward and a reverse batch for one directed pair both paid. */
+describe("audit SB-98 — one directed pair is scored once, however many batches hold it", () => {
+  it("concurrent forward + reverse batches make one provider call", async () => {
+    const h = await setup();
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const db = (h.store as any).db;
+    const row = db.prepare("SELECT a, b, inputs_hash FROM pairs WHERE coordinate = ?").get(h.coordinate);
+    db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(h.coordinate);
+    const pair = { a: row.a, b: row.b, inputsHash: row.inputs_hash };
+    const before = h.counters.batchCalls.length + h.counters.reverseCalls.length;
+    const c = h.coordinator as any;
+    await Promise.all([c.scoreBatchJob(h.coordinate, [pair]), c.scoreReverseBatchJob(h.coordinate, [pair])]);
+    expect(h.counters.batchCalls.length + h.counters.reverseCalls.length - before).toBe(1);
+    expect(c.pairsInFlight.size).toBe(0);
+  });
+});
+
+/** Audit SB-31: a store throw between the in-flight claim and dispatch leaked the claim. */
+describe("audit SB-31 — a store error before dispatch releases the rumor claim", () => {
+  it("the same join is processed on redelivery after bumpInboxRate threw", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, pk);
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "x", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    const real = h.store.bumpInboxRate.bind(h.store);
+    (h.store as any).bumpInboxRate = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+    await expect(h.coordinator.handleInboxWrap(h.coordinate, wrap as any)).rejects.toThrow(/SQLITE_BUSY/);
+    (h.store as any).bumpInboxRate = real;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+});
+
+/**
+ * Coordinator twin of audit SB-10. The install path picked the newest 31600 out of
+ * the relay's answer by kind alone, trusting the relay to have honoured `authors`
+ * and `#d`. A relay that does not could hand it another address's newer config.
+ */
+describe("install re-checks the 31600's author and d", () => {
+  it("ignores a newer 31600 at another d or by another author", async () => {
+    const h = await setup(0, { skipAutoInstall: true });
+    const eid = getPublicKey(h.eidSk);
+    const stranger = getPublicKey(generateSecretKey());
+    const forged = (pubkey: string, d: string, id: string) =>
+      ({
+        kind: 31600, pubkey, created_at: 99, id, sig: "", content: "",
+        tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", stranger, "1"]],
+      }) as any;
+    const realFetch = h.transport.fetch.bind(h.transport);
+    // A relay that ignores the filter and returns everything it has.
+    h.transport.fetch = async (filter: any, relays?: string[]) => [
+      ...(await realFetch(filter, relays)),
+      forged(eid, "some-other-event", "f1"),
+      forged(stranger, "cypherpunk", "f2"),
+    ];
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+  });
+});
+
+/**
+ * Audit DS41-034. A 31605 is ONE NIP-44 payload (65,535 plaintext bytes) and the
+ * client schema caps it at 100 matches. Reasoning is capped in characters, so CJK
+ * text could take a long list past the byte ceiling (nip44Encrypt throws on every
+ * retry, the attendee never gets a list), and a top_k over 100 published a list
+ * every client rejects.
+ */
+describe("audit DS41-034 — a match list always fits one NIP-44 payload", () => {
+  it("caps the count and trims from the weakest end until it fits", () => {
+    const matches = Array.from({ length: 120 }, (_, i) => ({
+      pubkey: getPublicKey(generateSecretKey()),
+      score: 1 - i / 200,
+      similarity: 0.5,
+      complementarity: 0.5,
+      reasoning: "協力".repeat(900), // 1,800 chars, 5,400 UTF-8 bytes
+    }));
+    const out = sanitizeMatchList({ v: 2, computed_at: 1, matches });
+    expect(out.matches.length).toBeGreaterThan(0);
+    expect(out.matches.length).toBeLessThanOrEqual(100);
+    expect(new TextEncoder().encode(JSON.stringify(out)).length).toBeLessThanOrEqual(65_535);
+    // Strongest first, kept in order.
+    expect(out.matches[0]!.pubkey).toBe(matches[0]!.pubkey);
+    expect(() => matchListContentSchema.parse(out)).not.toThrow();
+    // A short list is untouched.
+    expect(sanitizeMatchList({ v: 2, computed_at: 1, matches: matches.slice(0, 3) }).matches).toHaveLength(3);
+  });
+});
+
+/**
+ * Audit DS41-043. MAX_TRANSCRIPT_TEXT allows 100,000 characters, and the stored
+ * transcript went into the ECK-encrypted 31610 verbatim: a long keynote's
+ * transcript alone is past NIP-44's 65,535 bytes, so the talk could never publish.
+ */
+describe("audit DS41-043 — a long talk transcript still publishes", () => {
+  const base = {
+    v: 2 as const,
+    pubkey: "a".repeat(64),
+    talk_d: "t1",
+    title: "Keynote",
+    description: "",
+    speakers: [],
+    external_url: "https://example.com/talk",
+    external_kind: "youtube" as any,
+    lang: "en",
+    revision: 1,
+    status: "published" as const,
+    published_at: 1,
+  };
+  for (const [label, text] of [["ascii", "word ".repeat(20_000)], ["cjk", "演講".repeat(50_000)]] as const) {
+    it(`trims an oversized ${label} transcript to fit, and leaves a small one alone`, () => {
+      const content = { ...base, transcript: { x: "b".repeat(64), text, lang: "en", source: "stt" as const, updated_at: 1 } };
+      const fitted = fitTalkContent(content);
+      expect(new TextEncoder().encode(JSON.stringify(fitted)).length).toBeLessThanOrEqual(65_535);
+      expect(fitted.transcript!.text.endsWith("…")).toBe(true);
+      expect(text.startsWith(fitted.transcript!.text.slice(0, -1))).toBe(true);
+      expect(() => eckEncrypt(new Uint8Array(32), JSON.stringify(fitted))).not.toThrow();
+      const small = { ...content, transcript: { ...content.transcript, text: "short" } };
+      expect(fitTalkContent(small)).toBe(small);
+    });
+  }
+});
+
+/**
+ * Audit SB-124 — the 31600 `approval` tag is enforced on every join.
+ *
+ * It used to be parsed and never read, so `approval: "manual"` auto-approved any
+ * holder of a valid invite and `approval: "invite"` queued joins it should have
+ * refused. The organizer's own self-join (the create flow's "enroll me") is the
+ * one auto-approval a manual event allows, recognised by its E_id-labelled code.
+ */
+describe("audit SB-124 — the approval policy is enforced", () => {
+  /** Send a join carrying harness invite `idx` (or none), no submission. */
+  async function joinWith(h: Harness, sk: Uint8Array, idx: number | undefined, name = "x"): Promise<string> {
+    const pk = getPublicKey(sk);
+    const tags: string[][] = [["a", h.coordinate]];
+    if (idx !== undefined) {
+      const inviteSk = h.invites[idx]!;
+      tags.push(["invite", getPublicKey(inviteSk), makeInviteProof(inviteSk, h.coordinate, pk).sig]);
+    }
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, getPublicKey(h.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name, message: "", rsvp_public: false },
+        tags,
+      }) as any,
+    );
+    return pk;
+  }
+
+  it("manual: a valid invite is queued, not auto-approved, and its claim is not spent", async () => {
+    const h = await setup(0, { approval: "manual" });
+    const sk = generateSecretKey();
+    const pk = await joinWith(h, sk, 0);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(grantsTo(h, sk)).toHaveLength(0);
+
+    // The code is still unspent: once the organizer relaxes the policy, a
+    // DIFFERENT person can redeem it. Had the manual join claimed it, they could not.
+    await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["approval", "manual+invite"]], 10));
+    const sk2 = generateSecretKey();
+    const pk2 = await joinWith(h, sk2, 0);
+    expect(h.store.getAttendee(h.coordinate, pk2)?.status).toBe("approved");
+  });
+
+  it("manual: the organizer's own self-join (organizer-self code) still auto-approves", async () => {
+    const h = await setup(0, { approval: "manual", inviteLabels: ["organizer-self"] });
+    const organizerSk = generateSecretKey();
+    const pk = await joinWith(h, organizerSk, 0, "Olga");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(grantsTo(h, organizerSk).length).toBeGreaterThan(0);
+  });
+
+  it("manual: an organizer-self code admits only its first redeemer, and a forged proof none", async () => {
+    const h = await setup(0, { approval: "manual", inviteLabels: ["organizer-self"] });
+    await joinWith(h, generateSecretKey(), 0); // the organizer
+    const otherSk = generateSecretKey();
+    const other = await joinWith(h, otherSk, 0); // a second person with the same code
+    expect(h.store.getAttendee(h.coordinate, other)?.status).toBe("pending");
+
+    // A proof bound to someone else's pubkey does not verify for this sender.
+    const h2 = await setup(0, { approval: "manual", inviteLabels: ["organizer-self"] });
+    const thiefSk = generateSecretKey();
+    const thief = getPublicKey(thiefSk);
+    const inviteSk = h2.invites[0]!;
+    const proofForOther = makeInviteProof(inviteSk, h2.coordinate, getPublicKey(generateSecretKey()));
+    await h2.coordinator.handleInboxWrap(
+      h2.coordinate,
+      wrapRumor(thiefSk, getPublicKey(h2.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "thief", message: "", rsvp_public: false },
+        tags: [["a", h2.coordinate], ["invite", getPublicKey(inviteSk), proofForOther.sig]],
+      }) as any,
+    );
+    expect(h2.store.getAttendee(h2.coordinate, thief)?.status).toBe("pending");
+  });
+
+  it("invite: a join without a proof is rejected outright — no row, no queue", async () => {
+    const h = await setup(0, { approval: "invite" });
+    const pk = await joinWith(h, generateSecretKey(), undefined);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+
+  it("invite: a valid code admits; an already-used one is rejected, not queued", async () => {
+    const h = await setup(0, { approval: "invite" });
+    const first = await joinWith(h, generateSecretKey(), 0);
+    expect(h.store.getAttendee(h.coordinate, first)?.status).toBe("approved");
+    const second = await joinWith(h, generateSecretKey(), 0); // single-use, already claimed
+    expect(h.store.getAttendee(h.coordinate, second)).toBeUndefined();
+  });
+
+  it("invite: the organizer can still approve a rejected person by hand", async () => {
+    const h = await setup(0, { approval: "invite" });
+    const sk = generateSecretKey();
+    const pk = await joinWith(h, sk, undefined);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    await admin(h, "approve", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(grantsTo(h, sk).length).toBeGreaterThan(0);
+  });
+
+  it("manual+invite and open: a valid code auto-approves, no code waits in the queue", async () => {
+    for (const approval of ["manual+invite", "open"] as const) {
+      const h = await setup(0, { approval });
+      const withCode = await joinWith(h, generateSecretKey(), 0);
+      const without = await joinWith(h, generateSecretKey(), undefined);
+      expect(h.store.getAttendee(h.coordinate, withCode)?.status, approval).toBe("approved");
+      expect(h.store.getAttendee(h.coordinate, without)?.status, approval).toBe("pending");
+    }
+  });
+
+  it("a 31600 without an approval tag is treated as the NIP default, manual", async () => {
+    const h = await setup(0, { approval: "manual+invite" });
+    // configUpdate carries no approval tag at all.
+    await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [], 10));
+    const pk = await joinWith(h, generateSecretKey(), 0);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+  });
+});
+
+/**
+ * Audit DS41-041 — an event-context edit tells the organizer the scores are stale.
+ *
+ * Every scoring prompt embeds the title, summary and topics, but the pair cache is
+ * keyed on the profiles only, so a rewritten description left every score on the
+ * old framing with nothing said. The coordinator now sends a 21606 advisory
+ * suggesting a recompute (and deliberately does not recompute on its own).
+ */
+describe("audit DS41-041 — an event-context edit suggests a recompute", () => {
+  function contextNotices(h: Harness) {
+    return h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+      .filter((s) => s.stage === "event_context");
+  }
+  function metaSub(h: Harness) {
+    return h.transport.subs.find((s) => s.filter.kinds?.includes(31923) && s.filter.kinds?.includes(31600))!;
+  }
+  const meta = (h: Harness, createdAt: number, tags: string[][]) =>
+    ({
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: createdAt, id: `ev-${createdAt}`,
+      tags: [["d", "cypherpunk"], ...tags], content: "", sig: "",
+    }) as any;
+
+  it("sends one advisory (no poison state) when the summary changes after matches exist, and re-scores nothing", async () => {
+    const h = await setup();
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const pairsBefore = countPairs(h.store, h.coordinate);
+    expect(pairsBefore).toBeGreaterThan(0);
+    const scoringCalls = h.counters.batchCalls.length;
+
+    metaSub(h).onEvent(meta(h, 20, [["title", "Cypherpunk Assembly"], ["summary", "Now about privacy research"], ["t", "cypherpunk"]]));
+    await vi.waitFor(() => expect(contextNotices(h)).toHaveLength(1));
+    const notice = contextNotices(h)[0]!;
+    expect(notice.error_category).toBe("recompute_suggested");
+    expect(notice.state).toBeUndefined(); // an advisory, not a stuck job
+    expect(notice.pubkey).toBeUndefined();
+
+    await h.coordinator.jobs.drain();
+    expect(countPairs(h.store, h.coordinate)).toBe(pairsBefore); // scores kept
+    expect(h.counters.batchCalls.length).toBe(scoringCalls); // nothing re-scored
+  });
+
+  it("stays quiet when nothing the prompt reads changed, or when there is nothing scored yet", async () => {
+    const h = await setup();
+    // No pairs yet: a title change has nothing to invalidate.
+    metaSub(h).onEvent(meta(h, 20, [["title", "Renamed early"], ["t", "cypherpunk"]]));
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    // Only the end date moves: not part of the scoring context.
+    metaSub(h).onEvent(meta(h, 30, [["title", "Renamed early"], ["t", "cypherpunk"], ["end", "9000"]]));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(contextNotices(h)).toHaveLength(0);
   });
 });

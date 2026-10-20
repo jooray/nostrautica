@@ -19,6 +19,7 @@ import {
   MAX_SUBMISSION_MEDIA,
   MAX_MESSAGE,
   MAX_NAME,
+  type Approval,
   type AttendeeProfile,
   type MediaDescriptor,
 } from "@nostrautica/protocol";
@@ -28,7 +29,12 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { loadSelfCopy, cacheSelfCopy } from "$lib/media/submit.js";
+import {
+  loadSelfCopy,
+  cacheSelfCopy,
+  claimSubmissionRev,
+  captureSelfCopyScope,
+} from "$lib/media/submit.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 /**
@@ -83,6 +89,20 @@ export type JoinLanding = "approved" | "waiting" | "form";
  * away without submitting, the pending request they really do have outstanding
  * is still the truth for the next visit.
  */
+/**
+ * The join form must not send: the space admits by invite only (`approval:
+ * "invite"`) and there is no code in hand (manual e2e BUG-3).
+ *
+ * Its coordinator REJECTS such a join (NIP §6.2), it does not queue it, yet the
+ * page sent it anyway, said the organizer would review it, and polled for an
+ * approval that was never coming. The join form never carries a `member_of`
+ * proof (that path is `joinCommunityViaChild`), so without a code there is no
+ * entitlement to send. Other modes queue a code-less join, so they still send.
+ */
+export function joinNeedsInvite(approval: Approval | undefined, hasInvite: boolean): boolean {
+  return approval === "invite" && !hasInvite;
+}
+
 export function joinLanding(state: {
   approved: boolean;
   joinSent: boolean;
@@ -164,8 +184,17 @@ export async function sendJoinRequest(
   // (loadSelfCopy) and bumps past it, cleanly superseding the join submission. A
   // first join is rev 0; the self-copy written below carries it so the next edit
   // bumps from it.
-  const prevSelf = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
-  const rev = (prevSelf?.rev ?? -1) + 1;
+  //
+  // Through the persisted high-water mark (claimSubmissionRev), not
+  // `(prevSelf?.rev ?? -1) + 1`: an empty relay read with no local self-copy made
+  // that 0 again, and a re-join at rev 0 after rev N loses the §3.3 comparison —
+  // the coordinator drops it as stale while this screen says it was sent (audit
+  // DS41-008). Same rule the Record flow uses.
+  // Captured before any await: the rev floor and self-copy written below must
+  // land under the identity that started this join (DS41-003 pattern).
+  const scope = captureSelfCopyScope();
+  const prevSelf = await loadSelfCopy(signer, ctx, blindingKey, scope).catch(() => undefined);
+  const rev = claimSubmissionRev(ctx.coordinate, prevSelf?.rev, scope);
 
   const wraps: Promise<unknown>[] = [
     signerWrap(signer, inboxPubkey, {
@@ -222,6 +251,7 @@ export async function sendJoinRequest(
     ctx.coordinate,
     { profile, media: input.media ?? [], rev },
     selfEvent.created_at,
+    scope,
   );
 
   // Opt-in public RSVP (31925) — a standard, discoverable calendar RSVP.

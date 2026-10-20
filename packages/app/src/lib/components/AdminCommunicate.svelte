@@ -20,7 +20,7 @@
   import PostEditor from "./PostEditor.svelte";
   import { saveFormDraft, loadFormDraft, clearDraft } from "$lib/stores/drafts.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 
   let {
     ctx,
@@ -179,7 +179,7 @@
             {p.locked ? t("post.locked.title") : p.title}
             {#if p.membersOnly}<span class="badge">{t("post.membersBadge")}</span>{/if}
             <span class="muted" style="font-size:0.75rem">
-              · {new Date(p.publishedAt * 1000).toLocaleDateString()}
+              · {new Date(p.publishedAt * 1000).toLocaleDateString(i18n.locale)}
             </span>
           </span>
           {#if !p.locked}

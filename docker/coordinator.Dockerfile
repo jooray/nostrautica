@@ -2,7 +2,7 @@
 # Pinned to an exact Node 22 LTS by DIGEST (audit O1/Q14): one Node major
 # everywhere and a fully immutable base — the tag documents intent, the @sha256
 # digest is what actually gets pulled, so a re-tag upstream can't change the build.
-# Node 22.5+ is required for the built-in node:sqlite store (see README).
+# Node 22.13+ is required (unflagged node:sqlite) for the built-in node:sqlite store (see README).
 # Digest is for node:22.14.0-bookworm-slim; refresh with:
 #   docker manifest inspect node:22.14.0-bookworm-slim
 FROM node:22.14.0-bookworm-slim@sha256:1c18d9ab3af4585870b92e4dbc5cac5a0dc77dd13df1a5905cea89fc720eb05b
@@ -25,11 +25,18 @@ COPY pnpm-workspace.yaml package.json pnpm-lock.yaml tsconfig.base.json ./
 COPY patches ./patches
 # Every workspace package in the coordinator's dependency closure must exist on
 # disk for the workspace graph to resolve: the protocol package, and the vendored,
-# committed-pre-built Marmot/MLS packages (marmot-ts → ts-mls, both workspace:*).
+# committed-pre-built Marmot package (workspace:*). marmot-ts bundles its own
+# ts-mls fork since 0fbe001 (2026-10-05); the separate packages/vendor/ts-mls
+# package is gone, and a COPY naming it fails the whole build. check-pins.mjs
+# asserts every COPY source here exists, so a retired package can't strand it again.
 COPY packages/protocol ./packages/protocol
-COPY packages/coordinator ./packages/coordinator
+# The coordinator's manifests and sources only, never the whole directory: on a
+# working tree (or the coordinator host) it also holds `.env`, `coordinator.toml`
+# and the database. .dockerignore keeps them out of the context as well; this is
+# the second lock (audit DS41-072).
+COPY packages/coordinator/package.json packages/coordinator/tsconfig.json ./packages/coordinator/
+COPY packages/coordinator/src ./packages/coordinator/src
 COPY packages/vendor/marmot-ts ./packages/vendor/marmot-ts
-COPY packages/vendor/ts-mls ./packages/vendor/ts-mls
 
 RUN pnpm install --frozen-lockfile --filter @nostrautica/coordinator... \
   && pnpm --filter @nostrautica/protocol build \

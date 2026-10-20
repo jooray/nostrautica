@@ -170,6 +170,25 @@ bogus = 1
   });
 });
 
+/**
+ * Audit DS41-028. The install check compares the allowlist against the canonical
+ * lowercase hex of the coordinate's E_id, so an npub (the form the daemon's own
+ * startup line prints) or uppercase hex matched nothing and every install was
+ * denied, with no error anywhere.
+ */
+describe("security.allowed_eid_pubkeys is normalized at load", () => {
+  const HEX = "3bf0c63fcb93463407af97a5e5ee64fa883d107ef9e558472c4eb9aaaefa459d";
+  const NPUB = "npub180cvv07tjdrrgpa0j7j7tmnyl2yr6yr7l8j4s3evf6u64th6gkwsyjh6w6";
+  it("accepts npub and uppercase hex, stored as lowercase hex", () => {
+    const body = BASE + `\n[security]\nallowed_eid_pubkeys = ["${NPUB}", "${HEX.toUpperCase()}"]\n`;
+    expect(loadConfig(writeConfig(body)).security.allowed_eid_pubkeys).toEqual([HEX, HEX]);
+  });
+  it("refuses an entry that is neither, at load", () => {
+    const body = BASE + `\n[security]\nallowed_eid_pubkeys = ["not-a-key"]\n`;
+    expect(() => loadConfig(writeConfig(body))).toThrow(/not an npub or 64-char hex/);
+  });
+});
+
 describe("matching knobs are counts, not arbitrary numbers", () => {
   it("rejects a negative top_k", () => {
     const body = BASE + `\n[matching]\ntop_k = -1\n`;

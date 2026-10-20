@@ -60,4 +60,14 @@ export default tseslint.config(
       ],
     },
   },
+  {
+    // The PWA logs deliberately through console.warn/debug/error. A bare
+    // console.log is leftover debugging: audit SB-25 found seven `[DIAG …]`
+    // lines dumping every roster member's tags on each People-tab open.
+    files: ["packages/app/src/**/*.ts"],
+    ignores: ["**/*.test.ts"],
+    rules: {
+      "no-console": ["error", { allow: ["warn", "error", "debug", "info"] }],
+    },
+  },
 );

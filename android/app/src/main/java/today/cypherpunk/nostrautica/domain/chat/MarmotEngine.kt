@@ -62,15 +62,28 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
     private var closeJob: Job? = null
     private var eventsJob: Job? = null
     private val events = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    private val freshness = RuntimeFreshness()
 
     /** Hold the runtime open. Pair every call with [release]. */
     override suspend fun acquire() {
-        withContext(Dispatchers.IO) {
-            lock.withLock {
-                closeJob?.cancel(); closeJob = null
-                refs++
-                if (marmot == null) marmot = open()
+        // A reference counts only once open() succeeded, and an acquire that fails or is
+        // cancelled afterwards (withContext rethrows a cancellation even when its block
+        // finished) gives it back: the caller never got it, so it never calls release(),
+        // and a leaked ref kept the native runtime, its database and sockets open for the
+        // life of the process (DS41-060).
+        var counted = false
+        try {
+            withContext(Dispatchers.IO) {
+                lock.withLock {
+                    closeJob?.cancel(); closeJob = null
+                    if (marmot == null) marmot = open()
+                    refs++
+                    counted = true
+                }
             }
+        } catch (e: Throwable) {
+            if (counted) release()
+            throw e
         }
     }
 
@@ -116,6 +129,8 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             @Suppress("UNREACHABLE_CODE") error("unreachable")
         }
         m.start()
+        // start() registers the group subscriptions for every group the store holds.
+        freshness.restarted()
         eventsJob = scope.launch {
             val sub = m.subscribeEvents()
             try {
@@ -139,6 +154,16 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         withContext(NonCancellable) {
             runCatching { m.shutdownAndClose() }.onFailure { Log.w(TAG, "shutdown: ${it.javaClass.simpleName}") }
             runCatching { m.close() }
+        }
+    }
+
+    override suspend fun refreshIfStale(): Boolean = withContext(Dispatchers.IO) {
+        lock.withLock {
+            if (marmot == null || !freshness.shouldRestart(refs)) return@withLock false
+            Log.i(TAG, "restarting the chat runtime so its group subscriptions cover a new group or relay list")
+            close()
+            marmot = open()
+            true
         }
     }
 
@@ -185,9 +210,14 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         // this device listens.
         val want = relays.map(RelayPool::normalize).toSet()
         val inbox = runCatching { accountInboxRelays(label) }.getOrDefault(emptyList()).map(RelayPool::normalize).toSet()
-        if (!inbox.containsAll(want)) runCatching { setAccountInboxRelays(label, relays, bootstrap) }.onFailure { Log.w(TAG, "inbox relays: ${it.javaClass.simpleName}") }
+        var changed = false
+        if (!inbox.containsAll(want)) runCatching { setAccountInboxRelays(label, relays, bootstrap) }
+            .onSuccess { changed = true }.onFailure { Log.w(TAG, "inbox relays: ${it.javaClass.simpleName}") }
         val nip65 = runCatching { accountNip65Relays(label) }.getOrDefault(emptyList()).map(RelayPool::normalize).toSet()
-        if (!nip65.containsAll(want)) runCatching { setAccountNip65Relays(label, relays, bootstrap) }.onFailure { Log.w(TAG, "nip65 relays: ${it.javaClass.simpleName}") }
+        if (!nip65.containsAll(want)) runCatching { setAccountNip65Relays(label, relays, bootstrap) }
+            .onSuccess { changed = true }.onFailure { Log.w(TAG, "nip65 relays: ${it.javaClass.simpleName}") }
+        // A fresh account has no group subscription to break; one that holds groups does.
+        if (changed && runCatching { chatList(label, true).isNotEmpty() }.getOrDefault(false)) freshness.relayListsChanged()
         label
     }
 
@@ -210,13 +240,18 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
     }
 
     override suspend fun acceptInvite(account: String, groupIdHex: String) {
-        io { runCatching { acceptGroupInvite(account, groupIdHex) }.onFailure { Log.w(TAG, "accept: ${it.javaClass.simpleName}") } }
+        io {
+            runCatching { acceptGroupInvite(account, groupIdHex) }
+                .onSuccess { freshness.joinedGroup(groupIdHex) }
+                .onFailure { Log.w(TAG, "accept: ${it.javaClass.simpleName}") }
+        }
     }
 
     override suspend fun confirmRejoin(account: String, groupIdHex: String, coordinator: String): Boolean = io {
         val status = runCatching { groupRecoveryStatus(account, groupIdHex) }.getOrNull() ?: return@io false
         val offer = status.rejoinInvitations.filter { hexOf(it.welcomerAccountIdHex) == coordinator }.maxByOrNull { it.epoch } ?: return@io false
         runCatching { confirmGroupRejoin(account, offer.welcomeIdHex, offer.localStateToken) }.isSuccess
+            .also { if (it) freshness.joinedGroup(groupIdHex) }
     }
 
     override suspend fun rotateKeyPackage(account: String) { io { rotateKeyPackage(account) } }

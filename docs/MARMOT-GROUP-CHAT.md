@@ -45,7 +45,9 @@ The coordinator runs a headless Marmot admin bot
 - Authenticates 21607 attestations, binds account ⇄ chat device key, and adds
   each approved attendee's attested devices from their kind-30443 key packages.
 - Removes a member's leaves (real MLS Remove → forward secrecy) on revoke or
-  attendee withdrawal.
+  attendee withdrawal, also while chat is turned off: turning chat off freezes the
+  group (no adds or Welcomes) but keeps every leaf, and turning it back on
+  re-activates the same group.
 - Publishes the active `nostr_group_id` on the 31604 roster, the authoritative
   event→group binding clients verify before trusting a group.
 - Promotes each approved **organizer**'s chat devices to MLS co-admins, so the
@@ -169,7 +171,11 @@ So the app offers **Rejoin this chat**, next to a failed send, and in the
 "setting up" state once it has been slow for a while. It revokes this device's
 chat key (dropping the coordinator-held leaf), rotates the key package (a new
 event id under the same slot), and re-attests, which the coordinator handles as an
-ordinary enrolment: Add commit + Welcome. The device key, its label, its roster
+ordinary enrolment: Add commit + Welcome. The revoke and the add are two separate
+gift wraps that can arrive in either order, so the coordinator keeps the newest
+accepted `created_at` per device for each op and ignores an add or revoke strictly
+older than the other; the app sends the add in a later second than the revoke.
+The device key, its label, its roster
 entry and its device-cap slot are all reused, unlike clearing site data, which
 mints a new identity and burns another slot.
 

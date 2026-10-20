@@ -10,8 +10,18 @@ import {
 
 // Cache-path setup (CACHING-PLAN §2.4): mock the relay layer so fetchEventPosts
 // runs against a fixed event set and we can assert the persistent write-through.
-const { fetchEvents } = vi.hoisted(() => ({ fetchEvents: vi.fn() }));
-vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents, fetchEventsRelayOnly: vi.fn() }));
+const { fetchEvents, relayAnswers } = vi.hoisted(() => ({
+  fetchEvents: vi.fn(),
+  relayAnswers: { value: true },
+}));
+vi.mock("$lib/nostr/ndk.js", () => ({
+  fetchEvents,
+  fetchEventsRelayOnly: vi.fn(),
+  fetchEventsAnswered: async (...args: unknown[]) => ({
+    events: await (fetchEvents as (...a: unknown[]) => Promise<unknown[]>)(...args),
+    answered: relayAnswers.value,
+  }),
+}));
 vi.mock("$lib/nostr/publish-queue.js", () => ({ publishOrQueue: vi.fn() }));
 // The fixtures below are unsigned plain objects. Signature checking is NDK's job
 // in production (ndk.ts pins validation to 1) and `onlyVerified` is re-applied at
@@ -226,6 +236,26 @@ describe("fetchEventPosts cache write-through (§2.4)", () => {
     __resetPersistForTests();
     __setPersistBackend(memPersist());
     fetchEvents.mockReset();
+    relayAnswers.value = true;
+  });
+
+  // Audit DS41-015: an empty read nobody answered returned [] AND cached [] over
+  // the feed EventHome had just painted.
+  it("throws on an empty unanswered read and leaves the cached feed alone", async () => {
+    setActiveCacheOwner(OWNER);
+    fetchEvents.mockResolvedValue([pub("x", 100, "Hello")]);
+    await fetchEventPosts(ctx);
+
+    relayAnswers.value = false;
+    fetchEvents.mockResolvedValue([]);
+    await expect(fetchEventPosts(ctx)).rejects.toThrow(/No relay answered/);
+    expect(cachedEventPosts(ctx.coordinate)?.[0].title).toBe("Hello");
+  });
+
+  it("still returns an empty feed when a relay answered that there is none", async () => {
+    setActiveCacheOwner(OWNER);
+    fetchEvents.mockResolvedValue([]);
+    expect(await fetchEventPosts(ctx)).toEqual([]);
   });
 
   it("persists the fetched feed owner-scoped so cachedEventPosts paints it", async () => {

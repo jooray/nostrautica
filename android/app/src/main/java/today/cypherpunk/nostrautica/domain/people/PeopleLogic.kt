@@ -7,6 +7,7 @@ import today.cypherpunk.nostrautica.protocol.DirectoryEntryContent
 import today.cypherpunk.nostrautica.protocol.Match
 import today.cypherpunk.nostrautica.protocol.Nip19
 import today.cypherpunk.nostrautica.protocol.PerEventSettings
+import today.cypherpunk.nostrautica.protocol.SettingsMerge
 import java.text.Normalizer
 import java.time.Instant
 import java.time.ZoneId
@@ -294,19 +295,22 @@ object Report {
 enum class SettingList(val wire: String) { FAVORITES("favorites"), WANT_TO_MEET("want_to_meet"), MET("met") }
 
 object SettingsRules {
-    private fun toggle(list: List<String>, pk: String) = if (pk in list) list.filter { it != pk } else list + pk
-
-    fun toggled(s: PerEventSettings, list: SettingList, pubkey: String): PerEventSettings = when (list) {
-        SettingList.FAVORITES -> s.copy(favorites = toggle(s.favorites, pubkey))
-        SettingList.WANT_TO_MEET -> s.copy(wantToMeet = toggle(s.wantToMeet, pubkey))
-        SettingList.MET -> s.copy(met = toggle(s.met, pubkey))
+    private fun field(l: SettingList) = when (l) {
+        SettingList.FAVORITES -> SettingsMerge.Field.FAVORITES
+        SettingList.WANT_TO_MEET -> SettingsMerge.Field.WANT_TO_MEET
+        SettingList.MET -> SettingsMerge.Field.MET
     }
 
-    fun withNote(s: PerEventSettings, pubkey: String, note: String): PerEventSettings {
-        val n = LinkedHashMap(s.notes)
-        if (note.trim().isNotEmpty()) n[pubkey] = note.trim() else n.remove(pubkey)
-        return s.copy(notes = n)
-    }
+    /**
+     * Stamped edits (SB-88): the change carries its own timestamp, so a merge with
+     * another device's copy keeps it (see [SettingsMerge]). [s] is a merged copy
+     * (it carries a clock) or the empty one, so no created_at is needed here.
+     */
+    fun toggled(s: PerEventSettings, list: SettingList, pubkey: String, nowMs: Long = System.currentTimeMillis()): PerEventSettings =
+        SettingsMerge.edit(s, 0, SettingsMerge.Edit.Toggle(field(list), pubkey), nowMs)
+
+    fun withNote(s: PerEventSettings, pubkey: String, note: String, nowMs: Long = System.currentTimeMillis()): PerEventSettings =
+        SettingsMerge.edit(s, 0, SettingsMerge.Edit.Note(pubkey, note), nowMs)
 
     fun has(s: PerEventSettings?, list: SettingList, pubkey: String): Boolean = when (list) {
         SettingList.FAVORITES -> s?.favorites

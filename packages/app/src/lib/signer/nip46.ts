@@ -22,7 +22,7 @@ import {
 } from "nostr-tools/nip46";
 import { SimplePool } from "nostr-tools/pool";
 import { bytesToHex, hexToBytes, sha256Hex, utf8ToBytes } from "@nostrautica/protocol";
-import { signerRelays } from "$lib/nostr/relays.js";
+import { signerRelays, isAcceptedRelayUrl } from "$lib/nostr/relays.js";
 import type { AppSigner } from "./types.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -732,7 +732,9 @@ export class Nip46Signer implements AppSigner {
     const clientSk = hexToBytes(session.clientSkHex);
     const pointer: BunkerPointer = {
       pubkey: session.bunker.pubkey,
-      relays: session.bunker.relays,
+      // A session persisted before SB-08 can still name a plaintext remote relay;
+      // drop it here so it is neither dialled nor written back by serialize().
+      relays: session.bunker.relays.filter(isAcceptedRelayUrl),
       secret: session.bunker.secret ?? null,
     };
     // `pointer` stays the faithful record of what the signer advertised (it is
@@ -1008,7 +1010,11 @@ export class Nip46Signer implements AppSigner {
       throw new Error(t("error.badBunkerLink"));
     }
     const clientSk = generateSecretKey();
-    const pointer = await parseBunkerInput(normalized);
+    const parsed = await parseBunkerInput(normalized);
+    // `relay=` values come back verbatim (no scheme check): keep only relays we
+    // would dial anyway — wss://, or loopback ws:// for the local stack (SB-08).
+    // A link with none left is refused rather than silently rerouted.
+    const pointer = parsed && { ...parsed, relays: parsed.relays.filter(isAcceptedRelayUrl) };
     if (!pointer || !pointer.relays.length) {
       throw new Error(t("error.badBunkerLink"));
     }

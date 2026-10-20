@@ -12,9 +12,16 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { KIND_EVENT_PAGE, makeCoordinate } from "@nostrautica/protocol";
 
-const { fetchEvents } = vi.hoisted(() => ({ fetchEvents: vi.fn() }));
+const { fetchEvents, relayAnswers } = vi.hoisted(() => ({
+  fetchEvents: vi.fn(),
+  relayAnswers: { value: true },
+}));
 vi.mock("$lib/nostr/ndk.js", () => ({
   fetchEvents,
+  fetchEventsAnswered: async (...args: unknown[]) => ({
+    events: await (fetchEvents as (...a: unknown[]) => Promise<unknown[]>)(...args),
+    answered: relayAnswers.value,
+  }),
   fetchEventsRelayOnly: vi.fn(),
   publishSigned: vi.fn(),
   isAcceptedRelayUrl: (value: string) => value.startsWith("wss://"),

@@ -101,7 +101,12 @@ describe("consumeNsecFromHash (audit UX-12)", () => {
 
   it("strips the nsec from URL, history, AND the in-memory route", async () => {
     expect(await consumeNsecFromHash()).toBe(true);
+    // Staged for the Login screen to confirm, not imported (SB-129).
+    expect(session.loggedIn).toBe(false);
+    expect(session.pendingLinkKey?.nsec).toBe(nsec);
+    expect(await session.confirmLinkKey()).toBe(true);
     expect(session.loggedIn).toBe(true);
+    expect(session.pendingLinkKey).toBeNull();
 
     // URL + history cleaned…
     expect(replaceState).toHaveBeenCalledWith(null, "", "#/login");
@@ -121,6 +126,22 @@ describe("consumeNsecFromHash (audit UX-12)", () => {
 
     await expect(consumeNsecFromHash()).rejects.toThrow();
     expect(router.route.nsec).toBeUndefined();
+  });
+
+  it("never signs the visitor into the link's identity on its own (SB-129)", async () => {
+    await session.createLocalKey();
+    const mine = session.pubkey;
+    keystore.saveLocalKey.mockClear();
+
+    expect(await consumeNsecFromHash()).toBe(true);
+    // Still the visitor's own identity, and their stored key was not overwritten.
+    expect(session.pubkey).toBe(mine);
+    expect(keystore.saveLocalKey).not.toHaveBeenCalled();
+    expect(session.pendingLinkKey?.pubkey).not.toBe(mine);
+
+    session.cancelLinkKey();
+    expect(session.pendingLinkKey).toBeNull();
+    expect(session.pubkey).toBe(mine);
   });
 
   it("returns false when the hash carries no nsec", async () => {
@@ -272,6 +293,61 @@ describe("cross-tab remote logout (H-5)", () => {
     const other = "f".repeat(64);
     session.applyRemoteLogout(other);
     expect(session.loggedIn).toBe(true); // untouched
+  });
+});
+
+/**
+ * A tab the browser froze in the background never hears the logout broadcast
+ * (audit SB-95). The logout's durable trace is the wiped persisted login, and the
+ * layout re-checks it whenever the tab comes back to the front.
+ */
+describe("a resumed tab checks the persisted login (SB-95)", () => {
+  beforeEach(async () => {
+    await session.logout().catch(() => {});
+  });
+  afterEach(() => {
+    keystore.loadLoginMethod.mockResolvedValue(null);
+    keystore.saveNip46Session.mockImplementation(async () => {});
+  });
+
+  it("signs this tab out when another tab's logout wiped the persisted login", async () => {
+    await session.createLocalKey();
+    keystore.loadLoginMethod.mockResolvedValue(null); // the other tab ran clearKeystore()
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(false);
+    expect(recentEventsSetOwner).toHaveBeenLastCalledWith(null);
+  });
+
+  it("stays signed in while the login is still on disk", async () => {
+    await session.createLocalKey();
+    keystore.loadLoginMethod.mockResolvedValue("local");
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(true);
+  });
+
+  it("never mistakes a login that has not persisted yet for a remote logout", async () => {
+    // NIP-46 adopts first and saves the session after — and the user returning
+    // from the signer app fires exactly the visibility event this runs on.
+    let saved!: () => void;
+    keystore.saveNip46Session.mockImplementation(() => new Promise<void>((r) => (saved = r)));
+    keystore.loadLoginMethod.mockResolvedValue(null);
+    const pk = "c".repeat(64);
+    const signer = {
+      method: "nip46",
+      getPublicKey: async () => pk,
+      nip44Decrypt: async () => "",
+      nip44Encrypt: async () => "",
+      signEvent: async () => ({}),
+      serialize: () => ({}),
+      close: async () => {},
+    } as unknown as Nip46Signer;
+    const login = session.loginNip46(signer);
+    for (let i = 0; i < 20 && !session.loggedIn; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(session.loggedIn).toBe(true);
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(true);
+    saved();
+    expect(await login).toBe(true);
   });
 });
 

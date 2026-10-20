@@ -1,0 +1,121 @@
+package today.cypherpunk.nostrautica.nostr
+
+import android.content.Context
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import org.robolectric.Shadows.shadowOf
+import org.robolectric.shadows.ShadowNetworkCapabilities
+import androidx.room.Room
+import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import org.junit.After
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import org.junit.runner.RunWith
+import org.robolectric.RobolectricTestRunner
+import today.cypherpunk.nostrautica.data.EventStore
+import today.cypherpunk.nostrautica.data.db.AppDatabase
+import today.cypherpunk.nostrautica.protocol.Kinds
+import today.cypherpunk.nostrautica.protocol.LocalSigner
+import today.cypherpunk.nostrautica.protocol.NostrEvent
+
+/** The durable outbox's publish/flush policy (audit SB-66 had it untested). */
+@RunWith(RobolectricTestRunner::class)
+class NostrOutboxTest {
+    private val ctx: Context = ApplicationProvider.getApplicationContext()
+    private val db = Room.inMemoryDatabaseBuilder(ctx, AppDatabase::class.java).allowMainThreadQueries().build()
+    init {
+        // Robolectric's default network lacks NET_CAPABILITY_INTERNET; Nostr would think it is offline.
+        val cm = ctx.getSystemService(ConnectivityManager::class.java)
+        val caps = ShadowNetworkCapabilities.newInstance().also { shadowOf(it).addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) }
+        shadowOf(cm).setNetworkCapabilities(cm.activeNetwork, caps)
+    }
+    private val nostr = Nostr(ctx, RelayPool(RelayPool.newHttpClient()), EventStore(db), db)
+    private val relays = mutableListOf<FakeRelay>()
+    private fun relay() = FakeRelay().also { relays += it }
+    private val me = LocalSigner.generate()
+
+    @After fun down() { relays.forEach { it.close() }; db.close() }
+
+    private fun event(s: LocalSigner = me): NostrEvent = s.signNow(s.template(Kinds.APP_DATA, "x", emptyList()))
+    private fun refusing(reason: String) = relay().apply { onEvent = { ws, e -> ws.send("""["OK","${e.id}",false,"$reason"]""") } }
+
+    // Audit SB-35: Queued must always have an outbox row behind it.
+    @Test fun noRelaysIsRejectedNotQueued() = runBlocking {
+        val r = nostr.publish(event(), emptyList(), me.pubkey)
+        assertTrue(r is Nostr.PublishResult.Rejected)
+        assertEquals(0, db.outbox().all().size)
+    }
+
+    // Audit DS41-064: a permanent refusal is an error, not "queued", and is never retried.
+    @Test fun aRefusalByEveryRelayIsRejectedAndNotQueued() = runBlocking {
+        val a = refusing("blocked: not on the allowlist")
+        val r = nostr.publish(event(), listOf(a.url), me.pubkey)
+        assertEquals(Nostr.PublishResult.Rejected("blocked: not on the allowlist"), r)
+        assertEquals(0, db.outbox().all().size)
+        assertEquals("tried once, not three times", 1, a.received.size)
+    }
+
+    @Test fun aRefusingRelayIsNotKeptInTheOutboxNextToAnAcceptingOne() = runBlocking {
+        val ok = relay()
+        val no = refusing("invalid: bad tag")
+        val r = nostr.publish(event(), listOf(ok.url, no.url), me.pubkey)
+        assertTrue(r is Nostr.PublishResult.Published)
+        assertEquals(0, db.outbox().all().size)
+    }
+
+    @Test fun aRateLimitIsStillQueued() = runBlocking {
+        val slow = refusing("rate-limited: slow down")
+        val r = nostr.publish(event(), listOf(slow.url), me.pubkey)
+        assertEquals(Nostr.PublishResult.Queued, r)
+        assertEquals(1, db.outbox().all().size)
+    }
+
+    // Manual e2e BUG-5: one dead inbox relay kept a delivered DM "queued" and the logout
+    // warning counting it forever. Reaching one relay is sent; the rest is quiet convergence.
+    @Test fun aSendThatReachedOneRelayIsNotUnsentWhileTheDeadOneIsRetried() = runBlocking {
+        val ok = relay()
+        val dead = refusing("rate-limited: never answers")
+        val sent = event()
+        val r = nostr.publish(sent, listOf(ok.url, dead.url), me.pubkey)
+        assertTrue(r is Nostr.PublishResult.Published)
+        val rows = db.outbox().all()
+        assertEquals("the dead relay is still carried", listOf(sent.id), rows.map { it.id })
+        assertTrue(rows.single().partial)
+        assertEquals(emptyList<String>(), nostr.observeUnsent(me.pubkey).first().map { it.id })
+
+        // Nobody took this one: it is unsent and stays visible.
+        val waiting = event()
+        assertEquals(Nostr.PublishResult.Queued, nostr.publish(waiting, listOf(dead.url), me.pubkey))
+        assertEquals(listOf(waiting.id), nostr.observeUnsent(me.pubkey).first().map { it.id })
+    }
+
+    @Test fun aPartialRowIsDroppedAfterItsLastRetry() = runBlocking {
+        val ok = relay()
+        val dead = refusing("rate-limited: never answers")
+        nostr.publish(event(), listOf(ok.url, dead.url), me.pubkey)
+        nostr.activeOwner = { me.pubkey }
+        repeat(5) { nostr.flush(force = true) }
+        assertEquals("bounded: the outbox drains", 0, db.outbox().all().size)
+    }
+
+    // Audit SB-39: the flusher only publishes the signed-in account's rows.
+    @Test fun flushOnlyTouchesTheActiveOwnersRows() = runBlocking {
+        val other = LocalSigner.generate()
+        val down = refusing("rate-limited: later")
+        val mine = event(); val theirs = event(other)
+        nostr.publish(mine, listOf(down.url), me.pubkey)
+        nostr.publish(theirs, listOf(down.url), other.pubkey)
+        assertEquals(2, db.outbox().all().size)
+
+        val up = relay()
+        // Point both rows at the now-working relay, as a reconnect would.
+        db.outbox().all().forEach { db.outbox().put(it.copy(missing = """["${RelayPool.normalize(up.url)}"]""", lastAttemptAt = 0)) }
+        nostr.activeOwner = { me.pubkey }
+        nostr.flush(force = true)
+        assertEquals(listOf(mine.id), up.received.map { it.id })
+        assertEquals(listOf(other.pubkey), db.outbox().all().map { it.owner })
+    }
+}

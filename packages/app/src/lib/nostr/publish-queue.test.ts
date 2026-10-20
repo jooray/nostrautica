@@ -141,6 +141,42 @@ describe("publish-queue (App-8)", () => {
     expect(await listQueued()).toEqual([]);
   });
 
+  it("a Discard tapped mid-flush wins over the flush's snapshot (DS41-014)", async () => {
+    seed(store, "a", { queuedAt: 100 });
+    seed(store, "b", { queuedAt: 200 });
+    publishSigned.mockImplementation(async (event?: unknown) => {
+      // While the flusher is busy with "a", the user discards "b" in the outbox.
+      if ((event as { id: string }).id === "a") await discardQueued("b");
+    });
+    const res = await flushQueue();
+    expect(publishSigned.mock.calls.map((c) => (c[0] as { id: string }).id)).toEqual(["a"]);
+    expect(res.sent).toBe(1);
+    expect(store.has("b")).toBe(false);
+  });
+
+  it("a discard during a failing publish is not resurrected by the retry bookkeeping (DS41-014)", async () => {
+    seed(store, "c", { queuedAt: 100 });
+    publishSigned.mockImplementation(async () => {
+      await discardQueued("c");
+      throw new Error("relay timeout");
+    });
+    await flushQueue();
+    expect(store.has("c")).toBe(false);
+  });
+
+  it("without Web Locks, a second flush in the same tab is skipped, not run twice (SB-101)", async () => {
+    seed(store, "x", { queuedAt: 100 });
+    let release!: () => void;
+    publishSigned.mockImplementation(() => new Promise<void>((r) => (release = r)));
+    const first = flushQueue();
+    await new Promise((r) => setTimeout(r, 0));
+    const second = await flushQueue();
+    expect(second.skipped).toBe(true);
+    release();
+    expect((await first).sent).toBe(1);
+    expect(publishSigned).toHaveBeenCalledTimes(1);
+  });
+
   it("runs under a single-flusher lock: a contended flush is skipped", async () => {
     // Lock manager that reports the lock as already held (callback gets null).
     __setOutboxLocks({
@@ -230,6 +266,31 @@ describe("publish-queue owner isolation (audit U1)", () => {
     expect(store.has("a1")).toBe(false);
     expect(store.has("a2")).toBe(false);
     expect(store.has("b1")).toBe(true); // B's item survives A's logout
+  });
+
+  it("stamps the account that STARTED the publish, not whoever is active when it gives up (DS41-010)", async () => {
+    vi.useFakeTimers();
+    try {
+      setActiveCacheOwner(A);
+      vi.stubGlobal("navigator", { onLine: true });
+      // A NIP-59 gift wrap: its author is a one-time key no session ever has.
+      const wrapKey = "9".repeat(64);
+      publishSigned.mockImplementation(async () => {
+        // A logs out / B signs in while the publish is still retrying.
+        setActiveCacheOwner(B);
+        throw new Error("relay timeout");
+      });
+      const done = publishOrQueue(evtFor("wrap1", wrapKey) as never, ["wss://r"]);
+      await vi.runAllTimersAsync();
+      expect(await done).toBe(false);
+      expect(store.get("wrap1")?.owner).toBe(A);
+      // B can neither see nor flush it; A can.
+      expect(await listQueued()).toEqual([]);
+      setActiveCacheOwner(A);
+      expect((await listQueued()).map((i) => i.event.id)).toEqual(["wrap1"]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("drops a legacy ownerless item on flush rather than publishing it", async () => {

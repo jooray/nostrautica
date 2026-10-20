@@ -7,12 +7,12 @@
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { parsePostContent, imetaUrls, type Token } from "$lib/social/render.js";
   import QuotedNote from "$lib/components/QuotedNote.svelte";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
 
   let { post }: { post: RecentPost } = $props();
 
   const tokens = $derived(parsePostContent(post.content, imetaUrls(post.tags)));
-  const when = $derived(new Date(post.created_at * 1000).toLocaleDateString());
+  const when = $derived(new Date(post.created_at * 1000).toLocaleDateString(i18n.locale));
 
   // A reply's parent renders above the body (NIP-10: prefer the "reply" marker,
   // then "root", else the last positional e-tag).

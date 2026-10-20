@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -100,9 +100,17 @@ class Nip46Signer private constructor(
             put("id", id); put("method", method); put("params", JsonArray(params.map(::JsonPrimitive)))
         })
         val ev = client.signNow(client.template(Kinds.NIP46, client.nip44Encrypt(session.signerPubkey, body), listOf(listOf("p", session.signerPubkey))))
-        pool.publish(ev, session.relays)
         val reply = try {
-            withTimeout(timeoutMs) { d.await() }
+            val sent = pool.publish(ev, session.relays)
+            // Every signer relay refused or was unreachable: nothing can answer, so
+            // don't sit out the whole timeout.
+            if (sent.isNotEmpty() && sent.values.all { it is RelayPool.PublishOutcome.Rejected }) {
+                throw SignerUnavailable("no signer relay is reachable")
+            }
+            // withTimeoutOrNull, not withTimeout: a TimeoutCancellationException is a
+            // CancellationException, which callers treat as "the user left" and
+            // swallow (or rethrow, ending an enclosing scan).
+            withTimeoutOrNull(timeoutMs) { d.await() } ?: throw SignerUnavailable("the signer did not answer")
         } finally {
             pendingLock.withLock { pending.remove(id) }
         }
@@ -127,8 +135,8 @@ class Nip46Signer private constructor(
         return call("nip44_decrypt", listOf(peerPubkey, ciphertext))
     }
 
-    /** Cheap liveness probe after a restore. */
-    suspend fun ping(): Boolean = runCatching { call("ping", emptyList(), RESTORE_TIMEOUT_MS) }.isSuccess
+    /** Who the bunker signs for right now (a bounded get_public_key), for the identity check after a restore. */
+    suspend fun remotePubkey(): String = call("get_public_key", emptyList(), RESTORE_TIMEOUT_MS).trim().lowercase()
 
     fun close() { listener?.cancel(); scope.coroutineContext[Job]?.cancel() }
 
@@ -161,10 +169,23 @@ class Nip46Signer private constructor(
             return Offer(uri, sk, secret, relays)
         }
 
+        /**
+         * Does this decrypted reply complete a `nostrconnect://` handshake? Only one
+         * that echoes the offer's secret: the client pubkey is public (it is in the QR
+         * and in the REQ every relay sees), so anyone can encrypt a reply to it, and
+         * the secret is the one proof the responder actually saw the code. A bare
+         * `"ack"` proves nothing and would let a relay peer become the user's signer.
+         * Same rule as nostr-tools (`response.result === secret`), which the PWA uses.
+         */
+        internal fun acceptsNostrConnect(msg: JsonObject, secret: String): Boolean {
+            val result = msg["result"] as? JsonPrimitive ?: return false
+            return result.isString && secret.isNotEmpty() && result.content == secret
+        }
+
         /** Wait for the signer to answer a [nostrConnectOffer]. */
         suspend fun awaitNostrConnect(pool: RelayPool, offer: Offer): Nip46Signer {
             val client = LocalSigner(Bytes.fromHex(offer.clientSk))
-            val signerPubkey = withTimeout(NOSTRCONNECT_TIMEOUT_MS) {
+            val signerPubkey = withTimeoutOrNull(NOSTRCONNECT_TIMEOUT_MS) {
                 val found = CompletableDeferred<String>()
                 val job = CoroutineScope(Dispatchers.IO).launch {
                     pool.subscribe(offer.relays, listOf(Filter(kinds = listOf(Kinds.NIP46), tags = mapOf("p" to listOf(client.pubkey)), since = nowSec() - 30)))
@@ -172,12 +193,11 @@ class Nip46Signer private constructor(
                         .collect { m ->
                             val text = runCatching { client.nip44Decrypt(m.event.pubkey, m.event.content) }.getOrNull() ?: return@collect
                             val msg = runCatching { Json.parseToJsonElement(text) as JsonObject }.getOrNull() ?: return@collect
-                            val result = (msg["result"] as? JsonPrimitive)?.content
-                            if (result == offer.secret || result == "ack") found.complete(m.event.pubkey)
+                            if (acceptsNostrConnect(msg, offer.secret)) found.complete(m.event.pubkey)
                         }
                 }
                 try { found.await() } finally { job.cancel() }
-            }
+            } ?: throw SignerUnavailable("the signer did not answer; show a fresh code and try again")
             val probe = Nip46Signer(pool, Session(offer.clientSk, signerPubkey, signerPubkey, offer.relays, offer.secret))
             val user = probe.call("get_public_key", emptyList(), CONNECT_TIMEOUT_MS).trim()
             require(user.isHex32()) { "the signer returned an unreadable key" }

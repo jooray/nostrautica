@@ -27,8 +27,12 @@ import {
   type EckVersion,
   type ExternalFeed,
   supersedes,
+  eckTag,
+  readEckTag,
+  eckCandidates,
 } from "@nostrautica/protocol";
-import { fetchEvents, type Filter } from "$lib/nostr/ndk.js";
+import { fetchEvents, fetchEventsAnswered, type Filter } from "$lib/nostr/ndk.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
@@ -137,9 +141,11 @@ export function toEventPost(
       authorPubkey: e.pubkey,
     };
   }
-  const eckVersion = Number(tag(e.tags, "eck")) || undefined;
-  // Pick the key the POST names — never assume the current version.
-  const version = eckVersions.find((v) => v.id === eckVersion);
+  const ref = readEckTag(e.tags);
+  const eckVersion = ref?.id;
+  // Pick the key the POST names — never assume the current version — by id AND
+  // fingerprint when the tag carries one (NIP §4.1: two keys can share an id).
+  const version = ref ? eckCandidates(eckVersions, ref)[0] : undefined;
   const base = {
     d,
     kind: e.kind,
@@ -222,10 +228,14 @@ function cachePosts(coordinate: string, key: PostSlot, posts: EventPost[], at?: 
 export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
   const { pubkey } = parseCoordinate(ctx.coordinate);
   // Discovery for 31607 is {kinds, authors:[E_id]} — no `a` tag (spec §7.4).
-  const events = await fetchEvents(
+  const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_LONGFORM, KIND_MEMBERS_POST], authors: [pubkey] },
     ctx.config.relays,
   );
+  // An empty, unanswered read is not "no posts": returning [] here also cached
+  // [] over the feed the page had just painted (audit DS41-015). Throw, so the
+  // caller keeps what it has and can say it is not fresh.
+  if (events.length === 0 && !answered) throw new RelaysUnansweredError();
   const keys = await loadEventKeys(ctx.coordinate);
   const eck = keys?.eck ?? [];
   // Authority boundary: `authors: [E_id]` is a request, not a guarantee — the
@@ -250,10 +260,11 @@ export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
  */
 export async function fetchAttendeePosts(ctx: EventContext): Promise<EventPost[]> {
   const { pubkey: eid } = parseCoordinate(ctx.coordinate);
-  const events = await fetchEvents(
+  const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_LONGFORM], "#a": [ctx.coordinate] },
     ctx.config.relays,
   );
+  if (events.length === 0 && !answered) throw new RelaysUnansweredError(); // as fetchEventPosts
   const roster = await fetchRoster(ctx).catch(() => undefined);
   const members = roster ? new Set(roster.attendees.map((a) => a.pubkey)) : undefined;
   const raw = (events as unknown as RawPostEvent[]).filter(
@@ -489,18 +500,23 @@ export async function publishMembersPost(
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const eck = currentEck(keys);
   if (!eck) throw new Error("event content key not available");
-  const now = Math.floor(Date.now() / 1000);
   const d = input.d ?? randomPostD();
-  const publishedAt = input.publishedAt ?? now;
-  const ciphertext = encryptMembersPost(base64ToBytes(eck.key), {
-    v: 2,
-    title: input.title,
-    summary: input.summary || undefined,
-    image: input.image || undefined,
-    published_at: publishedAt,
-    author: input.author,
-    content: input.content,
-  });
+  // A NEW post's published_at is the created_at it is signed with, not a clock
+  // read taken before publishMonotonic's relay round-trip: that read finished a
+  // second or more later, so every fresh post came out with created_at >
+  // published_at and rendered "(edited)" on first publish (manual e2e NOTE-5).
+  // An edit keeps the original published_at.
+  let publishedAt = input.publishedAt ?? 0;
+  const encryptAt = (at: number) =>
+    encryptMembersPost(base64ToBytes(eck.key), {
+      v: 2,
+      title: input.title,
+      summary: input.summary || undefined,
+      image: input.image || undefined,
+      published_at: at,
+      author: input.author,
+      content: input.content,
+    });
   // Monotonic republish (audit P3): an edit at the same second as the prior
   // revision of this `d` must win the §3.1 tie-break, or the edit silently
   // doesn't take (the post is addressable across 30023/31607 by its `d`).
@@ -509,8 +525,9 @@ export async function publishMembersPost(
     author: ctx.config.eidPubkey,
     identifier: d,
     relays: ctx.config.relays,
-    sign: (created_at) =>
-      finalizeEvent(
+    sign: (created_at) => {
+      publishedAt = input.publishedAt ?? created_at;
+      return finalizeEvent(
         {
           kind: KIND_MEMBERS_POST,
           created_at,
@@ -518,12 +535,13 @@ export async function publishMembersPost(
           tags: [
             ["d", d],
             ["v", "2"],
-            ["eck", String(eck.id)],
+            eckTag(eck),
           ],
-          content: ciphertext,
+          content: encryptAt(publishedAt),
         },
         hexToBytes(keys.eidNsecHex!),
-      ),
+      );
+    },
   });
   return {
     post: {

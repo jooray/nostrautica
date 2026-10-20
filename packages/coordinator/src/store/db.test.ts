@@ -138,6 +138,42 @@ describe("Store at-rest key encryption (F1)", () => {
     expect(() => keyless.getEvent(COORD)).toThrow(/no identity key/);
     keyless.close();
   });
+
+  /**
+   * Audit SB-125. A revoke records the freshly minted ECK in the command's resume
+   * progress BEFORE anything else, and that column was plain TEXT: the event's
+   * current content key sat in the clear in the database, its WAL and any
+   * unencrypted backup, and survived a detach.
+   */
+  it("protects command resume progress (an ECK rotation's new key) at rest", () => {
+    const sk = generateSecretKey();
+    const store = new Store(":memory:", sk);
+    store.beginCommandOp(COORD, "member:x", 1, "r1", 1);
+    const progress = { eckRotation: { newId: 2, newKey: "TkVXLUVDSy1LRVk=", prevId: 1 } };
+    store.setCommandOpProgress(COORD, "member:x", "r1", progress);
+    const raw = store.getCommandWatermark(COORD, "member:x")!.progress_json!;
+    expect(raw.startsWith(ENC_PREFIX)).toBe(true);
+    expect(raw).not.toContain("TkVXLUVDSy1LRVk=");
+    expect(store.getCommandOpProgress(COORD, "member:x")).toEqual(progress);
+    // Detach drops the progress (custody) but keeps the watermark (replay bar).
+    store.clearCommandProgressForEvent(COORD);
+    expect(store.getCommandWatermark(COORD, "member:x")).toMatchObject({ rumor_id: "r1", progress_json: null });
+    store.close();
+  });
+
+  it("migrates a plaintext command-progress row on startup", () => {
+    const path = tmpDbPath();
+    const legacy = new Store(path);
+    legacy.beginCommandOp(COORD, "member:x", 1, "r1", 1);
+    legacy.setCommandOpProgress(COORD, "member:x", "r1", { eckRotation: { newId: 2, newKey: "TkVX", prevId: 1 } });
+    expect(legacy.getCommandWatermark(COORD, "member:x")!.progress_json).toContain("TkVX");
+    legacy.close();
+    const sk = generateSecretKey();
+    const store = new Store(path, sk);
+    expect(store.getCommandWatermark(COORD, "member:x")!.progress_json!.startsWith(ENC_PREFIX)).toBe(true);
+    expect(store.getCommandOpProgress(COORD, "member:x")).toEqual({ eckRotation: { newId: 2, newKey: "TkVX", prevId: 1 } });
+    store.close();
+  });
 });
 
 describe("pipeline artifacts + job status (audit H7 / Q12)", () => {
@@ -1567,5 +1603,54 @@ describe("docs/VERSIONING.md: schema version drift guard", () => {
         new RegExp("\\|\\s*`" + v + "`\\s*\\|"),
       );
     }
+  });
+});
+
+/** Audit DS41-030: NULLs in a composite PRIMARY KEY are distinct, so the upsert never matched. */
+describe("event-wide job_status rows (no pubkey) upsert in place", () => {
+  const row = (attempts: number) => ({
+    coordinate: "31923:aa:d", stage: "score_batch", pubkey: null, state: "poison" as const, attempts,
+    error_category: "provider", retryable: 1, updated_at: attempts,
+  });
+  it("a repeated poison of the same event-wide stage is ONE row", () => {
+    const store = new Store();
+    store.recordJobStatus(row(1) as any);
+    store.recordJobStatus(row(2) as any);
+    const rows = store.poisonStatuses("31923:aa:d");
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ pubkey: null, attempts: 2 });
+    store.close();
+  });
+  it("collapses NULL-keyed duplicates already on disk to the newest", () => {
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-js-"));
+    const path = join(dir, "t.sqlite");
+    try {
+      new Store(path).close();
+      const raw = new DatabaseSync(path);
+      const ins = raw.prepare("INSERT INTO job_status (coordinate, stage, pubkey, state, attempts, error_category, retryable, updated_at) VALUES (?, ?, NULL, ?, ?, ?, ?, ?)");
+      for (const n of [1, 3, 2]) ins.run("31923:aa:d", "score_batch", "poison", n, "provider", 1, n);
+      raw.close();
+      const store = new Store(path);
+      const rows = store.poisonStatuses("31923:aa:d");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]!.attempts).toBe(3);
+      store.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+/** Audit DS41-036: the delete_data withdrawal left the attendee's job_status rows behind. */
+describe("purgeAttendeeArtifacts removes the subject's pipeline status", () => {
+  it("deletes their job_status rows and keeps everyone else's and the usage tally", () => {
+    const store = new Store();
+    const C = "31923:aa:d";
+    for (const pubkey of ["gone", "stays"]) {
+      store.recordJobStatus({ coordinate: C, stage: "process_attendee", pubkey, state: "poison", attempts: 1, error_category: "x", retryable: 1, updated_at: 1 } as any);
+    }
+    store.purgeAttendeeArtifacts(C, "gone");
+    expect(store.poisonStatuses(C).map((r) => r.pubkey)).toEqual(["stays"]);
+    store.close();
   });
 });

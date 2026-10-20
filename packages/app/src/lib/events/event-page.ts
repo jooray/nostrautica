@@ -30,8 +30,12 @@ import {
   type MergedMenuItem,
   type MergedSection,
   pickLatest,
+  eckTag,
+  readEckTag,
+  eckCandidates,
 } from "@nostrautica/protocol";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { fetchEventsAnswered } from "$lib/nostr/ndk.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
@@ -70,10 +74,6 @@ export function cachedEventPage(coordinate: string): EventPageModel | undefined 
   return { ...hit, sources: hit.sources ?? [] };
 }
 
-function tag(tags: string[][], name: string): string | undefined {
-  return tags.find((t) => t[0] === name)?.[1];
-}
-
 /**
  * Fetch + assemble the event page. Members-only parts decrypt with the ECK
  * version named by the event's `eck` tag (never assumed current); without the
@@ -84,10 +84,15 @@ export async function fetchEventPage(
   ctx: EventContext,
 ): Promise<EventPageModel | undefined> {
   const { pubkey, identifier } = parseCoordinate(ctx.coordinate);
-  const events = await fetchEvents(
+  const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_EVENT_PAGE], authors: [pubkey], "#d": [identifier] },
     ctx.config.relays,
   );
+  // Nothing back and nobody answered is "unknown", not "this event has no page":
+  // EventHome paints the cached layout first, and answering `undefined` here
+  // erased it in favour of the default feed on every slow-relay visit (audit
+  // DS41-015). Callers keep what they have on a throw.
+  if (events.length === 0 && !answered) throw new RelaysUnansweredError();
   // Authority boundary: the filter's `authors` is a request, not a guarantee (see
   // the same note in posts.ts `matchesFeed`), and a 31608 is not decorative — it
   // defines the event's menu targets AND the `sources` list, i.e. WHICH npubs get
@@ -106,8 +111,8 @@ export async function fetchEventPage(
   let priv: EventPagePrivate = { v: 2, menu: [], sections: [] };
   if (content.private) {
     const keys = await loadEventKeys(ctx.coordinate);
-    const versionId = Number(tag(latest.tags, "eck")) || undefined;
-    const version = keys?.eck.find((v) => v.id === versionId);
+    const ref = readEckTag(latest.tags);
+    const version = ref && keys ? eckCandidates(keys.eck, ref)[0] : undefined;
     if (version) {
       try {
         priv = decryptEventPagePrivate(base64ToBytes(version.key), content.private);
@@ -151,7 +156,7 @@ export async function publishEventPage(
   if (hasPrivate) {
     const eck = currentEck(keys);
     if (!eck) throw new Error("event content key not available");
-    tags.push(["eck", String(eck.id)]);
+    tags.push(eckTag(eck));
     privateCiphertext = encryptEventPagePrivate(base64ToBytes(eck.key), {
       v: 2,
       menu: menu.privateItems,

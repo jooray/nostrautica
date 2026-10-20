@@ -20,6 +20,7 @@
     type DiscoveredCoordinator,
   } from "$lib/events/coordinators.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let {
     selected = $bindable(null),
@@ -87,8 +88,8 @@
     {#each coordinators as c (c.pubkey)}
       <div class="card coord-card" class:selected={selected === c.pubkey}>
         <div class="row" style="gap:0.6rem;align-items:flex-start">
-          {#if c.announce.picture}
-            <img src={c.announce.picture} alt="" class="coord-logo" />
+          {#if safeImageSrc(c.announce.picture)}
+            <img src={safeImageSrc(c.announce.picture)} alt="" class="coord-logo" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />
           {/if}
           <div style="flex:1;min-width:0">
             <strong>{c.announce.name}</strong>

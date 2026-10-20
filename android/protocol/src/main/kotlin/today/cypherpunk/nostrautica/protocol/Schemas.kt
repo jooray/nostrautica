@@ -3,6 +3,11 @@
 package today.cypherpunk.nostrautica.protocol
 
 import kotlinx.serialization.KSerializer
+import kotlinx.serialization.KeepGeneratedSerializer
+import kotlinx.serialization.Required
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonTransformingSerializer
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
@@ -47,7 +52,29 @@ object Wire {
     fun payloadVersion(raw: JsonElement): Int? = ((raw as? JsonObject)?.get("v") as? JsonPrimitive)?.intOrNull
 
     fun eventVersionTag(tags: List<List<String>>): Int? =
-        tags.firstOrNull { it.isNotEmpty() && it[0] == "v" }?.getOrNull(1)?.toIntOrNull()
+        tags.firstOrNull { it.isNotEmpty() && it[0] == "v" }?.getOrNull(1)?.let(::jsInteger)
+
+    /**
+     * An integer tag value read the way the TS reference reads it, `Number(raw)` +
+     * `Number.isInteger` (SB-72): surrounding whitespace is ignored, "" is 0, and
+     * "2.0", "+2", "2e0", "0x2" all mean 2. `toIntOrNull()` accepted only "2"/"+2",
+     * so a 31600 the PWA and the coordinator accept would not open here, and a
+     * coordinator generation spelled "3.0" made the coordinator vanish. Values
+     * outside Int are null (no real tag carries one).
+     */
+    fun jsInteger(raw: String): Int? {
+        val t = raw.trim()
+        val n: Double = when {
+            t.isEmpty() -> 0.0
+            Regex("^0[xX][0-9a-fA-F]+$").matches(t) -> t.substring(2).toLongOrNull(16)?.toDouble() ?: return null
+            Regex("^0[oO][0-7]+$").matches(t) -> t.substring(2).toLongOrNull(8)?.toDouble() ?: return null
+            Regex("^0[bB][01]+$").matches(t) -> t.substring(2).toLongOrNull(2)?.toDouble() ?: return null
+            Regex("^[+-]?([0-9]+\\.?[0-9]*|\\.[0-9]+)([eE][+-]?[0-9]+)?$").matches(t) -> t.toDoubleOrNull() ?: return null
+            else -> return null
+        }
+        if (!n.isFinite() || n != kotlin.math.floor(n) || n < Int.MIN_VALUE || n > Int.MAX_VALUE) return null
+        return n.toInt()
+    }
 
     fun hasCurrentVersionTag(tags: List<List<String>>) = eventVersionTag(tags) == PROTOCOL_VERSION
     fun isNewerVersionTag(tags: List<List<String>>) = (eventVersionTag(tags) ?: 0) > PROTOCOL_VERSION
@@ -119,6 +146,17 @@ object Limits {
     const val MAX_TRANSCRIPTS = 20
     const val MAX_PAGE_SECTIONS = 50
     const val MAX_PINNED_REFS = 50
+    const val MAX_ECK_VERSIONS = 1024
+    const val MAX_TALK_SPEAKERS = 50
+    const val MAX_PRIVACY_ROLES = 32
+    const val MAX_PRIVACY_ROLE = 64
+    const val MAX_PRIVACY_TIER = 200
+    /** Tombstones a per-event settings clock keeps per field (settings-merge.ts). */
+    const val MAX_SETTINGS_TOMBSTONES = 200
+    /** Retired E_inbox secrets one event-keys backup / organizer grant carries. */
+    const val MAX_PRIOR_INBOXES = 64
+    /** Organizer accounts one event's custody records name. */
+    const val MAX_ORGANIZERS = 32
     const val MAX_TALK_TITLE = 200
     const val MAX_TALK_DESC = 2000
     const val MAX_CHAT_KEY_LABEL = 60
@@ -233,15 +271,22 @@ data class ProfileTranslation(
     val about: String? = null,
     @SerialName("looking_for") val lookingFor: String? = null,
     val skills: List<String>? = null,
-)
+) : Validated {
+    override fun validate() {
+        checkLen(lang, Limits.MAX_LANG, "lang"); checkLen(about, Limits.MAX_ABOUT, "about")
+        checkLen(lookingFor, Limits.MAX_LOOKING_FOR, "looking_for"); checkStrings(skills, Limits.MAX_SKILLS, Limits.MAX_SKILL, "skills")
+    }
+}
 
 @Serializable
 data class AiProfile(
     val summary: String,
-    val skills: List<String> = emptyList(),
-    val interests: List<String> = emptyList(),
-    val offers: List<String> = emptyList(),
-    val seeks: List<String> = emptyList(),
+    // Required on the wire as in aiProfileSchema (SB-76): a PWA reader drops an entry
+    // that omits one, so this reader must not show it. The defaults are for code only.
+    @Required val skills: List<String> = emptyList(),
+    @Required val interests: List<String> = emptyList(),
+    @Required val offers: List<String> = emptyList(),
+    @Required val seeks: List<String> = emptyList(),
     val translations: ProfileTranslation? = null,
 ) : Validated {
     val hasContent: Boolean
@@ -252,6 +297,7 @@ data class AiProfile(
         for ((name, l) in listOf("skills" to skills, "interests" to interests, "offers" to offers, "seeks" to seeks)) {
             checkStrings(l, Limits.MAX_SKILLS, Limits.MAX_SKILL, name)
         }
+        translations?.validate()
     }
 
     companion object {
@@ -266,7 +312,14 @@ data class AiProfileOverride(
     val interests: List<String>? = null,
     val offers: List<String>? = null,
     val seeks: List<String>? = null,
-)
+) : Validated {
+    override fun validate() {
+        checkLen(summary, Limits.MAX_ABOUT, "summary")
+        for ((name, l) in listOf("skills" to skills, "interests" to interests, "offers" to offers, "seeks" to seeks)) {
+            checkStrings(l, Limits.MAX_SKILLS, Limits.MAX_SKILL, name)
+        }
+    }
+}
 
 // ── Invites, joins, submissions ──────────────────────────────────────────
 
@@ -327,6 +380,8 @@ data class ProfileCorrectionContent(
 ) : Validated {
     override fun validate() {
         checkVersion(v); check(rev >= 0) { "rev" }
+        overrides?.validate()
+        checkList(hiddenFields, AiProfile.FIELDS.size, "hidden_fields")
         hiddenFields?.forEach { check(it in AiProfile.FIELDS) { "hidden_fields" } }
         checkLen(report, Limits.MAX_INTRO_TEXT, "report")
     }
@@ -342,7 +397,12 @@ data class EckVersion(val id: Int, val key: String) : Validated {
 }
 
 @Serializable
-data class ParentProof(val a: String, val by: String, val sig: String)
+data class ParentProof(val a: String, val by: String, val sig: String) : Validated {
+    override fun validate() {
+        checkLen(a, Limits.MAX_URL, "parent.a"); checkHex32(by, "parent.by")
+        check(Regex("^[0-9a-f]{128}$").matches(sig)) { "parent.sig must be a 128-hex schnorr signature" }
+    }
+}
 
 @Serializable
 data class KeyGrantContent(
@@ -357,7 +417,8 @@ data class KeyGrantContent(
     override fun validate() {
         checkVersion(v); check(Coordinate.isSpace(a)) { "a must be an event coordinate" }
         check(role == "attendee" || role == "organizer") { "role" }
-        eck.forEach { it.validate() }; checkHex32(grantedBy, "granted_by")
+        checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }; checkHex32(grantedBy, "granted_by")
+        parent?.validate()
     }
 }
 
@@ -369,10 +430,15 @@ data class CoordinatorGrantContent(
     @SerialName("inbox_nsec") val inboxNsec: String,
     val eck: List<EckVersion>,
     @SerialName("config_relays") val configRelays: List<String>,
+    /** The coordinator this install takes over from (NIP §3.7, audit SB-122). The
+     *  incoming coordinator adopts a roster only from E_id or this key; omitted on a
+     *  first attach or a re-attach of the same coordinator. */
+    @SerialName("prev_coordinator") val prevCoordinator: String? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v); check(Coordinate.isSpace(a)) { "a" }; check(gen > 0) { "gen" }
-        checkHex32(inboxNsec, "inbox_nsec"); eck.forEach { it.validate() }; checkList(configRelays, Limits.MAX_RELAYS, "config_relays")
+        checkHex32(inboxNsec, "inbox_nsec"); checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }; checkList(configRelays, Limits.MAX_RELAYS, "config_relays")
+        prevCoordinator?.let { checkHex32(it, "prev_coordinator") }
     }
 }
 
@@ -400,11 +466,17 @@ data class OrganizerGrantContent(
     val eck: List<EckVersion>,
     @SerialName("config_relays") val configRelays: List<String>,
     @SerialName("granted_by") val grantedBy: String,
+    /** Accounts the sender knows hold custody, itself included (SB-90). */
+    val organizers: List<String>? = null,
+    /** Retired E_inbox secrets (SB-90). */
+    @SerialName("prior_einbox_nsecs") val priorEinboxNsecs: List<String>? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v); check(Coordinate.isSpace(a)) { "a" }
         checkHex32(eidNsec, "eid_nsec"); checkHex32(einboxNsec, "einbox_nsec"); checkHex32(grantedBy, "granted_by")
-        eck.forEach { it.validate() }; checkList(configRelays, Limits.MAX_RELAYS, "config_relays")
+        checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }; checkList(configRelays, Limits.MAX_RELAYS, "config_relays")
+        checkList(organizers, Limits.MAX_ORGANIZERS, "organizers"); organizers?.forEach { checkHex32(it, "organizers") }
+        checkList(priorEinboxNsecs, Limits.MAX_PRIOR_INBOXES, "prior_einbox_nsecs"); priorEinboxNsecs?.forEach { checkHex32(it, "prior_einbox_nsecs") }
     }
 }
 
@@ -446,7 +518,7 @@ data class TalkSubmissionContent(
     override fun validate() {
         checkVersion(v); check(talkD.length in 1..64) { "talk_d" }
         check(title.length in 1..Limits.MAX_TALK_TITLE) { "title" }; checkLen(description, Limits.MAX_TALK_DESC, "description")
-        speakers.forEach { checkHex32(it, "speakers") }
+        checkList(speakers, Limits.MAX_TALK_SPEAKERS, "speakers"); speakers.forEach { checkHex32(it, "speakers") }
         check(sourceType == null || sourceType in setOf("recording", "upload", "external")) { "source_type" }
         check(revision >= 0) { "revision" }
         validateTalkSource(media, externalUrl, externalKind)
@@ -474,6 +546,7 @@ data class TalkContent(
     override fun validate() {
         checkVersion(v); checkHex32(pubkey, "pubkey"); check(talkD.length in 1..64) { "talk_d" }
         check(title.length in 1..Limits.MAX_TALK_TITLE) { "title" }
+        checkList(speakers, Limits.MAX_TALK_SPEAKERS, "speakers"); speakers.forEach { checkHex32(it, "speakers") }
         check(status in setOf("pending", "published", "rejected")) { "status" }
         transcript?.validate()
         validateTalkSource(media, externalUrl, externalKind)
@@ -482,9 +555,16 @@ data class TalkContent(
 
 // ── Self copy, directory, roster, matches ────────────────────────────────
 
-@Serializable
+@KeepGeneratedSerializer
+@Serializable(with = MyProfileContentSerializer::class)
 data class MyProfileContent(
     val v: Int = Wire.PROTOCOL_VERSION,
+    /**
+     * Required and nullable (`a: z.string().nullable()`): null marks the reuse-library
+     * entry, but the KEY must be present or no TS reader accepts the payload (SB-85).
+     * [MyProfileContentSerializer] requires it on read and writes an explicit null,
+     * which `explicitNulls = false` would otherwise drop.
+     */
     val a: String?,
     val profile: AttendeeProfile? = null,
     val media: List<MediaDescriptor> = emptyList(),
@@ -496,7 +576,19 @@ data class MyProfileContent(
         checkVersion(v); profile?.validate()
         checkList(media, Limits.MAX_MEDIA, "media"); media.forEach { it.validate() }
         checkStrings(introTexts, Limits.MAX_LIBRARY_TEXTS, Limits.MAX_INTRO_TEXT, "intro_texts")
+        check(rev == null || rev >= 0) { "rev" }; check(correctionRev == null || correctionRev >= 0) { "correction_rev" }
     }
+}
+
+/** MyProfileContent with its `a` key always present, read and written. */
+object MyProfileContentSerializer : JsonTransformingSerializer<MyProfileContent>(MyProfileContent.generatedSerializer()) {
+    override fun transformDeserialize(element: JsonElement): JsonElement {
+        if (element is JsonObject && "a" !in element) throw SerializationException("31602 payload has no `a` key")
+        return element
+    }
+
+    override fun transformSerialize(element: JsonElement): JsonElement =
+        if (element is JsonObject && "a" !in element) JsonObject(element + ("a" to JsonNull)) else element
 }
 
 @Serializable
@@ -556,7 +648,11 @@ data class RosterContent(
             checkHex32(it.pubkey, "pubkey"); checkLen(it.d, Limits.MAX_D, "d")
             check(it.role == "attendee" || it.role == "organizer") { "role" }
             checkList(it.chatKeys, Limits.MAX_CHAT_KEYS_PER_ACCOUNT, "chat_keys")
-            it.chatKeys?.forEach { k -> checkHex32(k.pubkey, "chat key"); checkLen(k.label, Limits.MAX_CHAT_KEY_LABEL, "label") }
+            it.chatKeys?.forEach { k ->
+                checkHex32(k.pubkey, "chat key"); checkLen(k.label, Limits.MAX_CHAT_KEY_LABEL, "label")
+                // z.literal(true).optional(): absent or true, never false (SB-74).
+                check(k.external == null || k.external) { "chat key external must be absent or true" }
+            }
         }
     }
 }
@@ -619,8 +715,22 @@ data class MembersPostContent(
 
 @Serializable
 @JsonClassDiscriminator("type")
-sealed class PageSection {
+sealed class PageSection : Validated {
     abstract val pos: Int?
+
+    /** The zod section schemas (SB-73): the enum fields, the pinned-ref caps, a non-negative pos. */
+    override fun validate() {
+        val p = pos
+        check(p == null || p >= 0) { "pos" }
+        when (this) {
+            is Posts -> {
+                check(source in setOf("event", "attendees", "both")) { "posts source" }
+                check(visibility in setOf("public", "members", "both")) { "posts visibility" }
+            }
+            is Pinned -> { checkList(refs, Limits.MAX_PINNED_REFS, "refs"); refs.forEach { checkLen(it, Limits.MAX_URL, "ref") } }
+            is Attendees -> Unit
+        }
+    }
 
     @Serializable @SerialName("posts")
     data class Posts(val source: String, val visibility: String, override val pos: Int? = null) : PageSection()
@@ -639,7 +749,12 @@ sealed class PageSection {
 }
 
 @Serializable
-data class MenuItem(val label: String, val target: String, val pos: Int? = null)
+data class MenuItem(val label: String, val target: String, val pos: Int? = null) : Validated {
+    override fun validate() {
+        checkLen(label, Limits.MAX_NAME, "menu label"); checkLen(target, Limits.MAX_URL, "menu target")
+        check(pos == null || pos >= 0) { "pos" }
+    }
+}
 
 @Serializable
 data class ExternalFeed(
@@ -649,7 +764,14 @@ data class ExternalFeed(
     val until: Long? = null,
     val relays: List<String>? = null,
     val label: String? = null,
-)
+) : Validated {
+    /** externalFeedSchema (SB-75). */
+    override fun validate() {
+        checkHex32(pubkey, "source pubkey"); checkStrings(tags, Limits.MAX_FEED_TAGS, Limits.MAX_FEED_TAG, "source tags")
+        check(since == null || since >= 0) { "since" }; check(until == null || until >= 0) { "until" }
+        checkStrings(relays, Limits.MAX_RELAYS, Limits.MAX_URL, "source relays"); checkLen(label, Limits.MAX_NAME, "source label")
+    }
+}
 
 @Serializable
 data class EventPagePrivate(
@@ -659,6 +781,9 @@ data class EventPagePrivate(
 ) : Validated {
     override fun validate() {
         checkVersion(v); checkList(menu, Limits.MAX_PAGE_SECTIONS, "menu"); checkList(sections, Limits.MAX_PAGE_SECTIONS, "sections")
+        menu.forEach { it.validate() }; sections.forEach { it.validate() }
+        // `.extend({ pos })`: every members-only item carries its position.
+        check(menu.all { it.pos != null } && sections.all { it.pos != null }) { "members-only items need pos" }
     }
 }
 
@@ -670,8 +795,8 @@ data class EventPageContent(
     val private: String? = null,
 ) : Validated {
     override fun validate() {
-        checkVersion(v); checkList(sources, Limits.MAX_FEED_SOURCES, "sources")
-        sources.forEach { checkHex32(it.pubkey, "source pubkey") }
+        checkVersion(v); checkList(sections, Limits.MAX_PAGE_SECTIONS, "sections"); sections.forEach { it.validate() }
+        checkList(sources, Limits.MAX_FEED_SOURCES, "sources"); sources.forEach { it.validate() }
     }
 }
 
@@ -684,11 +809,32 @@ data class PerEventSettings(
     @SerialName("want_to_meet") val wantToMeet: List<String> = emptyList(),
     val met: List<String> = emptyList(),
     val notes: Map<String, String> = emptyMap(),
+    /** Per-entry change stamps (ms) for the cross-device merge, SB-88 — see [SettingsMerge]. */
+    val clock: SettingsClock? = null,
+    /** The stamp of every entry [clock] does not name. */
+    val base: Long? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v)
         for (l in listOf(favorites, wantToMeet, met)) { checkList(l, Limits.MAX_ROSTER, "list"); l.forEach { checkHex32(it, "pubkey") } }
         check(notes.size <= Limits.MAX_NOTES) { "too many notes" }; notes.values.forEach { checkLen(it, Limits.MAX_NOTE, "note") }
+        clock?.validate()
+        check(base == null || base >= 0) { "base" }
+    }
+}
+
+@Serializable
+data class SettingsClock(
+    val favorites: Map<String, Long> = emptyMap(),
+    @SerialName("want_to_meet") val wantToMeet: Map<String, Long> = emptyMap(),
+    val met: Map<String, Long> = emptyMap(),
+    val notes: Map<String, Long> = emptyMap(),
+) : Validated {
+    override fun validate() {
+        for (m in listOf(favorites, wantToMeet, met, notes)) {
+            check(m.size <= Limits.MAX_ROSTER + Limits.MAX_SETTINGS_TOMBSTONES) { "too many settings stamps" }
+            m.forEach { (k, at) -> checkHex32(k, "stamp key"); check(at >= 0) { "stamp" } }
+        }
     }
 }
 
@@ -711,9 +857,20 @@ data class EventKeysBackup(
     @SerialName("einbox_nsec") val einboxNsec: String,
     val eck: List<EckVersion>,
     @SerialName("coordinator_gen") val coordinatorGen: Int? = null,
+    /** Staged ECK versions (DS41-002): custody, not current. */
+    @SerialName("pending_eck") val pendingEck: List<EckVersion>? = null,
+    /** Retired E_inbox secrets (SB-89): they still read pre-rotation submissions. */
+    @SerialName("prior_einbox_nsecs") val priorEinboxNsecs: List<String>? = null,
+    /** Accounts this one handed custody to (SB-90). */
+    @SerialName("co_organizers") val coOrganizers: List<String>? = null,
 ) : Validated {
     override fun validate() {
-        checkVersion(v); checkHex32(eidNsec, "eid_nsec"); checkHex32(einboxNsec, "einbox_nsec"); eck.forEach { it.validate() }
+        checkList(coOrganizers, Limits.MAX_ORGANIZERS, "co_organizers"); coOrganizers?.forEach { checkHex32(it, "co_organizers") }
+        checkVersion(v); checkHex32(eidNsec, "eid_nsec"); checkHex32(einboxNsec, "einbox_nsec")
+        checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }
+        check(coordinatorGen == null || coordinatorGen >= 0) { "coordinator_gen" }
+        checkList(pendingEck, Limits.MAX_ECK_VERSIONS, "pending_eck"); pendingEck?.forEach { it.validate() }
+        checkList(priorEinboxNsecs, Limits.MAX_PRIOR_INBOXES, "prior_einbox_nsecs"); priorEinboxNsecs?.forEach { checkHex32(it, "prior_einbox_nsecs") }
     }
 }
 
@@ -757,7 +914,14 @@ data class CoordinatorPricing(
     val summary: String? = null,
     @SerialName("checkout_url") val checkoutUrl: String? = null,
     val currency: String? = null,
-)
+) : Validated {
+    override fun validate() {
+        check(model in setOf("free", "per_user", "per_event", "negotiated", "external")) { "pricing model" }
+        check(freeUpToUsers == null || freeUpToUsers >= 0) { "free_up_to_users" }
+        checkLen(summary, 280, "pricing summary"); checkLen(currency, 16, "currency")
+        check(checkoutUrl == null || (checkoutUrl.length <= Limits.MAX_URL && isHttpsUrl(checkoutUrl))) { "checkout_url" }
+    }
+}
 
 @Serializable
 data class CoordinatorFeatures(val matching: Boolean = true, val talks: Boolean = false, val chat: List<String> = emptyList())
@@ -776,9 +940,17 @@ data class CoordinatorAnnounce(
     val pricing: CoordinatorPricing? = null,
 ) : Validated {
     override fun validate() {
+        // coordinatorAnnounceSchema in full (SB-78), with the privacy bounds (SB-12).
         checkVersion(v); check(name.length in 1..120) { "name" }; checkLen(about, 2000, "about")
-        check(picture == null || isHttpsUrl(picture)) { "picture" }
-        check(termsUrl == null || isHttpsUrl(termsUrl)) { "terms_url" }
+        check(picture == null || (picture.length <= Limits.MAX_URL && isHttpsUrl(picture))) { "picture" }
+        check(termsUrl == null || (termsUrl.length <= Limits.MAX_URL && isHttpsUrl(termsUrl))) { "terms_url" }
+        checkLen(operator, 200, "operator"); checkList(relays, Limits.MAX_RELAYS, "relays")
+        checkList(features.chat, Limits.MAX_RELAYS, "features.chat")
+        privacy?.let { p ->
+            check(p.size <= Limits.MAX_PRIVACY_ROLES) { "too many privacy roles" }
+            p.forEach { (role, tier) -> checkLen(role, Limits.MAX_PRIVACY_ROLE, "privacy role"); checkLen(tier, Limits.MAX_PRIVACY_TIER, "privacy tier") }
+        }
+        pricing?.validate()
     }
 }
 

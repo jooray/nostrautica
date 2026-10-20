@@ -20,6 +20,9 @@ import {
   membersPostContentSchema,
   eventPageContentSchema,
   eventPagePrivateSchema,
+  MAX_NAME,
+  MAX_PAGE_SECTIONS,
+  MAX_URL,
   type MembersPostContent,
   type EventPagePrivate,
   type MenuItem,
@@ -154,6 +157,17 @@ describe("31608 event page content", () => {
       ["r", "nostr:naddr1sched", "Schedule"],
     ]);
     expect(rTagsToMenu([["d", "ev"], ...tags, ["v", "2"]])).toEqual(menu);
+  });
+
+  it("reads the public menu under the encrypted menu's bounds (SB-43)", () => {
+    const long = "https://x.example/" + "a".repeat(MAX_URL);
+    const menu = rTagsToMenu([
+      ["r", long, "Too long"],
+      ["r", "https://ok.example", "L".repeat(MAX_NAME + 50)],
+    ]);
+    expect(menu).toEqual([{ target: "https://ok.example", label: "L".repeat(MAX_NAME) }]);
+    const many = Array.from({ length: MAX_PAGE_SECTIONS + 10 }, (_, i) => ["r", `https://x.example/${i}`, `${i}`]);
+    expect(rTagsToMenu(many)).toHaveLength(MAX_PAGE_SECTIONS);
   });
 });
 

@@ -15,6 +15,7 @@ import {
   adminCommandContentSchema,
   inviteListContentSchema,
   invitePolicyOf,
+  ORGANIZER_SELF_INVITE_LABEL,
   INVITE_USES_UNLIMITED,
   myProfileContentSchema,
   directoryEntryContentSchema,
@@ -82,6 +83,14 @@ import {
   NewerProtocolVersionError,
   MAX_MEDIA_URLS,
   MAX_MEDIA_FILE_BYTES,
+  MAX_PAGE_SECTIONS,
+  MAX_ECK_VERSIONS,
+  MAX_TALK_SPEAKERS,
+  MAX_PRIVACY_ROLES,
+  MAX_PRIVACY_ROLE,
+  MAX_PRIVACY_TIER,
+  AI_PROFILE_FIELDS,
+  eventPageContentSchema,
 } from "./schemas.js";
 import type { z } from "zod";
 
@@ -146,6 +155,33 @@ describe("every §7 payload round-trips through JSON", () => {
       eck: [{ id: 1, key: b64_32 }],
       config_relays: ["wss://relay.example"],
     }));
+
+  it("21603 coordinator grant naming the outgoing coordinator (NIP §3.7, SB-122)", () => {
+    roundTrips(coordinatorGrantContentSchema, {
+      v: 2,
+      a: "31923:" + hex + ":ev",
+      gen: 2,
+      inbox_nsec: hex,
+      eck: [{ id: 1, key: b64_32 }],
+      config_relays: [],
+      prev_coordinator: hex,
+    });
+    // Optional: a grant from an older organizer client still parses (the
+    // coordinator then adopts only an E_id-authored roster).
+    expect(
+      coordinatorGrantContentSchema.parse({
+        v: 2, a: "31923:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [], config_relays: [],
+      }).prev_coordinator,
+    ).toBeUndefined();
+    // But when present it must be a pubkey — never an npub, never uppercase.
+    for (const bad of ["npub1xyz", "AB".repeat(32), "ab".repeat(31), ""]) {
+      expect(() =>
+        coordinatorGrantContentSchema.parse({
+          v: 2, a: "31923:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [], config_relays: [], prev_coordinator: bad,
+        }),
+      ).toThrow();
+    }
+  });
 
   it("21603 coordinator grant requires a positive gen (NIP §3.5)", () => {
     expect(() =>
@@ -223,6 +259,10 @@ describe("every §7 payload round-trips through JSON", () => {
     expect(invitePolicyOf({})).toEqual({ uses: 1 });
     expect(invitePolicyOf({ uses: INVITE_USES_UNLIMITED })).toEqual({ uses: 0 });
     expect(invitePolicyOf({ uses: 5, exp: 42 })).toEqual({ uses: 5, exp: 42 });
+  });
+
+  it("invitePolicyOf carries the label, so a coordinator can spot the organizer's own code (SB-124)", () => {
+    expect(invitePolicyOf({ label: ORGANIZER_SELF_INVITE_LABEL })).toEqual({ uses: 1, label: "organizer-self" });
   });
 
   it("31601 invite list: an unknown-key entry from a NEWER publisher still parses", () => {
@@ -1609,5 +1649,99 @@ describe("field bounds parity with sibling fields", () => {
       expect(coordinatorAnnounceSchema.safeParse(announce(bad)).success).toBe(false);
     }
     expect(coordinatorAnnounceSchema.safeParse({ v: 2, name: "coord" }).success).toBe(true);
+  });
+});
+
+/**
+ * The arrays and records that were still unbounded after PROTO-4 (audit SB-11,
+ * SB-12, SB-26, SB-27). Each limit is generous next to what real events carry:
+ * production 31608s have at most one public section, the coordinator's own 31611
+ * lists six one-word privacy roles, and the app sends no talk co-speakers.
+ */
+describe("remaining unbounded arrays and records are capped", () => {
+  const hex = "a".repeat(64);
+  const b64_32 = "A".repeat(43) + "=";
+  const coord = "31923:" + hex + ":ev";
+
+  it("caps the PUBLIC 31608 sections like the encrypted half (SB-11)", () => {
+    const sections = (n: number) => Array.from({ length: n }, () => ({ type: "attendees" }));
+    expect(eventPageContentSchema.safeParse({ v: 2, sections: sections(MAX_PAGE_SECTIONS) }).success).toBe(true);
+    expect(eventPageContentSchema.safeParse({ v: 2, sections: sections(MAX_PAGE_SECTIONS + 1) }).success).toBe(false);
+  });
+
+  it("caps the 31611 privacy map in entries, role length and tier length (SB-12)", () => {
+    const announce = (privacy: Record<string, string>) => ({ v: 2, name: "coord", privacy });
+    const real = {
+      stt: "private",
+      summary: "private",
+      match: "private",
+      embed: "private",
+      translate: "private",
+      match_score: "non-private",
+    };
+    expect(coordinatorAnnounceSchema.safeParse(announce(real)).success).toBe(true);
+    const wide = Object.fromEntries(Array.from({ length: MAX_PRIVACY_ROLES + 1 }, (_, i) => [`r${i}`, "private"]));
+    expect(coordinatorAnnounceSchema.safeParse(announce(wide)).success).toBe(false);
+    expect(coordinatorAnnounceSchema.safeParse(announce({ ["r".repeat(MAX_PRIVACY_ROLE + 1)]: "private" })).success).toBe(false);
+    expect(coordinatorAnnounceSchema.safeParse(announce({ stt: "p".repeat(MAX_PRIVACY_TIER + 1) })).success).toBe(false);
+  });
+
+  it("caps every eck version array (SB-26)", () => {
+    const eck = (n: number) => Array.from({ length: n }, (_, i) => ({ id: i + 1, key: b64_32 }));
+    const grant = (n: number) => ({ v: 2, a: coord, role: "attendee", eck: eck(n), granted_by: hex });
+    const coordGrant = (n: number) => ({ v: 2, a: coord, gen: 1, inbox_nsec: hex, eck: eck(n), config_relays: [] });
+    const orgGrant = (n: number) => ({
+      v: 2,
+      a: coord,
+      eid_nsec: hex,
+      einbox_nsec: hex,
+      eck: eck(n),
+      config_relays: [],
+      granted_by: hex,
+    });
+    const backup = (n: number) => ({ v: 2, eid_nsec: hex, einbox_nsec: hex, eck: eck(n) });
+    const cases: [z.ZodTypeAny, (n: number) => unknown][] = [
+      [keyGrantContentSchema, grant],
+      [coordinatorGrantContentSchema, coordGrant],
+      [organizerGrantContentSchema, orgGrant],
+      [eventKeysBackupSchema, backup],
+    ];
+    for (const [schema, make] of cases) {
+      expect(schema.safeParse(make(MAX_ECK_VERSIONS)).success).toBe(true);
+      expect(schema.safeParse(make(MAX_ECK_VERSIONS + 1)).success).toBe(false);
+    }
+    // The cap sits at the NIP-44 ceiling, so it can reject nothing deliverable:
+    // even the leanest carrier (a backup, not JSON-escaped inside a rumor) no
+    // longer fits in a 65 535-byte plaintext at the cap.
+    expect(JSON.stringify(backup(MAX_ECK_VERSIONS)).length).toBeGreaterThan(65_535);
+  });
+
+  it("caps hidden_fields at one entry per field, and talk co-speakers (SB-27)", () => {
+    const correction = (hidden_fields: string[]) => ({ v: 2, a: coord, rev: 1, hidden_fields });
+    expect(profileCorrectionContentSchema.safeParse(correction([...AI_PROFILE_FIELDS])).success).toBe(true);
+    expect(profileCorrectionContentSchema.safeParse(correction([...AI_PROFILE_FIELDS, "summary"])).success).toBe(false);
+    const external = {
+      external_url: "https://cdn.example/t.mp4",
+      external_kind: "video",
+      source_type: "external",
+    };
+    const speakers = (n: number) => Array.from({ length: n }, () => hex);
+    const submission = (n: number) => ({ v: 2, a: coord, talk_d: "k", title: "T", ...external, speakers: speakers(n) });
+    expect(talkSubmissionContentSchema.safeParse(submission(MAX_TALK_SPEAKERS)).success).toBe(true);
+    expect(talkSubmissionContentSchema.safeParse(submission(MAX_TALK_SPEAKERS + 1)).success).toBe(false);
+    const talk = (n: number) => ({
+      v: 2,
+      pubkey: hex,
+      talk_d: "k",
+      title: "T",
+      ...external,
+      speakers: speakers(n),
+      lang: "en",
+      revision: 0,
+      status: "published",
+      published_at: 1,
+    });
+    expect(talkContentSchema.safeParse(talk(MAX_TALK_SPEAKERS)).success).toBe(true);
+    expect(talkContentSchema.safeParse(talk(MAX_TALK_SPEAKERS + 1)).success).toBe(false);
   });
 });

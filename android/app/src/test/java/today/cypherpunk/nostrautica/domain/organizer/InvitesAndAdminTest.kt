@@ -118,6 +118,14 @@ class InvitesAndAdminTest {
         return Rumor(u.id, pk, at, kind, tags, content)
     }
 
+    // Audit SB-82: same-second joins are ordered by the lowest rumor id, whatever order they arrived in.
+    @Test fun sameSecondJoinsOrderByLowestId() {
+        val joins = (1..12).map { i -> rumor("%064x".format(i), Kinds.JOIN_REQUEST, """{"v":2,"name":"P$i","message":"","rsvp_public":false}""", 100) }
+        val want = joins.sortedBy { it.id }.map { it.pubkey }
+        assertEquals(want, InboxFold.fold(joins, coord).map { it.attendeePubkey })
+        assertEquals(want, InboxFold.fold(joins.reversed(), coord).map { it.attendeePubkey })
+    }
+
     @Test fun inboxFoldsLatestJoinRevisionAndWithdrawal() {
         val a = "a".repeat(64); val b = "b".repeat(64); val c = "c".repeat(64)
         val rumors = listOf(
@@ -179,6 +187,17 @@ class InvitesAndAdminTest {
         val c = p.copy(state = "cleared", at = 2)
         assertEquals(listOf(c), AdminModel.dedupeLatestStatuses(listOf(p, c)))
         assertEquals("admin.coord.minAgo" to 5, AdminModel.sinceLabel(1000, 1300))
+    }
+
+    @Test fun contextNoticeIsTheNewestAdvisoryAndALaterEditIsNotPreDismissed() {
+        // DS41-041, mirrors coordinator-status.test.ts.
+        val first = CoordinatorStatusContent(a = coord, stage = "event_context", errorCategory = "recompute_suggested", at = 10)
+        val later = first.copy(at = 20)
+        val poison = CoordinatorStatusContent(a = coord, stage = "event_context", state = "poison", errorCategory = "other", at = 30)
+        assertEquals(later, AdminModel.contextNotice(listOf(first, later, poison), emptySet()))
+        assertNull(AdminModel.contextNotice(listOf(first, later), setOf(AdminModel.contextNoticeId(later))))
+        // Dismissing the first notice does not hide the one a later edit raised.
+        assertEquals(later, AdminModel.contextNotice(listOf(first, later), setOf(AdminModel.contextNoticeId(first))))
     }
 
     @Test fun receiptAndCoordinatorHelpers() {
