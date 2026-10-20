@@ -26,7 +26,7 @@ import { Store } from "../store/db.js";
 import { MockLlm, MockStt } from "../providers/mock.js";
 import { ProviderContractError } from "../providers/types.js";
 import type { LlmProvider, RoleRoute } from "../providers/types.js";
-import { processAttendee, type ProcessDeps } from "./process.js";
+import { processAttendee, fitTranscriptBudget, MAX_PROFILE_TRANSCRIPT_CHARS, type ProcessDeps } from "./process.js";
 import { bytesToBase64, sha256Hex, aesGcmEncrypt } from "@nostrautica/protocol";
 
 const PK = "a".repeat(64);
@@ -281,5 +281,20 @@ describe("SEC-18 — the intro path forwards cancellation into transcription", (
     // Without the signal forwarded, transcribeMedia never learns about the abort
     // and bills a full STT call for a coordinator that is already shutting down.
     expect(stt.calls).toBe(0);
+  });
+});
+
+/** Audit DS41-038: every transcript went into one profile prompt, unbudgeted. */
+describe("fitTranscriptBudget", () => {
+  it("keeps the intros whole and trims talks to the budget", () => {
+    const t = ["intro".repeat(10), "a".repeat(100), "b".repeat(100)];
+    fitTranscriptBudget(t, 150);
+    expect(t[0]).toBe("intro".repeat(10));
+    expect(t[1]).toBe("a".repeat(100));
+    expect(t).toHaveLength(2);
+    const big = ["i", ...Array.from({ length: 10 }, () => "x".repeat(100_000))];
+    fitTranscriptBudget(big, MAX_PROFILE_TRANSCRIPT_CHARS);
+    expect(big.join("").length).toBeLessThanOrEqual(MAX_PROFILE_TRANSCRIPT_CHARS + 1);
+    expect(big[0]).toBe("i");
   });
 });

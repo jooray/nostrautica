@@ -162,6 +162,38 @@ function isRetryableStageFailure(e: unknown): boolean {
  *  on, short enough that a profile is translated well within the event. */
 const DEFAULT_STAGE_RETRY_MS = 60_000;
 
+/**
+ * Ceiling on the transcript text fed into ONE profile prompt (audit DS41-038).
+ * Up to ten talks of 100,000 characters each plus the intros were concatenated
+ * into a single prompt with no budget, so a speaker with a few long talks blew
+ * past a 128k-token context; the provider's 400 is not a contract error and rode
+ * the whole retry tail, each attempt a large paid upload. 60,000 characters is
+ * roughly 15k tokens, far beyond what a profile needs.
+ */
+export const MAX_PROFILE_TRANSCRIPT_CHARS = 60_000;
+
+/**
+ * Trim `transcripts` in place to `budget` characters in total, in order: the
+ * intros come first in the list, so they keep their text and talks give way.
+ */
+export function fitTranscriptBudget(transcripts: string[], budget: number): void {
+  let left = budget;
+  for (let i = 0; i < transcripts.length; i++) {
+    const t = transcripts[i]!;
+    if (t.length <= left) {
+      left -= t.length;
+      continue;
+    }
+    if (left <= 0) {
+      transcripts.length = i;
+      return;
+    }
+    transcripts[i] = t.slice(0, left) + "…";
+    transcripts.length = i + 1;
+    return;
+  }
+}
+
 /** How long to wait before re-running a degraded stage that failed with `e`. */
 function stageRetryDelayMs(e: unknown): number {
   const after = e instanceof ProviderHttpError ? e.retryAfterSec : undefined;
@@ -256,6 +288,7 @@ export async function processAttendee(
     const t = extra.trim();
     if (t) transcripts.push(t);
   }
+  fitTranscriptBudget(transcripts, MAX_PROFILE_TRANSCRIPT_CHARS);
 
   // 2. Nostr-context summary (skipped if N=0 or no content), cached by inputs hash
   //    (the hash includes the output language, so a lang change re-summarizes).
