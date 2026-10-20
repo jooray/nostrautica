@@ -1,8 +1,11 @@
 package today.cypherpunk.nostrautica.data
 
 import androidx.sqlite.db.SimpleSQLiteQuery
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import today.cypherpunk.nostrautica.data.db.AppDatabase
@@ -33,7 +36,7 @@ class EventStore(private val db: AppDatabase) {
         .distinct()
 
     /** Store events (already verified by the pool). Returns those that were new or newer. */
-    suspend fun put(events: Collection<NostrEvent>): List<NostrEvent> = writeLock.withLock {
+    suspend fun put(events: Collection<NostrEvent>): List<NostrEvent> = withContext(Dispatchers.IO) { writeLock.withLock {
         val changed = mutableListOf<NostrEvent>()
         val fresh = if (events.isEmpty()) emptySet() else events.map { it.id }.chunked(500).flatMap { dao.existing(it) }.toSet()
         for (e in events) {
@@ -49,7 +52,7 @@ class EventStore(private val db: AppDatabase) {
             changed += e
         }
         changed
-    }
+    } }
 
     suspend fun put(e: NostrEvent) = put(listOf(e))
 
@@ -111,17 +114,23 @@ class EventStore(private val db: AppDatabase) {
         return if (limit != null) all.take(limit) else all
     }
 
-    suspend fun query(vararg filters: Filter): List<NostrEvent> {
+    /**
+     * Main-safe, like every read here: screens call these from the main thread, and
+     * parsing a few hundred events' JSON (a roster's profiles, a feed) is tens to
+     * hundreds of ms on a slow phone, so it runs on [Dispatchers.Default].
+     */
+    suspend fun query(vararg filters: Filter): List<NostrEvent> = withContext(Dispatchers.Default) {
         val groups = split(filters.toList())
-        if (groups.size == 1) return rows(dao.query(sql(groups[0])))
-        return merge(groups.map { rows(dao.query(sql(it))) }, filters.mapNotNull { it.limit }.maxOrNull())
+        if (groups.size == 1) rows(dao.query(sql(groups[0])))
+        else merge(groups.map { rows(dao.query(sql(it))) }, filters.mapNotNull { it.limit }.maxOrNull())
     }
 
+    /** Room runs the query off the main thread; [flowOn] keeps the parsing there too. */
     fun observe(vararg filters: Filter): Flow<List<NostrEvent>> {
         val groups = split(filters.toList())
-        if (groups.size == 1) return dao.observe(sql(groups[0])).map(::rows)
+        if (groups.size == 1) return dao.observe(sql(groups[0])).map(::rows).flowOn(Dispatchers.Default)
         val limit = filters.mapNotNull { it.limit }.maxOrNull()
-        return kotlinx.coroutines.flow.combine(groups.map { g -> dao.observe(sql(g)).map(::rows) }) { merge(it.toList(), limit) }
+        return kotlinx.coroutines.flow.combine(groups.map { g -> dao.observe(sql(g)).map(::rows) }) { merge(it.toList(), limit) }.flowOn(Dispatchers.Default)
     }
 
     companion object {
@@ -131,7 +140,7 @@ class EventStore(private val db: AppDatabase) {
 
     /** The current version of an addressable/replaceable event, from the phone. */
     suspend fun latest(kind: Int, pubkey: String, d: String? = null): NostrEvent? =
-        dao.latest(kind, pubkey, if (Kinds.isAddressable(kind)) d ?: "" else null)?.let { NostrEvent.fromJsonString(it.json) }
+        withContext(Dispatchers.Default) { dao.latest(kind, pubkey, if (Kinds.isAddressable(kind)) d ?: "" else null)?.let { NostrEvent.fromJsonString(it.json) } }
 
     suspend fun delete(id: String) = writeLock.withLock { dao.delete(id); dao.deleteTags(id) }
 }

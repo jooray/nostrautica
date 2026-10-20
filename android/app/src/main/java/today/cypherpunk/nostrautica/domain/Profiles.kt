@@ -1,6 +1,7 @@
 package today.cypherpunk.nostrautica.domain
 
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -47,7 +48,7 @@ class Profiles(private val nostr: Nostr, private val cache: Cache) {
         if (pubkeys.isEmpty()) return kotlinx.coroutines.flow.flowOf(emptyMap())
         return nostr.observe(Filter(kinds = listOf(Kinds.PROFILE), authors = pubkeys.toList())).map { events ->
             events.groupBy { it.pubkey }.mapValues { (_, v) -> ProfileMeta.from(v.maxBy { it.createdAt }) }
-        }
+        }.flowOn(kotlinx.coroutines.Dispatchers.Default)
     }
 
     suspend fun local(pubkey: String): ProfileMeta? = nostr.store.latest(Kinds.PROFILE, pubkey)?.let(ProfileMeta::from)
