@@ -28,7 +28,8 @@ import {
   type ExternalFeed,
   supersedes,
 } from "@nostrautica/protocol";
-import { fetchEvents, type Filter } from "$lib/nostr/ndk.js";
+import { fetchEvents, fetchEventsAnswered, type Filter } from "$lib/nostr/ndk.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
@@ -222,10 +223,14 @@ function cachePosts(coordinate: string, key: PostSlot, posts: EventPost[], at?: 
 export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
   const { pubkey } = parseCoordinate(ctx.coordinate);
   // Discovery for 31607 is {kinds, authors:[E_id]} — no `a` tag (spec §7.4).
-  const events = await fetchEvents(
+  const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_LONGFORM, KIND_MEMBERS_POST], authors: [pubkey] },
     ctx.config.relays,
   );
+  // An empty, unanswered read is not "no posts": returning [] here also cached
+  // [] over the feed the page had just painted (audit DS41-015). Throw, so the
+  // caller keeps what it has and can say it is not fresh.
+  if (events.length === 0 && !answered) throw new RelaysUnansweredError();
   const keys = await loadEventKeys(ctx.coordinate);
   const eck = keys?.eck ?? [];
   // Authority boundary: `authors: [E_id]` is a request, not a guarantee — the
@@ -250,10 +255,11 @@ export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
  */
 export async function fetchAttendeePosts(ctx: EventContext): Promise<EventPost[]> {
   const { pubkey: eid } = parseCoordinate(ctx.coordinate);
-  const events = await fetchEvents(
+  const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_LONGFORM], "#a": [ctx.coordinate] },
     ctx.config.relays,
   );
+  if (events.length === 0 && !answered) throw new RelaysUnansweredError(); // as fetchEventPosts
   const roster = await fetchRoster(ctx).catch(() => undefined);
   const members = roster ? new Set(roster.attendees.map((a) => a.pubkey)) : undefined;
   const raw = (events as unknown as RawPostEvent[]).filter(

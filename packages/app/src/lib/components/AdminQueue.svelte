@@ -131,6 +131,8 @@
         <p class="muted" role="status" style="margin:0.25rem 0 0">
           {bulk === "publishing" ? t("admin.requests.bulk.publishing") : t("admin.requests.bulk.queued")}
         </p>
+      {:else if bulk === "outbox"}
+        <p class="muted" role="status" style="margin:0.25rem 0 0">{t("admin.requests.bulk.outbox")}</p>
       {:else if bulk === "failed"}
         <p class="muted" style="color:var(--danger);margin:0.25rem 0 0">{t("admin.requests.bulk.failed")}</p>
         <button class="btn inline" onclick={() => onRetryBulk(req.attendeePubkey)}>

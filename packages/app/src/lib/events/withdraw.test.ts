@@ -13,8 +13,12 @@ const deleteBlob = vi.fn();
 vi.mock("$lib/events/giftwrap.js", () => ({ signerWrap: (...a: unknown[]) => signerWrap(...a) }));
 vi.mock("$lib/nostr/publish-queue.js", () => ({ publishOrQueue: (...a: unknown[]) => publishOrQueue(...a) }));
 vi.mock("$lib/events/blinding.js", () => ({ deriveBlindingKey: (...a: unknown[]) => deriveBlindingKey(...a) }));
+const loadLibraryFull = vi.fn();
+const cachedLibrary = vi.fn();
 vi.mock("$lib/media/submit.js", () => ({
   loadSelfCopy: (...a: unknown[]) => loadSelfCopy(...a),
+  loadLibraryFull: (...a: unknown[]) => loadLibraryFull(...a),
+  cachedLibrary: (...a: unknown[]) => cachedLibrary(...a),
   resolveBlossomServers: (...a: unknown[]) => resolveBlossomServers(...a),
   fetchUserBlossomServers: (...a: unknown[]) => fetchUserBlossomServers(...a),
 }));
@@ -43,6 +47,8 @@ beforeEach(() => {
   resolveBlossomServers.mockReturnValue(["https://blossom.example"]);
   fetchUserBlossomServers.mockResolvedValue([]);
   deleteBlob.mockResolvedValue(true);
+  loadLibraryFull.mockResolvedValue({ media: [], texts: [], at: {}, known: true });
+  cachedLibrary.mockReturnValue(undefined);
 });
 
 describe("withdrawFromEvent (NIP §6.3 21610)", () => {
@@ -80,5 +86,30 @@ describe("withdrawFromEvent (NIP §6.3 21610)", () => {
     const res = await withdrawFromEvent(signer, ctx);
     expect(res.sent).toBe(true);
     expect(res.blobsAttempted).toBe(0);
+  });
+
+  // Audit DS41-006.
+  it("deletes nothing while the withdrawal is only queued", async () => {
+    publishOrQueue.mockResolvedValue(false);
+    const res = await withdrawFromEvent(signer, ctx);
+    expect(res.sent).toBe(false);
+    expect(deleteBlob).not.toHaveBeenCalled();
+    expect(signer.signEvent).not.toHaveBeenCalled(); // no NIP-09 for the self-copy
+    expect(publishOrQueue).toHaveBeenCalledTimes(1); // just the 21610
+  });
+
+  it("keeps a blob the reuse library still points at", async () => {
+    loadLibraryFull.mockResolvedValue({ media: [{ x: "c".repeat(64) }], texts: [], at: {}, known: true });
+    const res = await withdrawFromEvent(signer, ctx);
+    expect(res.blobsAttempted).toBe(1);
+    expect(deleteBlob).not.toHaveBeenCalledWith(signer, "https://blossom.example", "c".repeat(64));
+    expect(deleteBlob).toHaveBeenCalledWith(signer, "https://blossom.example", "d".repeat(64));
+  });
+
+  it("deletes no blob when the library can't be read", async () => {
+    loadLibraryFull.mockResolvedValue({ media: [], texts: [], at: {}, known: false });
+    const res = await withdrawFromEvent(signer, ctx);
+    expect(res.blobsAttempted).toBe(0);
+    expect(deleteBlob).not.toHaveBeenCalled();
   });
 });

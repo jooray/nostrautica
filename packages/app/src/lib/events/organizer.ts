@@ -35,6 +35,7 @@ import {
   KIND_MATCH_MATRIX,
   KIND_DELETION,
   giftwrapSince,
+  GIFTWRAP_MAX_BACKDATE_SEC,
   unwrapRumor,
   eckEncrypt,
   eckDecrypt,
@@ -61,6 +62,7 @@ import {
   EVENT_INBOX_RUMOR_KINDS,
   ADMIN_COMMAND_TTL_SEC,
   type EventKeysBackup,
+  type EventConfig,
   type InviteProof,
   type AttendeeProfile,
   type MediaDescriptor,
@@ -84,7 +86,7 @@ import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
-import { grantParentField, withFreshLinks } from "./hierarchy.js";
+import { grantParentField, fetchNewestConfig } from "./hierarchy.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
 // paints instantly and refreshes in parallel (CACHING-PLAN §2.11). Wiped on
@@ -186,9 +188,94 @@ export function acceptedRecordAuthors(ctx: EventContext): string[] {
     : [ctx.config.eidPubkey];
 }
 
+type PendingSubmission = {
+  key: RevisionKey;
+  profile: AttendeeProfile;
+  media: MediaDescriptor[];
+  introText?: string;
+};
+type PendingWithdrawal = { id: string; created_at: number; deleteData: boolean };
+
+/**
+ * The per-attendee winners of every inbox scan so far, persisted (owner-scoped)
+ * so the next scan only has to read what is new. Holding the WINNERS rather than
+ * the finished queue is what makes that safe: a submission that arrives after
+ * its join has left the read window still folds into the join it belongs to,
+ * because the join is in here.
+ */
+interface PendingScanState {
+  /** Unix seconds of the last scan that covered everything up to then. */
+  cursor?: number;
+  joins: Record<string, PendingRequest>;
+  joinIds: Record<string, string>;
+  subs: Record<string, PendingSubmission>;
+  withdrawals: Record<string, PendingWithdrawal>;
+}
+
+function pendingStateKey(coordinate: string): string {
+  return `pendingscan:${coordinate}`;
+}
+
+/** Page size and page cap for the first, full read of an event's inbox. */
+const PENDING_PAGE_SIZE = 500;
+const PENDING_MAX_PAGES = 20;
+
+/**
+ * The E_inbox wraps to fold in. With a cursor: everything since it, minus the
+ * NIP-59 backdating allowance and a day of slack (the DM scan's rule). Without
+ * one (first scan of this event on this device): the whole history, paged
+ * backwards; `complete` is false if the page cap or a stalled page stopped it.
+ */
+async function readInboxWraps(
+  ctx: EventContext,
+  inboxPubkeys: string[],
+  cursor: number | undefined,
+): Promise<{ wraps: GiftWrap[]; complete: boolean }> {
+  const now = Math.floor(Date.now() / 1000);
+  if (cursor !== undefined) {
+    const since = Math.min(giftwrapSince(now), cursor - GIFTWRAP_MAX_BACKDATE_SEC - 24 * 60 * 60);
+    // Relay-only: join requests must not be lost to the cache/EOSE race (see ndk.ts).
+    const wraps = (await fetchEventsRelayOnly(
+      { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, since },
+      ctx.config.relays,
+    )) as unknown as GiftWrap[];
+    return { wraps, complete: true };
+  }
+  const seen = new Set<string>();
+  const wraps: GiftWrap[] = [];
+  let until: number | undefined;
+  for (let page = 0; page < PENDING_MAX_PAGES; page++) {
+    const filter: Record<string, unknown> = { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, limit: PENDING_PAGE_SIZE };
+    if (until !== undefined) filter.until = until;
+    const batch = (await fetchEventsRelayOnly(filter, ctx.config.relays)) as unknown as GiftWrap[];
+    let added = 0;
+    let oldest: number | undefined;
+    for (const w of batch) {
+      if (!seen.has(w.id)) {
+        seen.add(w.id);
+        wraps.push(w);
+        added++;
+      }
+      if (oldest === undefined || w.created_at < oldest) oldest = w.created_at;
+    }
+    if (batch.length < PENDING_PAGE_SIZE) return { wraps, complete: true };
+    if (added === 0 || oldest === undefined) return { wraps, complete: false };
+    until = oldest; // inclusive: the boundary second is re-read, the id dedupe absorbs it
+  }
+  return { wraps, complete: false };
+}
+
 /**
  * Fetch and unwrap all inbound gift wraps to E_inbox, collapsing to the latest
  * join request + submission per attendee (latest by rumor created_at wins).
+ *
+ * It used to read only `giftwrapSince()` (the last 3 days) and then REPLACE the
+ * cached queue with that window. A join request sent four days before the
+ * organizer opened Admin was in neither, and on a coordinator-less event this
+ * queue is the only place an approval can happen: the attendee waited forever
+ * and nobody could see they had asked (audit DS41-011). The first scan on a
+ * device now reads the whole inbox (paged), later scans read from a persisted
+ * cursor, and the per-attendee winners carry over between scans.
  */
 export async function fetchPending(
   ctx: EventContext,
@@ -200,21 +287,19 @@ export async function fetchPending(
   // holds, so history stays readable across a detach/replace.
   const inboxSks = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])].map((h) => hexToBytes(h));
   const inboxPubkeys = inboxSks.map((sk) => getPublicKey(sk));
-  // Relay-only: join requests must not be lost to the cache/EOSE race (see ndk.ts).
-  const wraps = (await fetchEventsRelayOnly(
-    { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, since: giftwrapSince() },
-    ctx.config.relays,
-  )) as unknown as GiftWrap[];
+  const state = cacheGet<PendingScanState>(pendingStateKey(ctx.coordinate))?.data;
+  const scanStartedAt = Math.floor(Date.now() / 1000);
+  const { wraps, complete } = await readInboxWraps(ctx, inboxPubkeys, state?.cursor);
 
-  const byAttendee = new Map<string, PendingRequest>();
+  // Start from the winners of earlier scans (copies: the fold below mutates).
+  const byAttendee = new Map<string, PendingRequest>(
+    Object.entries(state?.joins ?? {}).map(([k, v]) => [k, { ...v }]),
+  );
   // The winning join rumor's id per attendee, so equal-created_at siblings apply
   // the global §3.1 tie-break (lowest id) rather than non-deterministic arrival
   // order (audit P4).
-  const joinRumorId = new Map<string, string>();
-  const submissions = new Map<
-    string,
-    { key: RevisionKey; profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string }
-  >();
+  const joinRumorId = new Map<string, string>(Object.entries(state?.joinIds ?? {}));
+  const submissions = new Map<string, PendingSubmission>(Object.entries(state?.subs ?? {}));
 
   /** Unwrap a wrap with whichever inbox secret it was sealed to (current or prior). */
   const unwrapAny = (wrap: GiftWrap) => {
@@ -232,7 +317,7 @@ export async function fetchPending(
   };
 
   /** Newest 21610 per attendee, by the same (created_at, lowest id) tie-break. */
-  const withdrawals = new Map<string, { id: string; created_at: number; deleteData: boolean }>();
+  const withdrawals = new Map<string, PendingWithdrawal>(Object.entries(state?.withdrawals ?? {}));
 
   for (const wrap of wraps) {
     const rumor = unwrapAny(wrap);
@@ -318,6 +403,19 @@ export async function fetchPending(
     }
   }
 
+  // Persist the winners BEFORE the fold below, which mutates requests and
+  // synthesizes withdrawal-only ones that are not joins. The cursor only moves
+  // when this read covered everything up to now; a full read cut short by the
+  // page cap leaves it unset, so the next scan reads the whole history again.
+  const nextState: PendingScanState = {
+    cursor: complete ? scanStartedAt : state?.cursor,
+    joins: Object.fromEntries([...byAttendee].map(([k, v]) => [k, { ...v }])),
+    joinIds: Object.fromEntries(joinRumorId),
+    subs: Object.fromEntries(submissions),
+    withdrawals: Object.fromEntries(withdrawals),
+  };
+  cacheSet(pendingStateKey(ctx.coordinate), nextState, scanStartedAt);
+
   // Fold submissions into their requests.
   for (const [pubkey, sub] of submissions) {
     const req = byAttendee.get(pubkey);
@@ -333,10 +431,10 @@ export async function fetchPending(
   for (const [pubkey, w] of withdrawals) {
     let req = byAttendee.get(pubkey);
     if (!req) {
-      // No join request for this person IN THIS WINDOW. That is the ordinary case,
-      // not an edge one: the inbox is read over the 3-day gift-wrap window, and
-      // somebody who joined when the invite went out and withdrew a week later has
-      // only the withdrawal inside it. Dropping it here meant their request reached
+      // No join request for this person in anything this device has read. Less
+      // common now that the first scan reads the whole inbox, but still real: a
+      // join older than a capped first read, or one sealed to an inbox this device
+      // never held, leaves only the withdrawal. Dropping it here meant their request reached
       // nobody at all, while their client had already deleted their media and their
       // 31602 self-copy and told them it was sent.
       //
@@ -567,10 +665,15 @@ export async function loadRoster(
   ctx: EventContext,
   eckBytes: Uint8Array,
 ): Promise<RosterRead> {
-  const publisher = directoryPublisher(ctx);
   const { identifier } = splitCoordinate(ctx.coordinate);
+  // Ask for every author we would ACCEPT, not only the current publisher (SB-91),
+  // matching attendee.ts `fetchRoster`. With a coordinator attached the request
+  // named only the coordinator, so an E_id-authored roster (one this organizer
+  // published from a page that had not yet seen the attach) was invisible to its
+  // own next read: "absent" on a device that has seen a roster, i.e. every later
+  // approve/revoke refused, while attendees were reading that very roster.
   const events = await fetchEventsRelayOnly(
-    { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
+    { kinds: [KIND_ROSTER], authors: acceptedRecordAuthors(ctx), "#d": [identifier] },
     ctx.config.relays,
   );
   // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7):
@@ -748,12 +851,17 @@ function splitCoordinate(coordinate: string): { identifier: string } {
  * coordinator authenticates commands as coming from the event authority). Used
  * for manual approval, recompute, reprocess, and revoke when a coordinator is
  * attached.
+ *
+ * Returns whether the command actually went out or only reached the durable
+ * outbox. The caller must not show "approved"/"revoked" for a queued one: the
+ * coordinator has not acted, and for a revoke the member keeps their chat leaf
+ * until it does (audit SB-03).
  */
 export async function sendAdminCommand(
   ctx: EventContext,
   cmd: "approve" | "recompute" | "reprocess" | "revoke" | "talk_publish" | "talk_reject",
   args: Record<string, unknown> = {},
-): Promise<void> {
+): Promise<PublishOutcome> {
   if (!ctx.config.coordinator) throw new Error("no coordinator attached");
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
@@ -765,7 +873,7 @@ export async function sendAdminCommand(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd, args, expires },
   });
-  await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays);
+  return toOutcome(await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays));
 }
 
 /**
@@ -1165,7 +1273,11 @@ export async function revokeAttendeeClient(
    */
   blindingKey?: Uint8Array,
 ): Promise<void> {
-  const keys = await loadEventKeys(ctx.coordinate);
+  // Captured once (audit DS41-001): the rotated ECK is saved after a roster read
+  // and a directory read, and must land under the identity that read these keys,
+  // not whoever is signed in by then.
+  const owner = activeKeystoreOwner() ?? undefined;
+  const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer keys not available");
   }
@@ -1220,12 +1332,28 @@ export async function revokeAttendeeClient(
   }
   const remaining = roster.attendees.filter((a) => a.pubkey !== removedPubkey);
 
-  // 3. Mint ECK v(n+1) and persist locally, then re-encrypt everyone else's
-  //    directory entry under it and re-grant to each.
+  // 3. Mint ECK v(n+1) and build EVERYTHING under it — every re-encrypted
+  //    directory entry, every re-grant, the new roster — before making it current.
+  //
+  //    This used to persist the new ECK first and then walk the attendees one
+  //    relay read at a time (up to 8 s each). Closing the tab, losing the network
+  //    or one hanging read part-way left this device with v(n+1) as its CURRENT
+  //    key while the relays still held the v(n) roster: every later loadRoster
+  //    decrypted with the new key, failed, and refused approve/revoke/post with
+  //    "Couldn't read this event's current roster" (audit DS41-002). Building is
+  //    now one batched read and local crypto; only then is the key saved, and
+  //    then everything is published.
   const newId = keys.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
   const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
-  keys.eck = [...keys.eck, newEck];
-  await saveEventKeys(keys);
+  const eckAll = [...keys.eck, newEck];
+  const newEckBytes = base64ToBytes(newEck.key);
+  const rekeyed = await rekeyRoster(ctx, eidSk, prevEckBytes, remaining, newEckBytes, newId, eckAll, {
+    keepChatKeys: false,
+  });
+  const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
+
+  keys.eck = eckAll;
+  await saveEventKeys(keys, owner);
   // The new ECK must reach the DURABLE backup, not just this device.
   //
   // Every other path that mints an ECK writes the 30078 backup;  this one never
@@ -1246,18 +1374,59 @@ export async function revokeAttendeeClient(
       "[organizer] revoke rotated the ECK with no blinding key — the new key exists only on this device",
     );
   }
-  const newEckBytes = base64ToBytes(newEck.key);
-  const publisher = directoryPublisher(ctx);
-  const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
-  const pubs: Promise<unknown>[] = [publishOrQueue(deletion, ctx.config.relays)];
+  await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
+}
 
-  for (const a of remaining) {
-    // Fetch + decrypt the attendee's current entry (old ECK).
+interface Rekeyed {
+  roster: RosterContent;
+  entries: VerifiedEvent[];
+  grants: { to: string; wrap: unknown }[];
+}
+
+/**
+ * Re-key every listed attendee under a new ECK, WITHOUT publishing anything:
+ * their directory entry re-encrypted at its new blinded `d`, a 21602 re-grant of
+ * the full ECK set sealed by E_id, and the new roster content. Shared by revoke
+ * and coordinator rotation, which both used to interleave one relay read and the
+ * publishes per attendee with the key change (audit DS41-002).
+ *
+ * The current entries come from ONE batched read (chunked `#d`), pinned to the
+ * accepted record authors and resolved per `d` by §3.1 (DS41-013). An entry that
+ * can't be found or decrypted is not republished, as before.
+ */
+async function rekeyRoster(
+  ctx: EventContext,
+  eidSk: Uint8Array,
+  prevEckBytes: Uint8Array,
+  attendees: RosterContent["attendees"],
+  newEckBytes: Uint8Array,
+  newId: number,
+  eckAll: EckVersion[],
+  opts: { keepChatKeys: boolean },
+): Promise<Rekeyed> {
+  const authors = acceptedRecordAuthors(ctx);
+  const ds = attendees.map((a) => a.d);
+  const found: { id: string; created_at?: number; tags: string[][]; content: string }[] = [];
+  for (let i = 0; i < ds.length; i += DIRECTORY_READ_CHUNK) {
+    const chunk = ds.slice(i, i + DIRECTORY_READ_CHUNK);
     const events = await fetchEvents(
-      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": [a.d] },
+      { kinds: [KIND_DIRECTORY_ENTRY], authors, "#d": chunk },
       ctx.config.relays,
     );
-    const latest = events.sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))[0];
+    found.push(...(onlyByAuthors(onlyVerified(events), authors) as unknown as typeof found));
+  }
+  const byD = new Map<string, typeof found>();
+  for (const e of found) {
+    const d = e.tags.find((t) => t[0] === "d")?.[1];
+    if (d) byD.set(d, [...(byD.get(d) ?? []), e]);
+  }
+
+  const eidPubkey = getPublicKey(eidSk);
+  const roster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
+  const entries: VerifiedEvent[] = [];
+  const grants: { to: string; wrap: unknown }[] = [];
+  for (const a of attendees) {
+    const latest = pickLatest(byD.get(a.d) ?? []);
     let content: unknown;
     try {
       content = latest ? JSON.parse(eckDecrypt(prevEckBytes, latest.content)) : undefined;
@@ -1265,43 +1434,63 @@ export async function revokeAttendeeClient(
       content = undefined;
     }
     const newD = blindedD(newEckBytes, ctx.coordinate, a.pubkey);
-    newRoster.attendees.push({ pubkey: a.pubkey, d: newD, role: a.role });
-
-    if (content) {
-      const entryEvent = finalizeEvent(
-        {
-          kind: KIND_DIRECTORY_ENTRY,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
-          content: eckEncrypt(newEckBytes, JSON.stringify(content)),
-        },
-        eidSk,
-      );
-      pubs.push(publishOrQueue(entryEvent, ctx.config.relays));
-    }
-
-    // Re-grant the new ECK set (all versions) to this attendee — sealed by E_id
-    // so C2 authentication accepts it.
-    const grantWrap = wrapRumor(eidSk, a.pubkey, {
-      kind: KIND_KEY_GRANT,
-      content: {
-        v: 2,
-        a: ctx.coordinate,
-        role: a.role,
-        eck: keys.eck,
-        granted_by: getPublicKey(eidSk),
-        ...(await grantParentField(ctx, eidSk, a.pubkey)),
-      },
+    roster.attendees.push({
+      pubkey: a.pubkey,
+      d: newD,
+      role: a.role,
+      ...(opts.keepChatKeys && a.chat_keys ? { chat_keys: a.chat_keys } : {}),
     });
-    pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
+    if (content) {
+      entries.push(
+        finalizeEvent(
+          {
+            kind: KIND_DIRECTORY_ENTRY,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
+            content: eckEncrypt(newEckBytes, JSON.stringify(content)),
+          },
+          eidSk,
+        ),
+      );
+    }
+    // Re-grant the new ECK set (all versions) — sealed by E_id so C2
+    // authentication accepts it.
+    grants.push({
+      to: a.pubkey,
+      wrap: wrapRumor(eidSk, a.pubkey, {
+        kind: KIND_KEY_GRANT,
+        content: {
+          v: 2,
+          a: ctx.coordinate,
+          role: a.role,
+          eck: eckAll,
+          granted_by: eidPubkey,
+          ...(await grantParentField(ctx, eidSk, a.pubkey)),
+        },
+      }),
+    });
   }
+  return { roster, entries, grants };
+}
 
-  // No `previous`: every entry's blinded `d` was re-derived under the NEW ECK, so
-  // every page genuinely changed and there is nothing on the relay to skip.
-  for (const ev of buildRosterEvents(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt)) {
-    pubs.push(publishOrQueue(ev, ctx.config.relays));
-  }
-  await Promise.all(pubs);
+/** How many directory `d`s one REQ asks for when re-keying a roster. */
+const DIRECTORY_READ_CHUNK = 100;
+
+/** Publish what {@link rekeyRoster} built (plus any extra events) and wait for all of it. */
+async function publishRekeyed(
+  ctx: EventContext,
+  extra: VerifiedEvent[],
+  rekeyed: Rekeyed,
+  rosterEvents: VerifiedEvent[],
+): Promise<void> {
+  await Promise.all([
+    ...extra.map((e) => publishOrQueue(e, ctx.config.relays)),
+    ...rekeyed.entries.map((e) => publishOrQueue(e, ctx.config.relays)),
+    ...rekeyed.grants.map((g) => publishAccountGiftWrap(g.wrap as any, g.to, ctx.config.relays)),
+    // No `previous` in rosterEvents: every entry's blinded `d` was re-derived
+    // under the NEW ECK, so every page genuinely changed.
+    ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
+  ]);
 }
 
 /**
@@ -1326,7 +1515,6 @@ async function rotateEckAndInbox(
   owner: string | undefined,
 ): Promise<{ newInboxNsecHex: string; newInboxPubkey: string; eck: EckVersion[] }> {
   const eidSk = hexToBytes(keys.eidNsecHex!);
-  const eidPubkey = getPublicKey(eidSk);
   const prevEck = currentEck(keys);
   if (!prevEck) throw new Error("no ECK available");
   const prevEckBytes = base64ToBytes(prevEck.key);
@@ -1349,55 +1537,14 @@ async function rotateEckAndInbox(
 
   // Re-encrypt every attendee's directory entry under the new ECK (new blinded d),
   // republish the roster, and re-grant the new ECK set to each — no one removed.
+  // Built first, published after the keys are saved (DS41-002): the new ECK must
+  // never be on the relays without also being in this device's keystore, and
+  // never current here while the slow per-attendee work is still pending.
   const { roster, at: rosterAt } = rosterForRewrite(rosterRead, prevEck.id);
-  const publisher = directoryPublisher(ctx);
-  const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
-  const pubs: Promise<unknown>[] = [];
-  for (const a of roster.attendees) {
-    const events = await fetchEvents(
-      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": [a.d] },
-      ctx.config.relays,
-    );
-    const latest = events.sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))[0];
-    let content: unknown;
-    try {
-      content = latest ? JSON.parse(eckDecrypt(prevEckBytes, latest.content)) : undefined;
-    } catch {
-      content = undefined;
-    }
-    const newD = blindedD(newEckBytes, ctx.coordinate, a.pubkey);
-    newRoster.attendees.push({ pubkey: a.pubkey, d: newD, role: a.role, ...(a.chat_keys ? { chat_keys: a.chat_keys } : {}) });
-    if (content) {
-      const entryEvent = finalizeEvent(
-        {
-          kind: KIND_DIRECTORY_ENTRY,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
-          content: eckEncrypt(newEckBytes, JSON.stringify(content)),
-        },
-        eidSk,
-      );
-      pubs.push(publishOrQueue(entryEvent, ctx.config.relays));
-    }
-    const grantWrap = wrapRumor(eidSk, a.pubkey, {
-      kind: KIND_KEY_GRANT,
-      content: {
-        v: 2,
-        a: ctx.coordinate,
-        role: a.role,
-        eck: eckAll,
-        granted_by: eidPubkey,
-        ...(await grantParentField(ctx, eidSk, a.pubkey)),
-      },
-    });
-    pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
-  }
-  // No `previous`: every entry's blinded `d` was re-derived under the NEW ECK, so
-  // every page genuinely changed and there is nothing on the relay to skip.
-  for (const ev of buildRosterEvents(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt)) {
-    pubs.push(publishOrQueue(ev, ctx.config.relays));
-  }
-  await Promise.all(pubs);
+  const rekeyed = await rekeyRoster(ctx, eidSk, prevEckBytes, roster.attendees, newEckBytes, newId, eckAll, {
+    keepChatKeys: true,
+  });
+  const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
 
   // Persist: append the new ECK, retain the old inbox secret for history reading,
   // and adopt the new inbox as primary.
@@ -1405,6 +1552,7 @@ async function rotateEckAndInbox(
   if (keys.einboxNsecHex) keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []), keys.einboxNsecHex];
   keys.einboxNsecHex = newInboxNsecHex;
   await saveEventKeys(keys, owner);
+  await publishRekeyed(ctx, [], rekeyed, rosterEvents);
   // Never silent (audit EV-11). The rotation has already happened locally; if the
   // backup does not publish, the durable record of the new ECK and the new inbox
   // simply is not there, and a later recovery on a fresh device restores an event
@@ -1430,11 +1578,62 @@ async function rotateEckAndInbox(
  * authenticates the install by matching the seal author against the coordinate's
  * E_id pubkey (spec §7.2, ENCRYPTION-AND-PRIVACY.md F2).
  */
+const CONFIG_UNREADABLE =
+  "Couldn't read this event's current settings from its relays, so nothing was published. " +
+  "Publishing from this page's copy could undo changes made elsewhere. " +
+  "Check your connection and try again.";
+
+/**
+ * The newest 31600 on the relays, which every config write must build on.
+ *
+ * Config writes republish the WHOLE 31600, and they used to build it from the
+ * page's `ctx.config` — whatever the page read when it loaded, possibly hours
+ * ago, on another device. Saving one field from a stale Settings page therefore
+ * reverted every other field changed since (retention, relays, approval…), and
+ * worst of all dropped a coordinator another device had attached: a 31600 that
+ * no longer names the coordinator is a durable detach on the daemon side (audit
+ * SB-02, SB-87). The earlier `withFreshLinks` fixed this for `parent`/`children`
+ * only; this replaces it.
+ *
+ * Throws rather than falling back to `ctx.config`: a write built on a config we
+ * could not read is exactly the write that destroys something.
+ */
+async function freshConfig(ctx: EventContext): Promise<EventConfig> {
+  const cfg = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(
+    () => undefined,
+  );
+  if (!cfg) throw new Error(CONFIG_UNREADABLE);
+  return cfg;
+}
+
+/**
+ * Refuse to rotate or hand out keys this device no longer holds the current
+ * version of. Another organizer device (or a co-organizer) that rotated the
+ * E_inbox/ECK on attach/detach published the new inbox and `eck` on the 31600;
+ * a device still on the old ones would grant the coordinator a dead inbox secret
+ * and mint a colliding ECK version (audit SB-90, SB-86). Fail loudly instead.
+ */
+function assertCurrentCustody(cfg: EventConfig, keys: EventKeys): void {
+  // Current OR prior inbox: a device whose own rotation got as far as saving the
+  // new inbox but not as far as the 31600 is ahead of the config, not behind it.
+  const heldInboxes = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])]
+    .filter((h): h is string => !!h)
+    .map((h) => getPublicKey(hexToBytes(h)));
+  const heldEck = keys.eck.reduce((m, v) => Math.max(m, v.id), 0);
+  if ((heldInboxes.length > 0 && !heldInboxes.includes(cfg.inbox)) || cfg.eck > heldEck) {
+    throw new Error(
+      "This event's keys were changed on another device, and this device still holds the old ones. " +
+        "Open the event on the device that changed them, or have it send this account a fresh organizer grant.",
+    );
+  }
+}
+
 /**
  * Republish the event's 31600 config with changed fields (signed by E_id). Used by
  * Admin to flip live-editable settings like the prerecorded-talks mode (spec F2).
- * Every other field is preserved from `ctx.config`, so a talks-off event's config
- * stays byte-identical except for the one changed tag.
+ * Every other field is preserved from the NEWEST config on the relays (see
+ * {@link freshConfig}), and the config as published is returned so the caller
+ * can adopt it.
  */
 export async function updateEventConfig(
   ctx: EventContext,
@@ -1445,21 +1644,22 @@ export async function updateEventConfig(
     retentionDays: number | undefined;
     relays: string[];
   }>,
-): Promise<void> {
+): Promise<EventConfig> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
+  if (changes.relays && unionRelays(changes.relays).length === 0) {
+    throw new Error("at least one relay is required");
+  }
+  const current = await freshConfig(ctx);
   // Relay list. An admin can rewrite it explicitly (Settings → Relays); otherwise
   // the event keeps the relays it was published with. We NEVER silently migrate a
   // live event onto changed app defaults — only newly created events pick those up
   // (create.ts).
-  const chatActive = (changes.chat ?? ctx.config.chat).length > 0;
-  const relays = changes.relays ? unionRelays(changes.relays) : ctx.config.relays;
-  if (changes.relays && relays.length === 0) {
-    throw new Error("at least one relay is required");
-  }
+  const chatActive = (changes.chat ?? current.chat).length > 0;
+  const relays = changes.relays ? unionRelays(changes.relays) : current.relays;
   // Chat relays are a SEPARATE set (`chat_relay` tags) and are never folded into
   // the list above: the Whitenoise interop pair refuses every kind we publish
   // except the chat ones, so having them in `relays` — as this did until
@@ -1472,11 +1672,10 @@ export async function updateEventConfig(
   // clearing it: the group may still exist and be draining, and a re-enable must
   // not have to rediscover the relays it was routing over.
   const chatRelays = chatActive
-    ? unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays))
-    : chatRelaysOf(ctx.config);
-  const built = buildEventConfig(
-    await withFreshLinks(ctx, { ...ctx.config, ...changes, relays, chatRelays }),
-  );
+    ? unionRelays(chatRelaysOf(current), chatInteropRelays(relays))
+    : chatRelaysOf(current);
+  const next: EventConfig = { ...current, ...changes, relays, chatRelays };
+  const built = buildEventConfig(next);
   // Monotonic republish (audit P3): a config change made in the same second as
   // the previous 31600 must win the §3.1 tie-break, or the stale config stays
   // authoritative and the setting silently doesn't take. Read + publish across the
@@ -1485,15 +1684,16 @@ export async function updateEventConfig(
   // relays existing subscribers watch and any newly added ones.
   await publishMonotonic({
     kind: built.kind,
-    author: ctx.config.eidPubkey,
-    identifier: ctx.config.d,
-    relays: unionRelays(ctx.config.relays, relays),
+    author: current.eidPubkey,
+    identifier: current.d,
+    relays: unionRelays(ctx.config.relays, current.relays, relays),
     sign: (created_at) =>
       finalizeEvent(
         { kind: built.kind, created_at, tags: built.tags, content: built.content },
         eidSk,
       ),
   });
+  return next;
 }
 
 export async function attachCoordinator(
@@ -1510,11 +1710,19 @@ export async function attachCoordinator(
     throw new Error("organizer keys not available on this device");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
+  // Build on the newest 31600, not the page's copy (SB-02/SB-87): `previous`
+  // below decides whether this is a replacement (detach + rotate), and a stale
+  // page that had not seen another device's attach skipped both.
+  const current = await freshConfig(ctx);
+  assertCurrentCustody(current, keys);
+  ctx = { ...ctx, config: current };
 
   // Install generation (NIP §3.5): strictly increase across every attach/detach/
   // re-attach so a replayed historical 21603 can never re-install. The last-used
-  // gen lives on the local record + the 30078 backup (durable across devices).
-  const gen = (keys.coordinatorGen ?? 0) + 1;
+  // gen lives on the local record + the 30078 backup, and is also on the wire in
+  // the newest 31600: take the highest, so a second device that attached since
+  // this one last did cannot make it reuse a generation (SB-89b).
+  const gen = Math.max(keys.coordinatorGen ?? 0, current.coordinatorGen ?? 0) + 1;
 
   // 0. Coordinator replacement: if a DIFFERENT coordinator is currently attached,
   //    detach it first (signed 21604) so it disposes of custody promptly, then rotate
@@ -1554,7 +1762,7 @@ export async function attachCoordinator(
     coordinatorGen: gen,
     eck: currentEckId,
   };
-  const built = buildEventConfig(await withFreshLinks(ctx, cfg));
+  const built = buildEventConfig(cfg);
 
   // 2. Gift-wrap the Coordinator Grant (21603) carrying the same gen, sealed by
   //    E_id so the coordinator can authenticate the install against the coordinate.
@@ -1653,14 +1861,22 @@ export async function detachCoordinator(
   ctx: EventContext,
   blindingKey?: Uint8Array,
 ): Promise<void> {
-  const previous = ctx.config.coordinator;
-  if (!previous) return;
+  if (!ctx.config.coordinator) return;
   const owner = activeKeystoreOwner() ?? undefined; // see attachCoordinator (DS41-001)
   const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
+  // The coordinator to detach, and every field republished below, come from the
+  // newest 31600 rather than the page's copy (SB-02/SB-87). If another device
+  // already detached it there is nothing left to do; if it attached a different
+  // one, that is the one actually holding custody.
+  const current = await freshConfig(ctx);
+  const previous = current.coordinator;
+  if (!previous) return;
+  assertCurrentCustody(current, keys);
+  ctx = { ...ctx, config: current };
 
   // 1. Signed 21604 detach to the current coordinator (immediate custody disposal),
   //    sent up front so the departing coordinator stops serving promptly.
@@ -1686,9 +1902,7 @@ export async function detachCoordinator(
   void _c;
   void _g;
   const currentEckId = rotatedEck.reduce((m, v) => Math.max(m, v.id), ctx.config.eck);
-  const built = buildEventConfig(
-    await withFreshLinks(ctx, { ...rest, inbox: newInboxPubkey, eck: currentEckId }),
-  );
+  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey, eck: currentEckId });
   // Monotonic republish (audit P3): a detach in the same second as the previous
   // config must win the §3.1 tie-break, or the coordinator-bearing config can
   // stay authoritative and the detach silently doesn't take.

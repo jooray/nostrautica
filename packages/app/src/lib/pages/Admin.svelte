@@ -85,6 +85,7 @@
   import AdminPeople from "$lib/components/AdminPeople.svelte";
   import AdminQueue from "$lib/components/AdminQueue.svelte";
   import { t, tp, i18n } from "$lib/i18n/i18n.svelte.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -916,18 +917,24 @@
 
   /** Approve one attendee by pubkey (coordinator command or local approve).
    *  Throws on failure so the bulk runner can record a per-item outcome. */
-  async function approveOne(pubkey: string): Promise<void> {
+  async function approveOne(pubkey: string): Promise<"done" | "queued"> {
     if (!ctx || !session.signer) throw new Error("not ready");
     if (ctx.config.coordinator) {
       // Route through the coordinator so IT grants + publishes the directory
       // (attendees discover directory/roster/matches under the coordinator key).
-      await sendAdminCommand(ctx, "approve", { pubkey });
+      // A command that only reached the outbox has not approved anyone yet (audit
+      // SB-03): keep the request in the queue and say it is waiting to send.
+      if ((await sendAdminCommand(ctx, "approve", { pubkey })) === "queued") {
+        opStatus.queued(t("admin.command.approveQueued"));
+        return "queued";
+      }
     } else {
       const req = pending.find((r) => r.attendeePubkey === pubkey);
       if (!req) throw new Error(t("admin.reprocess.noIntake"));
       await approveAttendee(session.signer, ctx, req);
     }
     approvedSet = new Set([...approvedSet, pubkey]);
+    return "done";
   }
 
   // Per-request busy guard (audit UX-27): a double-tap must not fire two
@@ -987,8 +994,7 @@
   async function runBulkItem(pubkey: string) {
     setBulk(pubkey, "publishing");
     try {
-      await approveOne(pubkey);
-      setBulk(pubkey, "confirmed");
+      setBulk(pubkey, (await approveOne(pubkey)) === "queued" ? "outbox" : "confirmed");
     } catch (e) {
       setBulk(pubkey, "failed", e instanceof Error ? e.message : String(e));
     }
@@ -1008,7 +1014,12 @@
     if (!ctx || !session.signer) return;
     try {
       if (ctx.config.coordinator) {
-        await sendAdminCommand(ctx, "revoke", { pubkey });
+        // Queued is not revoked (audit SB-03): until the coordinator acts, the
+        // member still holds their chat leaf and roster place. Don't say "Revoked".
+        if ((await sendAdminCommand(ctx, "revoke", { pubkey })) === "queued") {
+          opStatus.queued(t("admin.command.revokeQueued"));
+          return;
+        }
       } else {
         // Pass the blinding key: revoke mints a new ECK, and without this the
         // rotated key never reaches the organizer's own 30078 backup.

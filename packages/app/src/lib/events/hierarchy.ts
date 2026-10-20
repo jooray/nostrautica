@@ -152,6 +152,9 @@ export async function fetchNewestConfig(
   const hints = unionRelays(relays, eventRelayHints(coordinate), DEFAULT_RELAYS);
   const filter = { kinds: [KIND_EVENT_CONFIG], authors: [coord.pubkey], "#d": [coord.identifier] };
   const events = opts.fresh ? await fetchEventsRelayOnly(filter, hints) : await fetchEvents(filter, hints);
+  // `authors` and `#d` are requests a relay may ignore. Organizer config writes
+  // now rebuild the 31600 from this read and re-sign it with E_id, so a foreign
+  // or mis-addressed event here would be laundered into the event's own config.
   const latest = pickLatest(onlyAddressed(onlyVerified(events), KIND_EVENT_CONFIG, coord.pubkey, coord.identifier));
   if (!latest) return undefined;
   try {
@@ -159,24 +162,6 @@ export async function fetchNewestConfig(
   } catch {
     return undefined;
   }
-}
-
-/**
- * `cfg` with its hierarchy fields (`parent`, `children`) taken from the newest
- * 31600 on the relays. For every config write that is built from a page's cached
- * context (attach/detach a coordinator, live settings): the link is changed from
- * elsewhere (the other half of the pair, another tab or device), so a spread of
- * `ctx.config` republishes whatever the page saw at load and silently ends a link
- * made since. Reads relays only; if the config cannot be read, `cfg` is returned
- * as given (the publish that follows would fail on the same relays anyway).
- */
-export async function withFreshLinks<T extends Pick<EventConfig, "parent" | "children">>(
-  ctx: Pick<EventContext, "coordinate" | "config">,
-  cfg: T,
-): Promise<T> {
-  const fresh = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(() => undefined);
-  if (!fresh) return cfg;
-  return { ...cfg, parent: fresh.parent, children: fresh.children };
 }
 
 // Link status is asked once per approval, and "Approve all" approves dozens in a

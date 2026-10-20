@@ -76,6 +76,9 @@ import {
   revokeAttendeeClient,
   sharedInviteExp,
   updateEventConfig,
+  attachCoordinator,
+  loadRoster,
+  sendAdminCommand,
   type PendingRequest,
   fetchPending,} from "./organizer.js";
 import {
@@ -537,6 +540,25 @@ describe("roster read-modify-write safety", () => {
     expect(publishSigned).not.toHaveBeenCalled();
   });
 
+  // Audit SB-91: the fetch named only the current publisher (the coordinator)
+  // while the accept filter also takes E_id, so an E_id-authored roster was
+  // invisible to the organizer's own read.
+  it("reads an E_id-authored roster while a coordinator is attached", async () => {
+    const coordinator = getPublicKey(generateSecretKey());
+    const withCoord = { ...ctx, config: { ...ctx.config, coordinator } } as EventContext;
+    // A relay that honours the `authors` filter.
+    fetchEventsRelayOnly.mockImplementation(async (filter: { authors?: string[] }) =>
+      filter.authors?.includes(EID_PUBKEY)
+        ? [rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]
+        : [],
+    );
+
+    const read = await loadRoster(withCoord, ECK_BYTES);
+
+    expect(read.state).toBe("ok");
+    expect(read.state === "ok" && read.roster.attendees.map((a) => a.pubkey)).toEqual([ALICE]);
+  });
+
   it("still publishes the first roster on an event that has never had one", async () => {
     // The genuine first approval must keep working — the tripwire only fires once
     // this device has actually seen or written a roster for the event.
@@ -702,6 +724,63 @@ describe("roster read-modify-write safety", () => {
     expect((await loadEventKeys(COORD))?.eck).toHaveLength(1);
   });
 
+  // Audit DS41-002: the new ECK was saved as current BEFORE the per-attendee
+  // reads; one failing read left this device on v2 against a v1 roster, and
+  // every later roster read failed to decrypt.
+  it("leaves the ECK untouched when the directory read fails part-way", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+        { pubkey: CAROL, d: "d-carol", role: "attendee" },
+      ]),
+    ]);
+    fetchEvents.mockRejectedValue(new Error("relay hung up"));
+
+    await expect(revokeAttendeeClient({} as AppSigner, ctx, BOB)).rejects.toThrow(/hung up/);
+
+    expect((await loadEventKeys(COORD))?.eck).toHaveLength(1);
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  // Audit DS41-001, revoke path: the rotated keys were saved under whoever was
+  // signed in when the reads finished.
+  it("saves the rotated ECK under the identity that started the revoke", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+    const OTHER_OWNER = "c".repeat(64);
+    fetchEvents.mockImplementation(async () => {
+      setActiveOwner(OTHER_OWNER); // account switch while the read is in flight
+      return [];
+    });
+
+    await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+
+    expect((await loadEventKeys(COORD, OWNER))?.eck).toHaveLength(2);
+    expect(await loadEventKeys(COORD, OTHER_OWNER)).toBeUndefined();
+  });
+
+  it("reads every remaining member's directory entry in one request", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+        { pubkey: CAROL, d: "d-carol", role: "attendee" },
+      ]),
+    ]);
+    fetchEvents.mockClear();
+
+    await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+
+    const dirReads = fetchEvents.mock.calls.filter((c) => (c[0] as { "#d"?: string[] })["#d"]);
+    expect(dirReads).toHaveLength(1);
+    expect((dirReads[0]![0] as { "#d": string[] })["#d"]).toEqual(["d-alice", "d-carol"]);
+  });
+
   it("revokes normally when the roster does list them", async () => {
     fetchEventsRelayOnly.mockResolvedValue([
       rosterEvent([
@@ -831,11 +910,61 @@ describe("fetchPending surfaces withdrawals", () => {
     expect(who?.withdrawalRequestedPurge).toBe(true);
   });
 
+  // Audit DS41-011: the inbox was read over the last 3 days only and the cached
+  // queue replaced with that window, so an older request vanished from both.
+  it("finds a request older than the 3-day window and keeps it on later scans", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const old = joinWrap(now - 10 * 86400);
+    // A relay whose copy of this wrap is older than any windowed read reaches:
+    // only an unbounded read returns it.
+    fetchEventsRelayOnly.mockImplementation(async (f: { since?: number }) =>
+      f.since === undefined ? [old] : [],
+    );
+    const keys = (await loadEventKeys(COORD))!;
+
+    const first = await fetchPending(inboxCtx, keys);
+    expect(first.map((p) => p.attendeePubkey)).toEqual([ATTENDEE]);
+    expect((fetchEventsRelayOnly.mock.calls[0]![0] as { since?: number }).since).toBeUndefined();
+
+    // The next scan reads from the cursor; the old join is outside that window.
+    const second = await fetchPending(inboxCtx, keys);
+    expect((fetchEventsRelayOnly.mock.calls[1]![0] as { since?: number }).since).toBeDefined();
+    expect(second.map((p) => p.attendeePubkey)).toEqual([ATTENDEE]);
+  });
+
   it("does not let a stale withdrawal shadow a later re-join", async () => {
     fetchEventsRelayOnly.mockResolvedValue([withdrawWrap(100, true), joinWrap(200)]);
 
     const pending = await fetchPending(inboxCtx, (await loadEventKeys(COORD))!);
     expect(pending.find((p) => p.attendeePubkey === ATTENDEE)?.withdrawn).toBeUndefined();
+  });
+});
+
+// Audit SB-03: Admin marked a request approved/revoked whatever happened to the
+// command, because sendAdminCommand dropped publishOrQueue's answer.
+describe("sendAdminCommand outcome", () => {
+  it("reports `queued` when the command only reached the outbox", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+    vi.stubGlobal("navigator", { onLine: false });
+    const withCoord = {
+      ...ctx,
+      config: { ...ctx.config, coordinator: getPublicKey(generateSecretKey()) },
+    } as EventContext;
+
+    expect(await sendAdminCommand(withCoord, "approve", { pubkey: OWNER })).toBe("queued");
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("reports `published` when it went out", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+    const withCoord = {
+      ...ctx,
+      config: { ...ctx.config, coordinator: getPublicKey(generateSecretKey()) },
+    } as EventContext;
+
+    expect(await sendAdminCommand(withCoord, "revoke", { pubkey: OWNER })).toBe("published");
   });
 });
 
@@ -865,7 +994,16 @@ describe("updateEventConfig relay editing", () => {
     talks: "off",
     chat: [] as ChatBackend[],
   };
+  /** Serve `cfg` as the newest 31600 on the relays (what config writes build on). */
+  function serveConfig(cfg: Record<string, unknown>) {
+    const built = buildEventConfig(cfg as never);
+    fetchEventsRelayOnly.mockResolvedValue([
+      { id: "cfg", kind: KIND_EVENT_CONFIG, pubkey: EID_PUBKEY, created_at: 1000, tags: built.tags, content: "" },
+    ]);
+  }
+  /** A page context whose config matches what the relays hold. */
   function ctxWith(overrides: Partial<typeof fullConfig>): EventContext {
+    serveConfig({ ...fullConfig, ...overrides });
     return {
       coordinate: COORD,
       naddr: "naddr1test",
@@ -941,15 +1079,85 @@ describe("updateEventConfig relay editing", () => {
   it("keeps a link made after the caller's context was loaded (hierarchy fields come from the relays)", async () => {
     await saveEventKeys(organizerKeys(), OWNER);
     const parent = makeCoordinate(getPublicKey(generateSecretKey()), "some-community", KIND_COMMUNITY);
-    const newest = buildEventConfig({ ...fullConfig, parent } as never);
-    fetchEventsRelayOnly.mockResolvedValue([
-      { id: "cfg", kind: KIND_EVENT_CONFIG, pubkey: EID_PUBKEY, created_at: 1000, tags: newest.tags, content: "" },
-    ]);
+    const stale = ctxWith({}); // ctx has no parent
+    serveConfig({ ...fullConfig, parent });
 
-    await updateEventConfig(ctxWith({}), { retentionDays: 30 }); // ctx has no parent
+    await updateEventConfig(stale, { retentionDays: 30 });
 
     expect(publishedTags("parent")).toEqual([parent]);
     expect(publishedTags("retention")).toEqual(["30"]);
+  });
+
+  // Audit SB-87: the laptop's Settings page loaded before the phone attached a
+  // coordinator. Saving the chat toggle used to republish a 31600 with no
+  // coordinator tag, which the daemon treats as a durable detach.
+  it("keeps a coordinator attached since the page loaded", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const coordinator = getPublicKey(generateSecretKey());
+    const stale = ctxWith({});
+    serveConfig({ ...fullConfig, coordinator, coordinatorGen: 3 });
+
+    await updateEventConfig(stale, { chat: ["marmot"] });
+
+    const ev = publishSigned.mock.calls[0][0] as { tags: string[][] };
+    expect(ev.tags.find((t) => t[0] === "coordinator")).toEqual(["coordinator", coordinator, "3"]);
+  });
+
+  // Audit SB-02: every other field came from the page's copy too.
+  it("keeps every field changed elsewhere, not just the one being saved", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const stale = ctxWith({});
+    serveConfig({ ...fullConfig, retentionDays: 30, approval: "auto", relays: ["wss://moved.example"] });
+
+    const next = await updateEventConfig(stale, { talks: "on" });
+
+    expect(publishedTags("retention")).toEqual(["30"]);
+    expect(publishedRelayTags()).toEqual(["wss://moved.example"]);
+    expect(publishedTags("talks")).toEqual(["on"]);
+    expect(next.retentionDays).toBe(30);
+  });
+
+  describe("attachCoordinator", () => {
+    const INBOX_SK = generateSecretKey();
+    const withInbox = () => ({ ...organizerKeys(), eck: [{ id: 1, key: bytesToBase64(generateEck()) }], einboxNsecHex: bytesToHex(INBOX_SK) });
+
+    // Audit SB-89b: the install generation came from this device's keystore
+    // alone, so a device that had not seen another device's attach reused a gen.
+    it("takes the install generation from the wire when it is ahead of this device", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const coordinator = getPublicKey(generateSecretKey());
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK), coordinator, coordinatorGen: 4 });
+
+      await attachCoordinator({} as AppSigner, stale, coordinator);
+
+      const cfg = publishSigned.mock.calls
+        .map((c) => c[0] as { kind: number; tags: string[][] })
+        .find((e) => e.kind === KIND_EVENT_CONFIG)!;
+      expect(cfg.tags.find((t) => t[0] === "coordinator")).toEqual(["coordinator", coordinator, "5"]);
+    });
+
+    // Audit SB-90: another organizer device rotated the inbox on a detach; this
+    // one would have granted the coordinator a dead inbox secret.
+    it("refuses when this device's inbox key is no longer the event's", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(generateSecretKey()), eck: 2 });
+
+      await expect(
+        attachCoordinator({} as AppSigner, stale, getPublicKey(generateSecretKey())),
+      ).rejects.toThrow(/changed on another device/);
+      expect(publishSigned).not.toHaveBeenCalled();
+    });
+  });
+
+  it("publishes nothing when the current config can't be read", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const c = ctxWith({});
+    fetchEventsRelayOnly.mockResolvedValue([]);
+    await expect(updateEventConfig(c, { retentionDays: 30 })).rejects.toThrow(/current settings/);
+    expect(publishSigned).not.toHaveBeenCalled();
   });
 
   it("dedupes/trims the set and rejects an all-empty relay list", async () => {

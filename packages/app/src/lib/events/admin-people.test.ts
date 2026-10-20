@@ -171,6 +171,14 @@ describe("summarizeBulk (UX-A4)", () => {
     expect(summarizeBulk(items)).toEqual({ approved: 2, needRetry: 1, done: true });
   });
 
+  it("counts an outbox-only approval as finished but neither approved nor failed (SB-03)", () => {
+    const items: BulkItem[] = [
+      { pubkey: pk("a"), state: "confirmed" },
+      { pubkey: pk("b"), state: "outbox" },
+    ];
+    expect(summarizeBulk(items)).toEqual({ approved: 1, needRetry: 0, done: true });
+  });
+
   it("reports not-done while work is still queued/publishing", () => {
     const items: BulkItem[] = [
       { pubkey: pk("a"), state: "confirmed" },

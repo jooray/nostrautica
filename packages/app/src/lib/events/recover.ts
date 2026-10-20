@@ -20,8 +20,11 @@ import {
   makeCoordinate,
   parseCoordinate,
   hexToBytes,
+  blindedD,
+  compareLatest,
   type EventKeysBackup,
 } from "@nostrautica/protocol";
+import { deriveBlindingKey } from "./blinding.js";
 import { getPublicKey } from "nostr-tools/pure";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEvents } from "$lib/nostr/ndk.js";
@@ -85,7 +88,11 @@ function saveBackupMemo(memo: Record<string, true>): void {
  * directly; older ones are reconstructed from the E_id key + the event's
  * published 31600 config (its `d` tag), fetched from relays.
  */
-async function resolveCoordinate(backup: EventKeysBackup): Promise<string | undefined> {
+async function resolveCoordinate(
+  backup: EventKeysBackup,
+  backupD: string,
+  signer: AppSigner,
+): Promise<string | undefined> {
   if (backup.a) {
     try {
       parseCoordinate(backup.a);
@@ -104,9 +111,36 @@ async function resolveCoordinate(backup: EventKeysBackup): Promise<string | unde
     { kinds: [KIND_EVENT_CONFIG], authors: [eidPubkey] },
     DEFAULT_RELAYS,
   ).catch(() => []);
-  const latest = configs.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
-  const d = latest?.tags.find((t) => t[0] === "d")?.[1];
-  return d ? makeCoordinate(eidPubkey, d) : undefined;
+  // Every distinct `d` this E_id has published a 31600 at is a candidate. "The
+  // newest config" was not an answer to "which event is this backup for": with
+  // two events under one E_id it picked whichever was edited last (and on a
+  // created_at tie, whichever the relay sent first), and restored the backup's
+  // E_id/inbox secrets into that coordinate (audit SB-93).
+  const ds = [
+    ...new Set(
+      configs
+        .filter((e) => e.pubkey === eidPubkey)
+        .map((e) => e.tags.find((t) => t[0] === "d")?.[1])
+        .filter((d): d is string => !!d),
+    ),
+  ];
+  if (ds.length <= 1) return ds[0] ? makeCoordinate(eidPubkey, ds[0]) : undefined;
+  // Several: the backup's own `d` is blinded over its coordinate, so recompute it
+  // for each candidate and take the one that matches. Costs a blinding-key
+  // derivation, only on this legacy (no `a`) path. No match → unresolved, which
+  // stays retryable (nothing is memoized for it).
+  let blindingKey: Uint8Array;
+  try {
+    blindingKey = await deriveBlindingKey(signer);
+  } catch {
+    return undefined;
+  }
+  const ownPubkey = await signer.getPublicKey();
+  for (const d of ds) {
+    const coordinate = makeCoordinate(eidPubkey, d);
+    if (`${EVENTKEYS_PREFIX}${blindedD(blindingKey, coordinate, ownPubkey)}` === backupD) return coordinate;
+  }
+  return undefined;
 }
 
 /**
@@ -186,7 +220,8 @@ export async function recoverEventKeys(
     // coordinate because the coordinate only exists after the decrypt, and the
     // decrypt is the thing the budget below is rationing: this way a truncated pass
     // has spent its allowance on the newest backups rather than an arbitrary set.
-    const ordered = [...events].sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0));
+    const ordered = [...events].sort(compareLatest); // §3.1 order, ties by lowest id
+
     for (const e of ordered) {
       const d = e.tags.find((t) => t[0] === "d")?.[1];
       if (!d || !d.startsWith(EVENTKEYS_PREFIX)) continue;
@@ -218,7 +253,7 @@ export async function recoverEventKeys(
       }
       outcome.succeeded++;
       decrypted++;
-      const coordinate = await resolveCoordinate(backup);
+      const coordinate = await resolveCoordinate(backup, d, signer);
       if (!coordinate) continue;
       // The session moved on while we awaited the signer/relays (audit DS41-001):
       // a logout, or a switch to another account. This backup is `pubkey`'s

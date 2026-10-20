@@ -8,7 +8,7 @@
 import { NDKEvent } from "@nostr-dev-kit/ndk";
 import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
 import { getNdk, relaySet, fetchEvents, type Filter } from "$lib/nostr/ndk.js";
-import { KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
+import { KIND_DM_RELAY_LIST, pickLatest } from "@nostrautica/protocol";
 
 /** A per-relay publish result (marmot's `PublishResponse`). */
 interface PublishResponse {
@@ -92,7 +92,7 @@ export function createMarmotNetwork(): MarmotNetwork {
       // NIP-17 kind-10050 inbox relay list: where this user receives gift-wrapped
       // welcomes (the transport target for a 444/1059 to them).
       const events = await fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey], limit: 1 });
-      const latest = events.sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+      const latest = pickLatest(events);
       if (!latest) return [];
       return latest.tags
         .filter((t) => t[0] === "relay" && typeof t[1] === "string")

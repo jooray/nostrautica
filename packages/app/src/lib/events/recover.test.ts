@@ -14,6 +14,8 @@ import {
   bytesToHex,
   bytesToBase64,
   generateEck,
+  blindedD,
+  selfConversationKey,
   type EventKeysBackup,
 } from "@nostrautica/protocol";
 
@@ -158,6 +160,35 @@ describe("recoverEventKeys round-trip", () => {
     const restored = await recoverEventKeys(organizer);
     expect(restored).toEqual([coordinate]);
     expect((await loadEventKeys(coordinate))?.role).toBe("organizer");
+  });
+
+  it("picks the event the backup's blinded d names when one E_id has several (SB-93)", async () => {
+    const organizer = LocalSigner.generate();
+    const owner = await organizer.getPublicKey();
+    const { event, coordinate } = await makeBackupEvent(organizer, { includeA: false });
+    const eidPubkey = coordinate.split(":")[1]!;
+    // The backup's d as create.ts writes it: blinded over ITS coordinate.
+    const bk = selfConversationKey(organizer.getSecretKey()!);
+    event.tags = [["d", `nostrautica:eventkeys:${blindedD(bk, coordinate, owner)}`]];
+
+    fetchEvents.mockImplementation(async (filter: { kinds?: number[] }) => {
+      if (filter.kinds?.includes(KIND_APP_DATA)) return [event];
+      if (filter.kinds?.includes(KIND_EVENT_CONFIG)) {
+        // A second event under the same E_id, edited more recently: "the newest
+        // 31600" used to restore this backup into it.
+        return [
+          { id: "1", kind: KIND_EVENT_CONFIG, pubkey: eidPubkey, created_at: 1, tags: [["d", "cypherpunk-2026"]] },
+          { id: "2", kind: KIND_EVENT_CONFIG, pubkey: eidPubkey, created_at: 9, tags: [["d", "other-event"]] },
+        ];
+      }
+      return [];
+    });
+    const mem = memBackend();
+    __setKeystoreBackend(mem.backend);
+    setActiveOwner(owner);
+
+    expect(await recoverEventKeys(organizer)).toEqual([coordinate]);
+    expect(await loadEventKeys(makeCoordinate(eidPubkey, "other-event"))).toBeUndefined();
   });
 
   it("ignores unrelated 30078s and undecryptable backups", async () => {

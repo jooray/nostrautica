@@ -10,11 +10,18 @@ import type { VerifiedEvent } from "nostr-tools/pure";
 
 // saveMuteList now publishes through publishMonotonic (R6). The mock invokes the
 // caller's `sign` so the round-trip still exercises the real signEvent path.
-const { fetchEvents, publishMonotonic } = vi.hoisted(() => ({
+const { fetchEvents, publishMonotonic, relay } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
   publishMonotonic: vi.fn(),
+  relay: { answered: true },
 }));
-vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents }));
+vi.mock("$lib/nostr/ndk.js", () => ({
+  fetchEvents,
+  fetchEventsAnswered: async (...args: unknown[]) => ({
+    events: await fetchEvents(...args),
+    answered: relay.answered,
+  }),
+}));
 vi.mock("$lib/nostr/monotonic.js", () => ({ publishMonotonic }));
 // Fixtures are unsigned; NDK verifies signatures in production and `onlyVerified`
 // is the belt-and-braces re-check at the authority boundary. The real
@@ -32,6 +39,7 @@ import {
   fetchMuteList,
   setMuted,
   UnreadableMuteListError,
+  MuteListUnavailableError,
   type MuteListState,
 } from "./mutes.js";
 
@@ -118,6 +126,7 @@ describe("fetch/merge/write round-trip", () => {
   }
 
   beforeEach(() => {
+    relay.answered = true;
     fetchEvents.mockReset();
     publishMonotonic.mockReset().mockImplementation(
       async (input: { sign: (t: number) => unknown | Promise<unknown> }) => {
@@ -271,5 +280,53 @@ describe("fetch/merge/write round-trip", () => {
     ]);
     const list = await fetchMuteList(signer({ content: "" }));
     expect(list.privateTags).toEqual([["p", OTHER]]);
+  });
+
+  it("refuses to mute when the read came back empty and no relay answered", async () => {
+    relay.answered = false;
+    fetchEvents.mockResolvedValue([]);
+    const store = { content: "sentinel" };
+    await expect(setMuted(signer(store), PK, true)).rejects.toThrow(MuteListUnavailableError);
+    expect(publishMonotonic).not.toHaveBeenCalled();
+    expect(store.content).toBe("sentinel");
+  });
+
+  it("still creates a first list when a relay answered that there is none", async () => {
+    fetchEvents.mockResolvedValue([]);
+    const store = { content: "" };
+    const muted = await setMuted(signer(store), PK, true);
+    expect([...muted]).toEqual([PK]);
+  });
+
+  // Audit DS41-007: two mutes tapped back to back both read the same list.
+  it("serializes concurrent mutes so the second does not drop the first", async () => {
+    let onRelay = {
+      id: "a1",
+      pubkey: PK,
+      kind: KIND_MUTE_LIST,
+      created_at: 10,
+      tags: [] as string[][],
+      content: "",
+    };
+    fetchEvents.mockImplementation(async () => {
+      const served = onRelay;
+      await new Promise((r) => setTimeout(r, 5));
+      return [served];
+    });
+    let clock = 10;
+    publishMonotonic.mockImplementation(
+      async (input: { sign: (t: number) => Promise<{ content: string; tags: string[][] }> }) => {
+        await new Promise((r) => setTimeout(r, 5));
+        const created_at = ++clock;
+        const ev = await input.sign(created_at);
+        onRelay = { ...onRelay, id: `e${created_at}`, created_at, content: ev.content, tags: ev.tags };
+        return { published: true, createdAt: created_at };
+      },
+    );
+    const s = signer({ content: "" });
+    await Promise.all([setMuted(s, PK, true), setMuted(s, OTHER, true)]);
+    const written = JSON.parse(dec(onRelay.content));
+    expect(written).toContainEqual(["p", PK]);
+    expect(written).toContainEqual(["p", OTHER]);
   });
 });

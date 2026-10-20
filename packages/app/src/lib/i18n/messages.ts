@@ -732,6 +732,7 @@ export const messages = {
     // above only covers an EMPTY roster; this covers a full but unconfirmed one.
     "attendees.asOf": "Showing a saved list, as of {time}. No relay has answered since.",
     "attendees.asOf.unknown": "Showing a saved list. This device cannot tell how old it is.",
+    "feed.stale": "Showing the copy saved on this device. No relay answered, so newer posts may be missing.",
 
     // Attendee
     "attendee.youFollow": "You follow",
@@ -1194,6 +1195,11 @@ export const messages = {
     "admin.freshness": "Updated {ago}",
     "admin.requests.bulkSummary": "{approved} approved, {retry} need retry",
     "admin.requests.bulk.queued": "Queued…",
+    "admin.requests.bulk.outbox": "Waiting to send. It goes out when you're back online.",
+    "admin.command.approveQueued":
+      "No connection right now. The approval is saved on this device and goes to the coordinator when you're back online. The request stays in the queue until then.",
+    "admin.command.revokeQueued":
+      "No connection right now. The removal is saved on this device and goes to the coordinator when you're back online. Until then this person still has access.",
     "admin.requests.bulk.publishing": "Publishing…",
     "admin.requests.bulk.failed": "Couldn't approve, try again.",
     "admin.requests.bulk.retry": "Retry",
@@ -2467,6 +2473,7 @@ export const messages = {
     "attendees.name": "Účastník",
     "attendees.asOf": "Zobrazuje sa uložený zoznam, stav k {time}. Odvtedy neodpovedal žiadny relay.",
     "attendees.asOf.unknown": "Zobrazuje sa uložený zoznam. Toto zariadenie nevie, aký je starý.",
+    "feed.stale": "Zobrazuje sa kópia uložená v tomto zariadení. Neodpovedal žiadny relay, takže novšie príspevky môžu chýbať.",
 
     // Attendee
     "attendee.youFollow": "Sledujete",
@@ -2930,6 +2937,11 @@ export const messages = {
     "admin.freshness": "Aktualizované {ago}",
     "admin.requests.bulkSummary": "{approved} schválených, {retry} treba zopakovať",
     "admin.requests.bulk.queued": "V poradí…",
+    "admin.requests.bulk.outbox": "Čaká na odoslanie. Odíde po obnovení pripojenia.",
+    "admin.command.approveQueued":
+      "Momentálne nie ste pripojení. Schválenie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy žiadosť zostáva v poradí.",
+    "admin.command.revokeQueued":
+      "Momentálne nie ste pripojení. Odobratie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy má táto osoba stále prístup.",
     "admin.requests.bulk.publishing": "Zverejňuje sa…",
     "admin.requests.bulk.failed": "Nepodarilo sa schváliť, skúste znova.",
     "admin.requests.bulk.retry": "Zopakovať",
@@ -4193,6 +4205,7 @@ export const messages = {
     "attendees.name": "Účastník",
     "attendees.asOf": "Zobrazuje se uložený seznam, stav k {time}. Od té doby neodpověděl žádný relay.",
     "attendees.asOf.unknown": "Zobrazuje se uložený seznam. Toto zařízení neví, jak je starý.",
+    "feed.stale": "Zobrazuje se kopie uložená v tomto zařízení. Neodpověděl žádný relay, takže novější příspěvky mohou chybět.",
 
     // Účastník
     "attendee.youFollow": "Sledujete",
@@ -4655,6 +4668,11 @@ export const messages = {
     "admin.freshness": "Aktualizováno {ago}",
     "admin.requests.bulkSummary": "{approved} schváleno, {retry} vyžaduje opakování",
     "admin.requests.bulk.queued": "Ve frontě…",
+    "admin.requests.bulk.outbox": "Čeká na odeslání. Odejde po obnovení připojení.",
+    "admin.command.approveQueued":
+      "Momentálně nejste připojeni. Schválení je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby žádost zůstává ve frontě.",
+    "admin.command.revokeQueued":
+      "Momentálně nejste připojeni. Odebrání je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby má tato osoba stále přístup.",
     "admin.requests.bulk.publishing": "Zveřejňuje se…",
     "admin.requests.bulk.failed": "Nepodařilo se schválit, zkuste znovu.",
     "admin.requests.bulk.retry": "Zopakovat",
@@ -5929,6 +5947,7 @@ export const messages = {
     // unbestätigte ab.
     "attendees.asOf": "Zeigt eine gespeicherte Liste, Stand {time}. Seitdem hat kein Relay geantwortet.",
     "attendees.asOf.unknown": "Zeigt eine gespeicherte Liste. Dieses Gerät kann nicht sagen, wie alt sie ist.",
+    "feed.stale": "Zeigt die auf diesem Gerät gespeicherte Kopie. Kein Relay hat geantwortet, neuere Beiträge können fehlen.",
 
     // Teilnehmende Person
     "attendee.youFollow": "Du folgst",
@@ -6376,6 +6395,11 @@ export const messages = {
     "admin.freshness": "Aktualisiert {ago}",
     "admin.requests.bulkSummary": "{approved} genehmigt, {retry} benötigen einen erneuten Versuch",
     "admin.requests.bulk.queued": "Eingereiht…",
+    "admin.requests.bulk.outbox": "Wartet auf Versand. Geht raus, sobald du wieder online bist.",
+    "admin.command.approveQueued":
+      "Gerade keine Verbindung. Die Freigabe ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin bleibt die Anfrage in der Warteschlange.",
+    "admin.command.revokeQueued":
+      "Gerade keine Verbindung. Das Entfernen ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin hat diese Person weiterhin Zugriff.",
     "admin.requests.bulk.publishing": "Veröffentlicht…",
     "admin.requests.bulk.failed": "Genehmigung fehlgeschlagen, versuch es erneut.",
     "admin.requests.bulk.retry": "Erneut versuchen",
@@ -7673,6 +7697,7 @@ export const messages = {
     // confirmar.
     "attendees.asOf": "Mostrando una lista guardada, del {time}. Ningún relay ha respondido desde entonces.",
     "attendees.asOf.unknown": "Mostrando una lista guardada. Este dispositivo no puede saber qué antigüedad tiene.",
+    "feed.stale": "Mostrando la copia guardada en este dispositivo. Ningún relay respondió, así que pueden faltar publicaciones más recientes.",
 
     // Asistente
     "attendee.youFollow": "Sigues",
@@ -8134,6 +8159,11 @@ export const messages = {
     "admin.freshness": "Actualizado {ago}",
     "admin.requests.bulkSummary": "{approved} aprobadas, {retry} necesitan reintento",
     "admin.requests.bulk.queued": "En cola…",
+    "admin.requests.bulk.outbox": "Pendiente de envío. Saldrá cuando vuelvas a estar en línea.",
+    "admin.command.approveQueued":
+      "Ahora mismo no hay conexión. La aprobación está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces la solicitud sigue en la cola.",
+    "admin.command.revokeQueued":
+      "Ahora mismo no hay conexión. La retirada está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces esta persona sigue teniendo acceso.",
     "admin.requests.bulk.publishing": "Publicando…",
     "admin.requests.bulk.failed": "No se pudo aprobar, vuelve a intentarlo.",
     "admin.requests.bulk.retry": "Reintentar",

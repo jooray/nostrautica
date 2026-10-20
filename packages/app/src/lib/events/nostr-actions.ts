@@ -8,6 +8,7 @@ import {
   KIND_CONTACTS,
   KIND_RELAY_LIST,
   KIND_DM_RELAY_LIST,
+  pickLatest,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { VerifiedEvent } from "nostr-tools/pure";
@@ -23,7 +24,8 @@ async function latest(kind: number, pubkey: string) {
   // These reads feed merge-then-republish of the user's own lists — re-verify
   // before the latest-wins pick (audit APPK-1) so a forged "own" event can't
   // be merged and re-signed.
-  return onlyVerified(events).sort((a, b) => (b.created_at ?? 0) - (a.created_at ?? 0))[0];
+  // §3.1 tie-break (lowest id), not arrival order (audit DS41-013).
+  return pickLatest(onlyVerified(events));
 }
 
 /** Fetch existing kind-0, merge edited fields, publish (spec §5.4 item 1). */
