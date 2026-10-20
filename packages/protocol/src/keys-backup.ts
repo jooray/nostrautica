@@ -16,11 +16,12 @@
  *   inbox the newest 31600 names when the caller knows it (`configInbox`, a
  *   pubkey); otherwise `a`'s (the caller passes its own copy first). Every other
  *   secret goes to `prior_einbox_nsecs`, where it still reads old submissions.
+ * - `co_organizers`: the union (SB-90).
  */
 import { getPublicKey } from "nostr-tools/pure";
 import { hexToBytes } from "@noble/hashes/utils";
 import { unionEck } from "./eck-identity.js";
-import { MAX_PRIOR_INBOXES, PROTOCOL_VERSION, type EventKeysBackup } from "./schemas.js";
+import { MAX_ORGANIZERS, MAX_PRIOR_INBOXES, PROTOCOL_VERSION, type EventKeysBackup } from "./schemas.js";
 
 function inboxPubkey(secretHex: string): string | undefined {
   try {
@@ -48,6 +49,7 @@ export function mergeEventKeysBackups(
   // when the cap bites the oldest go first.
   const prior = inboxes.filter((s) => s !== current).slice(-MAX_PRIOR_INBOXES);
   const gen = Math.max(a.coordinator_gen ?? 0, b.coordinator_gen ?? 0);
+  const coOrganizers = [...new Set([...(a.co_organizers ?? []), ...(b.co_organizers ?? [])])].sort().slice(0, MAX_ORGANIZERS);
   return {
     v: PROTOCOL_VERSION,
     ...((a.a ?? b.a) ? { a: a.a ?? b.a } : {}),
@@ -57,5 +59,6 @@ export function mergeEventKeysBackups(
     coordinator_gen: gen,
     ...(pending.length > 0 ? { pending_eck: pending } : {}),
     ...(prior.length > 0 ? { prior_einbox_nsecs: prior } : {}),
+    ...(coOrganizers.length > 0 ? { co_organizers: coOrganizers } : {}),
   };
 }

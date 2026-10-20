@@ -687,6 +687,8 @@ export async function receiveGrants(
           eck: grant.eck,
           eidNsecHex: grant.eid_nsec,
           einboxNsecHex: grant.einbox_nsec,
+          priorEinboxNsecs: grant.prior_einbox_nsecs,
+          organizers: grant.organizers,
         },
         pubkey,
       );

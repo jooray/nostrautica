@@ -921,13 +921,24 @@ relay-visible event on its own.
     einbox_nsec: hex32,
     eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
     config_relays: string[] ≤30,
-    granted_by: hex32
+    granted_by: hex32,
+    organizers?: hex32[] ≤32,          // accounts known to hold custody, sender included
+    prior_einbox_nsecs?: hex32[] ≤64   // retired E_inbox secrets (§3.7)
   }
   ```
 - Seal author **MUST be exactly `E_id`**; `granted_by` **MUST** equal the seal author.
   Grants full, irrevocable custody of `E_id`, `E_inbox`, and every known ECK version, a
   co-organizer is cryptographically indistinguishable from the event's creator (§13).
   Receivers union-merge the granted ECK versions the same way `21602` does.
+- **Re-issue on rotation.** A co-organizer is a different account and not an attendee,
+  so it receives neither the attendee re-grants nor the rotating account's own 30078
+  backup. A client that rotates the ECK and/or `E_inbox` (revocation, detach/replace,
+  collision repair, §4.1) **SHOULD** send a fresh `21605` to every account it knows holds
+  custody: the ones it granted to, plus those named in `organizers` of grants it
+  received. Receivers record `organizers` (minus themselves) for their own rotations,
+  and keep an inbox they already held as retired rather than dropping it when the grant
+  names a different one; the current inbox is the one the newest `31600` names.
+  Both fields are optional; an older receiver ignores them.
 
 #### `21606`: Coordinator Status
 

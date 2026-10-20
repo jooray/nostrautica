@@ -43,6 +43,13 @@ export interface EventKeys {
    * `loadRoster` finds it, or when the rotation finishes). Organizer only.
    */
   pendingEck?: EckVersion[];
+  /**
+   * Other ACCOUNTS known to hold organizer custody for this event: the ones this
+   * account handed a 21605 to, plus the ones a received 21605 named (audit
+   * SB-90). Every rotation re-issues custody to them, since a co-organizer is
+   * not an attendee and receives nothing else. Organizer only.
+   */
+  coOrganizers?: string[];
 }
 
 /** On-disk shape: an EventKeys record scoped to the identity that owns it. */
@@ -119,6 +126,7 @@ function toPublic(r: StoredEventKeys): EventKeys {
     ...(r.priorEinboxNsecs ? { priorEinboxNsecs: r.priorEinboxNsecs } : {}),
     coordinatorGen: r.coordinatorGen,
     ...(r.pendingEck?.length ? { pendingEck: r.pendingEck } : {}),
+    ...(r.coOrganizers?.length ? { coOrganizers: r.coOrganizers } : {}),
   };
 }
 
@@ -379,7 +387,15 @@ export async function addEckVersions(
  */
 export async function applyOrganizerGrant(
   coordinate: string,
-  grant: { eck: EckVersion[]; eidNsecHex: string; einboxNsecHex: string },
+  grant: {
+    eck: EckVersion[];
+    eidNsecHex: string;
+    einboxNsecHex: string;
+    /** 21605 `prior_einbox_nsecs` (SB-90): retired inboxes the sender still holds. */
+    priorEinboxNsecs?: string[];
+    /** 21605 `organizers` (SB-90): every account the sender knows holds custody. */
+    organizers?: string[];
+  },
   owner?: string,
 ): Promise<EventKeys> {
   const o = ownerForWrite(owner);
@@ -391,9 +407,49 @@ export async function applyOrganizerGrant(
   existing.eck = unionEck(existing.eck, grant.eck);
   existing.role = "organizer";
   existing.eidNsecHex = grant.eidNsecHex;
+  // The grant's inbox becomes current, but an inbox this record already held is
+  // RETIRED, never dropped (a re-issued grant after a rotation, or a stale one
+  // arriving late: either way that secret still reads submissions sealed to it;
+  // Admin re-adopts whichever inbox the newest 31600 names).
+  const prior = [
+    ...new Set([
+      ...(existing.priorEinboxNsecs ?? []),
+      ...(grant.priorEinboxNsecs ?? []),
+      ...(existing.einboxNsecHex ? [existing.einboxNsecHex] : []),
+    ]),
+  ].filter((s) => s !== grant.einboxNsecHex);
   existing.einboxNsecHex = grant.einboxNsecHex;
+  existing.priorEinboxNsecs = prior.length > 0 ? prior : undefined;
+  const co = [...new Set([...(existing.coOrganizers ?? []), ...(grant.organizers ?? [])])].filter((p) => p !== o);
+  existing.coOrganizers = co.length > 0 ? co : undefined;
   await saveEventKeys(existing, o);
   return existing;
+}
+
+/**
+ * Make the E_inbox the newest 31600 names current when this record holds it as
+ * a retired one (audit SB-89/SB-90): two devices that each rotated, or a stale
+ * organizer grant processed after a fresh one, can leave a superseded inbox
+ * current, and then every new join request is sealed to an inbox this device is
+ * not reading. Returns true when it changed something. `inboxPubkeyOf` derives
+ * a secret's pubkey (injected to keep this module free of curve code).
+ */
+export async function adoptConfigInbox(
+  coordinate: string,
+  configInbox: string,
+  inboxPubkeyOf: (secretHex: string) => string,
+  owner?: string,
+): Promise<boolean> {
+  const o = ownerForWrite(owner);
+  const keys = await loadEventKeys(coordinate, o);
+  if (!keys?.einboxNsecHex) return false;
+  if (inboxPubkeyOf(keys.einboxNsecHex) === configInbox) return false;
+  const match = (keys.priorEinboxNsecs ?? []).find((s) => inboxPubkeyOf(s) === configInbox);
+  if (!match) return false;
+  keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []).filter((s) => s !== match), keys.einboxNsecHex];
+  keys.einboxNsecHex = match;
+  await saveEventKeys(keys, o);
+  return true;
 }
 
 /**
@@ -487,6 +543,10 @@ function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
         (p) => !current.some((v) => v.id === p.id && v.key === p.key),
       );
       return pending.length > 0 ? { pendingEck: pending } : {};
+    })(),
+    ...(() => {
+      const co = [...new Set([...(primary.coOrganizers ?? []), ...(fallback.coOrganizers ?? [])])];
+      return co.length > 0 ? { coOrganizers: co } : {};
     })(),
   };
 }

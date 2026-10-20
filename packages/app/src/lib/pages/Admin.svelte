@@ -41,6 +41,8 @@
     sendAdminCommand,
     checkForOrganizerGrant,
     pollForOrganizerGrant,
+    checkOrganizerKeys,
+    repairEventKeys,
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
@@ -236,8 +238,49 @@
     }
   }
 
+  // ── Custody across devices (audit SB-90, SB-86, SB-91) ─────────────────────
+  // Every refresh reads the newest 31600 once (no signer): routing approvals
+  // through a coordinator that another device attached since this page loaded
+  // (SB-91), and telling the organizer when another device rotated the keys
+  // (SB-90) or two devices rotated at once (SB-86). The first check on open also
+  // folds in the account's key backup, which is how this device learns about a
+  // rotation its sibling made.
+  let keyStatus = $state<{ changedElsewhere: boolean; collision: boolean } | null>(null);
+  let repairing = $state(false);
+  let repaired = $state(false);
+
+  async function refreshKeyStatus(reconcile: boolean): Promise<void> {
+    const c = ctx;
+    if (!c) return;
+    const bk = reconcile && session.signer ? await deriveBlindingKey(session.signer).catch(() => undefined) : undefined;
+    const st = await checkOrganizerKeys(c, { organizer: session.signer, blindingKey: bk, reconcile }).catch(() => undefined);
+    if (!st || destroyed || ctx !== c) return;
+    keyStatus = { changedElsewhere: st.changedElsewhere, collision: st.collision };
+    if ((st.config.coordinator ?? null) !== (c.config.coordinator ?? null) || st.config.inbox !== c.config.inbox) {
+      ctx = { ...c, config: st.config };
+    }
+    keys = (await loadEventKeys(c.coordinate)) ?? keys;
+  }
+
+  async function repairKeys() {
+    if (!ctx || !session.signer || repairing) return;
+    repairing = true;
+    try {
+      await repairEventKeys(session.signer, ctx, await deriveBlindingKey(session.signer));
+      repaired = true;
+      await refreshKeyStatus(false);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      repairing = false;
+    }
+  }
+
   async function refresh() {
     if (!ctx || !keys) return;
+    // In parallel with the queue scan; the local approve/revoke paths re-check the
+    // noted config themselves, so nothing waits on it.
+    void refreshKeyStatus(false);
     // Fetch pending + roster CONCURRENTLY and assign atomically (same tick): a
     // sequential `pending = await fetchPending(...)` followed by a separate
     // `await fetchRoster(...)` opens a window where `pending` already includes
@@ -363,7 +406,7 @@
       // user-facing slices (pending + updates) settle, rather than lingering for
       // the slowest background member. network-settled (finally) still waits for
       // everything, so perf marks stay meaningful.
-      const background = Promise.allSettled([refreshLiveness()]);
+      const background = Promise.allSettled([refreshLiveness(), refreshKeyStatus(true)]);
       await Promise.allSettled([refresh()]);
       refreshing = false;
       await background;
@@ -1054,6 +1097,21 @@
 <AdminTabs {naddr} />
 
 {#if error}<div class="card warn">{error}</div>{/if}
+
+{#if keyStatus?.changedElsewhere}
+  <div class="card warn" role="status">{t("admin.keys.changedElsewhere")}</div>
+{:else if keyStatus?.collision && !repaired}
+  <div class="card warn" role="status">
+    {#if ctx?.config.coordinator}
+      <p style="margin:0">{t("admin.keys.collisionCoordinator")}</p>
+    {:else}
+      <p>{t("admin.keys.collision")}</p>
+      <button class="btn inline" disabled={repairing} onclick={() => void repairKeys()}>{t("admin.keys.repair")}</button>
+    {/if}
+  </div>
+{:else if repaired}
+  <div class="card" role="status">{t("admin.keys.repaired")}</div>
+{/if}
 
 {#if notOrganizer}
   <div class="card">

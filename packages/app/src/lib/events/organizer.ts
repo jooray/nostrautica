@@ -82,12 +82,14 @@ import {
   type EckRef,
   mergeEventKeysBackups,
   eventKeysBackupSchema,
+  MAX_ORGANIZERS,
+  MAX_PRIOR_INBOXES,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
-import { loadEventKeys, currentEck, saveEventKeys, activeKeystoreOwner } from "./keystore.js";
+import { loadEventKeys, currentEck, saveEventKeys, activeKeystoreOwner, adoptConfigInbox } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
@@ -995,14 +997,35 @@ export async function addCoOrganizer(
   ctx: EventContext,
   coOrganizerPubkey: string,
 ): Promise<PublishOutcome> {
-  const keys = await loadEventKeys(ctx.coordinate);
+  const owner = activeKeystoreOwner() ?? undefined;
+  const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
     throw new Error("organizer keys not available on this device");
   }
-  const eidSk = hexToBytes(keys.eidNsecHex);
-  // Sealed by E_id: the recipient's C2 authentication of a 21605 organizer grant
-  // requires the seal author to be E_id (authenticateOrganizerGrant).
-  const wrap = wrapRumor(eidSk, coOrganizerPubkey, {
+  // Remember who holds custody (audit SB-90): every later rotation re-issues the
+  // grant to them, since nothing else ever tells a co-organizer the keys moved.
+  const own = await Promise.resolve()
+    .then(() => organizer.getPublicKey())
+    .catch(() => undefined);
+  if (coOrganizerPubkey !== own) {
+    keys.coOrganizers = [...new Set([...(keys.coOrganizers ?? []), coOrganizerPubkey])];
+    await saveEventKeys(keys, owner);
+  }
+  return toOutcome(await sendOrganizerGrant(ctx, keys, coOrganizerPubkey, own));
+}
+
+/**
+ * Gift-wrap a 21605 carrying this device's full custody to one account. Sealed by
+ * E_id: the recipient's C2 authentication requires the seal author to be E_id
+ * (authenticateOrganizerGrant). `organizers` names every account known to hold
+ * custody, the sender's own included, so the recipient can re-issue to all of
+ * them on its own rotations (SB-90); `prior_einbox_nsecs` keeps old submissions
+ * readable after one.
+ */
+async function sendOrganizerGrant(ctx: EventContext, keys: EventKeys, to: string, ownPubkey: string | undefined) {
+  const eidSk = hexToBytes(keys.eidNsecHex!);
+  const organizers = [...new Set([...(ownPubkey ? [ownPubkey] : []), ...(keys.coOrganizers ?? [])])].slice(0, MAX_ORGANIZERS);
+  const wrap = wrapRumor(eidSk, to, {
     kind: KIND_ORGANIZER_GRANT,
     content: {
       v: 2,
@@ -1012,11 +1035,38 @@ export async function addCoOrganizer(
       eck: keys.eck,
       config_relays: ctx.config.relays,
       granted_by: getPublicKey(eidSk),
+      ...(organizers.length > 0 ? { organizers } : {}),
+      ...(keys.priorEinboxNsecs?.length ? { prior_einbox_nsecs: keys.priorEinboxNsecs.slice(-MAX_PRIOR_INBOXES) } : {}),
     },
   });
-  return toOutcome(
-    await publishAccountGiftWrap(wrap as any, coOrganizerPubkey, ctx.config.relays),
-  );
+  return publishAccountGiftWrap(wrap as any, to, ctx.config.relays);
+}
+
+/**
+ * Re-issue organizer custody to every known co-organizer after a rotation of the
+ * E_inbox and/or ECK (audit SB-90). A co-organizer is a different account and not
+ * an attendee: it receives neither the attendee re-grants nor this account's
+ * backup, so without this its pending queue went silently empty (joins sealed to
+ * the new inbox) and its People tab unreadable (roster under the new ECK).
+ * Best-effort per recipient; returns how many were handed to the relays/outbox.
+ */
+async function reissueOrganizerGrants(organizer: AppSigner, ctx: EventContext, keys: EventKeys): Promise<number> {
+  const co = keys.coOrganizers ?? [];
+  if (co.length === 0 || !keys.eidNsecHex || !keys.einboxNsecHex) return 0;
+  const own = await Promise.resolve()
+    .then(() => organizer.getPublicKey())
+    .catch(() => undefined);
+  let sent = 0;
+  for (const to of co) {
+    if (to === own) continue;
+    try {
+      await sendOrganizerGrant(ctx, keys, to, own);
+      sent++;
+    } catch (e) {
+      console.warn("[organizer] could not re-issue organizer custody to", to, e);
+    }
+  }
+  return sent;
 }
 
 /** How often the organizer-grant wait re-checks while the page stays open. */
@@ -1484,6 +1534,8 @@ export async function revokeAttendeeClient(
   }
   await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
   await promotePending(keys, newEck, owner);
+  // Co-organizers hold custody but are not attendees: hand them the new key (SB-90).
+  await reissueOrganizerGrants(organizer, ctx, keys);
 }
 
 /**
@@ -1705,6 +1757,8 @@ async function rotateEckAndInbox(
   await stageEck(keys, newEck, owner);
   await publishRekeyed(ctx, [], rekeyed, rosterEvents);
   await promotePending(keys, newEck, owner);
+  // New inbox + new ECK: co-organizers must get both or go blind (SB-90).
+  await reissueOrganizerGrants(organizer, ctx, keys);
   // Never silent (audit EV-11). The rotation has already happened locally; if the
   // backup does not publish, the durable record of the new ECK and the new inbox
   // simply is not there, and a later recovery on a fresh device restores an event
@@ -1718,6 +1772,55 @@ async function rotateEckAndInbox(
   }
 
   return { newInboxNsecHex, newInboxPubkey, eck: eckAll };
+}
+
+/**
+ * Heal a same-id ECK collision (NIP §4.1, audit SB-86) by moving forward: mint
+ * `max id + 1`, which is unique again, re-encrypt the roster and every directory
+ * entry under it, and re-grant the FULL version list (both colliding keys
+ * included) to everyone on the roster, so nothing already encrypted under either
+ * key becomes unreadable to someone who held it. Same staging, backup and
+ * co-organizer re-issue as any rotation.
+ *
+ * It re-grants everyone the live roster lists. When the collision came from two
+ * concurrent REVOKES, the roster that lost the relay race is gone, and a person
+ * only that device removed is on the surviving roster and keeps access: revoke
+ * them again afterwards (Admin says so). With a coordinator attached the
+ * coordinator owns rotation; this refuses, and detach + re-attach rotates.
+ */
+export async function repairEventKeys(
+  organizer: AppSigner,
+  ctx: EventContext,
+  blindingKey?: Uint8Array,
+): Promise<void> {
+  const owner = activeKeystoreOwner() ?? undefined;
+  const keys = await loadEventKeys(ctx.coordinate, owner);
+  if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) throw new Error("organizer keys not available");
+  const cfg = await freshConfig(ctx);
+  if (cfg.coordinator) throw new CoordinatorAttachedError();
+  assertCurrentCustody(cfg, keys);
+  ctx = { ...ctx, config: cfg };
+  const eidSk = hexToBytes(keys.eidNsecHex);
+  const rosterRead = await loadRoster(ctx, keys, owner);
+  const prevEck = (rosterRead.state === "ok" && rosterRead.eck) || currentEck(keys)!;
+  const { roster, at: rosterAt } = rosterForRewrite(rosterRead, prevEck.id);
+  const newEck = mintEck(keys);
+  const newEckBytes = base64ToBytes(newEck.key);
+  const eckAll = unionEck(keys.eck, [newEck]);
+  const rekeyed = await rekeyRoster(ctx, eidSk, prevEck, roster.attendees, newEckBytes, newEck.id, eckAll, {
+    keepChatKeys: true,
+    held: unionEck(keys.eck, keys.pendingEck ?? []),
+  });
+  const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newEck.id, rekeyed.roster, rosterAt);
+  await stageEck(keys, newEck, owner);
+  if (blindingKey) {
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0, { owner, configInbox: cfg.inbox }).catch(
+      (e: unknown) => console.warn("[organizer] keys repaired but the backup did not publish:", e),
+    );
+  }
+  await publishRekeyed(ctx, [], rekeyed, rosterEvents);
+  await promotePending(keys, newEck, owner);
+  await reissueOrganizerGrants(organizer, ctx, keys);
 }
 
 /**
@@ -1755,7 +1858,41 @@ async function freshConfig(ctx: EventContext): Promise<EventConfig> {
     () => undefined,
   );
   if (!cfg) throw new Error(CONFIG_UNREADABLE);
+  noteFreshConfig(ctx.coordinate, cfg);
   return cfg;
+}
+
+// ── One roster authority (audit SB-91) ───────────────────────────────────────
+//
+// The 31604 address is written by the coordinator when one is attached and by
+// E_id otherwise, and the choice of path used to come from the page's cached
+// config: a page loaded before another device attached a coordinator kept
+// approving locally, publishing an E_id roster that attendees picked over the
+// coordinator's (newer created_at) until the coordinator's next publish dropped
+// the person again. Admin now reads the newest 31600 on every refresh and notes
+// it here; the local approve/revoke paths refuse while it names a coordinator.
+
+const freshConfigMemo = new Map<string, { cfg: EventConfig; at: number }>();
+
+/** Record the newest 31600 read from the relays (Admin's refresh, every config write). */
+export function noteFreshConfig(coordinate: string, cfg: EventConfig): void {
+  freshConfigMemo.set(coordinate, { cfg, at: Date.now() });
+}
+
+/** Test-only. */
+export function __resetFreshConfigMemoForTests(): void {
+  freshConfigMemo.clear();
+}
+
+/** A coordinator is attached: the roster is its to write, route through a 21604. */
+export class CoordinatorAttachedError extends Error {
+  constructor() {
+    super(
+      "A coordinator is attached to this event, so approvals and removals go through it. " +
+        "Refresh this page and try again.",
+    );
+    this.name = "CoordinatorAttachedError";
+  }
 }
 
 /**
@@ -1766,15 +1903,108 @@ async function freshConfig(ctx: EventContext): Promise<EventConfig> {
  * and mint a colliding ECK version (audit SB-90, SB-86). Fail loudly instead.
  */
 function assertCurrentCustody(cfg: EventConfig, keys: EventKeys): void {
+  if (custodyIsStale(cfg, keys)) throw new KeysChangedElsewhereError();
+}
+
+/** The newest 31600 names an inbox, or an ECK version, this device does not hold. */
+function custodyIsStale(cfg: EventConfig, keys: EventKeys): boolean {
   // Current OR prior inbox: a device whose own rotation got as far as saving the
   // new inbox but not as far as the 31600 is ahead of the config, not behind it.
   const heldInboxes = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])]
     .filter((h): h is string => !!h)
     .map((h) => getPublicKey(hexToBytes(h)));
-  const heldEck = keys.eck.reduce((m, v) => Math.max(m, v.id), 0);
-  if ((heldInboxes.length > 0 && !heldInboxes.includes(cfg.inbox)) || cfg.eck > heldEck) {
-    throw new KeysChangedElsewhereError();
+  // Staged versions count: this device minted them, it is ahead, not behind.
+  const heldEck = unionEck(keys.eck, keys.pendingEck ?? []).reduce((m, v) => Math.max(m, v.id), 0);
+  return (heldInboxes.length > 0 && !heldInboxes.includes(cfg.inbox)) || cfg.eck > heldEck;
+}
+
+/** What Admin shows about this device's custody (audit SB-90, SB-86, SB-91). */
+export interface OrganizerKeyStatus {
+  /** The newest 31600 on the relays (Admin adopts it, so routing is fresh). */
+  config: EventConfig;
+  /** The config names an inbox or ECK version this device does not hold. */
+  changedElsewhere: boolean;
+  /** Two keys share the current ECK id (an unhealed concurrent rotation). */
+  collision: boolean;
+}
+
+/**
+ * Admin's per-refresh custody check. Reads the newest 31600 (one relay read, no
+ * signer), notes it for the SB-91 guard, makes the inbox it names current when
+ * this device holds it as a retired one, and reports whether this device is
+ * behind (SB-90) or holds a same-id collision (SB-86).
+ *
+ * With `reconcile` (once per Admin open, never on the 30 s poll: it costs a signer
+ * decrypt, and on a remote signer that is a prompt) it also folds the account's
+ * 30078 backup into this device, which is how a second device of the SAME account
+ * learns about a rotation the first one made, and republishes the union when this
+ * device holds something the backup lacks. Undefined when the config is unreadable.
+ */
+export async function checkOrganizerKeys(
+  ctx: EventContext,
+  opts: { organizer?: AppSigner | null; blindingKey?: Uint8Array; reconcile?: boolean } = {},
+): Promise<OrganizerKeyStatus | undefined> {
+  const owner = activeKeystoreOwner() ?? undefined;
+  const cfg = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(() => undefined);
+  if (!cfg) return undefined;
+  noteFreshConfig(ctx.coordinate, cfg);
+  let keys = await loadEventKeys(ctx.coordinate, owner);
+  if (!keys || keys.role !== "organizer") return { config: cfg, changedElsewhere: false, collision: false };
+  if (opts.reconcile && opts.organizer && opts.blindingKey && keys.eidNsecHex && keys.einboxNsecHex) {
+    try {
+      await reconcileEventKeysBackup(opts.organizer, ctx.coordinate, keys, opts.blindingKey, cfg.inbox, owner);
+    } catch (e) {
+      console.warn("[organizer] could not reconcile the event-keys backup:", e);
+    }
   }
+  await adoptConfigInbox(ctx.coordinate, cfg.inbox, (s) => getPublicKey(hexToBytes(s)), owner).catch(() => false);
+  keys = (await loadEventKeys(ctx.coordinate, owner)) ?? keys;
+  const cur = currentEck(keys);
+  return {
+    config: cfg,
+    changedElsewhere: custodyIsStale(cfg, keys),
+    collision: !!cur && eckCollisionIds(keys.eck).includes(cur.id),
+  };
+}
+
+/**
+ * Fold the account's backup into this device and, when this device holds custody
+ * the backup lacks, publish the union (SB-89/SB-90). One decrypt per changed
+ * backup event per session; one encrypt + signature only when there is something
+ * to add.
+ */
+async function reconcileEventKeysBackup(
+  organizer: AppSigner,
+  coordinate: string,
+  keys: EventKeys,
+  blindingKey: Uint8Array,
+  configInbox: string,
+  owner: string | undefined,
+): Promise<void> {
+  const ownPubkey = await organizer.getPublicKey();
+  const d = eventKeysBackupD(blindingKey, coordinate, ownPubkey);
+  const local = keysAsBackup(keys, coordinate, keys.coordinatorGen ?? 0);
+  const remote = await readEventKeysBackup(organizer, ownPubkey, d);
+  if (remote) {
+    const merged = mergeEventKeysBackups(local, remote.backup, { configInbox });
+    if (foldBackupIntoKeys(keys, merged)) await saveEventKeys(keys, owner);
+    if (sameBackup(merged, remote.backup)) return;
+  }
+  await writeEventKeysBackup(organizer, coordinate, keys, blindingKey, keys.coordinatorGen ?? 0, { owner, configInbox });
+}
+
+/** Same custody, ignoring field order and list order. */
+function sameBackup(a: EventKeysBackup, b: EventKeysBackup): boolean {
+  const norm = (x: EventKeysBackup) =>
+    JSON.stringify({
+      eck: unionEck(x.eck).map((v) => `${v.id}|${v.key}`),
+      pending: unionEck(x.pending_eck ?? []).map((v) => `${v.id}|${v.key}`),
+      inbox: x.einbox_nsec,
+      prior: [...(x.prior_einbox_nsecs ?? [])].sort(),
+      gen: x.coordinator_gen ?? 0,
+      co: [...(x.co_organizers ?? [])].sort(),
+    });
+  return norm(a) === norm(b);
 }
 
 /**
@@ -1969,7 +2199,8 @@ function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: numbe
     eck: keys.eck,
     coordinator_gen: Math.max(coordinatorGen, keys.coordinatorGen ?? 0),
     ...(keys.pendingEck?.length ? { pending_eck: keys.pendingEck } : {}),
-    ...(keys.priorEinboxNsecs?.length ? { prior_einbox_nsecs: keys.priorEinboxNsecs } : {}),
+    ...(keys.priorEinboxNsecs?.length ? { prior_einbox_nsecs: keys.priorEinboxNsecs.slice(-MAX_PRIOR_INBOXES) } : {}),
+    ...(keys.coOrganizers?.length ? { co_organizers: keys.coOrganizers.slice(0, MAX_ORGANIZERS) } : {}),
   };
 }
 
@@ -1978,7 +2209,8 @@ function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: numbe
  * anything changed, i.e. whether the other copy held custody this device lacked.
  */
 function foldBackupIntoKeys(keys: EventKeys, merged: EventKeysBackup): boolean {
-  const before = JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0]);
+  const snap = () => JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0, keys.coOrganizers ?? []]);
+  const before = snap();
   keys.eck = unionEck(keys.eck, merged.eck);
   const pending = unionEck(keys.pendingEck ?? [], merged.pending_eck ?? []).filter(
     (p) => !keys.eck.some((v) => v.id === p.id && v.key === p.key),
@@ -1991,7 +2223,9 @@ function foldBackupIntoKeys(keys: EventKeys, merged: EventKeysBackup): boolean {
   const prior = inboxes.filter((s) => s !== merged.einbox_nsec);
   keys.priorEinboxNsecs = prior.length > 0 ? prior : undefined;
   keys.coordinatorGen = Math.max(keys.coordinatorGen ?? 0, merged.coordinator_gen ?? 0) || undefined;
-  return before !== JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0]);
+  const co = [...new Set([...(keys.coOrganizers ?? []), ...(merged.co_organizers ?? [])])];
+  keys.coOrganizers = co.length > 0 ? co : undefined;
+  return before !== snap();
 }
 
 /** Thrown when the account's backup exists but cannot be read, so it is not rewritten blind. */
@@ -2017,13 +2251,21 @@ async function readEventKeysBackup(organizer: AppSigner, ownPubkey: string, d: s
     onlyByAuthors(onlyVerified(events), [ownPubkey]).filter((e) => e.tags?.some((t) => t[0] === "d" && t[1] === d)),
   );
   if (!latest) return undefined;
+  // One decrypt per backup EVENT per session: a 30078 rewrite is a new id, so this
+  // can never serve a stale copy, and on a remote signer each decrypt is a prompt.
+  const hit = decryptedBackups.get(d);
+  if (hit && hit.id === latest.id) return hit;
   try {
     const json = await organizer.nip44Decrypt(ownPubkey, latest.content);
-    return { backup: eventKeysBackupSchema.parse(JSON.parse(json)), id: latest.id! };
+    const read = { backup: eventKeysBackupSchema.parse(JSON.parse(json)), id: latest.id! };
+    decryptedBackups.set(d, read);
+    return read;
   } catch {
     throw new EventKeysBackupUnreadableError();
   }
 }
+
+const decryptedBackups = new Map<string, { backup: EventKeysBackup; id: string }>();
 
 /**
  * Republish the organizer's self-encrypted 30078 event-keys backup (with the given

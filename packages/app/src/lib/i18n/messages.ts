@@ -1200,6 +1200,15 @@ export const messages = {
       "No connection right now. The approval is saved on this device and goes to the coordinator when you're back online. The request stays in the queue until then.",
     "admin.command.revokeQueued":
       "No connection right now. The removal is saved on this device and goes to the coordinator when you're back online. Until then this person still has access.",
+    "admin.keys.changedElsewhere":
+      "This event's keys were changed on another device, and this device still has the old ones. Join requests and approvals from here may be missing or fail. Open the event on that device, or have it send this account a fresh organizer grant.",
+    "admin.keys.collision":
+      "This event's member key was changed on two devices at the same time, so some people may not be able to read the member list. Repair it here: everyone on the roster gets one new key that also opens both old ones.",
+    "admin.keys.collisionCoordinator":
+      "This event's member key was changed on two devices at the same time. Detach and re-attach the coordinator to give everyone one new key.",
+    "admin.keys.repair": "Repair keys",
+    "admin.keys.repaired":
+      "Keys repaired. Everyone on the roster has been sent the new key. If someone was removed on the other device at the same time, check People and remove them again.",
     "admin.requests.bulk.publishing": "Publishing…",
     "admin.requests.bulk.failed": "Couldn't approve, try again.",
     "admin.requests.bulk.retry": "Retry",
@@ -2942,6 +2951,15 @@ export const messages = {
       "Momentálne nie ste pripojení. Schválenie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy žiadosť zostáva v poradí.",
     "admin.command.revokeQueued":
       "Momentálne nie ste pripojení. Odobratie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy má táto osoba stále prístup.",
+    "admin.keys.changedElsewhere":
+      "Kľúče tohto podujatia sa zmenili na inom zariadení a toto zariadenie má stále tie staré. Žiadosti o vstup a schvaľovanie odtiaľto môžu chýbať alebo zlyhať. Otvorte podujatie na tom zariadení alebo ho požiadajte, aby tomuto účtu poslalo nové organizátorské oprávnenie.",
+    "admin.keys.collision":
+      "Kľúč pre členov tohto podujatia sa zmenil na dvoch zariadeniach naraz, takže niektorí ľudia možno nevidia zoznam členov. Opravte to tu: každý na zozname dostane jeden nový kľúč, ktorým otvorí aj oba staré.",
+    "admin.keys.collisionCoordinator":
+      "Kľúč pre členov tohto podujatia sa zmenil na dvoch zariadeniach naraz. Odpojte a znova pripojte koordinátora, aby všetci dostali jeden nový kľúč.",
+    "admin.keys.repair": "Opraviť kľúče",
+    "admin.keys.repaired":
+      "Kľúče sú opravené. Všetci na zozname dostali nový kľúč. Ak niekoho v tom istom čase odobrali na druhom zariadení, skontrolujte Ľudí a odoberte ho znova.",
     "admin.requests.bulk.publishing": "Zverejňuje sa…",
     "admin.requests.bulk.failed": "Nepodarilo sa schváliť, skúste znova.",
     "admin.requests.bulk.retry": "Zopakovať",
@@ -4673,6 +4691,15 @@ export const messages = {
       "Momentálně nejste připojeni. Schválení je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby žádost zůstává ve frontě.",
     "admin.command.revokeQueued":
       "Momentálně nejste připojeni. Odebrání je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby má tato osoba stále přístup.",
+    "admin.keys.changedElsewhere":
+      "Klíče této akce se změnily na jiném zařízení a toto zařízení má pořád ty staré. Žádosti o vstup a schvalování odsud mohou chybět nebo selhat. Otevřete akci na tom zařízení, nebo ho požádejte, aby tomuto účtu poslalo nové organizátorské oprávnění.",
+    "admin.keys.collision":
+      "Klíč pro členy této akce se změnil na dvou zařízeních současně, takže někteří lidé možná nevidí seznam členů. Opravte to tady: každý na seznamu dostane jeden nový klíč, kterým otevře i oba staré.",
+    "admin.keys.collisionCoordinator":
+      "Klíč pro členy této akce se změnil na dvou zařízeních současně. Odpojte a znovu připojte koordinátora, aby všichni dostali jeden nový klíč.",
+    "admin.keys.repair": "Opravit klíče",
+    "admin.keys.repaired":
+      "Klíče jsou opravené. Všichni na seznamu dostali nový klíč. Pokud někoho ve stejnou chvíli odebrali na druhém zařízení, zkontrolujte Lidi a odeberte ho znovu.",
     "admin.requests.bulk.publishing": "Zveřejňuje se…",
     "admin.requests.bulk.failed": "Nepodařilo se schválit, zkuste znovu.",
     "admin.requests.bulk.retry": "Zopakovat",
@@ -6400,6 +6427,15 @@ export const messages = {
       "Gerade keine Verbindung. Die Freigabe ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin bleibt die Anfrage in der Warteschlange.",
     "admin.command.revokeQueued":
       "Gerade keine Verbindung. Das Entfernen ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin hat diese Person weiterhin Zugriff.",
+    "admin.keys.changedElsewhere":
+      "Die Schlüssel dieses Events wurden auf einem anderen Gerät geändert, und dieses Gerät hat noch die alten. Beitrittsanfragen und Freigaben von hier können fehlen oder fehlschlagen. Öffne das Event auf jenem Gerät oder lass es diesem Konto eine neue Organisator-Freigabe schicken.",
+    "admin.keys.collision":
+      "Der Mitgliederschlüssel dieses Events wurde auf zwei Geräten gleichzeitig geändert, daher können manche die Mitgliederliste vielleicht nicht lesen. Repariere es hier: Alle auf der Liste bekommen einen neuen Schlüssel, der auch beide alten öffnet.",
+    "admin.keys.collisionCoordinator":
+      "Der Mitgliederschlüssel dieses Events wurde auf zwei Geräten gleichzeitig geändert. Trenne den Coordinator und hänge ihn wieder an, damit alle einen neuen Schlüssel bekommen.",
+    "admin.keys.repair": "Schlüssel reparieren",
+    "admin.keys.repaired":
+      "Schlüssel repariert. Alle auf der Liste haben den neuen Schlüssel bekommen. Falls jemand zur selben Zeit auf dem anderen Gerät entfernt wurde, prüfe die Personen und entferne ihn erneut.",
     "admin.requests.bulk.publishing": "Veröffentlicht…",
     "admin.requests.bulk.failed": "Genehmigung fehlgeschlagen, versuch es erneut.",
     "admin.requests.bulk.retry": "Erneut versuchen",
@@ -8164,6 +8200,15 @@ export const messages = {
       "Ahora mismo no hay conexión. La aprobación está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces la solicitud sigue en la cola.",
     "admin.command.revokeQueued":
       "Ahora mismo no hay conexión. La retirada está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces esta persona sigue teniendo acceso.",
+    "admin.keys.changedElsewhere":
+      "Las claves de este evento se cambiaron en otro dispositivo y este todavía tiene las antiguas. Puede que falten solicitudes de acceso o que las aprobaciones desde aquí fallen. Abre el evento en ese dispositivo o pídele que envíe a esta cuenta una nueva concesión de organizador.",
+    "admin.keys.collision":
+      "La clave de miembros de este evento se cambió en dos dispositivos a la vez, así que puede que algunas personas no puedan leer la lista de miembros. Repáralo aquí: todos en la lista reciben una clave nueva que también abre las dos antiguas.",
+    "admin.keys.collisionCoordinator":
+      "La clave de miembros de este evento se cambió en dos dispositivos a la vez. Desconecta y vuelve a conectar el coordinador para que todos reciban una clave nueva.",
+    "admin.keys.repair": "Reparar claves",
+    "admin.keys.repaired":
+      "Claves reparadas. Todos en la lista han recibido la clave nueva. Si alguien fue retirado en el otro dispositivo al mismo tiempo, revisa Personas y retíralo de nuevo.",
     "admin.requests.bulk.publishing": "Publicando…",
     "admin.requests.bulk.failed": "No se pudo aprobar, vuelve a intentarlo.",
     "admin.requests.bulk.retry": "Reintentar",

@@ -48,6 +48,8 @@ import {
   KIND_EVENT_CONFIG,
   buildEventConfig,
   eckTag,
+  unwrapRumor,
+  KIND_ORGANIZER_GRANT,
 } from "@nostrautica/protocol";
 import { WHITENOISE_RELAYS } from "$lib/nostr/relays.js";
 
@@ -81,12 +83,18 @@ import {
   loadRoster,
   sendAdminCommand,
   type PendingRequest,
-  fetchPending,} from "./organizer.js";
+  fetchPending,
+  addCoOrganizer,
+  checkOrganizerKeys,
+  repairEventKeys,
+  __resetFreshConfigMemoForTests,
+} from "./organizer.js";
 import {
   __setKeystoreBackend,
   setActiveOwner,
   saveEventKeys,
   loadEventKeys,
+  applyOrganizerGrant,
   type EventKeys,
   type KeystoreBackend,
   type LockedEventKeys,
@@ -207,6 +215,7 @@ beforeEach(() => {
   fetchEventsRelayOnly.mockReset().mockResolvedValue([]); // no monotonic collision
   publishSigned.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal("navigator", { onLine: true }); // publishOrQueue takes the immediate-publish path
+  __resetFreshConfigMemoForTests();
 });
 
 afterEach(() => {
@@ -1007,7 +1016,7 @@ describe("roster read-modify-write safety", () => {
     await saveEventKeys({ ...withInbox!, einboxNsecHex: "3".repeat(64) }, OWNER);
     fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[]; "#d"?: string[] }) =>
       filter.kinds?.includes(30078)
-        ? [{ id: "bk", kind: 30078, pubkey: ALICE, created_at: 10, tags: [["d", filter["#d"]![0]]], content: "garbled" }]
+        ? [{ id: "bk-garbled", kind: 30078, pubkey: ALICE, created_at: 10, tags: [["d", filter["#d"]![0]]], content: "garbled" }]
         : [rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }, { pubkey: BOB, d: "d-bob", role: "attendee" }])],
     );
     const encrypted: string[] = [];
@@ -1025,6 +1034,135 @@ describe("roster read-modify-write safety", () => {
     expect(encrypted).toHaveLength(0); // no blind overwrite
     expect(warn.mock.calls.flat().join(" ")).toMatch(/backup did not publish/i);
     warn.mockRestore();
+  });
+
+  // ── Audit SB-90: co-organizers are re-issued custody on every rotation ──────
+  describe("co-organizer custody across rotations", () => {
+    const CO_SK = generateSecretKey();
+    const CO = getPublicKey(CO_SK);
+    const signer = {
+      getPublicKey: async () => ALICE,
+      nip44Encrypt: async (_pk: string, p: string) => `enc:${p}`,
+      nip44Decrypt: async (_pk: string, c: string) => c.replace(/^enc:/, ""),
+      signEvent: async (e: unknown) => e,
+    } as unknown as AppSigner;
+    /** The 21605 contents gift-wrapped to the co-organizer, decrypted with its key. */
+    function grantsToCo(): { einbox_nsec: string; eck: { id: number; key: string }[]; organizers?: string[] }[] {
+      return publishSigned.mock.calls
+        .map((c) => c[0] as { kind: number; tags: string[][] })
+        .filter((e) => e.kind === 1059 && e.tags.some((t) => t[0] === "p" && t[1] === CO))
+        .map((w) => unwrapRumor(w as never, CO_SK))
+        .filter((r) => r.kind === KIND_ORGANIZER_GRANT)
+        .map((r) => JSON.parse(r.content));
+    }
+
+    it("remembers the co-organizer and tells it who else holds custody", async () => {
+      const withInbox = await loadEventKeys(COORD);
+      await saveEventKeys({ ...withInbox!, einboxNsecHex: "3".repeat(64) }, OWNER);
+
+      await addCoOrganizer(signer, ctx, CO);
+
+      expect((await loadEventKeys(COORD))?.coOrganizers).toEqual([CO]);
+      expect(grantsToCo()[0]?.organizers).toEqual([ALICE, CO]);
+    });
+
+    it("a revoke hands the co-organizer the rotated ECK", async () => {
+      const withInbox = await loadEventKeys(COORD);
+      await saveEventKeys({ ...withInbox!, einboxNsecHex: "3".repeat(64), coOrganizers: [CO] }, OWNER);
+      fetchEventsRelayOnly.mockResolvedValue([
+        rosterEvent([
+          { pubkey: ALICE, d: "d-alice", role: "attendee" },
+          { pubkey: BOB, d: "d-bob", role: "attendee" },
+        ]),
+      ]);
+
+      await revokeAttendeeClient(signer, ctx, BOB);
+
+      const keys = await loadEventKeys(COORD);
+      const v2 = keys!.eck.find((v) => v.id === 2)!;
+      expect(grantsToCo().at(-1)?.eck).toContainEqual(v2);
+    });
+
+    it("a received re-issue retires the old inbox instead of dropping it, and learns the organizer set", async () => {
+      const OLD = "3".repeat(64);
+      const NEW = "4".repeat(64);
+      await saveEventKeys({ ...organizerKeysWithEck(), einboxNsecHex: OLD }, OWNER);
+      await applyOrganizerGrant(
+        COORD,
+        { eck: [{ id: 1, key: bytesToBase64(ECK_BYTES) }], eidNsecHex: bytesToHex(EID_SK), einboxNsecHex: NEW, organizers: [ALICE, OWNER] },
+        OWNER,
+      );
+      const keys = await loadEventKeys(COORD);
+      expect(keys?.einboxNsecHex).toBe(NEW);
+      expect(keys?.priorEinboxNsecs).toEqual([OLD]);
+      expect(keys?.coOrganizers).toEqual([ALICE]); // never itself
+    });
+  });
+
+  // ── Audit SB-90/SB-86: Admin's custody check, and the repair ────────────────
+  describe("organizer key status and repair", () => {
+    const INBOX_SK = generateSecretKey();
+    const cfgBase = {
+      d: IDENTIFIER, eidPubkey: EID_PUBKEY, inbox: getPublicKey(INBOX_SK), relays: ["wss://relay.example"], chatRelays: [] as string[],
+      blossom: [] as string[], maxVideoSec: 90, maxTalkSec: 900, matching: "off", matchVisibility: "pair", approval: "manual",
+      eck: 1, nostrContext: 0, lang: "en", talks: "off", chat: [] as ChatBackend[],
+    };
+    const configEvent = (over: Record<string, unknown>) => ({
+      id: "cfg", kind: KIND_EVENT_CONFIG, pubkey: EID_PUBKEY, created_at: 1000,
+      tags: buildEventConfig({ ...cfgBase, ...over } as never).tags, content: "",
+    });
+
+    it("reports keys changed elsewhere when the config names an inbox this device lacks", async () => {
+      await saveEventKeys({ ...organizerKeysWithEck(), einboxNsecHex: bytesToHex(INBOX_SK) }, OWNER);
+      fetchEventsRelayOnly.mockResolvedValue([configEvent({ inbox: getPublicKey(generateSecretKey()) })]);
+
+      const st = await checkOrganizerKeys(ctx);
+
+      expect(st?.changedElsewhere).toBe(true);
+      expect(st?.collision).toBe(false);
+    });
+
+    it("adopts the inbox the config names when this device holds it as a retired one", async () => {
+      const NEW_SK = generateSecretKey();
+      await saveEventKeys(
+        { ...organizerKeysWithEck(), einboxNsecHex: bytesToHex(INBOX_SK), priorEinboxNsecs: [bytesToHex(NEW_SK)] },
+        OWNER,
+      );
+      fetchEventsRelayOnly.mockResolvedValue([configEvent({ inbox: getPublicKey(NEW_SK) })]);
+
+      const st = await checkOrganizerKeys(ctx);
+
+      expect(st?.changedElsewhere).toBe(false);
+      expect((await loadEventKeys(COORD))?.einboxNsecHex).toBe(bytesToHex(NEW_SK));
+    });
+
+    it("repairs a same-id collision with one new key that carries both old ones", async () => {
+      const v2a = { id: 2, key: bytesToBase64(generateEck()) };
+      const v2b = { id: 2, key: bytesToBase64(generateEck()) };
+      await saveEventKeys(
+        { ...organizerKeysWithEck(), eck: [{ id: 1, key: bytesToBase64(ECK_BYTES) }, v2a, v2b], einboxNsecHex: bytesToHex(INBOX_SK) },
+        OWNER,
+      );
+      const roster = { v: 2, eck_current: 2, attendees: [{ pubkey: ALICE, d: "d-alice", role: "attendee" }] };
+      fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[] }) =>
+        filter.kinds?.includes(KIND_EVENT_CONFIG)
+          ? [configEvent({ eck: 2 })]
+          : filter.kinds?.includes(KIND_ROSTER)
+            ? [{ ...rosterEvent([]), tags: [["d", IDENTIFIER], ["a", COORD], eckTag(v2a), ["v", "2"]], content: eckEncrypt(base64ToBytes(v2a.key), JSON.stringify(roster)) }]
+            : [],
+      );
+      expect((await checkOrganizerKeys(ctx))?.collision).toBe(true);
+
+      await repairEventKeys({} as AppSigner, ctx);
+
+      const keys = await loadEventKeys(COORD);
+      const v3 = keys!.eck.find((v) => v.id === 3)!;
+      expect(v3).toBeDefined();
+      const rotated = publishSigned.mock.calls.map((c) => c[0] as { kind: number; content: string; tags: string[][] }).find((e) => e.kind === KIND_ROSTER)!;
+      expect(rotated.tags.find((t) => t[0] === "eck")?.[1]).toBe("3");
+      expect((JSON.parse(eckDecrypt(base64ToBytes(v3.key), rotated.content)) as RosterContent).attendees.map((a) => a.pubkey)).toEqual([ALICE]);
+      expect((await checkOrganizerKeys(ctx))?.collision).toBe(false);
+    });
   });
 
   it("still revokes, loudly, when no blinding key is available", async () => {
