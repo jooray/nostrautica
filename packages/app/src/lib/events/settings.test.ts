@@ -17,12 +17,18 @@ import { describe, it, expect, beforeEach, vi } from "vitest";
 import { KIND_APP_DATA, makeCoordinate, type PerEventSettings } from "@nostrautica/protocol";
 import type { VerifiedEvent } from "nostr-tools/pure";
 
-const { fetchEvents, publishMonotonic } = vi.hoisted(() => ({
+const { fetchEvents, publishMonotonic, relay } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
   publishMonotonic: vi.fn(),
+  /** Whether the stubbed read reports a relay EOSE (StreamHandle.answered). */
+  relay: { answered: true },
 }));
 vi.mock("$lib/nostr/ndk.js", () => ({
   fetchEvents,
+  fetchEventsAnswered: async (...args: unknown[]) => ({
+    events: await fetchEvents(...args),
+    answered: relay.answered,
+  }),
   fetchEventsRelayOnly: vi.fn(),
   publishSigned: vi.fn(),
   isAcceptedRelayUrl: (value: string) => value.startsWith("wss://"),
@@ -33,7 +39,7 @@ vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
   onlyVerified: <T,>(events: T[]) => events,
 }));
 
-import { loadPerEventSettings, toggleSetting } from "./settings.js";
+import { loadPerEventSettings, toggleSetting, setNote, cachedPerEventSettings } from "./settings.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
@@ -82,6 +88,7 @@ describe("per-event settings read-modify-write safety", () => {
   beforeEach(() => {
     __resetPersistForTests();
     setActiveCacheOwner(ME);
+    relay.answered = true;
     fetchEvents.mockReset();
     publishMonotonic.mockReset().mockImplementation(
       async (input: { sign: (t: number) => unknown | Promise<unknown> }) => {
@@ -150,5 +157,72 @@ describe("per-event settings read-modify-write safety", () => {
     ]);
     const loaded = await loadPerEventSettings(signer({ content: "" }), ctx, BLINDING);
     expect(loaded.favorites).toEqual([FRIEND]);
+  });
+
+  // Audit SB-01: an 8 s read that no relay answered resolves to [] — the same
+  // answer as "never saved". Publishing over that replaced everything.
+  it("refuses to write when no relay answered and this device has no copy", async () => {
+    relay.answered = false;
+    fetchEvents.mockResolvedValue([]);
+    const store = { content: "sentinel" };
+
+    await expect(setNote(signer(store), ctx, BLINDING, OTHER, "met at the bar")).rejects.toThrow(
+      /Couldn't read your saved notes/,
+    );
+    expect(publishMonotonic).not.toHaveBeenCalled();
+    expect(store.content).toBe("sentinel");
+  });
+
+  it("builds on this device's own copy when no relay answered", async () => {
+    // First a successful save, so the device holds a copy…
+    fetchEvents.mockResolvedValue([storedEvent(ME, `enc:${JSON.stringify(SAVED)}`)]);
+    await loadPerEventSettings(signer({ content: "" }), ctx, BLINDING);
+    expect(cachedPerEventSettings(COORD)?.favorites).toEqual([FRIEND]);
+    // …then the venue Wi-Fi: nothing comes back.
+    relay.answered = false;
+    fetchEvents.mockResolvedValue([]);
+    const store = { content: "" };
+
+    await toggleSetting(signer(store), ctx, BLINDING, "want_to_meet", OTHER);
+
+    const written: PerEventSettings = JSON.parse(store.content.replace(/^enc:/, ""));
+    expect(written.want_to_meet).toEqual([OTHER]);
+    expect(written.notes[FRIEND]).toBe(SAVED.notes[FRIEND]);
+    expect(written.met).toEqual([FRIEND]);
+  });
+
+  // Audit DS41-007: two taps in a row used to read the same baseline, and the
+  // second publish erased the first one's change.
+  it("serializes concurrent edits so neither erases the other", async () => {
+    // A tiny in-memory relay: reads return what the last publish wrote.
+    let onRelay = storedEvent(ME, `enc:${JSON.stringify(SAVED)}`, 100);
+    let clock = 100;
+    fetchEvents.mockImplementation(async () => {
+      const served = onRelay; // what the relay held when the REQ arrived
+      await new Promise((r) => setTimeout(r, 5)); // a real read takes time
+      return [served];
+    });
+    publishMonotonic.mockImplementation(
+      async (input: { sign: (t: number) => Promise<{ content: string }> }) => {
+        await new Promise((r) => setTimeout(r, 5)); // the monotonic floor read
+        const createdAt = ++clock;
+        const ev = await input.sign(createdAt);
+        onRelay = storedEvent(ME, ev.content, createdAt);
+        return { published: true, createdAt };
+      },
+    );
+    const store = { content: "" };
+    const s = signer(store);
+
+    await Promise.all([
+      toggleSetting(s, ctx, BLINDING, "want_to_meet", OTHER),
+      toggleSetting(s, ctx, BLINDING, "favorites", OTHER),
+      setNote(s, ctx, BLINDING, OTHER, "rust person"),
+    ]);
+
+    const final: PerEventSettings = JSON.parse(onRelay.content.replace(/^enc:/, ""));    expect(final.want_to_meet).toEqual([OTHER]);
+    expect(final.favorites).toEqual([FRIEND, OTHER]);
+    expect(final.notes[OTHER]).toBe("rust person");
+    expect(final.notes[FRIEND]).toBe(SAVED.notes[FRIEND]);
   });
 });
