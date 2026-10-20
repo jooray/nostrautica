@@ -132,6 +132,17 @@ describe("claimCorrectionRev (audit A-5)", () => {
     expect(cachedCorrectionRev(COORDINATE)).toBe(2);
   });
 
+  it("does not republish a blank self-copy when it could not read the real one", async () => {
+    // Audit DS41-005: a fresh device whose relay read fails has no self-copy at
+    // all. Recording the rev used to publish { media: [], correction_rev } over
+    // the attendee's real profile, media and intro.
+    fetchEventsRelayOnly.mockRejectedValue(new Error("relay unreachable"));
+    const { rev, record } = await claimCorrectionRev(signer, ctx, BLINDING_KEY);
+    await record();
+    expect(publishSigned).not.toHaveBeenCalled();
+    expect(cachedCorrectionRev(COORDINATE)).toBe(rev); // the local floor still holds
+  });
+
   it("starts at 0 for an event that has never been corrected", async () => {
     fetchEventsRelayOnly.mockResolvedValue([await selfCopyEvent({ v: 2, a: COORDINATE, media: [], rev: 0 })]);
     expect((await claimCorrectionRev(signer, ctx, BLINDING_KEY)).rev).toBe(0);

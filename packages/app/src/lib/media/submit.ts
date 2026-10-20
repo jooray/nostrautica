@@ -244,10 +244,18 @@ export async function claimCorrectionRev(
   return {
     rev,
     record: async () => {
+      // Republishing the self-copy REPLACES it, so it may only be rebuilt from a
+      // copy we actually have. `self` is undefined when the relay read failed and
+      // this device holds no copy (a fresh device, a cleared profile, a timeout),
+      // and `{ media: [] }` in its place published a 31602 carrying nothing but
+      // `correction_rev` over the attendee's profile, media and intro (audit
+      // DS41-005). Skipping costs only the cross-device floor; the local
+      // high-water mark above already protects this device's next rev.
+      if (!self) return;
       const attendeePubkey = await signer.getPublicKey();
       const selfD = blindedD(blindingKey, ctx.coordinate, attendeePubkey);
       const key = selfCopyKey(ctx.coordinate);
-      const merged: SelfCopy = { ...(self ?? { media: [] }), correctionRev: rev };
+      const merged: SelfCopy = { ...self, correctionRev: rev };
       const content = {
         v: 2,
         a: ctx.coordinate,
