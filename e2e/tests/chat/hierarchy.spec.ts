@@ -276,11 +276,19 @@ test.describe.serial(
       await expect(olga.getByText("Dana Early").first()).toBeVisible({ timeout: 60_000 });
     });
 
-    test("S5 — a direct join to the community with its own invite code still works", async ({ browser }) => {
+    test("S5 — a direct join to the manual community with its own invite code waits for the organizer", async ({ browser }) => {
       test.setTimeout(240_000);
       const own = await inviteLinks(olga, communityNaddr, 1);
       const rita = await user(browser, "Rita Direct");
+      const ritaShort = (await ownPubkeyHex(rita)).slice(0, 8);
       await joinWithInvite(rita, own[0]);
+      // `approval: "manual"` is enforced (SB-124): a valid code alone does not
+      // admit; only member_of proofs from linked events do (§15.4, S2).
+      const queued = new RegExp(`\\[join\\] ${ritaShort} invite=yes approval=manual → manual queue`);
+      await expect.poll(() => queued.test(coordinatorLog()), { timeout: 90_000 }).toBe(true);
+      await olga.goto(`/#/e/${communityNaddr}/admin`);
+      await expect(olga.getByText("Rita Direct").first()).toBeVisible({ timeout: 60_000 });
+      await olga.getByRole("button", { name: /^approve$/i }).first().click();
       await expectApproved(rita, communityNaddr);
       await olga.goto(`/#/e/${communityNaddr}/attendees`);
       await expect(olga.getByText("Rita Direct").first()).toBeVisible({ timeout: 60_000 });
