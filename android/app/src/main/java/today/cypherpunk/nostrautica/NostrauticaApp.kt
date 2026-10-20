@@ -12,7 +12,7 @@ class NostrauticaApp : Application() {
 
     override fun onCreate() {
         super.onCreate()
-        if (BuildConfig.DEBUG) enableStrictMode()
+        if (BuildConfig.DEBUG) { enableStrictMode(); MainThreadWatchdog.start() }
         container = AppContainer(this)
         container.session.restore()
         // Every other secret (event keys, chat device keys) into memory, off the main
