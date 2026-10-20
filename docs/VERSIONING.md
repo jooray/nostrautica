@@ -13,6 +13,8 @@ single product release.
 | `@nostrautica/app` | `packages/app/package.json` | The PWA changes (UI, client logic, service worker). Also the SW-precache input. |
 | `@nostrautica/protocol` | `packages/protocol/package.json` | The shared protocol **package API** (types/schemas/helpers) changes. |
 | `@nostrautica/coordinator` | `packages/coordinator/package.json` | The coordinator **package API/behavior** changes. |
+| Android `versionName` | `android/app/build.gradle.kts` | Every Android release. Must equal the root `version`: `assembleRelease` fails otherwise. |
+| Android `versionCode` | `android/app/build.gradle.kts` | Every Android release, above the last `android-v*` GitHub release's (Android and Zapstore refuse an equal or lower one). `android/tools/release-check.sh` enforces it. |
 | Wire protocol `v` | `PROTOCOL_VERSION` in `packages/protocol/src/schemas.ts` | The **on-the-wire payload contract** changes. This is deliberately separate: package versions can move without a wire change, and a wire change is a compatibility event for every peer. Currently `2`. |
 | Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the open-time and backup/restore downgrade guards). Bumped at every downgrade-incompatible boundary via a numbered migration (see below). Currently `5`. |
 
