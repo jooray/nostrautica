@@ -149,6 +149,12 @@ class CommunityRulesTest {
         assertEquals(listOf(a, b, c), CommunityRules.sortChildren(listOf(b, c, a), 0))
     }
 
+    // Audit SB-81: titles tie-break like localeCompare, not in raw UTF-16 order.
+    @Test fun titleTiesUseCollationNotCodeUnits() {
+        val apple = kid("apple", 2_000); val banana = kid("Banana", 2_000)
+        assertEquals(listOf(apple, banana), CommunityRules.sortChildren(listOf(banana, apple), 0))
+    }
+
     @Test fun withChildAddsOnceAndRemoves() {
         assertEquals(listOf("x", "y"), CommunityRules.withChild(listOf("x"), "y", true))
         assertEquals(listOf("x", "y"), CommunityRules.withChild(listOf("x", "y"), "y", true))
