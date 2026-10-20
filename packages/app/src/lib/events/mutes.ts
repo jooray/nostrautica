@@ -20,9 +20,10 @@ import {
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { VerifiedEvent } from "nostr-tools/pure";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { fetchEventsAnswered } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import { withMutationLock } from "$lib/nostr/mutation-lock.js";
 
 export type Tag = string[];
 
@@ -117,14 +118,31 @@ export function removeMute(state: MuteListState, pubkey: string): MuteListState 
  * explain itself.
  */
 export async function fetchMuteList(signer: AppSigner): Promise<MuteListState> {
+  return (await readMuteList(signer)).state;
+}
+
+/**
+ * Thrown by `setMuted` when the read came back empty AND no relay answered: on
+ * the wire that is indistinguishable from "no mute list", and merging into it
+ * republished a kind-10000 holding only the one pubkey being muted, over every
+ * mute the user had (the same trap as audit SB-01, on the shared NIP-51 list).
+ */
+export class MuteListUnavailableError extends Error {
+  constructor() {
+    super("Couldn't read your mute list, so nothing was changed. Check your connection and try again.");
+    this.name = "MuteListUnavailableError";
+  }
+}
+
+async function readMuteList(signer: AppSigner): Promise<{ state: MuteListState; known: boolean }> {
   const pubkey = await signer.getPublicKey();
-  const events = await fetchEvents({ kinds: [KIND_MUTE_LIST], authors: [pubkey] });
+  const { events, answered } = await fetchEventsAnswered({ kinds: [KIND_MUTE_LIST], authors: [pubkey] });
   // Pin to the user's own key before the latest-wins pick: `authors` is a request
   // a relay may ignore, and now that an undecryptable list is fatal rather than
   // ignored, a foreign kind-10000 with a high created_at would otherwise wedge
   // mute/unmute permanently. Only the user's own list is self-decryptable anyway.
   const latest = pickLatest(onlyByAuthors(onlyVerified(events), [pubkey]));
-  if (!latest) return { ...EMPTY_MUTE_LIST };
+  if (!latest) return { state: { ...EMPTY_MUTE_LIST }, known: answered };
   let privateTags: Tag[] = [];
   if (latest.content) {
     // Ask the SHAPE before asking the signer. A remote signer is a relay round
@@ -139,7 +157,7 @@ export async function fetchMuteList(signer: AppSigner): Promise<MuteListState> {
     const parsed = JSON.parse(await signer.nip44Decrypt(pubkey, latest.content));
     if (Array.isArray(parsed)) privateTags = parsed.filter((t) => Array.isArray(t)) as Tag[];
   }
-  return { publicTags: (latest.tags as Tag[]) ?? [], privateTags };
+  return { state: { publicTags: (latest.tags as Tag[]) ?? [], privateTags }, known: true };
 }
 
 /** Sign & publish a replacement kind-10000, re-encrypting the private items. */
@@ -168,14 +186,22 @@ export async function saveMuteList(signer: AppSigner, state: MuteListState): Pro
  * Mute or unmute `pubkey`: fetch the current list, merge the change, publish, and
  * return the resulting muted set. Fetch-first so concurrent-device edits and
  * unknown tags survive.
+ *
+ * Serialized per account (audit DS41-007): two mutes tapped in quick succession
+ * both read the same list, and the later publish dropped the earlier mute. And
+ * refused on an unanswered empty read — see {@link MuteListUnavailableError}.
  */
 export async function setMuted(
   signer: AppSigner,
   pubkey: string,
   muted: boolean,
 ): Promise<Set<string>> {
-  const state = await fetchMuteList(signer);
-  const next = muted ? addPrivateMute(state, pubkey) : removeMute(state, pubkey);
-  await saveMuteList(signer, next);
-  return mutedPubkeys(next);
+  const owner = await signer.getPublicKey();
+  return withMutationLock(`rmw:${owner}:${KIND_MUTE_LIST}`, async () => {
+    const { state, known } = await readMuteList(signer);
+    if (!known) throw new MuteListUnavailableError();
+    const next = muted ? addPrivateMute(state, pubkey) : removeMute(state, pubkey);
+    await saveMuteList(signer, next);
+    return mutedPubkeys(next);
+  });
 }
