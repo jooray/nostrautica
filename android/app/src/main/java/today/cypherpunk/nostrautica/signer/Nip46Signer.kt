@@ -135,8 +135,8 @@ class Nip46Signer private constructor(
         return call("nip44_decrypt", listOf(peerPubkey, ciphertext))
     }
 
-    /** Cheap liveness probe after a restore. */
-    suspend fun ping(): Boolean = runCatching { call("ping", emptyList(), RESTORE_TIMEOUT_MS) }.isSuccess
+    /** Who the bunker signs for right now (a bounded get_public_key), for the identity check after a restore. */
+    suspend fun remotePubkey(): String = call("get_public_key", emptyList(), RESTORE_TIMEOUT_MS).trim().lowercase()
 
     fun close() { listener?.cancel(); scope.coroutineContext[Job]?.cancel() }
 

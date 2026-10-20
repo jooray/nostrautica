@@ -10,7 +10,8 @@
     "signin.paste.invalid": "That doesn't look like a key. Paste an nsec1…, ncryptsec1… or bunker:// link.",
     "signin.paste.wrongPassphrase": "Wrong passphrase for this backup.",
     "signin.paste.tooStrong": "This backup's encryption needs more memory than this phone gives an app. Unlock it in another app and paste the nsec instead.",
-    "home.addByLink.body.native": "Invite and event links open in this app when you tap them. You can also paste one here."
+    "home.addByLink.body.native": "Invite and event links open in this app when you tap them. You can also paste one here.",
+    "signin.identityChanged": "Your remote signer now signs for a different account, so you were signed out. Sign in again."
   },
   "sk": {
     "signin.nip55": "Podpisovacia aplikácia v tomto telefóne",
@@ -23,7 +24,8 @@
     "signin.paste.invalid": "Toto nevyzerá ako kľúč. Vložte nsec1…, ncryptsec1… alebo odkaz bunker://.",
     "signin.paste.wrongPassphrase": "Nesprávne heslo k tejto zálohe.",
     "signin.paste.tooStrong": "Šifrovanie tejto zálohy potrebuje viac pamäte, než telefón aplikácii dovolí. Odomknite ju v inej aplikácii a vložte sem nsec.",
-    "home.addByLink.body.native": "Pozvánky a odkazy na podujatia sa po ťuknutí otvoria v tejto aplikácii. Odkaz môžete vložiť aj sem."
+    "home.addByLink.body.native": "Pozvánky a odkazy na podujatia sa po ťuknutí otvoria v tejto aplikácii. Odkaz môžete vložiť aj sem.",
+    "signin.identityChanged": "Váš vzdialený podpisovač teraz podpisuje za iný účet, preto ste boli odhlásení. Prihláste sa znova."
   },
   "cs": {
     "signin.nip55": "Podepisovací aplikace v tomto telefonu",
@@ -36,7 +38,8 @@
     "signin.paste.invalid": "Tohle nevypadá jako klíč. Vložte nsec1…, ncryptsec1… nebo odkaz bunker://.",
     "signin.paste.wrongPassphrase": "Nesprávné heslo k této záloze.",
     "signin.paste.tooStrong": "Šifrování této zálohy potřebuje víc paměti, než telefon aplikaci dovolí. Odemkněte ji v jiné aplikaci a vložte sem nsec.",
-    "home.addByLink.body.native": "Pozvánky a odkazy na akce se po klepnutí otevřou v této aplikaci. Odkaz můžete vložit i sem."
+    "home.addByLink.body.native": "Pozvánky a odkazy na akce se po klepnutí otevřou v této aplikaci. Odkaz můžete vložit i sem.",
+    "signin.identityChanged": "Váš vzdálený podepisovač teď podepisuje za jiný účet, proto jste byli odhlášeni. Přihlaste se znovu."
   },
   "de": {
     "signin.nip55": "Signer-App auf diesem Telefon",
@@ -49,7 +52,8 @@
     "signin.paste.invalid": "Das sieht nicht nach einem Schlüssel aus. Füge einen nsec1…, ncryptsec1… oder bunker://-Link ein.",
     "signin.paste.wrongPassphrase": "Falsche Passphrase für dieses Backup.",
     "signin.paste.tooStrong": "Die Verschlüsselung dieses Backups braucht mehr Speicher, als dieses Telefon einer App gibt. Entsperre es in einer anderen App und füge den nsec ein.",
-    "home.addByLink.body.native": "Einladungs- und Event-Links öffnen sich in dieser App, wenn du sie antippst. Du kannst einen auch hier einfügen."
+    "home.addByLink.body.native": "Einladungs- und Event-Links öffnen sich in dieser App, wenn du sie antippst. Du kannst einen auch hier einfügen.",
+    "signin.identityChanged": "Dein Remote-Signer signiert jetzt für ein anderes Konto, deshalb wurdest du abgemeldet. Bitte melde dich erneut an."
   },
   "es": {
     "signin.nip55": "App firmante en este teléfono",
@@ -62,6 +66,7 @@
     "signin.paste.invalid": "Eso no parece una clave. Pega un nsec1…, ncryptsec1… o un enlace bunker://.",
     "signin.paste.wrongPassphrase": "La frase de contraseña de esta copia no es correcta.",
     "signin.paste.tooStrong": "El cifrado de esta copia necesita más memoria de la que este teléfono da a una app. Desbloquéala en otra app y pega el nsec.",
-    "home.addByLink.body.native": "Los enlaces de invitación y de eventos se abren en esta app al tocarlos. También puedes pegar uno aquí."
+    "home.addByLink.body.native": "Los enlaces de invitación y de eventos se abren en esta app al tocarlos. También puedes pegar uno aquí.",
+    "signin.identityChanged": "Tu firmante remoto ahora firma para otra cuenta, así que se cerró tu sesión. Vuelve a iniciar sesión."
   }
 }

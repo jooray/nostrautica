@@ -13,6 +13,7 @@ import today.cypherpunk.nostrautica.protocol.Nip19
 import today.cypherpunk.nostrautica.protocol.Nip49
 import today.cypherpunk.nostrautica.protocol.NostrSigner
 import today.cypherpunk.nostrautica.protocol.Secp
+import today.cypherpunk.nostrautica.protocol.isHex32
 
 /**
  * The signed-in account (signer/session.svelte.ts). One active account at a time;
@@ -80,6 +81,36 @@ class Session(
         _account.value = Account(stored.pubkey, signer, Method.valueOf(stored.method.uppercase()))
     }
 
+    @Volatile private var verifiedSigner: NostrSigner? = null
+
+    /**
+     * The identity check a NIP-46 restore skips to stay instant (nip46.ts
+     * fromPersisted → Nip46IdentityMismatchError): ask the bunker who it signs for.
+     * A bunker that was re-keyed, restored elsewhere or reassigned would otherwise
+     * keep signing as someone else while the app writes as the stored user. A
+     * different answer signs out (the session is invalid for good); no answer or
+     * an unreadable one keeps the session, since an offline signer is normal.
+     * Once per restored signer. Returns false when it signed the account out.
+     */
+    suspend fun verifyRestoredSigner(): Boolean {
+        val acct = _account.value ?: return true
+        val signer = acct.signer as? Nip46Signer ?: return true
+        if (verifiedSigner === signer) return true
+        val pk = try {
+            signer.remotePubkey()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return true
+        }
+        if (!pk.isHex32()) return true
+        verifiedSigner = signer
+        if (pk == acct.pubkey || _account.value !== acct) return true
+        Log.w(TAG, "the restored NIP-46 signer answers for a different user; signed out")
+        logout()
+        return false
+    }
+
     private fun save(s: Stored) = secure.put(KEY, json.encodeToString(Stored.serializer(), s))
 
     /** A brand-new identity for someone who doesn't use Nostr (invisible onboarding). */
@@ -112,6 +143,7 @@ class Session(
     }
 
     fun adoptNip46(signer: Nip46Signer): Account {
+        verifiedSigner = signer // its user pubkey came from get_public_key a moment ago
         save(Stored("nip46", signer.pubkey, nip46 = signer.session))
         return Account(signer.pubkey, signer, Method.NIP46).also { _account.value = it }
     }
