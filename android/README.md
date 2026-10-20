@@ -76,6 +76,11 @@ app/
 Routes are the PWA's (`ui/nav/Route.kt` ports `routes.ts`), so every web link,
 invite links with `?code=…&lang=…` included, opens the same screen; the app
 claims `https://nostrautica.cypherpunk.today/app` and `nostr:naddr…` links.
+The https links are verified app links: `web/.well-known/assetlinks.json`
+(deployed with the landing page) names `today.cypherpunk.nostrautica` and the
+release key's SHA-256, so Android opens them in the app without a chooser.
+Debug builds are not verified. Changing the signing key means updating that
+file; `AppLinksTest` pins it to the manifest and the key.
 
 ### Data, battery, offline
 

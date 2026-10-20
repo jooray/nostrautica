@@ -51,8 +51,12 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- Event and invite links: https://nostrautica.cypherpunk.today/app/#/e/<naddr>/join?code=… -->
-            <intent-filter android:autoVerify="false">
+            <!-- Event and invite links: https://nostrautica.cypherpunk.today/app/#/e/<naddr>/join?code=…
+                 Verified app links (DS41-066): the site serves /.well-known/assetlinks.json
+                 (web/.well-known/assetlinks.json, deployed with the landing page) naming this
+                 package and the shared release key, so Android opens these links here
+                 without a chooser. Debug builds (.debug, another key) stay unverified. -->
+            <intent-filter android:autoVerify="true">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />

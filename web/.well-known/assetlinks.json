@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.handle_all_urls"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "today.cypherpunk.nostrautica",
+      "sha256_cert_fingerprints": [
+        "79:75:0F:B4:93:49:EC:37:29:BE:5A:3E:82:55:07:A1:5E:47:C6:D9:87:E8:54:AE:91:D5:D5:0A:20:B3:A2:4D"
+      ]
+    }
+  }
+]
