@@ -43,9 +43,12 @@ system protects, what it deliberately leaks, and who must be trusted.
   convenience trade-off (spec §5.2), stated plainly in the UI; the key rides the
   URL fragment (never sent to a server) but email itself is not confidential.
 - **Event CSS is trusted-organizer UI control, not a secret-safe boundary.** It can
-  spoof in-event UI and emit allowed image/network beacons. Some themed event
-  routes currently reveal sensitive values; `font-src 'self'` limits one remote
-  font exfiltration technique but does not make those surfaces safe.
+  spoof in-event UI and emit allowed image/network beacons. It is kept away from
+  secrets by a guard, not by being safe: every surface that shows one (admin
+  invite nsecs/QR, key backup, chat device handoff) removes the event stylesheet
+  synchronously while it is on screen (spec §7.4, NIP §13). A secret-bearing
+  surface that forgets to enter the guard would be exposed to the theme again.
+  `font-src 'self'` separately shuts the remote-font text exfiltration channel.
 - **Third-party talk embeds disclose the viewer to the host.** A talk submitted as
   an external URL renders as a YouTube embed (spec §7, `media/external.ts`), and
   the CSP admits `frame-src https://www.youtube-nocookie.com` for exactly that.
