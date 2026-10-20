@@ -394,13 +394,18 @@ fun shareText(ctx: Context, text: String, subject: String? = null) {
     runCatching { ctx.startActivity(Intent.createChooser(i, null)) }
 }
 
-/** Write to cache/exports/ and hand it to the share sheet through the app's FileProvider. */
-fun shareFile(ctx: Context, name: String, mime: String, write: (File) -> Unit) {
-    val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
-    // Exports can hold live invite codes: keep only the newest file around.
-    dir.listFiles()?.forEach { it.delete() }
-    val f = File(dir, name)
-    write(f)
+/**
+ * Write to cache/exports/ and hand it to the share sheet through the app's FileProvider.
+ * The file is written on Dispatchers.IO: the invite sheet PDF draws a QR code per
+ * invite, and from a button's onClick that ran on the main thread.
+ */
+suspend fun shareFile(ctx: Context, name: String, mime: String, write: (File) -> Unit) {
+    val f = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+        val dir = File(ctx.cacheDir, "exports").apply { mkdirs() }
+        // Exports can hold live invite codes: keep only the newest file around.
+        dir.listFiles()?.forEach { it.delete() }
+        File(dir, name).also(write)
+    }
     val uri = FileProvider.getUriForFile(ctx, ctx.packageName + ".files", f)
     val i = Intent(Intent.ACTION_SEND).setType(mime).putExtra(Intent.EXTRA_STREAM, uri).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
     runCatching { ctx.startActivity(Intent.createChooser(i, name)) }

@@ -141,7 +141,12 @@ class Content(
     }
 
     /** Re-derive everything from the phone (also after an ECK arrives): no network. */
-    suspend fun rebuild(ctx: EventContext, owner: String?, attendees: Boolean = true) = lockFor(ctx.coordinate).withLock {
+    // Every entry point a screen calls switches to Dispatchers.Default: re-deriving the
+    // page and the feeds decrypts members-only parts with the ECK and parses every
+    // stored post, and screens call these from coroutines on the main thread.
+    suspend fun rebuild(ctx: EventContext, owner: String?, attendees: Boolean = true) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { rebuildLocked(ctx, owner, attendees) }
+
+    private suspend fun rebuildLocked(ctx: EventContext, owner: String?, attendees: Boolean) = lockFor(ctx.coordinate).withLock {
         val page = rebuildPage(ctx, owner)
         rebuildEventPosts(ctx, owner)
         rebuildExternalPosts(ctx, owner, page?.sources ?: emptyList())
@@ -153,7 +158,10 @@ class Content(
      * attendee feed in one round, then the curated feeds the page declares,
      * one subscription per distinct relay set. Skipped when fresh.
      */
-    suspend fun refresh(ctx: EventContext, owner: String?, force: Boolean = false, attendees: Boolean = true) {
+    suspend fun refresh(ctx: EventContext, owner: String?, force: Boolean = false, attendees: Boolean = true) =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { refreshOffMain(ctx, owner, force, attendees) }
+
+    private suspend fun refreshOffMain(ctx: EventContext, owner: String?, force: Boolean, attendees: Boolean) {
         val base = "content:posts:${ctx.coordinate}"
         val fk = base + if (attendees) ":a" else ""
         // A fresh fetch that included the attendee feed also covers one that doesn't.
@@ -185,7 +193,10 @@ class Content(
     }
 
     /** One post by `d` (posts.ts fetchPostByD), from the store after a fetch when stale. */
-    suspend fun postByD(ctx: EventContext, owner: String?, d: String, force: Boolean = false): EventPost? {
+    suspend fun postByD(ctx: EventContext, owner: String?, d: String, force: Boolean = false): EventPost? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { postByDOffMain(ctx, owner, d, force) }
+
+    private suspend fun postByDOffMain(ctx: EventContext, owner: String?, d: String, force: Boolean): EventPost? {
         val eid = eid(ctx)
         val sources = cachedPage(owner, ctx.coordinate)?.sources ?: emptyList()
         val authors = (listOf(eid) + sources.map { it.pubkey }).distinct()
@@ -228,7 +239,10 @@ class Content(
      * Fetch (when stale) and decrypt the event's talks. Null when the viewer
      * holds no ECK (the cached set, if any, keeps painting).
      */
-    suspend fun refreshTalks(ctx: EventContext, owner: String, force: Boolean = false): TalksState? {
+    suspend fun refreshTalks(ctx: EventContext, owner: String, force: Boolean = false): TalksState? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { refreshTalksOffMain(ctx, owner, force) }
+
+    private suspend fun refreshTalksOffMain(ctx: EventContext, owner: String, force: Boolean): TalksState? {
         if (ctx.cfg.talks == "off") return TalksState(emptyList(), false)
         val fk = "content:talks:${ctx.coordinate}"
         if (force || !cache.isFresh(fk, TTL_MS)) {

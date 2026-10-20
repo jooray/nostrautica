@@ -86,12 +86,21 @@ class EventKeysStore(private val secure: SecureStore) {
     fun list(owner: String): List<EventKeys> =
         secure.keys("ek|$owner|").mapNotNull { k -> secure.get(k)?.let { runCatching { json.decodeFromString(EventKeys.serializer(), it) }.getOrNull() } }
 
-    suspend fun save(owner: String, keys: EventKeys) = lock.withLock {
+    // Writes are on Dispatchers.IO: each is a Keystore encryption (binder calls into
+    // keystore2 and the TEE), and logout locks every held event's record in a loop,
+    // from screens' coroutines on the main thread. Reads come from SecureStore's memory.
+    suspend fun save(owner: String, keys: EventKeys) =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { saveOffMain(owner, keys) }
+
+    private suspend fun saveOffMain(owner: String, keys: EventKeys) = lock.withLock {
         secure.put(name(owner, keys.coordinate), json.encodeToString(EventKeys.serializer(), keys))
         _changes.value++
     }
 
-    suspend fun delete(owner: String, coordinate: String) = lock.withLock {
+    suspend fun delete(owner: String, coordinate: String) =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { deleteOffMain(owner, coordinate) }
+
+    private suspend fun deleteOffMain(owner: String, coordinate: String) = lock.withLock {
         secure.put(name(owner, coordinate), null)
         _changes.value++
     }
@@ -132,7 +141,10 @@ class EventKeysStore(private val secure: SecureStore) {
     }
 
     /** Self-encrypt every record with the account's signer and drop the plaintext. */
-    suspend fun lockForLogout(owner: String, signer: NostrSigner) {
+    suspend fun lockForLogout(owner: String, signer: NostrSigner) =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { lockForLogoutOffMain(owner, signer) }
+
+    private suspend fun lockForLogoutOffMain(owner: String, signer: NostrSigner) {
         for (rec in list(owner)) {
             runCatching {
                 var toLock = rec
@@ -148,7 +160,10 @@ class EventKeysStore(private val secure: SecureStore) {
     }
 
     /** Restore what [lockForLogout] locked. Returns false if some record stayed locked. */
-    suspend fun unlockForLogin(owner: String, signer: NostrSigner): Boolean {
+    suspend fun unlockForLogin(owner: String, signer: NostrSigner): Boolean =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { unlockForLoginOffMain(owner, signer) }
+
+    private suspend fun unlockForLoginOffMain(owner: String, signer: NostrSigner): Boolean {
         var complete = true
         for (k in secure.keys("ekl|$owner|")) {
             val coordinate = k.removePrefix("ekl|$owner|")

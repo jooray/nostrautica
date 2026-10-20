@@ -1,7 +1,10 @@
 package today.cypherpunk.nostrautica.data
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import today.cypherpunk.nostrautica.data.db.AppDatabase
@@ -20,27 +23,32 @@ class Cache(db: AppDatabase) {
     private val dao = db.kv()
     val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
 
+    // Decoding runs on Dispatchers.Default: screens read and observe from the main
+    // thread, and a 300-person roster or directory is a large JSON document.
     suspend fun <T> get(scope: String, key: String, s: KSerializer<T>): T? =
-        dao.get(scope, key)?.let { runCatching { json.decodeFromString(s, it.data) }.getOrNull() }
+        dao.get(scope, key)?.let { withContext(Dispatchers.Default) { runCatching { json.decodeFromString(s, it.data) }.getOrNull() } }
 
     suspend fun getRaw(scope: String, key: String): KvRow? = dao.get(scope, key)
 
     fun <T> observe(scope: String, key: String, s: KSerializer<T>): Flow<T?> =
-        dao.observe(scope, key).map { row -> row?.let { runCatching { json.decodeFromString(s, it.data) }.getOrNull() } }
+        dao.observe(scope, key).map { row -> row?.let { runCatching { json.decodeFromString(s, it.data) }.getOrNull() } }.flowOn(Dispatchers.Default)
 
     fun <T> observePrefix(scope: String, prefix: String, s: KSerializer<T>): Flow<Map<String, T>> =
         dao.observePrefix(scope, prefix).map { rows ->
             rows.mapNotNull { r -> runCatching { json.decodeFromString(s, r.data) }.getOrNull()?.let { r.key to it } }.toMap()
-        }
+        }.flowOn(Dispatchers.Default)
 
     suspend fun <T> prefix(scope: String, prefix: String, s: KSerializer<T>): Map<String, T> =
-        dao.withPrefix(scope, prefix).mapNotNull { r -> runCatching { json.decodeFromString(s, r.data) }.getOrNull()?.let { r.key to it } }.toMap()
+        dao.withPrefix(scope, prefix).let { rows ->
+            withContext(Dispatchers.Default) { rows.mapNotNull { r -> runCatching { json.decodeFromString(s, r.data) }.getOrNull()?.let { r.key to it } }.toMap() }
+        }
 
     /** Store unless something newer (by [at]) is already there. Returns whether it was written. */
     suspend fun <T> put(scope: String, key: String, s: KSerializer<T>, value: T, at: Long = System.currentTimeMillis() / 1000): Boolean {
         val current = dao.get(scope, key)
         if (current != null && current.at > at) return false
-        dao.put(KvRow(scope, key, at, System.currentTimeMillis(), json.encodeToString(s, value)))
+        val data = withContext(Dispatchers.Default) { json.encodeToString(s, value) }
+        dao.put(KvRow(scope, key, at, System.currentTimeMillis(), data))
         return true
     }
 
