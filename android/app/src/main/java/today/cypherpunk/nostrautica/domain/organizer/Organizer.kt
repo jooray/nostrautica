@@ -434,7 +434,8 @@ class Organizer(
 
     // ── Space hierarchy (events/hierarchy.ts, §15) ──────────────────────────
 
-    private fun cfgOf(ctx: EventContext, cfg: EventConfig) = ctx.copy(config = SerializableConfig(cfg.eidPubkey, OrganizerEvents.configTags(cfg)))
+    private fun cfgOf(ctx: EventContext, cfg: EventConfig) =
+        ctx.copy(config = SerializableConfig(cfg.eidPubkey, OrganizerEvents.configTags(cfg.forSpace(Coordinate.parse(ctx.coordinate)))))
 
     /**
      * Republish a space's own 31600 with [mutate] applied to the NEWEST config. The read is
@@ -445,7 +446,8 @@ class Organizer(
         val keys = keysFor(coordinate)
         if (keys == null || keys.role != "organizer" || keys.eidNsecHex == null) throw NotOrganizer()
         val current = contexts.fetchConfig(coordinate, relays) ?: throw IllegalStateException("Event config (31600) not found")
-        val next = mutate(current)
+        // forSpace: the a tag names the space's own kind (SB-09), repairing a community saved before the fix.
+        val next = mutate(current).forSpace(Coordinate.parse(coordinate))
         if (next.children == current.children && next.parent == current.parent) return null
         val publishRelays = (OrganizerEvents.unionRelays(relays, current.relays) + Relays.DEFAULT).distinct()
         publishMonotonic(eidSk(keys), Kinds.EVENT_CONFIG, next.d, publishRelays, "config") { at ->
@@ -862,7 +864,8 @@ class Organizer(
         // The space hierarchy (§15) is edited from other screens and devices: a settings change built
         // on a cached context must not roll back a link made since. Carry the newest parent/children.
         val fresh = runCatching { contexts.fetchConfig(ctx.coordinate, ctx.cfg.relays) }.getOrNull()
-        val cfg = if (fresh != null) base.copy(parent = fresh.parent, children = fresh.children) else base
+        val cfg = (if (fresh != null) base.copy(parent = fresh.parent, children = fresh.children) else base)
+            .forSpace(Coordinate.parse(ctx.coordinate))
         val tags = OrganizerEvents.configTags(cfg)
         val all = (relays + Relays.DEFAULT).distinct()
         val (_, ok) = publishMonotonic(eidSk, Kinds.EVENT_CONFIG, cfg.d, all, "config") { at -> UnsignedEvent(cfg.eidPubkey, at, Kinds.EVENT_CONFIG, tags, "") }

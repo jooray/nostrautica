@@ -138,6 +138,7 @@ object OrganizerEvents {
             matching = input.matching, matchVisibility = input.matchVisibility, approval = input.approval,
             eck = 1, nostrContext = input.nostrContext, lang = input.lang, talks = input.talks, chat = input.chat,
             parent = input.parent?.takeIf { !input.community },
+            spaceKind = kind,
         )
         val configEvent = UnsignedEvent(eidPub, now, Kinds.EVENT_CONFIG, configTags(config), "").signWith(eidSk)
         val eckV = EckVersion(1, Bytes.toBase64(eck))
@@ -149,9 +150,9 @@ object OrganizerEvents {
     }
 
     /**
-     * The 31600 tags. Matches the PWA's buildEventConfig, which always names the
-     * `a` coordinate with kind 31923 (also for a community): readers key the config
-     * by its `d` + author, and diverging here would make the two apps' configs differ.
+     * The 31600 tags, as the PWA's buildEventConfig writes them. The `a` coordinate
+     * carries the config's spaceKind, so a community names its own 31612 (audit SB-09);
+     * callers set it at create, or with forSpace before a republish.
      */
     fun configTags(config: EventConfig): List<List<String>> = config.toTags()
 
