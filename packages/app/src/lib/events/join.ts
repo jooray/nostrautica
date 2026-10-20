@@ -19,6 +19,7 @@ import {
   MAX_SUBMISSION_MEDIA,
   MAX_MESSAGE,
   MAX_NAME,
+  type Approval,
   type AttendeeProfile,
   type MediaDescriptor,
 } from "@nostrautica/protocol";
@@ -88,6 +89,20 @@ export type JoinLanding = "approved" | "waiting" | "form";
  * away without submitting, the pending request they really do have outstanding
  * is still the truth for the next visit.
  */
+/**
+ * The join form must not send: the space admits by invite only (`approval:
+ * "invite"`) and there is no code in hand (manual e2e BUG-3).
+ *
+ * Its coordinator REJECTS such a join (NIP §6.2), it does not queue it, yet the
+ * page sent it anyway, said the organizer would review it, and polled for an
+ * approval that was never coming. The join form never carries a `member_of`
+ * proof (that path is `joinCommunityViaChild`), so without a code there is no
+ * entitlement to send. Other modes queue a code-less join, so they still send.
+ */
+export function joinNeedsInvite(approval: Approval | undefined, hasInvite: boolean): boolean {
+  return approval === "invite" && !hasInvite;
+}
+
 export function joinLanding(state: {
   approved: boolean;
   joinSent: boolean;

@@ -576,6 +576,9 @@ export const messages = {
       "Waiting for auto-approval… If it doesn't arrive, the organizer will review your request manually.",
     "join.waiting.manual":
       "The organizer will review your request. You'll get access as soon as they approve.",
+    "join.waiting.inviteOnly": "Joining here needs an invite, and your request had none, so it was not approved automatically. The organizer can still let you in by hand. To get in right away, open the invite link they sent you.",
+    "join.inviteOnly.title": "Invite only",
+    "join.inviteOnly.body": "Only people with an invite link can join here. Open the invite link the organizer sent you, or ask them for one.",
     "join.backToEvent": "Back to event",
     "join.myEvents": "My events",
     "join.notThrough": "Didn't go through?",
@@ -1145,6 +1148,7 @@ export const messages = {
     "admin.requests.approving": "Approving…",
     "admin.requests.approveAll": "Approve all ({n})",
     "admin.requests.invite": "invite",
+    "admin.requests.noInvite": "no invite, not auto-approved",
     "admin.requests.withdrew": "Asked to leave after sending this request. Approving now would re-admit them.",
     "admin.requests.withdrew.purge": "Asked to leave and to have their data deleted, after sending this request. Approving now would re-admit them.",
     "admin.people.withdrew":
@@ -2332,6 +2336,9 @@ export const messages = {
       "Čaká sa na automatické schválenie… Ak nepríde, organizátor posúdi vašu žiadosť manuálne.",
     "join.waiting.manual":
       "Organizátor posúdi vašu žiadosť. Prístup získate hneď po schválení.",
+    "join.waiting.inviteOnly": "Na pripojenie treba pozvánku a vaša žiadosť ju nemala, preto nebola schválená automaticky. Organizátor vás ešte môže prijať ručne. Ak sa chcete pripojiť hneď, otvorte pozývací odkaz, ktorý vám poslal.",
+    "join.inviteOnly.title": "Iba na pozvánku",
+    "join.inviteOnly.body": "Pripojiť sa tu môžu len ľudia s pozývacím odkazom. Otvorte odkaz, ktorý vám poslal organizátor, alebo ho oň požiadajte.",
     "join.backToEvent": "Späť na podujatie",
     "join.myEvents": "Moje podujatia",
     "join.notThrough": "Neprešlo to?",
@@ -2898,6 +2905,7 @@ export const messages = {
     "admin.requests.approving": "Schvaľuje sa…",
     "admin.requests.approveAll": "Schváliť všetky ({n})",
     "admin.requests.invite": "pozvánka",
+    "admin.requests.noInvite": "bez pozvánky, neschválené automaticky",
     "admin.requests.withdrew": "Táto osoba po odoslaní žiadosti požiadala o odchod. Schválením ju teraz znova prijmete.",
     "admin.requests.withdrew.purge": "Táto osoba po odoslaní žiadosti požiadala o odchod a o vymazanie svojich údajov. Schválením ju teraz znova prijmete.",
     "admin.people.withdrew":
@@ -4077,6 +4085,9 @@ export const messages = {
       "Čeká se na automatické schválení… Pokud nepřijde, organizátor posoudí vaši žádost ručně.",
     "join.waiting.manual":
       "Organizátor posoudí vaši žádost. Přístup získáte hned po schválení.",
+    "join.waiting.inviteOnly": "K připojení je potřeba pozvánka a vaše žádost žádnou neměla, proto nebyla schválena automaticky. Organizátor vás ještě může přijmout ručně. Pokud se chcete připojit hned, otevřete odkaz na pozvánku, který vám poslal.",
+    "join.inviteOnly.title": "Jen na pozvánku",
+    "join.inviteOnly.body": "Připojit se tu mohou jen lidé s odkazem na pozvánku. Otevřete odkaz, který vám poslal organizátor, nebo ho o něj požádejte.",
     "join.backToEvent": "Zpět na akci",
     "join.myEvents": "Moje akce",
     "join.notThrough": "Neprošlo to?",
@@ -4641,6 +4652,7 @@ export const messages = {
     "admin.requests.approving": "Schvalování…",
     "admin.requests.approveAll": "Schválit všechny ({n})",
     "admin.requests.invite": "pozvánka",
+    "admin.requests.noInvite": "bez pozvánky, neschváleno automaticky",
     "admin.requests.withdrew": "Tato osoba po odeslání žádosti požádala o odchod. Schválením ji nyní znovu přijmete.",
     "admin.requests.withdrew.purge": "Tato osoba po odeslání žádosti požádala o odchod a o smazání svých údajů. Schválením ji nyní znovu přijmete.",
     "admin.people.withdrew":
@@ -5839,6 +5851,9 @@ export const messages = {
     "join.requestSent": "Anfrage gesendet",
     "join.waiting.invite": "Warten auf automatische Genehmigung… Falls sie nicht kommt, prüft der Veranstalter deine Anfrage manuell.",
     "join.waiting.manual": "Der Veranstalter prüft deine Anfrage. Du bekommst Zugang, sobald sie genehmigt wird.",
+    "join.waiting.inviteOnly": "Für den Beitritt braucht es eine Einladung, und deine Anfrage hatte keine. Deshalb wurde sie nicht automatisch genehmigt. Der Veranstalter kann dich trotzdem von Hand aufnehmen. Um sofort beizutreten, öffne den Einladungslink, den er dir geschickt hat.",
+    "join.inviteOnly.title": "Nur mit Einladung",
+    "join.inviteOnly.body": "Hier kann nur beitreten, wer einen Einladungslink hat. Öffne den Link, den dir der Veranstalter geschickt hat, oder bitte ihn um einen.",
     "join.backToEvent": "Zurück zum Event",
     "join.myEvents": "Meine Events",
     "join.notThrough": "Nicht angekommen?",
@@ -6381,6 +6396,7 @@ export const messages = {
     "admin.requests.approving": "Genehmigt…",
     "admin.requests.approveAll": "Alle genehmigen ({n})",
     "admin.requests.invite": "Einladung",
+    "admin.requests.noInvite": "ohne Einladung, nicht automatisch genehmigt",
     "admin.requests.withdrew": "Hat nach dem Senden dieser Anfrage um Austritt gebeten. Eine Genehmigung würde die Person wieder aufnehmen.",
     "admin.requests.withdrew.purge": "Hat nach dem Senden dieser Anfrage um Austritt und um Löschung der eigenen Daten gebeten. Eine Genehmigung würde die Person wieder aufnehmen.",
     "admin.people.withdrew":
@@ -7586,6 +7602,9 @@ export const messages = {
       "Esperando la aprobación automática… Si no llega, el organizador revisará tu solicitud manualmente.",
     "join.waiting.manual":
       "El organizador revisará tu solicitud. Tendrás acceso en cuanto la aprueben.",
+    "join.waiting.inviteOnly": "Para unirte hace falta una invitación y tu solicitud no la tenía, así que no se aprobó automáticamente. El organizador aún puede admitirte a mano. Para entrar ahora mismo, abre el enlace de invitación que te envió.",
+    "join.inviteOnly.title": "Solo con invitación",
+    "join.inviteOnly.body": "Solo pueden unirse aquí quienes tengan un enlace de invitación. Abre el enlace que te envió el organizador o pídele uno.",
     "join.backToEvent": "Volver al evento",
     "join.myEvents": "Mis eventos",
     "join.notThrough": "¿No llegó?",
@@ -8157,6 +8176,7 @@ export const messages = {
     "admin.requests.approving": "Aprobando…",
     "admin.requests.approveAll": "Aprobar todas ({n})",
     "admin.requests.invite": "invitación",
+    "admin.requests.noInvite": "sin invitación, no aprobada automáticamente",
     "admin.requests.withdrew": "Pidió salir después de enviar esta solicitud. Aprobarla ahora significaría volver a admitir a esa persona.",
     "admin.requests.withdrew.purge": "Pidió salir y que se eliminen sus datos, después de enviar esta solicitud. Aprobarla ahora significaría volver a admitir a esa persona.",
     "admin.people.withdrew":

@@ -43,7 +43,7 @@ vi.mock("$lib/media/submit.js", async (importOriginal) => ({
   cacheSelfCopy: (...args: unknown[]) => cacheSelfCopy(...(args as [])),
 }));
 
-import { sendJoinRequest, joinPollGapMs, joinLanding, POLL_RELAX_AFTER_MS } from "./join.js";
+import { sendJoinRequest, joinPollGapMs, joinLanding, joinNeedsInvite, POLL_RELAX_AFTER_MS } from "./join.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
@@ -172,6 +172,19 @@ describe("joinPollGapMs", () => {
  * Observed in production 2026-09-17: one join, `invite=no → manual queue`, and
  * then nothing, because the second attempt produced no network traffic at all.
  */
+// Manual e2e BUG-3: a code-less join to an `invite` space is rejected by the
+// coordinator (NIP §6.2), so the form must say so instead of sending it and
+// promising a review.
+describe("joinNeedsInvite", () => {
+  it("blocks a code-less join only when the space is invite-only", () => {
+    expect(joinNeedsInvite("invite", false)).toBe(true);
+    expect(joinNeedsInvite("invite", true)).toBe(false);
+    for (const mode of ["manual", "manual+invite", "open", undefined] as const) {
+      expect(joinNeedsInvite(mode, false)).toBe(false);
+    }
+  });
+});
+
 describe("joinLanding", () => {
   it("shows the form to somebody who has done nothing yet", () => {
     expect(joinLanding({ approved: false, joinSent: false, hasInvite: false })).toBe("form");
