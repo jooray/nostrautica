@@ -435,7 +435,7 @@ export interface Transport {
   fetchAll?(
     filter: any,
     relays?: string[],
-    opts?: { pageSize?: number; overlapSec?: number; maxTotal?: number; timeoutMs?: number },
+    opts?: { pageSize?: number; overlapSec?: number; maxTotal?: number; maxPages?: number; timeoutMs?: number },
   ): Promise<NostrEvent[]>;
   /** Prove a relay set is reachable (≥1 relay connects/EOSEs) before a relay
    *  handover promotes it (audit C9). Optional: a transport without it degrades to

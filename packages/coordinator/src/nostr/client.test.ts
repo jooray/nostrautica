@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { NostrClient, MAX_FETCH_EVENTS, type NostrEvent, type Filter } from "./client.js";
+import { NostrClient, MAX_FETCH_EVENTS, MAX_FETCH_ALL_EVENTS, type NostrEvent, type Filter } from "./client.js";
 
 /**
  * Paginated full-history fetch (audit R4). The one-shot fetch caps at
@@ -66,12 +66,42 @@ describe("NostrClient.fetchAll pagination (audit R4)", () => {
     expect(client.fetchCalls).toBeGreaterThan(1);
   });
 
-  it("stops after a single page when history fits (short page = complete)", async () => {
+  it("stops once a short page brings nothing new (one confirming round trip)", async () => {
     const events = makeEvents(10, 1_000_000);
     const client = new StubClient(events);
     const all = await client.fetchAll({ kinds: [1059] }, undefined, { pageSize: 100 });
     expect(all).toHaveLength(10);
-    expect(client.fetchCalls).toBe(1); // short first page → done
+    expect(client.fetchCalls).toBe(2); // short page, then one below it that adds nothing
+  });
+
+  /**
+   * Audit DS41-026. `fetch()` settles on EOSE or on its timeout alike (and
+   * nostr-tools fires a synthetic EOSE after 4.4 s), so a slow relay's partial
+   * page looked like the end of history and everything older was never fetched.
+   */
+  it("keeps walking past a timeout-truncated short page", async () => {
+    const events = makeEvents(30, 1_000_000);
+    class SlowClient extends StubClient {
+      override fetch(filter: Filter, relays?: string[], t?: number, max?: number): Promise<NostrEvent[]> {
+        // The relay gets through only 4 events before the timeout, every time.
+        return super.fetch(filter, relays, t, max).then((page) => page.slice(0, 4));
+      }
+    }
+    const client = new SlowClient(events);
+    const all = await client.fetchAll({ kinds: [1059] }, undefined, { pageSize: 100 });
+    expect(all).toHaveLength(30);
+  });
+
+  /** Audit SB-04 / SB-132 / DS41-027: the walk held every event it ever saw. */
+  it("caps a flood by default instead of holding the whole history in memory", async () => {
+    const client = new StubClient(makeEvents(3000, 1_000_000));
+    const all = await client.fetchAll({ kinds: [1059] }, undefined, { pageSize: 100, maxTotal: 1000 });
+    expect(all).toHaveLength(1000);
+    // The default is finite (it used to be Infinity) and bounds pages too.
+    const pagesOnly = new StubClient(makeEvents(3000, 1_000_000));
+    await pagesOnly.fetchAll({ kinds: [1059] }, undefined, { pageSize: 10, maxPages: 5 });
+    expect(pagesOnly.fetchCalls).toBe(5);
+    expect(MAX_FETCH_ALL_EVENTS).toBeLessThan(Number.POSITIVE_INFINITY);
   });
 
   /**
