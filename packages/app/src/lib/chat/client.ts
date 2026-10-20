@@ -991,6 +991,11 @@ export class MarmotChat {
       op: "revoke",
       chatPubkey: this.identity.pubkey,
     });
+    // The coordinator orders a device's add/revoke by created_at and lets a tie
+    // through (DS41-049), because whole seconds are all a rumor carries. Make sure
+    // the add below is STRICTLY newer than this revoke, so it wins even when a relay
+    // (or the coordinator's boot replay) hands them over add-first.
+    await waitForNextSecond(Math.floor(Date.now() / 1000));
     // 2. Rotate the key package (same `d` slot, so the relay replaces in place —
     //    new event id, new init key, nothing the coordinator has consumed) and
     //    re-attest: `ensurePublished` re-sends op:"add" with a fresh proof of
@@ -1113,5 +1118,12 @@ function groupHasMember(group: MarmotGroupLike, pubkey: string): boolean {
     return getPubkeyLeafNodes(group.state, pubkey).length > 0;
   } catch {
     return false;
+  }
+}
+
+/** Resolve once the wall clock's whole second is past `sec` (at most ~1 s). */
+async function waitForNextSecond(sec: number): Promise<void> {
+  while (Math.floor(Date.now() / 1000) <= sec) {
+    await new Promise((r) => setTimeout(r, 1000 - (Date.now() % 1000) + 5));
   }
 }

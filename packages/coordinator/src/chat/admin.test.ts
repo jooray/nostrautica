@@ -1348,6 +1348,49 @@ describe("one member's throwing sync does not abort the backfill (DS41-053)", ()
   });
 });
 
+describe("21607 add/revoke for one device are ordered by created_at (DS41-049)", () => {
+  // Rejoin = revoke, then add. Delivered (or replayed at boot) add-first, the
+  // revoke used to remove the leaf the add had just created.
+  const addAt = (t: number) => {
+    const proof = makeChatDeviceProof(DEVICE_SK, COORD, ACCOUNT, t);
+    return { v: 2 as const, a: COORD, op: "add" as const, chat_pubkey: CHATKEY, label: "Test device", proof };
+  };
+  const setupAdmin = () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    // A wall clock well past every created_at used here, so no value is clamped.
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, { now: () => 10_000_000 });
+    return { store, mls, admin };
+  };
+
+  it("an OLDER revoke processed after the add is ignored — the rejoin sticks", async () => {
+    const { store, mls, admin } = setupAdmin();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    expect(await admin.handleAttestation(COORD, ACCOUNT, addAt(2000), 2000)).toBe(true);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), 1999)).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("active");
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+  });
+
+  it("an OLDER add processed after a revoke does not re-activate the device", async () => {
+    const { store, mls, admin } = setupAdmin();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(COORD, ACCOUNT, addAt(1000), 1000);
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), 3000)).toBe(true);
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, addAt(2000), 2000)).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
+    // …while a NEWER add (a later rejoin) is accepted as before.
+    expect(await admin.handleAttestation(COORD, ACCOUNT, addAt(3001), 3001)).toBe(true);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("active");
+  });
+});
+
 describe("a failed attestation sync is retried, not just logged", () => {
   it("queues durable work when the inline sync throws", async () => {
     const logs: string[] = [];

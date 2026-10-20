@@ -20,6 +20,7 @@ import { keyPackageProfile, type ChatMls } from "./mls.js";
 import { normalizeAvatarUrl } from "./avatar.js";
 import {
   verifyChatDeviceProof,
+  rumorEffectiveCreatedAt,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   type ChatKeyAttestationContent,
   type CoordinatorStatusContent,
@@ -980,6 +981,36 @@ export class MarmotAdmin {
 
   // ── attestations (21607) ───────────────────────────────────────────────────
   /**
+   * Per-device ordering of 21607 add/revoke (audit DS41-049).
+   *
+   * Rejoin sends a `revoke` and then an `add` for the same chat key as two
+   * independent gift wraps, and nothing delivers them in order: relays page
+   * newest-first, and the boot backfill replays whatever it fetched. Processed
+   * add-then-revoke, the revoke removed the leaf the add had just created, and
+   * the device was left revoked while its user was told the rejoin worked.
+   *
+   * So each op records the newest `created_at` it was accepted at, under its own
+   * watermark subject per chat key, and an op STRICTLY older than the opposite
+   * op's watermark is refused. Ties are let through (today's behaviour): seconds
+   * are coarse, and the app waits for the next second between the two sends so a
+   * rejoin never produces one. The value is clamped like every other ordering
+   * timestamp, so a device with a clock far in the future cannot make its key
+   * unrevocable.
+   */
+  private attestationOrderKey(createdAt: number): number {
+    return rumorEffectiveCreatedAt(createdAt, Math.floor(this.now() / 1000));
+  }
+
+  private attestationWatermark(coordinate: string, op: "add" | "revoke", chatPubkey: string): number | undefined {
+    return this.store.getCommandWatermark(coordinate, `chatkey-${op}:${chatPubkey}`)?.created_at;
+  }
+
+  private recordAttestation(coordinate: string, op: "add" | "revoke", chatPubkey: string, at: number): void {
+    const prev = this.attestationWatermark(coordinate, op, chatPubkey);
+    if (prev === undefined || at > prev) this.store.setCommandWatermark(coordinate, `chatkey-${op}:${chatPubkey}`, at, "");
+  }
+
+  /**
    * Record an authenticated chat-key attestation. `accountPubkey` is the SEAL
    * AUTHOR the coordinator already bound via `unwrapRumor`, so the binding is
    * authenticated by the account key itself (§3.3). The account must be an enrolled
@@ -1031,6 +1062,14 @@ export class MarmotAdmin {
         this.notifyRefusal(coordinate, accountPubkey, "chat_proof_invalid");
         return false;
       }
+      const orderAt = this.attestationOrderKey(createdAt);
+      const revokedAt = this.attestationWatermark(coordinate, "revoke", content.chat_pubkey);
+      if (revokedAt !== undefined && orderAt < revokedAt) {
+        this.log(
+          `[chat] IGNORED 21607 add from ${accountPubkey.slice(0, 8)} for ${content.chat_pubkey.slice(0, 8)}: older than the revoke already applied (${orderAt} < ${revokedAt})`,
+        );
+        return false;
+      }
       // Per-account device cap (NIP §10.1): at most MAX_CHAT_KEYS_PER_ACCOUNT active
       // keys per account per event. A refresh of an already-active key doesn't count
       // against the cap; activating a NEW (or previously-revoked) key beyond it does.
@@ -1061,6 +1100,7 @@ export class MarmotAdmin {
         this.notifyRefusal(coordinate, accountPubkey, "chat_key_bound_to_other_account");
         return false;
       }
+      this.recordAttestation(coordinate, "add", content.chat_pubkey, orderAt);
       this.log(`[chat] bound chat key ${content.chat_pubkey.slice(0, 8)} → ${accountPubkey.slice(0, 8)}`);
       // Republish: this add is what puts the device (and its label) in the roster's
       // `chat_keys`, which is the only thing the device-management UI can read.
@@ -1125,6 +1165,15 @@ export class MarmotAdmin {
       );
       return false;
     }
+    const orderAt = this.attestationOrderKey(createdAt);
+    const addedAt = this.attestationWatermark(coordinate, "add", content.chat_pubkey);
+    if (addedAt !== undefined && orderAt < addedAt) {
+      this.log(
+        `[chat] IGNORED 21607 revoke from ${accountPubkey.slice(0, 8)} for ${content.chat_pubkey.slice(0, 8)}: older than the add already applied (${orderAt} < ${addedAt})`,
+      );
+      return false;
+    }
+    this.recordAttestation(coordinate, "revoke", content.chat_pubkey, orderAt);
     this.store.setChatKeyStatus(coordinate, content.chat_pubkey, "revoked", this.now());
     // Republish BEFORE the MLS remove: dropping the leaf can take a relay round
     // trip, and the roster is what the user is staring at. Without this the
