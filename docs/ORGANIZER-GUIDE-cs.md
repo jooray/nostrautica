@@ -70,6 +70,10 @@ Zvolte **Vytvořit akci** a vyplňte formulář:
   - *Pozvánkové kódy + ruční*: pozvánkové odkazy schvalují automaticky (je-li
     připojen koordinátor); ostatní čekají na vás. **Doporučeno pro většinu
     akcí.**
+  - *Otevřené: připojí se každý, kdo má odkaz* (jen pro komunity, kde je
+    výchozí): je-li připojen koordinátor, každý, kdo má odkaz, je schválen
+    automaticky, s kódem i bez něj. Koho jste odebrali, se takto zpět
+    nedostane; jeho nová žádost čeká na vás.
 - **Jazyk akce**: viz níže.
 - **AI párování**: nastavte na *Zapnuto*, pokud plánujete připojit koordinátora
   (§5). Koordinátora můžete připojit i později; toto nastavení teď nechte

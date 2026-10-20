@@ -722,8 +722,11 @@ interface EventState {
   /**
    * The 31600 `approval` policy (PROTOCOL-NIP.md §6.2), enforced on every join
    * (audit SB-124): `manual` queues everything, `invite` admits only a valid
-   * entitlement and rejects the rest, `manual+invite` / `open` auto-approve an
-   * entitlement and queue the rest. See {@link Coordinator.handleJoinLocked}.
+   * entitlement and rejects the rest, `manual+invite` auto-approves an
+   * entitlement and queues the rest, and `open` auto-approves every well-formed
+   * join, code or no code, except a member the organizer revoked: their re-join
+   * is queued, because holding the link must not undo a removal. The roster cap
+   * applies to all of them. See {@link Coordinator.handleJoinLocked}.
    */
   approval: Approval;
   /** Prerecorded-talks journey mode (spec F2). "off" ⇒ talk submissions are ignored. */
@@ -2891,6 +2894,24 @@ export class Coordinator {
     // organizer's (audit B-8): an invite code cannot conjure space that the 31604
     // payload does not have. Refused entrants stay pending, which is the same place
     // a manual-approval event would have put them.
+    // `approval: "open"` (owner decision, 2026-10-20): holding the link is the
+    // entitlement. A join that no code or membership proof admitted is approved
+    // anyway, with one exception: a member the organizer REVOKED. The early
+    // enrollment upsert above has already reset their row to `pending`, so the
+    // pre-join `existing` row is the record of that removal, and it stays
+    // authoritative: they wait in the queue for the organizer instead of walking
+    // back in by pressing Join. (A self-withdrawal with `delete_data` erased the
+    // row, so that person re-joins like anyone new. That was their own choice,
+    // not the organizer's.) A code they presented is still verified and claimed
+    // above, and still admits them like in `manual+invite`.
+    if (!decision.grant && state.approval === "open") {
+      if (existing?.status === "revoked") {
+        decision = { grant: false, reason: `approval is "open" but they were revoked; ${decision.reason}` };
+      } else {
+        decision = { grant: true, reason: 'approval is "open"' };
+      }
+    }
+
     if (decision.grant && !(await this.admitToRoster(state, attendeePubkey))) {
       decision = { grant: false, reason: "event roster is full" };
     }

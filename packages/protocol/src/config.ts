@@ -35,11 +35,12 @@ export const UNLIMITED_SEC = 0;
  * `"open"` (2026-09-13) is for communities: the trust already exists wherever
  * the invite link was posted — a group chat whose members know each other — and
  * asking an admin to click eighty times to re-confirm it is work they will not
- * do. A coordinator decides it exactly like `"manual+invite"` (PROTOCOL-NIP
- * §6.2): a join carrying a valid entitlement (an invite code in the link, or a
- * `member_of` proof) auto-approves, and a code-less join waits in the
- * organizer's queue. The plain event link carries no code, so for the
- * link-holders-are-in behaviour share a link minted with a (reusable) invite.
+ * do. So anyone holding the link is in (PROTOCOL-NIP §6.2): a coordinator
+ * auto-approves every well-formed join, with or without an invite code, and
+ * the organizer does nothing. Two limits stay: the roster cap (a join refused
+ * for space waits in the queue), and a member the organizer revoked, whose
+ * re-join is queued rather than readmitted. A code in the link is still
+ * verified and claimed, but none is needed.
  *
  * Adding a value here is safe in both directions because `parseConfigTags`
  * falls back to `"manual"` on anything it does not recognise rather than

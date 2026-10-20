@@ -321,7 +321,9 @@
     const startedAt = Date.now();
     try {
       const coordinate = ctx.coordinate;
-      const fast = code ? 10 : 0; // 1.5s cadence first, then relax to 5s
+      // 1.5s cadence first, then relax to 5s. An "open" space auto-approves a
+      // code-less join just as fast as a code, so it gets the fast checks too.
+      const fast = code || ctx.config.approval === "open" ? 10 : 0;
       for (let i = 0; !approved && !destroyed; i++) {
         const gapMs = joinPollGapMs(i, fast, Date.now() - startedAt);
         pollIntervalSec = Math.round(gapMs / 1000);
