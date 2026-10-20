@@ -138,6 +138,42 @@ describe("Store at-rest key encryption (F1)", () => {
     expect(() => keyless.getEvent(COORD)).toThrow(/no identity key/);
     keyless.close();
   });
+
+  /**
+   * Audit SB-125. A revoke records the freshly minted ECK in the command's resume
+   * progress BEFORE anything else, and that column was plain TEXT: the event's
+   * current content key sat in the clear in the database, its WAL and any
+   * unencrypted backup, and survived a detach.
+   */
+  it("protects command resume progress (an ECK rotation's new key) at rest", () => {
+    const sk = generateSecretKey();
+    const store = new Store(":memory:", sk);
+    store.beginCommandOp(COORD, "member:x", 1, "r1", 1);
+    const progress = { eckRotation: { newId: 2, newKey: "TkVXLUVDSy1LRVk=", prevId: 1 } };
+    store.setCommandOpProgress(COORD, "member:x", "r1", progress);
+    const raw = store.getCommandWatermark(COORD, "member:x")!.progress_json!;
+    expect(raw.startsWith(ENC_PREFIX)).toBe(true);
+    expect(raw).not.toContain("TkVXLUVDSy1LRVk=");
+    expect(store.getCommandOpProgress(COORD, "member:x")).toEqual(progress);
+    // Detach drops the progress (custody) but keeps the watermark (replay bar).
+    store.clearCommandProgressForEvent(COORD);
+    expect(store.getCommandWatermark(COORD, "member:x")).toMatchObject({ rumor_id: "r1", progress_json: null });
+    store.close();
+  });
+
+  it("migrates a plaintext command-progress row on startup", () => {
+    const path = tmpDbPath();
+    const legacy = new Store(path);
+    legacy.beginCommandOp(COORD, "member:x", 1, "r1", 1);
+    legacy.setCommandOpProgress(COORD, "member:x", "r1", { eckRotation: { newId: 2, newKey: "TkVX", prevId: 1 } });
+    expect(legacy.getCommandWatermark(COORD, "member:x")!.progress_json).toContain("TkVX");
+    legacy.close();
+    const sk = generateSecretKey();
+    const store = new Store(path, sk);
+    expect(store.getCommandWatermark(COORD, "member:x")!.progress_json!.startsWith(ENC_PREFIX)).toBe(true);
+    expect(store.getCommandOpProgress(COORD, "member:x")).toEqual({ eckRotation: { newId: 2, newKey: "TkVX", prevId: 1 } });
+    store.close();
+  });
 });
 
 describe("pipeline artifacts + job status (audit H7 / Q12)", () => {

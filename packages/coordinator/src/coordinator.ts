@@ -4852,6 +4852,8 @@ export class Coordinator {
     this.events.delete(coordinate);
     this.completedInstallGen.delete(coordinate);
     this.deps.store.deleteEvent(coordinate);
+    // A rotation's resume progress holds an ECK: custody, so it goes too (SB-125).
+    this.deps.store.clearCommandProgressForEvent(coordinate);
     this.inviteHashCache.delete(coordinate);
     if (!already) {
       log(`[detach] ${coordinate} — ${opts.reason} (gen ${gen}); custody deleted, ${cancelled} job(s) cancelled, subscriptions closed`);

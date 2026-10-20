@@ -1571,6 +1571,21 @@ export class Store {
     if (migrated > 0) {
       console.log(`[store] migrated ${migrated} plaintext event-key row(s) to at-rest encryption`);
     }
+    // Command resume progress (audit SB-125): an ECK rotation records the new key
+    // here, written in the clear before this fix. Same idempotent one-way pass.
+    const progressRows = this.db
+      .prepare(
+        "SELECT rowid, progress_json FROM command_watermarks WHERE progress_json IS NOT NULL AND progress_json NOT LIKE ? AND progress_json NOT LIKE ?",
+      )
+      .all(`${ENC_PREFIX}%`, `${ENC_PACKED_PREFIX}%`) as { rowid: number; progress_json: string }[];
+    for (const row of progressRows) {
+      this.db
+        .prepare("UPDATE command_watermarks SET progress_json = ? WHERE rowid = ?")
+        .run(this.protect(row.progress_json), row.rowid);
+    }
+    if (progressRows.length > 0) {
+      console.log(`[store] migrated ${progressRows.length} plaintext command-progress row(s) to at-rest encryption`);
+    }
   }
 
   // ── rumor dedupe ──────────────────────────────────────────────────────────
@@ -1832,18 +1847,32 @@ export class Store {
     const row = this.getCommandWatermark(coordinate, subject);
     if (!row?.progress_json) return {};
     try {
-      const v = JSON.parse(row.progress_json);
+      const v = JSON.parse(this.reveal(row.progress_json));
       return v && typeof v === "object" ? (v as Record<string, unknown>) : {};
     } catch {
       return {};
     }
   }
   /** Persist resume progress for a subject's current operation, only while it is
-   *  still the recorded rumor (audit C1: ECK-rotation state machine). */
+   *  still the recorded rumor (audit C1: ECK-rotation state machine).
+   *
+   *  `protect()`ed like `events.eck_json` (audit SB-125): the revoke's progress is
+   *  the freshly minted ECK itself, and stored in the clear it handed every reader
+   *  of the database file, its WAL or an unencrypted backup the event's CURRENT
+   *  content key. */
   setCommandOpProgress(coordinate: string, subject: string, rumorId: string, progress: Record<string, unknown>): void {
     this.db
       .prepare("UPDATE command_watermarks SET progress_json = ? WHERE coordinate = ? AND subject = ? AND rumor_id = ?")
-      .run(JSON.stringify(progress), coordinate, subject, rumorId);
+      .run(this.protect(JSON.stringify(progress)), coordinate, subject, rumorId);
+  }
+
+  /**
+   * Drop every resume-progress blob for an event (audit SB-125). Detach must delete
+   * the ECK custody (NIP §3.5), and an ECK rotation's progress holds a key. The
+   * watermarks themselves stay: they are the replay bar for old commands.
+   */
+  clearCommandProgressForEvent(coordinate: string): void {
+    this.db.prepare("UPDATE command_watermarks SET progress_json = NULL WHERE coordinate = ?").run(coordinate);
   }
 
   // ── install generation / detach tombstone (NIP §3.5) ──────────────────────
