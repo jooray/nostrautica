@@ -1074,7 +1074,7 @@
       {/if}
       {#if grantCheckedAt !== undefined}
         {t("admin.grant.lastChecked", {
-          time: new Date(grantCheckedAt).toLocaleTimeString(),
+          time: new Date(grantCheckedAt).toLocaleTimeString(i18n.locale),
         })}
       {/if}
     </p>

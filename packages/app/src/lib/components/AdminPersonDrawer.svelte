@@ -10,7 +10,7 @@
   import type { AttendeeProfile, MediaDescriptor, CoordinatorStatusContent } from "@nostrautica/protocol";
   import { buildPersonDetail } from "$lib/events/admin-person-detail.js";
   import { focusTrap } from "./focus-trap.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
   import Avatar from "./Avatar.svelte";
 
@@ -72,7 +72,7 @@
           : "",
   );
 
-  const when = (sec?: number) => (sec ? new Date(sec * 1000).toLocaleString() : "");
+  const when = (sec?: number) => (sec ? new Date(sec * 1000).toLocaleString(i18n.locale) : "");
 </script>
 
 <div

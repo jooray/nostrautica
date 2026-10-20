@@ -29,7 +29,7 @@
   import { autoGrow } from "$lib/components/auto-grow.js";
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { avatarHues } from "$lib/identity/avatar.js";
-  import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
   import type { MessageKey } from "$lib/i18n/messages.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
@@ -412,10 +412,10 @@
   });
 
   function dayLabel(ts: number): string {
-    return new Date(ts * 1000).toLocaleDateString();
+    return new Date(ts * 1000).toLocaleDateString(i18n.locale);
   }
   function timeLabel(ts: number): string {
-    return new Date(ts * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return new Date(ts * 1000).toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit" });
   }
   // Group messages by calendar day for the day separators.
   const grouped = $derived.by(() => {

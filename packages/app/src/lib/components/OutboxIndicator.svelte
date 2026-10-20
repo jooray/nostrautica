@@ -7,12 +7,12 @@
    */
   import { onMount } from "svelte";
   import { outbox } from "$lib/stores/outbox.svelte.js";
-  import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
 
   onMount(() => outbox.init());
 
   let open = $state(false);
-  const when = (sec: number) => new Date(sec).toLocaleTimeString();
+  const when = (sec: number) => new Date(sec).toLocaleTimeString(i18n.locale);
 </script>
 
 {#if outbox.pending > 0 || outbox.failed.length > 0}

@@ -10,7 +10,7 @@
   // device's secret can produce its proof of possession, so "rename" is offered for
   // this device alone.
   import { onMount } from "svelte";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { session } from "$lib/signer/session.svelte.js";
   import { enterSecretSurface } from "$lib/stores/secret-surface.svelte.js";
   import { chatSession } from "$lib/chat/session.svelte.js";
@@ -77,7 +77,7 @@
       // read "Added today" the moment its owner opened the room. There is no
       // first-bound timestamp on the wire to publish instead, so the honest fix is
       // to call the number what it actually is.
-      return t("chat.devices.lastActive", { date: new Date(at).toLocaleDateString() });
+      return t("chat.devices.lastActive", { date: new Date(at).toLocaleDateString(i18n.locale) });
     } catch {
       return "";
     }

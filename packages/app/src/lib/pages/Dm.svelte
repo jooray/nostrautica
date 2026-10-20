@@ -27,7 +27,7 @@
   import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { perfMark } from "$lib/perf.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
 
   // Cache-first (§2.6): DM history from the persisted unwrap memo paints the
@@ -116,7 +116,7 @@
     return profiles.get(pubkey)?.name || npubEncode(pubkey).slice(0, 12) + "…";
   }
   function fmt(at: number): string {
-    return new Date(at * 1000).toLocaleString([], {
+    return new Date(at * 1000).toLocaleString(i18n.locale, {
       month: "short",
       day: "numeric",
       hour: "2-digit",

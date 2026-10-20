@@ -39,7 +39,7 @@
     prefetchAttendeesTab,
     prefetchGrants,
   } from "$lib/nostr/prefetch.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -341,7 +341,7 @@
   const checkedLabel = $derived(
     lastCheckedAt === null
       ? ""
-      : new Date(lastCheckedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+      : new Date(lastCheckedAt).toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit" }),
   );
 
   // Post-approval routing (U1): lead with "Record your intro" unless one already

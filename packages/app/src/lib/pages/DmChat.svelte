@@ -25,7 +25,7 @@
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { perfMark } from "$lib/perf.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import Avatar from "$lib/components/Avatar.svelte";
   import { fillHeight } from "$lib/components/fill-height.js";
   import { autoGrow } from "$lib/components/auto-grow.js";
@@ -368,7 +368,7 @@
 
   const title = $derived(profile?.name || (peer ? npubEncode(peer).slice(0, 12) + "…" : t("dmchat.title")));
   function fmt(at: number): string {
-    return new Date(at * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    return new Date(at * 1000).toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit" });
   }
 </script>
 

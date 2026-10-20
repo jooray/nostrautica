@@ -16,7 +16,7 @@
   import { eventConstellation } from "$lib/events/constellation.js";
   import { parseCoordinate } from "@nostrautica/protocol";
   import { router } from "$lib/router/router.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
 
   let {
@@ -50,7 +50,7 @@
   const hasBanner = $derived(!!bannerSrc);
 
   function fmtDate(unixSec: number): string {
-    return new Date(unixSec * 1000).toLocaleDateString(undefined, {
+    return new Date(unixSec * 1000).toLocaleDateString(i18n.locale, {
       month: "short",
       day: "numeric",
     });

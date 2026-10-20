@@ -21,7 +21,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import EventHeader from "$lib/components/EventHeader.svelte";
   import Avatar from "$lib/components/Avatar.svelte";
-  import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
 
   let { naddr }: { naddr: string } = $props();
@@ -53,7 +53,7 @@
 
   /** A friendly, full date (range) for the event — "1 August 2026", or a span. */
   function fmtDay(unixSec: number, opts: Intl.DateTimeFormatOptions): string {
-    return new Date(unixSec * 1000).toLocaleDateString(undefined, opts);
+    return new Date(unixSec * 1000).toLocaleDateString(i18n.locale, opts);
   }
   const dateLine = $derived.by(() => {
     if (!ctx?.start) return "";
@@ -65,7 +65,7 @@
   });
   const generatedLine = $derived(
     t("report.generatedOn", {
-      date: new Date().toLocaleDateString(undefined, { year: "numeric", month: "long", day: "numeric" }),
+      date: new Date().toLocaleDateString(i18n.locale, { year: "numeric", month: "long", day: "numeric" }),
     }),
   );
 

@@ -14,7 +14,7 @@
   import { onMount } from "svelte";
   import { router } from "$lib/router/router.svelte.js";
   import { session } from "$lib/signer/session.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import {
     cachedLinkedParent,
     loadLinkedParent,
@@ -136,7 +136,7 @@
 
   function when(start?: number): string {
     if (!start) return "";
-    return new Date(start * 1000).toLocaleDateString(undefined, {
+    return new Date(start * 1000).toLocaleDateString(i18n.locale, {
       weekday: "short",
       day: "numeric",
       month: "short",

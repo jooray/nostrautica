@@ -58,7 +58,7 @@
   import ImageCropper from "$lib/components/ImageCropper.svelte";
   import { defaultEventBanner, defaultEventIcon, uploadPublicImage } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
@@ -773,7 +773,7 @@
     if (f.since !== undefined) {
       parts.push(
         t("admin.page.feeds.sinceLabel", {
-          date: new Date(f.since * 1000).toLocaleDateString(),
+          date: new Date(f.since * 1000).toLocaleDateString(i18n.locale),
         }),
       );
     }
@@ -990,7 +990,7 @@
       {/if}
       {#if grantCheckedAt !== undefined}
         {t("admin.grant.lastChecked", {
-          time: new Date(grantCheckedAt).toLocaleTimeString(),
+          time: new Date(grantCheckedAt).toLocaleTimeString(i18n.locale),
         })}
       {/if}
     </p>
