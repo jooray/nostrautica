@@ -21,6 +21,8 @@ import {
   type KeyGrantContent,
   type OrganizerGrantContent,
   KIND_COMMUNITY,
+  KIND_ROSTER,
+  eckEncrypt,
   makeMembershipProof,
 } from "@nostrautica/protocol";
 import { loadParentProof, loadParentConsent } from "./community-join.js";
@@ -31,6 +33,9 @@ import {
   authenticateOrganizerGrant,
   fetchMatches,
   cachedMatches,
+  fetchRoster,
+  cachedRoster,
+  __resetAttendeeInflightForTests,
   receiveGrants,
   MAX_GRANT_WRAPS,
   GRANT_MEMO_KEY,
@@ -414,6 +419,70 @@ describe("fetchMatches cache write-through (§2.3)", () => {
     // Owner-scoped: another identity can't read this match list.
     setActiveCacheOwner("2".repeat(64));
     expect(cachedMatches(coordinate)).toBeUndefined();
+  });
+});
+
+describe("roster reads are scoped to the identity that started them (DS41-003)", () => {
+  const A = "1".repeat(64);
+  const B = "2".repeat(64);
+  const eidSk = generateSecretKey();
+  const eidPk = getPublicKey(eidSk);
+  const coordinate = makeCoordinate(eidPk, "scoped-roster");
+  const ctx = { coordinate, config: { eidPubkey: eidPk, relays: [] } } as unknown as EventContext;
+  const eck = generateEck();
+  const roster = {
+    v: 2,
+    eck_current: 1,
+    attendees: [{ pubkey: "3".repeat(64), d: "a".repeat(32), role: "attendee" as const }],
+  };
+  const rosterEvent = finalizeEvent(
+    {
+      kind: KIND_ROSTER,
+      created_at: 1_700_000_000,
+      tags: [["d", "scoped-roster"]],
+      content: eckEncrypt(eck, JSON.stringify(roster)),
+    },
+    eidSk,
+  );
+
+  beforeEach(async () => {
+    __resetPersistForTests();
+    __resetAttendeeInflightForTests();
+    __setPersistBackend(memPersist());
+    __setKeystoreBackend(memKeystore());
+    // A holds the ECK; B holds nothing for this event.
+    await saveEventKeys({ coordinate, role: "attendee", eck: [{ id: 1, key: bytesToBase64(eck) }] }, A);
+    setActiveOwner(A);
+    setActiveCacheOwner(A);
+    streamEvents.mockReset();
+  });
+
+  afterEach(() => {
+    setActiveOwner(null);
+    setActiveCacheOwner(null);
+  });
+
+  it("B neither joins A's in-flight roster nor receives it into B's cache", async () => {
+    let release!: (events: unknown[]) => void;
+    streamEvents.mockReturnValue({
+      ready: new Promise((r) => (release = r)),
+      stop: () => {},
+    });
+    const forA = fetchRoster(ctx);
+    // Let A's read reach the relay await.
+    await new Promise((r) => setTimeout(r, 0));
+
+    // A logs out (well: is switched away from) and B signs in on the same device.
+    setActiveOwner(B);
+    setActiveCacheOwner(B);
+    const forB = fetchRoster(ctx);
+
+    release([rosterEvent]);
+    expect(await forB).toBeUndefined(); // B has no key: no roster, and not A's
+    // A's own read still decrypts (A's caller asked for it), but its late cache
+    // write is dropped rather than landing in B's scope.
+    expect((await forA)?.attendees).toHaveLength(1);
+    expect(cachedRoster(coordinate)).toBeUndefined();
   });
 });
 

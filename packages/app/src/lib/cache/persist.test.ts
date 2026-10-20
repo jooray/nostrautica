@@ -191,6 +191,20 @@ describe("persist logout wipe + delete", () => {
     cacheSet("dir", ["fresh"], undefined, undefined, cacheGeneration());
     expect(cacheGet<string[]>("dir")?.data).toEqual(["fresh"]);
   });
+
+  it("an account switch with no logout fences in-flight writes too (DS41-003)", () => {
+    __setPersistBackend(memBackend().backend);
+    setActiveCacheOwner(null);
+    const beforeLogin = cacheGeneration();
+    setActiveCacheOwner(A); // a login/restore is not an invalidation
+    expect(cacheGeneration()).toBe(beforeLogin);
+    const gen = cacheGeneration();
+    setActiveCacheOwner(B); // A → B: an imported key, a second bunker
+    cacheSet("dir", ["A-plaintext"], undefined, undefined, gen);
+    expect(cacheGet("dir")).toBeUndefined();
+    setActiveCacheOwner(A);
+    expect(cacheGet("dir")).toBeUndefined();
+  });
 });
 
 describe("persist cross-tab disk latest-wins (App-6)", () => {
