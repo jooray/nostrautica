@@ -38,6 +38,7 @@ const cacheSelfCopy = vi.fn();
 // DS41-008 case below is about.
 vi.mock("$lib/media/submit.js", async (importOriginal) => ({
   claimSubmissionRev: (await importOriginal<typeof import("$lib/media/submit.js")>()).claimSubmissionRev,
+  captureSelfCopyScope: (await importOriginal<typeof import("$lib/media/submit.js")>()).captureSelfCopyScope,
   loadSelfCopy: (...args: unknown[]) => loadSelfCopy(...(args as [])),
   cacheSelfCopy: (...args: unknown[]) => cacheSelfCopy(...(args as [])),
 }));

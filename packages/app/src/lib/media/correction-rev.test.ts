@@ -21,6 +21,7 @@ import {
   __setPersistBackend,
   __resetPersistForTests,
   setActiveCacheOwner,
+  cacheGet,
   type CacheEntry,
   type PersistBackend,
 } from "$lib/cache/persist.js";
@@ -141,6 +142,19 @@ describe("claimCorrectionRev (audit A-5)", () => {
     await record();
     expect(publishSigned).not.toHaveBeenCalled();
     expect(cachedCorrectionRev(COORDINATE)).toBe(rev); // the local floor still holds
+  });
+
+  it("keeps the correction floor under the identity that claimed it (DS41-003 pattern)", async () => {
+    const other = "f".repeat(64);
+    fetchEventsRelayOnly.mockImplementation(async () => {
+      setActiveCacheOwner(other); // account switch while the self-copy read is out
+      return [await selfCopyEvent({ v: 2, a: COORDINATE, media: [], correction_rev: 3 })];
+    });
+    const { rev } = await claimCorrectionRev(signer, ctx, BLINDING_KEY);
+    expect(rev).toBe(4);
+    expect(cacheGet(`corrrev:${COORDINATE}`, other)).toBeUndefined();
+    expect(cacheGet(`selfcopy:${COORDINATE}`, other)).toBeUndefined();
+    expect(cacheGet<number>(`corrrev:${COORDINATE}`, pubkey)?.data).toBe(4);
   });
 
   it("starts at 0 for an event that has never been corrected", async () => {

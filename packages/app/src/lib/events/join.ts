@@ -28,7 +28,12 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import { signerWrap } from "./giftwrap.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { loadSelfCopy, cacheSelfCopy, claimSubmissionRev } from "$lib/media/submit.js";
+import {
+  loadSelfCopy,
+  cacheSelfCopy,
+  claimSubmissionRev,
+  captureSelfCopyScope,
+} from "$lib/media/submit.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 /**
@@ -170,8 +175,11 @@ export async function sendJoinRequest(
   // that 0 again, and a re-join at rev 0 after rev N loses the §3.3 comparison —
   // the coordinator drops it as stale while this screen says it was sent (audit
   // DS41-008). Same rule the Record flow uses.
-  const prevSelf = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
-  const rev = claimSubmissionRev(ctx.coordinate, prevSelf?.rev);
+  // Captured before any await: the rev floor and self-copy written below must
+  // land under the identity that started this join (DS41-003 pattern).
+  const scope = captureSelfCopyScope();
+  const prevSelf = await loadSelfCopy(signer, ctx, blindingKey, scope).catch(() => undefined);
+  const rev = claimSubmissionRev(ctx.coordinate, prevSelf?.rev, scope);
 
   const wraps: Promise<unknown>[] = [
     signerWrap(signer, inboxPubkey, {
@@ -228,6 +236,7 @@ export async function sendJoinRequest(
     ctx.coordinate,
     { profile, media: input.media ?? [], rev },
     selfEvent.created_at,
+    scope,
   );
 
   // Opt-in public RSVP (31925) — a standard, discoverable calendar RSVP.

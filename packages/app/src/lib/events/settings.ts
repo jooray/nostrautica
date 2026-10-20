@@ -18,7 +18,32 @@ import { fetchEventsAnswered } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { withMutationLock } from "$lib/nostr/mutation-lock.js";
-import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, cacheGeneration, activeCacheOwner } from "$lib/cache/persist.js";
+
+/**
+ * The cache scope a settings read or write runs FOR, captured when it starts
+ * (the DS41-003 pattern). These calls await relays and the signer, and the
+ * identity can change underneath them (logout, account switch): the decrypted
+ * settings must be filed under the owner who read them, and dropped if the
+ * owner cache was invalidated meanwhile, never written into the next account's
+ * scope.
+ */
+interface CacheScope {
+  owner: string | undefined;
+  gen: number;
+}
+
+function captureScope(): CacheScope {
+  return { owner: activeCacheOwner() ?? undefined, gen: cacheGeneration() };
+}
+
+function scopedGet(scope: CacheScope, key: string) {
+  return scope.owner ? cacheGet<PerEventSettings>(key, scope.owner) : undefined;
+}
+
+function scopedSet(scope: CacheScope, key: string, data: PerEventSettings, at: number): void {
+  if (scope.owner) cacheSet(key, data, at, scope.owner, scope.gen);
+}
 
 // User-private per-event settings are decrypted with the user's self-key, so
 // they cache under the OWNER scope (wiped on logout) and now survive reloads
@@ -87,13 +112,14 @@ export async function loadPerEventSettings(
   ctx: EventContext,
   blindingKey: Uint8Array,
 ): Promise<PerEventSettings> {
-  return (await readSettings(signer, ctx, blindingKey)).settings;
+  return (await readSettings(signer, ctx, blindingKey, captureScope())).settings;
 }
 
 async function readSettings(
   signer: AppSigner,
   ctx: EventContext,
   blindingKey: Uint8Array,
+  scope: CacheScope,
 ): Promise<{ settings: PerEventSettings; known: boolean }> {
   const pubkey = await signer.getPublicKey();
   const d = await settingsD(signer, ctx, blindingKey);
@@ -109,7 +135,7 @@ async function readSettings(
   // save a note again. Their own events are the only ones that can be self-decrypted
   // anyway, so pinning costs nothing and closes that off.
   const latest = pickLatest(onlyByAuthors(onlyVerified(events), [pubkey]));
-  const local = cacheGet<PerEventSettings>(settingsKey(ctx.coordinate));
+  const local = scopedGet(scope, settingsKey(ctx.coordinate));
   if (!latest) {
     // Nothing came back. A copy this device wrote (possibly still sitting in the
     // outbox) beats a blank either way. Without one, an answered read is a
@@ -123,7 +149,7 @@ async function readSettings(
   // is newer than what they returned; building the next save on the relay copy
   // would silently undo it.
   if (local && local.at > (latest.created_at ?? 0)) return { settings: clone(local.data), known: true };
-  cacheSet(settingsKey(ctx.coordinate), settings, latest.created_at ?? 0);
+  scopedSet(scope, settingsKey(ctx.coordinate), settings, latest.created_at ?? 0);
   return { settings, known: true };
 }
 
@@ -164,16 +190,17 @@ async function mutateSettings(
   blindingKey: Uint8Array,
   edit: (settings: PerEventSettings) => void,
 ): Promise<PerEventSettings> {
+  const scope = captureScope();
   const pubkey = await signer.getPublicKey();
   const d = await settingsD(signer, ctx, blindingKey);
   return withMutationLock(`rmw:${pubkey}:${KIND_APP_DATA}:${d}`, async () => {
-    const { settings, known } = await readSettings(signer, ctx, blindingKey);
+    const { settings, known } = await readSettings(signer, ctx, blindingKey, scope);
     if (!known) throw new SettingsUnreadableError();
     edit(settings);
     const createdAt = await saveSettings(signer, ctx, blindingKey, settings);
     // Write-through (§2.8), stamped with the created_at actually published so the
     // next read can tell this copy apart from an older relay answer.
-    cacheSet(settingsKey(ctx.coordinate), settings, createdAt);
+    scopedSet(scope, settingsKey(ctx.coordinate), settings, createdAt);
     return settings;
   });
 }

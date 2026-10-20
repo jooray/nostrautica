@@ -42,7 +42,7 @@ vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
 import { loadPerEventSettings, toggleSetting, setNote, cachedPerEventSettings } from "./settings.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
-import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
+import { __resetPersistForTests, setActiveCacheOwner, cacheGet } from "$lib/cache/persist.js";
 
 const ME = "a".repeat(64);
 const OTHER = "b".repeat(64);
@@ -189,6 +189,18 @@ describe("per-event settings read-modify-write safety", () => {
     expect(written.want_to_meet).toEqual([OTHER]);
     expect(written.notes[FRIEND]).toBe(SAVED.notes[FRIEND]);
     expect(written.met).toEqual([FRIEND]);
+  });
+
+  // DS41-003 pattern: an account switch while the read is in flight must not
+  // file A's decrypted settings under B.
+  it("writes the settings cache under the identity that started the save", async () => {
+    fetchEvents.mockImplementation(async () => {
+      setActiveCacheOwner(OTHER); // switched accounts mid-read
+      return [storedEvent(ME, `enc:${JSON.stringify(SAVED)}`)];
+    });
+    await toggleSetting(signer({ content: "" }), ctx, BLINDING, "met", OTHER);
+    expect(cacheGet(`evsettings:${COORD}`, OTHER)).toBeUndefined();
+    expect(cacheGet<PerEventSettings>(`evsettings:${COORD}`, ME)?.data.met).toEqual([FRIEND, OTHER]);
   });
 
   // Audit DS41-007: two taps in a row used to read the same baseline, and the

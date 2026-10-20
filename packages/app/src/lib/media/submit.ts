@@ -33,7 +33,14 @@ import { cachedDirectoryEntry, fetchDirectoryEntry } from "$lib/events/attendee.
 import { fetchEvents, fetchEventsAnswered, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
 import { preflight, uploadAndMirror, mirror, downloadBlob, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
-import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
+import {
+  cacheGet,
+  cacheSet,
+  whenCacheReady,
+  cacheGeneration,
+  activeCacheOwner,
+  type CacheEntry,
+} from "$lib/cache/persist.js";
 import { withMutationLock } from "$lib/nostr/mutation-lock.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
@@ -106,14 +113,43 @@ const MEDIALIB_AT_KEY = "medialib-at";
  * shape as `nextReplaceableTimestamp` above, which already keeps the OTHER half
  * of the ordering key (created_at) monotonic across a session for this reason.
  */
-function nextRev(coordinate: string, observed: number | undefined): number {
-  const next = revFloor(coordinate, observed) + 1;
+/**
+ * The cache scope a self-copy read or write runs FOR, captured when the
+ * operation starts (the DS41-003 pattern). Submissions await relays and the
+ * signer before they write the self-copy and the rev floors through, and the
+ * identity can change underneath (logout, account switch): those writes must go
+ * to the owner who started them, behind the generation fence, and never into
+ * the next account's scope.
+ */
+export interface SelfCopyScope {
+  owner: string | undefined;
+  gen: number;
+}
+
+export function captureSelfCopyScope(): SelfCopyScope {
+  return { owner: activeCacheOwner() ?? undefined, gen: cacheGeneration() };
+}
+
+/** `cacheGet` for a captured scope; with no scope, the active one (as before). */
+function scopedGet<T>(scope: SelfCopyScope | undefined, key: string): CacheEntry<T> | undefined {
+  if (!scope) return cacheGet<T>(key);
+  return scope.owner ? cacheGet<T>(key, scope.owner) : undefined;
+}
+
+/** `cacheSet` for a captured scope; a logged-out capture writes nothing. */
+function scopedSet<T>(scope: SelfCopyScope | undefined, key: string, data: T, at: number): void {
+  if (!scope) return cacheSet(key, data, at);
+  if (scope.owner) cacheSet(key, data, at, scope.owner, scope.gen);
+}
+
+function nextRev(coordinate: string, observed: number | undefined, scope?: SelfCopyScope): number {
+  const next = revFloor(coordinate, observed, scope) + 1;
   // Stamp with the WALL CLOCK, not with `next`. The third argument is the cache's
   // latest-wins timestamp, and a revision counter is 0, 1, 2… — as a timestamp that
   // is 1970, so the 30-day prune deleted this high-water mark on the next boot and
   // reinstated the exact incident the comment above describes. `Math.max` keeps
   // latest-wins monotonic if two writes land in the same second.
-  cacheSet(selfRevKey(coordinate), next, Math.floor(Date.now() / 1000));
+  scopedSet(scope, selfRevKey(coordinate), next, Math.floor(Date.now() / 1000));
   return next;
 }
 
@@ -122,21 +158,25 @@ function nextRev(coordinate: string, observed: number | undefined): number {
  * callers outside this module (the join flow). The persisted high-water mark is
  * written before the caller publishes, so a failed publish can't reissue it.
  */
-export function claimSubmissionRev(coordinate: string, observed: number | undefined): number {
-  return nextRev(coordinate, observed);
+export function claimSubmissionRev(
+  coordinate: string,
+  observed: number | undefined,
+  scope?: SelfCopyScope,
+): number {
+  return nextRev(coordinate, observed, scope);
 }
 
 /** The highest rev known to have been sent for this event, or -1. */
-function revFloor(coordinate: string, observed: number | undefined): number {
-  const stored = cacheGet<number>(selfRevKey(coordinate))?.data;
+function revFloor(coordinate: string, observed: number | undefined, scope?: SelfCopyScope): number {
+  const stored = scopedGet<number>(scope, selfRevKey(coordinate))?.data;
   return Math.max(typeof stored === "number" ? stored : -1, observed ?? -1);
 }
 
 /** Raise the high-water mark to `rev` without consuming one (a rev already sent). */
-function nextRevFloor(coordinate: string, rev: number): void {
-  const floor = revFloor(coordinate, rev);
+function nextRevFloor(coordinate: string, rev: number, scope?: SelfCopyScope): void {
+  const floor = revFloor(coordinate, rev, scope);
   // Same reason as `nextRev`: the counter is not a timestamp.
-  cacheSet(selfRevKey(coordinate), floor, Math.floor(Date.now() / 1000));
+  scopedSet(scope, selfRevKey(coordinate), floor, Math.floor(Date.now() / 1000));
 }
 
 /** The cross-event reuse library: recorded intros (`media`) + authored text intros
@@ -206,13 +246,22 @@ export function cachedSelfCopy(coordinate: string): SelfCopy | undefined {
  * most likely to happen minutes later on the same bad venue Wi-Fi — had nothing
  * to fall back on when the relay read came back empty.
  */
-export function cacheSelfCopy(coordinate: string, self: SelfCopy, at: number): void {
-  cacheSet(selfCopyKey(coordinate), self, at);
-  if (typeof self.rev === "number") nextRevFloor(coordinate, self.rev);
+export function cacheSelfCopy(
+  coordinate: string,
+  self: SelfCopy,
+  at: number,
+  /** Captured when the caller's operation started (see SelfCopyScope). */
+  scope?: SelfCopyScope,
+): void {
+  scopedSet(scope, selfCopyKey(coordinate), self, at);
+  if (typeof self.rev === "number") nextRevFloor(coordinate, self.rev, scope);
   if (typeof self.correctionRev === "number") {
     // Same high-water discipline as `rev`: raise, never lower (audit A-5).
-    const floor = Math.max(cacheGet<number>(correctionRevKey(coordinate))?.data ?? -1, self.correctionRev);
-    cacheSet(correctionRevKey(coordinate), floor, Math.floor(Date.now() / 1000));
+    const floor = Math.max(
+      scopedGet<number>(scope, correctionRevKey(coordinate))?.data ?? -1,
+      self.correctionRev,
+    );
+    scopedSet(scope, correctionRevKey(coordinate), floor, Math.floor(Date.now() / 1000));
   }
 }
 /** This device's persisted high-water mark for 21608 correction revs, or undefined. */
@@ -244,13 +293,15 @@ export async function claimCorrectionRev(
   ctx: EventContext,
   blindingKey: Uint8Array,
 ): Promise<{ rev: number; record: () => Promise<void> }> {
-  const self = await loadSelfCopy(signer, ctx, blindingKey).catch(() => undefined);
-  const floor = Math.max(cachedCorrectionRev(ctx.coordinate) ?? -1, self?.correctionRev ?? -1);
+  const scope = captureSelfCopyScope();
+  const self = await loadSelfCopy(signer, ctx, blindingKey, scope).catch(() => undefined);
+  const stored = scopedGet<number>(scope, correctionRevKey(ctx.coordinate))?.data;
+  const floor = Math.max(typeof stored === "number" ? stored : -1, self?.correctionRev ?? -1);
   const rev = floor + 1;
   // Wall clock as the cache timestamp, NOT `rev` — a revision counter read as a
   // timestamp is 1970, and the 30-day prune then deletes the high-water mark on the
   // next boot (the trap `nextRev` documents).
-  cacheSet(correctionRevKey(ctx.coordinate), rev, Math.floor(Date.now() / 1000));
+  scopedSet(scope, correctionRevKey(ctx.coordinate), rev, Math.floor(Date.now() / 1000));
   return {
     rev,
     record: async () => {
@@ -278,12 +329,12 @@ export async function claimCorrectionRev(
       const cipher = await signer.nip44Encrypt(attendeePubkey, JSON.stringify(content));
       const event = await signer.signEvent({
         kind: KIND_MY_PROFILE,
-        created_at: nextReplaceableTimestamp(selfD, cacheGet<SelfCopy>(key)?.at),
+        created_at: nextReplaceableTimestamp(selfD, scopedGet<SelfCopy>(scope, key)?.at),
         tags: [["d", selfD]],
         content: cipher,
       });
       await publishOrQueue(event);
-      cacheSelfCopy(ctx.coordinate, merged, event.created_at);
+      cacheSelfCopy(ctx.coordinate, merged, event.created_at, scope);
     },
   };
 }
@@ -447,8 +498,9 @@ export async function submitProfileAndMedia(
   // Monotonic per-(coordinate) revision (NIP §3.3). The self-copy reports what the
   // last submission carried, but the counter itself is persisted locally so a
   // failed read can only ever fail to ADVANCE it, never roll it back — see nextRev.
-  const prevSelf = await loadSelfCopy(signer, ctx, args.blindingKey).catch(() => undefined);
-  const rev = nextRev(ctx.coordinate, prevSelf?.rev);
+  const scope = captureSelfCopyScope(); // the write-backs below land under THIS owner
+  const prevSelf = await loadSelfCopy(signer, ctx, args.blindingKey, scope).catch(() => undefined);
+  const rev = nextRev(ctx.coordinate, prevSelf?.rev, scope);
 
   // v2 (NIP §8): the 21601 submission carries at most MAX_SUBMISSION_MEDIA (4)
   // descriptors, or the coordinator rejects it wholesale at the schema boundary.
@@ -480,7 +532,9 @@ export async function submitProfileAndMedia(
   // Carry the correction rev forward (audit A-5). Every submission REPLACES this
   // 31602, and Zod strips what the schema doesn't name, so a submission that didn't
   // re-emit it would erase the only cross-device record of the correction counter.
-  const carriedCorrectionRev = prevSelf?.correctionRev ?? cachedCorrectionRev(ctx.coordinate);
+  const storedCorrectionRev = scopedGet<number>(scope, correctionRevKey(ctx.coordinate))?.data;
+  const carriedCorrectionRev =
+    prevSelf?.correctionRev ?? (typeof storedCorrectionRev === "number" ? storedCorrectionRev : undefined);
   const selfContent = {
     v: 2,
     a: ctx.coordinate,
@@ -495,7 +549,7 @@ export async function submitProfileAndMedia(
   const selfCipher = await signer.nip44Encrypt(attendeePubkey, JSON.stringify(selfContent));
   const selfEvent = await signer.signEvent({
     kind: KIND_MY_PROFILE,
-    created_at: nextReplaceableTimestamp(selfD, cacheGet<SelfCopy>(selfKey)?.at),
+    created_at: nextReplaceableTimestamp(selfD, scopedGet<SelfCopy>(scope, selfKey)?.at),
     tags: [["d", selfD]],
     content: selfCipher,
   });
@@ -507,6 +561,7 @@ export async function submitProfileAndMedia(
       ctx.coordinate,
       { profile, media: args.media, introText, rev, correctionRev: carriedCorrectionRev } satisfies SelfCopy,
       selfEvent.created_at,
+      scope,
     );
     return published;
   });
@@ -681,6 +736,8 @@ export async function loadSelfCopy(
   signer: AppSigner,
   ctx: EventContext,
   blindingKey: Uint8Array,
+  /** Captured by the caller's operation; defaults to the scope active now. */
+  scope: SelfCopyScope = captureSelfCopyScope(),
 ): Promise<SelfCopy | undefined> {
   const pubkey = await signer.getPublicKey();
   const d = blindedD(blindingKey, ctx.coordinate, pubkey);
@@ -707,13 +764,13 @@ export async function loadSelfCopy(
         rev: typeof parsed.rev === "number" ? parsed.rev : undefined,
         correctionRev: typeof parsed.correction_rev === "number" ? parsed.correction_rev : undefined,
       };
-      cacheSet(selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
+      scopedSet(scope, selfCopyKey(ctx.coordinate), self, latest.created_at ?? 0);
       return self;
     } catch {
       /* undecryptable / malformed — fall through to the persisted copy */
     }
   }
-  return cachedSelfCopy(ctx.coordinate);
+  return scopedGet<SelfCopy>(scope, selfCopyKey(ctx.coordinate))?.data;
 }
 
 /**
