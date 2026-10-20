@@ -32,6 +32,8 @@ import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import today.cypherpunk.nostrautica.i18n.LocalStrings
+import today.cypherpunk.nostrautica.protocol.Nip19
+import today.cypherpunk.nostrautica.protocol.Secp
 import today.cypherpunk.nostrautica.signer.Nip46Signer
 import today.cypherpunk.nostrautica.signer.Nip55Signer
 import today.cypherpunk.nostrautica.ui.LocalContainer
@@ -78,7 +80,15 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     var name by remember { mutableStateOf("") }
-    var paste by remember { mutableStateOf(nsec ?: "") }
+    // Never pre-fill the (masked) paste field from a link: any app or web page can
+    // open `…#/login?nsec=`, and one tap on Import would sign the user in as the
+    // sender's identity (SB-22). A login link is shown as what it is, with the
+    // account it signs in as, and needs its own explicit confirmation.
+    var paste by remember { mutableStateOf("") }
+    var linkKey by remember { mutableStateOf(nsec?.trim()?.takeIf { it.startsWith("nsec1") }) }
+    val linkNpub = remember(linkKey) {
+        linkKey?.let { k -> runCatching { Nip19.npub(Secp.pubkeyHex(Nip19.decodeNsec(k))) }.getOrNull() }
+    }
     var passphrase by remember { mutableStateOf("") }
     var offer by remember { mutableStateOf<Nip46Signer.Companion.Offer?>(null) }
     var showQr by remember { mutableStateOf(false) }
@@ -110,6 +120,27 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
     androidx.compose.foundation.layout.Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         if (!embedded(onDone)) ScreenTitle(s.t("login.welcome"))
         error?.let { ErrorCard(it) }
+
+        // 0. A login link (the PWA's backup link, `#/login?nsec=`), only on explicit confirmation.
+        val k = linkKey
+        if (k != null && linkNpub != null) {
+            Card {
+                SectionTitle(s.t("signin.link.title"))
+                Dim(s.t("signin.link.body"))
+                Text(linkNpub, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                PrimaryButton(s.t("signin.link.use"), {
+                    busy = "link"; error = null
+                    scope.launch {
+                        val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+                            runCatching { c.session.importKey(k) }
+                        }
+                        busy = null
+                        r.onSuccess { linkKey = null; finish() }.onFailure { error = s.t("signin.paste.invalid") }
+                    }
+                }, busy = busy == "link", icon = Icons.Outlined.Key)
+                LinkButton(s.t("signin.link.ignore"), { linkKey = null })
+            }
+        }
 
         // 1. A signer app on this phone (NIP-55).
         Card {
