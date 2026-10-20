@@ -70,6 +70,18 @@ describe("coordinates", () => {
     expect(parseCoordinate("0:" + pubkey + ":ev").kind).toBe(0);
     expect(parseCoordinate("65535:" + pubkey + ":ev").kind).toBe(65535);
   });
+
+  it("accepts only the canonical decimal spelling of a kind (SB-30)", () => {
+    // Each of these is Number()-equal to a real kind, so before the fix each one
+    // named the same space under a second string — every record is keyed by the
+    // whole coordinate.
+    for (const kind of ["31612.0", " 31612", "31612 ", "031612", "+31612", "3.1612e4", "0x7b7c", ""]) {
+      expect(() => parseCoordinate(kind + ":" + pubkey + ":ev")).toThrow();
+      expect(isEventCoordinate(kind + ":" + pubkey + ":ev")).toBe(false);
+      expect(isCommunityCoordinate(kind + ":" + pubkey + ":ev")).toBe(false);
+    }
+    expect(isCommunityCoordinate(makeCoordinate(pubkey, "ev", KIND_COMMUNITY))).toBe(true);
+  });
 });
 
 describe("event config (kind 31600)", () => {

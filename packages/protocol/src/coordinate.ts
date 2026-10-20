@@ -47,12 +47,18 @@ export function parseCoordinate(coordinate: string): EventCoordinate {
   if (first < 0 || second < 0) {
     throw new Error(`invalid coordinate: ${coordinate}`);
   }
-  const kind = Number(coordinate.slice(0, first));
+  const kindText = coordinate.slice(0, first);
+  const kind = Number(kindText);
   const pubkey = coordinate.slice(first + 1, second);
   const identifier = coordinate.slice(second + 1);
   // The pubkey must be canonical lowercase hex (every downstream comparison is
-  // case-sensitive) and the kind a NIP-01 16-bit integer (audit PROTO-5).
+  // case-sensitive) and the kind a NIP-01 16-bit integer (audit PROTO-5) spelled
+  // in canonical decimal (audit SB-30). Records are keyed by the WHOLE coordinate
+  // string, so `Number()`'s leniency — "31612.0", " 31612", "031612", "" → 0 —
+  // would let one space be named by several strings: the divergent namespace the
+  // SPACE_KINDS allowlist exists to prevent, reached by spelling, not by kind.
   if (
+    !/^(0|[1-9][0-9]*)$/.test(kindText) ||
     !Number.isInteger(kind) ||
     kind < 0 ||
     kind > 65535 ||
