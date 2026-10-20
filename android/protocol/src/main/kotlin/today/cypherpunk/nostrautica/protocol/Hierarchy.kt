@@ -22,8 +22,11 @@ object Hierarchy {
         isValidParent(parent) && isValidChild(child) && childCfg.parent == parent && child in parentCfg.children
 
     /** Who may sign a proof for [child]: its E_id and its current coordinator. */
-    fun authorities(child: String, childCfg: EventConfig): List<String> =
-        listOfNotNull(Coordinate.parse(child).pubkey, childCfg.coordinator)
+    fun authorities(child: String, childCfg: EventConfig): List<String> {
+        // Total, like membershipAuthorities (SB-29): a malformed child has no authorities.
+        val eid = Coordinate.parseOrNull(child)?.pubkey ?: return emptyList()
+        return listOfNotNull(eid, childCfg.coordinator)
+    }
 
     private fun challenge(parent: String, child: String, attendee: String): ByteArray {
         val sb = StringBuilder("[")

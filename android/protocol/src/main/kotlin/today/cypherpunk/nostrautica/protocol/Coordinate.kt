@@ -18,7 +18,10 @@ data class Coordinate(val kind: Int, val pubkey: String, val identifier: String)
             val first = coordinate.indexOf(':')
             val second = coordinate.indexOf(':', first + 1)
             require(first >= 0 && second >= 0) { "invalid coordinate: $coordinate" }
-            val kind = coordinate.substring(0, first).toIntOrNull()
+            // The kind in canonical decimal only, as parseCoordinate (SB-30): records are keyed by
+            // the whole string, so "+31923" or "031923" must not name the same space twice.
+            val kindText = coordinate.substring(0, first)
+            val kind = kindText.takeIf { Regex("^(0|[1-9][0-9]*)$").matches(it) }?.toIntOrNull()
             val pubkey = coordinate.substring(first + 1, second)
             require(kind != null && kind in 0..65535 && pubkey.isHex32()) { "invalid coordinate: $coordinate" }
             return Coordinate(kind, pubkey, coordinate.substring(second + 1))
