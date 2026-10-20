@@ -7020,7 +7020,7 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
   /** A community coordinator and an event coordinator that are DIFFERENT daemons
    *  sharing only the relay (a shared FakeTransport), so the community side can only
    *  learn about the event from the event's own published 31600. */
-  async function pair(o: { parentListsChild?: boolean; childNamesParent?: boolean } = {}) {
+  async function pair(o: { parentListsChild?: boolean; childNamesParent?: boolean; parentApproval?: "manual" | "invite" | "manual+invite" | "open" } = {}) {
     const transport = new FakeTransport();
     const pEidSk = generateSecretKey();
     const cEidSk = generateSecretKey();
@@ -7031,6 +7031,7 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
       eidSk: pEidSk,
       transport,
       extraConfigTags: o.parentListsChild === false ? [] : [["child", cCoord]],
+      ...(o.parentApproval ? { approval: o.parentApproval } : {}),
     });
     const child = await setup(0, {
       eidSk: cEidSk,
@@ -7088,6 +7089,21 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
     expect(statusOf(parent, pk)).toBe("approved");
     // The community's coordinator issued its own key grant for the community.
     expect(grantsTo(parent, sk, pCoord).length).toBe(1);
+  });
+
+  // §15.4 vs SB-124: a `manual` community queues direct joins, invite or not, but
+  // a verified proof from a linked event still admits — linking is the consent.
+  it("a manual community still admits a verified member_of proof, but queues a direct invite join", async () => {
+    const { parent, child, pCoord, cCoord } = await pair({ parentApproval: "manual" });
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    await joinCommunity(parent, sk, memberOf(cCoord, makeMembershipProof(child.coordSk, pCoord, cCoord, pk)));
+    expect(statusOf(parent, pk)).toBe("approved");
+    expect(grantsTo(parent, sk, pCoord).length).toBe(1);
+
+    // A forged proof is no exception.
+    const forger = await joinCommunity(parent, generateSecretKey(), memberOf(cCoord, { by: getPublicKey(child.coordSk), sig: "ab".repeat(64) }));
+    expect(statusOf(parent, forger)).toBe("pending");
   });
 
   it("an event grant has no proof when the community does not list the event, or the event names no parent", async () => {

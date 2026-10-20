@@ -2782,11 +2782,28 @@ export class Coordinator {
     });
 
     // `approval: "manual"` (audit SB-124): every join waits for the organizer — a
-    // valid invite or membership proof included, which is the whole difference from
-    // `manual+invite`. The single exception is the organizer's own self-join (the
-    // create flow's "enroll me"), recognised by its E_id-labelled code.
+    // valid invite included, which is the whole difference from `manual+invite`.
+    // Two exceptions. The organizer's own self-join (the create flow's "enroll
+    // me"), recognised by its E_id-labelled code. And a verified `member_of`
+    // proof on a community (§15.4): linking a child event IS the community
+    // organizer's consent, so approval for the child admits to the community
+    // "exactly as for a valid invite" whatever the community's own mode — the
+    // mode governs direct joins only.
     if (state.approval === "manual") {
-      const decision = await this.organizerSelfJoin(state, attendeePubkey, invite);
+      let decision = await this.organizerSelfJoin(state, attendeePubkey, invite);
+      let viaMemberOf: string | undefined;
+      if (!decision.grant && hasMemberOf) {
+        const memberOf = await this.memberOfChecker.check({
+          coordinate: state.coordinate,
+          attendeePubkey,
+          tags,
+          children: state.children ?? [],
+        });
+        if (memberOf.grant) {
+          decision = memberOf;
+          viaMemberOf = memberOf.reason;
+        }
+      }
       if (decision.grant && !(await this.admitToRoster(state, attendeePubkey))) {
         log(`[join] ${short(attendeePubkey)} organizer self-join refused: event roster is full`);
         return;
@@ -2804,7 +2821,7 @@ export class Coordinator {
         now: this.now(),
       });
       log(
-        `[join] ${short(attendeePubkey)} invite=${invite ? "yes" : "no"} approval=manual → ${decision.grant ? "AUTO-APPROVED (" + decision.reason + ")" : "manual queue (" + decision.reason + ")"}`,
+        `[join] ${short(attendeePubkey)} invite=${invite ? "yes" : "no"}${viaMemberOf ? ` ${viaMemberOf}` : ""} approval=manual → ${decision.grant ? "AUTO-APPROVED (" + decision.reason + ")" : "manual queue (" + decision.reason + ")"}`,
       );
       if (decision.grant) await this.grantAndPublish(state, attendeePubkey);
       return;

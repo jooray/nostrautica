@@ -429,12 +429,15 @@ silently drop them.
   - `["approval", "manual"|"invite"|"manual+invite"|"open"]`: default `"manual"`
     (`"open"` is the community default, §1.1). A coordinator **MUST** enforce it on
     every `21600` it decides:
-    - `"manual"`: every join waits for the organizer, including one carrying a valid
-      invite (§7) or membership proof (§15), and no invite claim is consumed. The one
-      exception is the organizer's own self-join: a valid invite whose `31601` entry
-      carries `label: "organizer-self"` is verified and claimed like any invite and
+    - `"manual"`: every direct join waits for the organizer, including one carrying a
+      valid invite (§7), and no invite claim is consumed. Two exceptions. The
+      organizer's own self-join: a valid invite whose `31601` entry carries
+      `label: "organizer-self"` is verified and claimed like any invite and
       auto-approves. Only `E_id` can write that label, and organizer clients mint
-      such a code only for the organizer's own participant enrollment.
+      such a code only for the organizer's own participant enrollment. And a verified
+      `member_of` proof on a community (§15.4): linking a child event is the
+      community organizer's consent, so approval for the child admits to the
+      community whatever its own mode.
     - `"invite"`: a valid entitlement (invite, or a `member_of` proof on a community)
       auto-approves. Anything else is **rejected**: no proof at all, or a code that is
       unknown, already used up or expired. The coordinator does not queue a rejected
