@@ -246,7 +246,12 @@ class Dms(
      * remote signer may show UI; otherwise it runs silently and stops at the first
      * request that would need the user.
      */
-    suspend fun unwrapPending(interactive: Boolean) = unwrapLock.withLock {
+    suspend fun unwrapPending(interactive: Boolean) = withContext(Dispatchers.Default) { unwrapPendingLocked(interactive) }
+
+    // Up to 1000 wraps per Messages open (200 × 5 history pages), each two NIP-44
+    // decrypts, a signature check and a snapshot rebuild every 20: never on the main
+    // thread, where [watch]'s callers run it.
+    private suspend fun unwrapPendingLocked(interactive: Boolean) = unwrapLock.withLock {
         val acct = session.account.value ?: return@withLock
         val me = acct.pubkey
         if (owner != me) return@withLock
@@ -329,7 +334,11 @@ class Dms(
      * new wraps, a bounded history walk, interactive unwraps and read-state sync.
      * Cancelling (leaving the screen) closes the subscription.
      */
-    suspend fun watch(onSettled: () -> Unit = {}) {
+    suspend fun watch(onSettled: () -> Unit = {}) = withContext(Dispatchers.Default) { watchOffMain(onSettled) }
+
+    // The DM screens collect this from a LaunchedEffect (the main thread); the
+    // subscription handling, store writes and unwraps it drives belong off it.
+    private suspend fun watchOffMain(onSettled: () -> Unit) {
         val acct = session.account.value ?: return
         val me = acct.pubkey
         switchTo(me)

@@ -100,7 +100,11 @@ class Membership(
      * Each decrypt is a signer call, so results are memoized per event id and a
      * remote signer is asked for at most [maxDecrypts] new ones per pass.
      */
-    suspend fun discoverJoined(signer: NostrSigner, maxDecrypts: Int = 30): Map<String, Long> {
+    suspend fun discoverJoined(signer: NostrSigner, maxDecrypts: Int = 30): Map<String, Long> =
+        // A local key decrypts every self-copy with no budget, from Home's LaunchedEffect.
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { discoverJoinedOffMain(signer, maxDecrypts) }
+
+    private suspend fun discoverJoinedOffMain(signer: NostrSigner, maxDecrypts: Int): Map<String, Long> {
         val pk = signer.pubkey
         nostr.fetch(Relays.DEFAULT, Filter(kinds = listOf(Kinds.MY_PROFILE), authors = listOf(pk)))
         val events = nostr.store.query(Filter(kinds = listOf(Kinds.MY_PROFILE), authors = listOf(pk)))

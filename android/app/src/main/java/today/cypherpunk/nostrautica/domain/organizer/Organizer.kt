@@ -274,8 +274,13 @@ class Organizer(
             listOf(Filter(kinds = listOf(Kinds.GIFT_WRAP), tags = mapOf("p" to sks.map(Secp::pubkeyHex)), since = GiftWrap.since())),
             timeoutMs = 10_000, graceMs = 2_000,
         )
-        val rumors = r.events.mapNotNull { unwrapInbox(it, sks) }
-        val pending = InboxFold.fold(rumors, ctx.coordinate)
+        // Every wrap is unwrapped locally (two NIP-44 decrypts and a signature check per
+        // inbox key tried), hundreds of them for a busy event, and Admin calls this from
+        // the main thread: off it, or the screen froze for seconds on a slow phone.
+        val (rumors, pending) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val rumors = r.events.mapNotNull { unwrapInbox(it, sks) }
+            rumors to InboxFold.fold(rumors, ctx.coordinate)
+        }
         cache.put(owner, "pending:${ctx.coordinate}", ListSerializer(PendingRequest.serializer()), pending, pending.maxOfOrNull { it.rumorCreatedAt } ?: 0)
         val cfg = ctx.cfg
         val talks = if (cfg.talks != "off" && cfg.coordinator != null) {

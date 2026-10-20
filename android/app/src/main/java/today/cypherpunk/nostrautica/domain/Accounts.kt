@@ -139,7 +139,12 @@ class Accounts(private val session: Session, private val nostr: Nostr, private v
         }
         // Unwrap with every kind this account may receive, so the cached result
         // serves whichever caller comes next; then apply this caller's allowlist.
-        val r = GiftWrap.unwrap(wrap, acct.signer, Kinds.ATTENDEE_RUMOR_KINDS + Kinds.ORGANIZER_RUMOR_KINDS)
+        // On Dispatchers.Default: with a local key this is two NIP-44 decrypts and a
+        // signature check, and the grants scan and the DM inbox call it in loops of
+        // hundreds from screens' coroutines on the main thread.
+        val r = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            GiftWrap.unwrap(wrap, acct.signer, Kinds.ATTENDEE_RUMOR_KINDS + Kinds.ORGANIZER_RUMOR_KINDS)
+        }
         cache.put(acct.pubkey, key, Rumor.serializer(), r, wrap.createdAt)
         if (r.kind !in allowedKinds) throw GiftWrap.UnwrapException("rumor kind ${r.kind} is not accepted here")
         return r
