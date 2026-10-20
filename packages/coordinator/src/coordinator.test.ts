@@ -53,7 +53,7 @@ import {
   type EckVersion,
 } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
-import { Coordinator, type Transport } from "./coordinator.js";
+import { Coordinator, sanitizeMatchList, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
 import type { RoleRoutes } from "./providers/types.js";
 import type { ChatMls } from "./chat/mls.js";
@@ -6973,5 +6973,33 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
     expect(statusOf(h, pk)).toBe("approved");
     // The installed event answers from live state: no relay read of its 31600.
     expect(h.transport.fetches.slice(fetchesBefore).some((f) => f.kinds?.includes(31600) && f.authors?.includes(childEid))).toBe(false);
+  });
+});
+
+/**
+ * Audit DS41-034. A 31605 is ONE NIP-44 payload (65,535 plaintext bytes) and the
+ * client schema caps it at 100 matches. Reasoning is capped in characters, so CJK
+ * text could take a long list past the byte ceiling (nip44Encrypt throws on every
+ * retry, the attendee never gets a list), and a top_k over 100 published a list
+ * every client rejects.
+ */
+describe("audit DS41-034 — a match list always fits one NIP-44 payload", () => {
+  it("caps the count and trims from the weakest end until it fits", () => {
+    const matches = Array.from({ length: 120 }, (_, i) => ({
+      pubkey: getPublicKey(generateSecretKey()),
+      score: 1 - i / 200,
+      similarity: 0.5,
+      complementarity: 0.5,
+      reasoning: "協力".repeat(900), // 1,800 chars, 5,400 UTF-8 bytes
+    }));
+    const out = sanitizeMatchList({ v: 2, computed_at: 1, matches });
+    expect(out.matches.length).toBeGreaterThan(0);
+    expect(out.matches.length).toBeLessThanOrEqual(100);
+    expect(new TextEncoder().encode(JSON.stringify(out)).length).toBeLessThanOrEqual(65_535);
+    // Strongest first, kept in order.
+    expect(out.matches[0]!.pubkey).toBe(matches[0]!.pubkey);
+    expect(() => matchListContentSchema.parse(out)).not.toThrow();
+    // A short list is untouched.
+    expect(sanitizeMatchList({ v: 2, computed_at: 1, matches: matches.slice(0, 3) }).matches).toHaveLength(3);
   });
 });

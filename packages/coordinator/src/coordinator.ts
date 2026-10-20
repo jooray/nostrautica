@@ -57,6 +57,8 @@ import {
   chatKeyAttestationContentSchema,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   MAX_ROSTER,
+  MAX_MATCHES,
+  NIP44_MAX_PLAINTEXT_BYTES,
   MAX_ROSTER_PAGES,
   splitRoster,
   mergeRosterPages,
@@ -6831,10 +6833,11 @@ function blindedDFor(eck: Uint8Array, coordinate: string, pubkey: string): strin
  * `reasoning` is length-capped (word boundary) and URLs neutralized so injected
  * text can't smuggle clickable links into clients.
  */
-function sanitizeMatchList(list: MatchListContent): MatchListContent {
-  return {
+export function sanitizeMatchList(list: MatchListContent): MatchListContent {
+  const out: MatchListContent = {
     ...list,
-    matches: list.matches.map((m) => ({
+    // The client schema caps a 31605 at MAX_MATCHES (audit DS41-034).
+    matches: list.matches.slice(0, MAX_MATCHES).map((m) => ({
       ...m,
       reasoning: sanitizeLlmText(m.reasoning),
       // Icebreakers are LLM-authored too (NIP §6.2): same publish-boundary hygiene
@@ -6845,6 +6848,14 @@ function sanitizeMatchList(list: MatchListContent): MatchListContent {
         : {}),
     })),
   };
+  // One NIP-44 payload, 65,535 plaintext bytes (audit DS41-034). Reasoning is
+  // capped in characters, so CJK or emoji text can take a long list past the
+  // ceiling, and nip44Encrypt would then throw on every retry: the attendee never
+  // gets a list. The list is in rank order, so drop from the weakest end.
+  while (out.matches.length > 0 && utf8ToBytes(JSON.stringify(out)).length > NIP44_MAX_PLAINTEXT_BYTES) {
+    out.matches.pop();
+  }
+  return out;
 }
 
 /**
