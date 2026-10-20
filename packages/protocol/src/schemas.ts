@@ -600,6 +600,14 @@ export const coordinatorGrantContentSchema = z.object({
   inbox_nsec: secretKeyHex, // hex privkey of E_inbox
   eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   config_relays: z.array(z.string()).max(MAX_RELAYS),
+  // The outgoing coordinator this install takes over from (NIP §3.7, audit
+  // SB-122): the coordinator the newest 31600 named when the organizer attached
+  // this one, if it was a different one. Optional and additive — a coordinator that
+  // predates it ignores it, and a grant without it (an older organizer client, or a
+  // first attach) makes the handover bootstrap adopt only an E_id-authored roster.
+  // This is the ONLY way a roster authored by a key other than E_id becomes
+  // adoptable: it is vouched for by E_id, because the grant is E_id-sealed.
+  prev_coordinator: hex32.optional(),
 });
 export type CoordinatorGrantContent = z.infer<
   typeof coordinatorGrantContentSchema

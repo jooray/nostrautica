@@ -240,6 +240,21 @@ therefore has protocol consequences beyond the coordinator's own state:
   member records (directory, roster, match lists, published talks) under its own key (bootstrapping from the previous coordinator's still-decryptable records where custody
   allows, and from reprocessing otherwise), so that record-authority pinning (above) never
   leaves members without a readable directory.
+- **Handover roster authority.** Being able to decrypt a `31604` is not authority to
+  define membership: its `d` is the event's public `d`, so anyone can publish there, and
+  every current or former attendee holds an ECK version that decrypts it. A bootstrapping
+  coordinator **MUST** adopt a roster (every page of it, §6.2) and the directory entries it
+  seeds from only when it is authored by `E_id` or by the coordinator named in the
+  `prev_coordinator` field of the `E_id`-sealed `21603` that installed it, and **MUST
+  NOT** adopt one from any other author, whether or not that author is an attendee.
+  Roles (an `organizer` entry is an MLS co-admin, §4) are adopted only from those
+  authors. A `21603` without `prev_coordinator` (a first attach, or an organizer client
+  that predates the field) means only an `E_id`-authored roster is adoptable; a
+  coordinator **MUST NOT** fall back to any other author. The organizer's client **MUST**
+  set `prev_coordinator` when the attach replaces a different coordinator named by the
+  newest `31600`, and omits it otherwise. Because the replace/detach key rotation above
+  republishes the roster under `E_id`, a handover from a pre-field client still keeps the
+  organizer's approvals.
 
 ## 4. Encryption model
 
@@ -850,11 +865,16 @@ relay-visible event on its own.
     gen: int >0,
     inbox_nsec: hex32,
     eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
-    config_relays: string[] ≤30
+    config_relays: string[] ≤30,
+    prev_coordinator?: hex32
   }
   ```
 - Seal author **MUST** equal the coordinate's `E_id`. Install authorization and the `gen`
   rules are §3.5.
+- `prev_coordinator` (optional, additive) is the pubkey of the coordinator this install
+  replaces: the one the newest `31600` named when the organizer attached this one, if
+  different. It is the only key other than `E_id` whose roster the handover bootstrap may
+  adopt (§3.7). A coordinator that predates the field ignores it.
 
 #### `21604`: Admin Command
 

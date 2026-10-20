@@ -265,7 +265,8 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "coordinatorGrantContentSchema",
     sealing: "gift-wrap",
     author: "`E_id` → coordinator",
-    notes: "Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5.",
+    notes:
+      "Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5. Optional `prev_coordinator` names the replaced coordinator, the only non-`E_id` roster author the handover may adopt (§3.7).",
   },
   {
     constant: "KIND_ADMIN_COMMAND",

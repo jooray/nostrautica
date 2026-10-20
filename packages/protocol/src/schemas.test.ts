@@ -155,6 +155,33 @@ describe("every §7 payload round-trips through JSON", () => {
       config_relays: ["wss://relay.example"],
     }));
 
+  it("21603 coordinator grant naming the outgoing coordinator (NIP §3.7, SB-122)", () => {
+    roundTrips(coordinatorGrantContentSchema, {
+      v: 2,
+      a: "31923:" + hex + ":ev",
+      gen: 2,
+      inbox_nsec: hex,
+      eck: [{ id: 1, key: b64_32 }],
+      config_relays: [],
+      prev_coordinator: hex,
+    });
+    // Optional: a grant from an older organizer client still parses (the
+    // coordinator then adopts only an E_id-authored roster).
+    expect(
+      coordinatorGrantContentSchema.parse({
+        v: 2, a: "31923:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [], config_relays: [],
+      }).prev_coordinator,
+    ).toBeUndefined();
+    // But when present it must be a pubkey — never an npub, never uppercase.
+    for (const bad of ["npub1xyz", "AB".repeat(32), "ab".repeat(31), ""]) {
+      expect(() =>
+        coordinatorGrantContentSchema.parse({
+          v: 2, a: "31923:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [], config_relays: [], prev_coordinator: bad,
+        }),
+      ).toThrow();
+    }
+  });
+
   it("21603 coordinator grant requires a positive gen (NIP §3.5)", () => {
     expect(() =>
       coordinatorGrantContentSchema.parse({

@@ -346,8 +346,10 @@ Sent by the organizer (manual approval) or the coordinator (invite auto-approval
 **rumor kind 21603: Coordinator Grant** (→ coordinator; this is how an organizer "installs" the coordinator for an event)
 ```
 content: {"v":2, "a": <coordinate>, "gen": <int>, "inbox_nsec":"<hex>",
-          "eck":[…], "config_relays":["wss://…"]}
+          "eck":[…], "config_relays":["wss://…"],
+          "prev_coordinator": "<hex pubkey>"}   // optional, only on a replace
 ```
+`prev_coordinator` names the coordinator this install replaces. The new coordinator rebuilds the approved set from a prior roster (NIP §3.7 handover), and it accepts that roster only from `E_id` or from the coordinator named here, never from whoever can decrypt it (a throwaway key holding the ECK could otherwise mint itself an organizer). Without the field, only an `E_id`-authored roster is used.
 Sealed by `E_id` (like 21604): the coordinator authenticates the install by requiring the gift wrap's seal author to equal the coordinate's `E_id` pubkey, **and** requires this grant's `gen` to match the `gen` the newest fetchable 31600 currently names it at, a config that can't be fetched is retryable, never treated as authorization. A `gen` at or below any generation this coordinator has ever installed or detached for the event is rejected outright, so a replayed historical grant can never re-install (§9).
 
 **rumor kind 21604: Admin Command** (organizer → coordinator)

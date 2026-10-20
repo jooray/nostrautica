@@ -110,6 +110,26 @@ system protects, what it deliberately leaks, and who must be trusted.
   chat devices are automatically promoted to MLS co-admins as the backstop when a
   backup is unavailable.
 
+## Coordinator handover
+
+When the organizer replaces a coordinator, the new one rebuilds the member list from
+the previous roster (NIP §3.7). It trusts that roster only from the event identity
+(`E_id`) or from the outgoing coordinator that the `E_id`-sealed install grant names
+(`prev_coordinator`). Anyone holding an ECK, including a revoked attendee using a fresh
+key, can encrypt a roster that decrypts correctly. Before this rule, such a roster could
+make the attacker an approved organizer on the new coordinator: an MLS co-admin with
+the current ECK. Two consequences remain:
+
+- **A malicious outgoing coordinator is still trusted for the handover.** The organizer
+  chose it and the grant names it, so its last roster is adopted. It can add pubkeys to
+  that roster. Rotating the keys on replace limits what it can read afterwards, but not
+  what it hands over. The roster is still bounded by the roster and attendee caps.
+- **A grant from an older organizer client names no outgoing coordinator.** The new
+  coordinator then adopts only an `E_id`-authored roster, plus the invite approvals it
+  rebuilds from the inbox history. The client's replace flow rewrites the roster under
+  `E_id`, so approvals normally survive. If that rewrite did not happen, the approvals
+  are missing until the organizer re-approves those people.
+
 ## Revocation honesty
 
 Rotation is **forward-only** (spec §6.3). Anyone who ever held a decryption key can
