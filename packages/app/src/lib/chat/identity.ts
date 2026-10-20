@@ -35,6 +35,7 @@ import {
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { marmotKvBackend, identityPrefix } from "./stores.js";
+import { withExclusiveLock } from "$lib/util/exclusive-lock.js";
 
 /**
  * The applesauce `EventSigner` shape marmot-ts expects. Declared structurally so
@@ -158,6 +159,11 @@ const unlockInFlight = new Map<string, Promise<void>>();
  */
 const resolveInFlight = new Map<string, Promise<Uint8Array>>();
 
+/** Tests only: forget this realm's in-flight resolves, as a second tab would have. */
+export function __resetChatResolveInFlightForTests(): void {
+  resolveInFlight.clear();
+}
+
 /**
  * Resolve THIS device's chat key: return the locally-persisted one, or mint a
  * fresh per-device key (D3). There is no cross-device restore — every device holds
@@ -185,6 +191,18 @@ async function ensureChatDeviceKeyInner(account: string): Promise<Uint8Array> {
   // caller's problem, not this unrelated one's; swallow it here rather than let it
   // propagate into a concurrent resolveChatIdentity that has nothing to do with it.
   await unlockInFlight.get(account)?.catch(() => {});
+  // `resolveInFlight` dedupes within ONE tab only. Two tabs opening chat on a
+  // fresh profile each read "no key", each minted, and each wrote the shared
+  // IndexedDB row; the loser kept running — and attesting — a key the device no
+  // longer holds, so the next launch came back as a stranger to every group
+  // (audit SB-96). Read and mint under one per-account lock across tabs; the
+  // second tab re-reads inside it and finds the first tab's key.
+  return withExclusiveLock(`nostrautica-chat-device-key:${account}`, () =>
+    readOrMintChatDeviceKey(account),
+  );
+}
+
+async function readOrMintChatDeviceKey(account: string): Promise<Uint8Array> {
   const existing = await loadChatDeviceKey(account);
   if (existing) return existing;
   // FAIL CLOSED. `unlockInFlight` covers the timing race, but not a FAILED unlock:
@@ -221,7 +239,17 @@ const SLOT_ID = /^[0-9a-f]{64}$/;
  * deleted: a new `d` is a new address, so the old 30443 would otherwise stay
  * discoverable next to the new one.
  */
-async function ensureClientId(
+function ensureClientId(
+  chatPubkey: string,
+): Promise<{ clientId: string; legacyClientId?: string }> {
+  // Same read-then-mint shape as the device key: two tabs must not each pick a
+  // different KeyPackage slot for one chat identity (SB-96).
+  return withExclusiveLock(`nostrautica-chat-client-id:${chatPubkey}`, () =>
+    readOrMintClientId(chatPubkey),
+  );
+}
+
+async function readOrMintClientId(
   chatPubkey: string,
 ): Promise<{ clientId: string; legacyClientId?: string }> {
   const backend = marmotKvBackend();
