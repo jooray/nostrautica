@@ -3143,6 +3143,17 @@ export class Coordinator {
       }
       roster = mergeRosterPages([roster, ...rest]);
     }
+    // The roster ceiling applies to a bootstrapped roster too (audit SB-123). Each
+    // page is schema-capped, but the merge is not: 40 pages × 700 entries is 28,000
+    // "approved" members, each granted the ECK and given paid pipeline work. No
+    // roster a coordinator could have published is that large, so one that is was
+    // not written by a coordinator: adopt none of it.
+    if (roster.attendees.length > MAX_ROSTER) {
+      log(
+        `[handover] ${state.coordinate}: ABORTING — the roster from ${short(rosterAuthor)} names ${roster.attendees.length} members, past the ${MAX_ROSTER}-member roster cap`,
+      );
+      return;
+    }
     log(
       `[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from a roster authored by ${short(rosterAuthor)}` +
         (rosterAuthor === state.eidPubkey ? " (E_id)" : " (prior coordinator)"),
@@ -3152,6 +3163,15 @@ export class Coordinator {
     for (const a of roster.attendees) {
       const existing = this.deps.store.getAttendee(state.coordinate, a.pubkey);
       if (existing?.status === "approved") continue; // already reconstructed from E_inbox backfill
+      // The same population cap a join is held to (audit SB-123): the E_inbox
+      // backfill may already have enrolled people, so the merged-roster check above
+      // is not enough on its own.
+      if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+        log(
+          `[handover] ${state.coordinate}: stopped seeding at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap; the rest of the roster was not adopted`,
+        );
+        break;
+      }
       // Recover profile + ai_profile from the prior 31603 (decryptable with our ECK).
       let profileJson: string | undefined;
       let aiProfileJson: string | undefined;

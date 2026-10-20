@@ -4708,6 +4708,53 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
     // The genuine attendee, reconstructed from A's real roster, is unaffected.
     expect(storeB.getAttendee(h.coordinate, alicePk)?.status).toBe("approved");
   });
+
+  /**
+   * Audit SB-123. Every page is schema-capped at 700 entries but the merge was
+   * not, so a paginated roster could seed up to 40 × 700 "approved" members — each
+   * granted the ECK and handed paid pipeline work — past the 2,000-member cap that
+   * every join and approval is held to.
+   */
+  it("adopts nothing from a merged roster larger than the roster cap", async () => {
+    const h = await setup();
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const forgerSk = generateSecretKey();
+    const forgerPk = getPublicKey(forgerSk);
+    const pages = 5; // 5 × 450 = 2,250 > MAX_ROSTER (a full 700-entry page is past NIP-44)
+    for (let p = 0; p < pages; p++) {
+      const attendees = Array.from({ length: 450 }, () => ({
+        pubkey: getPublicKey(generateSecretKey()),
+        d: "x",
+        role: "attendee" as const,
+      }));
+      const content = { v: 3, eck_current: 1, ...(p === 0 ? { pages } : {}), attendees };
+      h.transport.seed.push({
+        kind: KIND_ROSTER,
+        pubkey: forgerPk,
+        created_at: Math.floor(h.clock.t / 1000),
+        id: `big-roster-${p}`,
+        sig: "",
+        tags: [["d", rosterPageD(identifier, p)], ["a", h.coordinate]],
+        content: eckEncrypt(h.eck, JSON.stringify(content)),
+      } as any);
+    }
+    const coordSkB = generateSecretKey();
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-big", sig: "", content: "",
+      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", getPublicKey(coordSkB), "2"]],
+    } as any);
+    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
+    await coordB.installEvent({
+      coordinate: h.coordinate,
+      inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"],
+      gen: 2,
+      source: "grant",
+      backfill: "full",
+    });
+    expect(storeB.attendeeCount(h.coordinate)).toBe(0);
+  });
 });
 
 // ── NIP §6.2 — match icebreakers (31605) ─────────────────────────────────────
