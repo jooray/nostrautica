@@ -14059,6 +14059,280 @@
    "ok": false
   },
   {
+   "schema": "eventKeysBackup",
+   "label": "pending_eck",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "pending_eck": [
+     {
+      "id": 2,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ]
+   },
+   "ok": true
+  },
+  {
+   "schema": "eventKeysBackup",
+   "label": "pending_eck bad key",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "pending_eck": [
+     {
+      "id": 2,
+      "key": "AAAA"
+     }
+    ]
+   },
+   "ok": false
+  },
+  {
+   "schema": "eventKeysBackup",
+   "label": "prior inboxes + co-organizers",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "prior_einbox_nsecs": [
+     "0303030303030303030303030303030303030303030303030303030303030303"
+    ],
+    "co_organizers": [
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
+   },
+   "ok": true
+  },
+  {
+   "schema": "eventKeysBackup",
+   "label": "33 co-organizers",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "co_organizers": [
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
+   },
+   "ok": false
+  },
+  {
+   "schema": "organizerGrantContent",
+   "label": "base",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "granted_by": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+   },
+   "ok": true
+  },
+  {
+   "schema": "organizerGrantContent",
+   "label": "organizers + prior inboxes",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "granted_by": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+    "organizers": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ],
+    "prior_einbox_nsecs": [
+     "0303030303030303030303030303030303030303030303030303030303030303"
+    ]
+   },
+   "ok": true
+  },
+  {
+   "schema": "organizerGrantContent",
+   "label": "organizer not hex",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "granted_by": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+    "organizers": [
+     "zz"
+    ]
+   },
+   "ok": false
+  },
+  {
+   "schema": "organizerGrantContent",
+   "label": "65 prior inboxes",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "granted_by": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+    "prior_einbox_nsecs": [
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303"
+    ]
+   },
+   "ok": false
+  },
+  {
    "schema": "coordinatorGrantContent",
    "label": "base (no prev_coordinator)",
    "payload": {
@@ -14293,6 +14567,96 @@
      "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
      "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
     ]
+   },
+   "ok": false
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "legacy (no clock)",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {}
+   },
+   "ok": true
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "with clock + base",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": 5
+     },
+     "met": {
+      "abababababababababababababababababababababababababababababababab": 6
+     }
+    },
+    "base": 3
+   },
+   "ok": true
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "clock key not hex",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "x": 5
+     }
+    }
+   },
+   "ok": false
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "clock stamp negative",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0": -1
+     }
+    }
+   },
+   "ok": false
+  },
+  {
+   "schema": "perEventSettings",
+   "label": "base negative",
+   "payload": {
+    "v": 2,
+    "favorites": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "base": -1
    },
    "ok": false
   }
@@ -15431,5 +15795,1427 @@
     "label": "M46"
    }
   ]
- }
+ },
+ "settingsMerges": [
+  {
+   "label": "two devices, same baseline",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 5,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "bAt": 8,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "two devices, reversed",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 8,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "bAt": 5,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "tombstone beats stale copy",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 9,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "bAt": 8,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "legacy write older than stamps",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 9,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": "old"
+    }
+   },
+   "bAt": 3,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": "old"
+    },
+    "clock": {
+     "favorites": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 3000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 3000
+     }
+    },
+    "base": 3000
+   }
+  },
+  {
+   "label": "legacy write newer than stamps",
+   "a": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "aAt": 9,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {}
+   },
+   "bAt": 100,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 100000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 100000
+   }
+  },
+  {
+   "label": "two legacy docs",
+   "a": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "notes": {}
+   },
+   "aAt": 10,
+   "b": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "notes": {}
+   },
+   "bAt": 20,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 20000
+     },
+     "notes": {}
+    },
+    "base": 20000
+   }
+  },
+  {
+   "label": "note tie by text",
+   "a": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "apple"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   },
+   "aAt": 0,
+   "b": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "banana"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   },
+   "bAt": 0,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "banana"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "odd note key carried",
+   "a": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "not-a-pubkey": "keep me"
+    }
+   },
+   "aAt": 1,
+   "b": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "bAt": 8,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays",
+     "not-a-pubkey": "keep me"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 1000
+   }
+  }
+ ],
+ "settingsEdits": [
+  {
+   "label": "favourite A",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "toggle",
+    "list": "favorites",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+   },
+   "nowMs": 1000,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "note A",
+   "doc": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "note",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "note": "  relays  "
+   },
+   "nowMs": 1001,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "phone favourites B",
+   "doc": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "toggle",
+    "list": "favorites",
+    "pubkey": "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+   },
+   "nowMs": 5000,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "laptop marks C met",
+   "doc": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "toggle",
+    "list": "met",
+    "pubkey": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+   },
+   "nowMs": 8000,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+    ],
+    "want_to_meet": [],
+    "met": [
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000
+     },
+     "want_to_meet": {},
+     "met": {
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 8000
+     },
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "phone un-favourites A",
+   "doc": {
+    "v": 2,
+    "favorites": [
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1000,
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "toggle",
+    "list": "favorites",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
+   },
+   "nowMs": 9000,
+   "out": {
+    "v": 2,
+    "favorites": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "relays"
+    },
+    "clock": {
+     "favorites": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 5000,
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 9000
+     },
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 1001
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "clear note on legacy doc with lagging clock",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "x"
+    }
+   },
+   "docAt": 2000,
+   "edit": {
+    "kind": "note",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "note": " "
+   },
+   "nowMs": 5,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 2000001
+     }
+    },
+    "base": 2000000
+   }
+  },
+  {
+   "label": "toggle on legacy doc",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+    ],
+    "met": [],
+    "notes": {}
+   },
+   "docAt": 50,
+   "edit": {
+    "kind": "toggle",
+    "list": "want_to_meet",
+    "pubkey": "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+   },
+   "nowMs": 10,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [
+     "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+     "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3"
+    ],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {
+      "b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2": 50000,
+      "c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3c3": 50001
+     },
+     "met": {},
+     "notes": {}
+    },
+    "base": 50000
+   }
+  },
+  {
+   "label": "note tie a",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "note",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "note": "apple"
+   },
+   "nowMs": 7000,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "apple"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   }
+  },
+  {
+   "label": "note tie b",
+   "doc": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {},
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {}
+    },
+    "base": 0
+   },
+   "docAt": 0,
+   "edit": {
+    "kind": "note",
+    "pubkey": "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+    "note": "banana"
+   },
+   "nowMs": 7000,
+   "out": {
+    "v": 2,
+    "favorites": [],
+    "want_to_meet": [],
+    "met": [],
+    "notes": {
+     "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": "banana"
+    },
+    "clock": {
+     "favorites": {},
+     "want_to_meet": {},
+     "met": {},
+     "notes": {
+      "a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1": 7000
+     }
+    },
+    "base": 0
+   }
+  }
+ ],
+ "eckIdentity": {
+  "fingerprints": [
+   {
+    "key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+    "fp": "aea94ad501dcb863"
+   },
+   {
+    "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=",
+    "fp": "2e85d61baf458765"
+   },
+   {
+    "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI=",
+    "fp": "e39d6d927134efe8"
+   },
+   {
+    "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=",
+    "fp": "210b090ff4d19640"
+   },
+   {
+    "key": "//////////////////////////////////////////8=",
+    "fp": "171e97b643831419"
+   }
+  ],
+  "sets": [
+   {
+    "set": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     },
+     {
+      "id": 2,
+      "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+     }
+    ],
+    "union": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "canonical": {
+     "id": 2,
+     "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+    },
+    "collisions": [
+     2
+    ]
+   },
+   {
+    "set": [
+     {
+      "id": 2,
+      "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+     },
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "union": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "canonical": {
+     "id": 2,
+     "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+    },
+    "collisions": [
+     2
+    ]
+   },
+   {
+    "set": [
+     {
+      "id": 3,
+      "key": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="
+     },
+     {
+      "id": 2,
+      "key": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
+     },
+     {
+      "id": 3,
+      "key": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ="
+     },
+     {
+      "id": 3,
+      "key": "yMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMg="
+     }
+    ],
+    "union": [
+     {
+      "id": 2,
+      "key": "CAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAg="
+     },
+     {
+      "id": 3,
+      "key": "yMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMg="
+     },
+     {
+      "id": 3,
+      "key": "CQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQkJCQk="
+     },
+     {
+      "id": 3,
+      "key": "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ="
+     }
+    ],
+    "canonical": {
+     "id": 3,
+     "key": "yMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMg="
+    },
+    "collisions": [
+     3
+    ]
+   }
+  ],
+  "tags": [
+   {
+    "tag": [
+     "eck",
+     "2"
+    ],
+    "ref": {
+     "id": 2
+    }
+   },
+   {
+    "tag": [
+     "eck",
+     "2",
+     "87e1af484eb67b95"
+    ],
+    "ref": {
+     "id": 2,
+     "fp": "87e1af484eb67b95"
+    }
+   },
+   {
+    "tag": [
+     "eck",
+     "2",
+     "XYZ"
+    ],
+    "ref": {
+     "id": 2
+    }
+   },
+   {
+    "tag": [
+     "eck",
+     "0"
+    ],
+    "ref": null
+   },
+   {
+    "tag": [
+     "eck",
+     "2.0",
+     "ABCDEF0123456789"
+    ],
+    "ref": {
+     "id": 2,
+     "fp": "abcdef0123456789"
+    }
+   }
+  ]
+ },
+ "backupMerges": [
+  {
+   "label": "two rotations",
+   "a": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "coordinator_gen": 1,
+    "prior_einbox_nsecs": [
+     "0202020202020202020202020202020202020202020202020202020202020202"
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0404040404040404040404040404040404040404040404040404040404040404",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+     }
+    ],
+    "coordinator_gen": 2,
+    "prior_einbox_nsecs": [
+     "0202020202020202020202020202020202020202020202020202020202020202"
+    ]
+   },
+   "configInbox": null,
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "coordinator_gen": 2,
+    "prior_einbox_nsecs": [
+     "0404040404040404040404040404040404040404040404040404040404040404",
+     "0202020202020202020202020202020202020202020202020202020202020202"
+    ]
+   }
+  },
+  {
+   "label": "config names the other inbox",
+   "a": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0404040404040404040404040404040404040404040404040404040404040404",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ]
+   },
+   "configInbox": "462779ad4aad39514614751a71085f2f10e1c7a593e4e030efb5b8721ce55b0b",
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0404040404040404040404040404040404040404040404040404040404040404",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "coordinator_gen": 0,
+    "prior_einbox_nsecs": [
+     "0303030303030303030303030303030303030303030303030303030303030303"
+    ]
+   }
+  },
+  {
+   "label": "staged then promoted",
+   "a": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "pending_eck": [
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ]
+   },
+   "configInbox": null,
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "coordinator_gen": 0
+   }
+  },
+  {
+   "label": "old backup without a",
+   "a": {
+    "v": 2,
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "coordinator_gen": 3
+   },
+   "configInbox": null,
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "coordinator_gen": 3
+   }
+  },
+  {
+   "label": "co-organizers union",
+   "a": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "co_organizers": [
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "co_organizers": [
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+   },
+   "configInbox": null,
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "coordinator_gen": 0,
+    "co_organizers": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
+   }
+  }
+ ]
 }

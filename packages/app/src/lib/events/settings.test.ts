@@ -42,7 +42,7 @@ vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
 import { loadPerEventSettings, toggleSetting, setNote, cachedPerEventSettings } from "./settings.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
-import { __resetPersistForTests, setActiveCacheOwner, cacheGet } from "$lib/cache/persist.js";
+import { __resetPersistForTests, setActiveCacheOwner, cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 const ME = "a".repeat(64);
 const OTHER = "b".repeat(64);
@@ -144,7 +144,7 @@ describe("per-event settings read-modify-write safety", () => {
     // first tap on every event.
     fetchEvents.mockResolvedValue([]);
     const loaded = await loadPerEventSettings(signer({ content: "" }), ctx, BLINDING);
-    expect(loaded).toEqual({ v: 2, favorites: [], want_to_meet: [], met: [], notes: {} });
+    expect(loaded).toMatchObject({ v: 2, favorites: [], want_to_meet: [], met: [], notes: {} });
   });
 
   it("ignores a 30078 by another key, so it can't wedge every later save", async () => {
@@ -189,6 +189,20 @@ describe("per-event settings read-modify-write safety", () => {
     expect(written.want_to_meet).toEqual([OTHER]);
     expect(written.notes[FRIEND]).toBe(SAVED.notes[FRIEND]);
     expect(written.met).toEqual([FRIEND]);
+  });
+
+  // SB-88: a copy cached before per-entry stamps existed must be stamped from when
+  // it was saved, or every entry in it would lose to any older-client write.
+  it("stamps a pre-clock cached copy from its own save time", async () => {
+    cacheSet(`evsettings:${COORD}`, SAVED, 500, ME);
+    relay.answered = false;
+    fetchEvents.mockResolvedValue([]);
+    const store = { content: "" };
+
+    await toggleSetting(signer(store), ctx, BLINDING, "want_to_meet", OTHER);
+
+    const written: PerEventSettings = JSON.parse(store.content.replace(/^enc:/, ""));
+    expect(written.clock?.favorites[FRIEND]).toBe(500_000);
   });
 
   // DS41-003 pattern: an account switch while the read is in flight must not
@@ -238,5 +252,69 @@ describe("per-event settings read-modify-write safety", () => {
     expect(final.favorites).toEqual([FRIEND, OTHER]);
     expect(final.notes[OTHER]).toBe("rust person");
     expect(final.notes[FRIEND]).toBe(SAVED.notes[FRIEND]);
+  });
+});
+
+// Audit SB-88: two DEVICES of one account. Same-device serialization (above) does
+// nothing for them; the payload has to merge.
+describe("per-event settings across two devices", () => {
+  const DAVE = "d".repeat(64);
+  const parse = (content: string): PerEventSettings => JSON.parse(content.replace(/^enc:/, ""));
+
+  beforeEach(() => {
+    __resetPersistForTests();
+    setActiveCacheOwner(ME);
+    relay.answered = true;
+    fetchEvents.mockReset();
+  });
+
+  it("a queued local save does not erase what another device published meanwhile", async () => {
+    // The laptop marked FRIEND as met while offline: its copy (t=150) is newer
+    // than anything on the relay and still queued.
+    let laptopAt = 0;
+    publishMonotonic.mockReset().mockImplementation(async (input: { sign: (t: number) => Promise<unknown> }) => {
+      laptopAt = laptopAt ? laptopAt + 1 : 150;
+      await input.sign(laptopAt);
+      return { published: false, createdAt: laptopAt };
+    });
+    fetchEvents.mockResolvedValue([storedEvent(ME, `enc:${JSON.stringify(SAVED)}`, 100)]);
+    const laptop = { content: "" };
+    await toggleSetting(signer(laptop), ctx, BLINDING, "met", DAVE);
+
+    // Meanwhile the phone favourited OTHER and that reached the relay at t=120.
+    const phone: PerEventSettings = {
+      ...SAVED,
+      favorites: [FRIEND, OTHER],
+      clock: { favorites: { [OTHER]: 120_000 }, want_to_meet: {}, met: {}, notes: {} },
+      base: 100_000,
+    };
+    fetchEvents.mockResolvedValue([storedEvent(ME, `enc:${JSON.stringify(phone)}`, 120)]);
+
+    // The laptop's next save used to build on its own (newer) copy wholesale.
+    await toggleSetting(signer(laptop), ctx, BLINDING, "want_to_meet", FRIEND);
+    const written = parse(laptop.content);
+    expect(written.favorites).toContain(OTHER); // the phone's favourite survived
+    expect(written.met).toContain(DAVE); // and so did the laptop's queued change
+    expect(written.want_to_meet).toEqual([FRIEND]);
+  });
+
+  it("a device keeps showing its own change after another device's stale write wins the relay", async () => {
+    publishMonotonic.mockReset().mockImplementation(async (input: { sign: (t: number) => Promise<unknown> }) => {
+      await input.sign(120);
+      return { published: true, createdAt: 120 };
+    });
+    fetchEvents.mockResolvedValue([storedEvent(ME, `enc:${JSON.stringify(SAVED)}`, 100)]);
+    const phone = { content: "" };
+    await toggleSetting(signer(phone), ctx, BLINDING, "favorites", OTHER);
+
+    // The laptop, which never saw that favourite, then wrote at t=130 (an older
+    // build: no clock at all).
+    const laptopWrite: PerEventSettings = { ...SAVED, met: [FRIEND, DAVE] };
+    fetchEvents.mockResolvedValue([storedEvent(ME, `enc:${JSON.stringify(laptopWrite)}`, 130)]);
+    const seen = await loadPerEventSettings(signer(phone), ctx, BLINDING);
+    expect(seen.met).toEqual(expect.arrayContaining([FRIEND, DAVE]));
+    // The phone's favourite was stamped at the wall clock (after t=130 s), so it
+    // is newer than the laptop's whole-document write and survives the merge.
+    expect(seen.favorites).toContain(OTHER);
   });
 });

@@ -44,6 +44,9 @@ import {
   type OrganizerGrantContent,
   type EventConfig,
   type Rumor,
+  readEckTag,
+  eckCandidates,
+  type EckVersion,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { getPublicKey } from "nostr-tools/pure";
@@ -684,6 +687,8 @@ export async function receiveGrants(
           eck: grant.eck,
           eidNsecHex: grant.eid_nsec,
           einboxNsecHex: grant.einbox_nsec,
+          priorEinboxNsecs: grant.prior_einbox_nsecs,
+          organizers: grant.organizers,
         },
         pubkey,
       );
@@ -875,9 +880,40 @@ export async function isApproved(coordinate: string): Promise<boolean> {
 }
 
 async function eckBytesFor(coordinate: string, owner?: string): Promise<Uint8Array | undefined> {
+  return (await heldFor(coordinate, owner))?.current;
+}
+
+/** Every ECK version held for a coordinate, plus the current one's bytes. */
+interface HeldEck {
+  current: Uint8Array;
+  versions: EckVersion[];
+}
+
+async function heldFor(coordinate: string, owner?: string): Promise<HeldEck | undefined> {
   const keys = await loadEventKeys(coordinate, owner);
   const eck = currentEck(keys);
-  return eck ? base64ToBytes(eck.key) : undefined;
+  return eck && keys ? { current: base64ToBytes(eck.key), versions: keys.eck } : undefined;
+}
+
+/**
+ * Decrypt a member record with the key its own `eck` tag names (id + fingerprint,
+ * NIP §4.1), falling back to the current key. A roster or entry written under an
+ * older version, or under one key of a same-id pair, used to be unreadable here
+ * because only the current key was ever tried (DS41-002, SB-86). Throws when no
+ * held key decrypts it. Returns the key that did, for the roster's continuation
+ * pages.
+ */
+function decryptHeld(held: HeldEck, tags: string[][] | undefined, content: string): { plain: string; key: Uint8Array } {
+  const ref = readEckTag(tags);
+  for (const v of ref ? eckCandidates(held.versions, ref) : []) {
+    const key = base64ToBytes(v.key);
+    try {
+      return { plain: eckDecrypt(key, content), key };
+    } catch {
+      /* next */
+    }
+  }
+  return { plain: eckDecrypt(held.current, content), key: held.current };
 }
 
 // Decrypted roster/directory/matches are member-only (ECK/nip44), so they cache
@@ -997,8 +1033,8 @@ async function fetchRosterOnce(
   scope: ReadScope,
 ): Promise<RosterContent | undefined> {
   if (!scope.keysOwner) return undefined;
-  const eck = await eckBytesFor(ctx.coordinate, scope.keysOwner);
-  if (!eck) return undefined;
+  const held = await heldFor(ctx.coordinate, scope.keysOwner);
+  if (!held) return undefined;
   const authors = acceptedRecordAuthors(ctx);
   const { identifier } = parseCoordinate(ctx.coordinate);
   // Streamed one-shot: first EOSE + grace instead of the slowest relay — this
@@ -1016,8 +1052,11 @@ async function fetchRosterOnce(
   // (onlyVerified + directoryPublisher). Distinguish a newer-protocol roster
   // (prompt an update, NIP §2 / D2) from a garbled one (drop).
   let raw: unknown;
+  let eck: Uint8Array;
   try {
-    raw = JSON.parse(eckDecrypt(eck, latest.content));
+    const opened = decryptHeld(held, latest.tags, latest.content);
+    raw = JSON.parse(opened.plain);
+    eck = opened.key;
   } catch {
     return undefined;
   }
@@ -1175,8 +1214,8 @@ async function fetchDirectoryOnce(
   scope: ReadScope,
 ): Promise<DirectoryEntryContent[]> {
   if (!scope.keysOwner) return [];
-  const eck = await eckBytesFor(ctx.coordinate, scope.keysOwner);
-  if (!eck) return [];
+  const held = await heldFor(ctx.coordinate, scope.keysOwner);
+  if (!held) return [];
   const roster = await fetchRosterFor(ctx, scope);
   if (!roster || roster.attendees.length === 0) return [];
 
@@ -1199,7 +1238,7 @@ async function fetchDirectoryOnce(
   let newestAt = 0;
   for (const e of latestByD.values()) {
     try {
-      entries.push(directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content))));
+      entries.push(directoryEntryContentSchema.parse(JSON.parse(decryptHeld(held, e.tags, e.content).plain)));
       if ((e.created_at ?? 0) > newestAt) newestAt = e.created_at ?? 0;
     } catch {
       /* skip entries we can't decrypt (e.g. published under a newer ECK) */
@@ -1240,8 +1279,8 @@ export async function streamDirectory(
 ): Promise<DirectoryStream | undefined> {
   const scope = captureReadScope(); // DS41-003: see ReadScope
   if (!scope.keysOwner) return undefined;
-  const eck = await eckBytesFor(ctx.coordinate, scope.keysOwner);
-  if (!eck) return undefined; // not approved — nothing decryptable
+  const held = await heldFor(ctx.coordinate, scope.keysOwner);
+  if (!held) return undefined; // not approved — nothing decryptable
   const authors = acceptedRecordAuthors(ctx);
   const acceptedAuthors = new Set(acceptedRecordAuthors(ctx));
   const coord = ctx.coordinate;
@@ -1279,7 +1318,7 @@ export async function streamDirectory(
     if (e.pubkey !== undefined && !acceptedAuthors.has(e.pubkey)) return;
     const at = e.created_at ?? 0;
     try {
-      const entry = directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content)));
+      const entry = directoryEntryContentSchema.parse(JSON.parse(decryptHeld(held, e.tags, e.content).plain));
       const prev = byPk.get(entry.pubkey);
       if (!prev || supersedes({ id: e.id, created_at: at }, { id: prev.id, created_at: prev.at })) {
         byPk.set(entry.pubkey, { entry, at, id: e.id });

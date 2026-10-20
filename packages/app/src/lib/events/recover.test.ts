@@ -27,6 +27,7 @@ import {
   __setKeystoreBackend,
   setActiveOwner,
   loadEventKeys,
+  saveEventKeys,
   currentEck,
   type EventKeys,
   type KeystoreBackend,
@@ -262,6 +263,48 @@ describe("recoverEventKeys prefers the NEWEST backup per coordinate", () => {
     await recoverEventKeys(organizer);
     const keys = await loadEventKeys(coordinate);
     expect(keys?.einboxNsecHex).toBe(freshInbox);
+    // The stale backup's inbox is not thrown away: it still reads the
+    // submissions sealed to it before the rotation (audit SB-89).
+    expect(keys?.priorEinboxNsecs).toContain(staleInbox);
+  });
+
+  // Audit SB-89: restore kept only the local record's inbox and dropped its
+  // prior list altogether, so a rotation's retired inbox vanished on recovery.
+  it("keeps the local record's retired inboxes and the backup's prior ones", async () => {
+    const organizer = LocalSigner.generate();
+    const owner = await organizer.getPublicKey();
+    const eidSk = generateSecretKey();
+    const coordinate = makeCoordinate(getPublicKey(eidSk), "cypherpunk-2026");
+    const [localCurrent, localPrior, backupPrior] = [1, 2, 3].map(() => bytesToHex(generateSecretKey()));
+    const eck = { id: 1, key: bytesToBase64(generateEck()) };
+    const mem = memBackend();
+    __setKeystoreBackend(mem.backend);
+    setActiveOwner(owner);
+    await saveEventKeys(
+      { coordinate, role: "organizer", eck: [eck], eidNsecHex: bytesToHex(eidSk), einboxNsecHex: localCurrent, priorEinboxNsecs: [localPrior] },
+      owner,
+    );
+    fetchEvents.mockResolvedValue([
+      {
+        kind: KIND_APP_DATA,
+        pubkey: owner,
+        created_at: 1000,
+        tags: [["d", "nostrautica:eventkeys:blinded-opaque"]],
+        content: await organizer.nip44Encrypt(
+          owner,
+          JSON.stringify({
+            v: 2, a: coordinate, eid_nsec: bytesToHex(eidSk), einbox_nsec: localCurrent, eck: [eck],
+            prior_einbox_nsecs: [backupPrior],
+          } satisfies EventKeysBackup),
+        ),
+      },
+    ]);
+
+    await recoverEventKeys(organizer, { force: true });
+
+    const keys = await loadEventKeys(coordinate);
+    expect(keys?.einboxNsecHex).toBe(localCurrent);
+    expect(new Set(keys?.priorEinboxNsecs)).toEqual(new Set([localPrior, backupPrior]));
   });
 });
 

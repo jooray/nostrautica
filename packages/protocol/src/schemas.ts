@@ -322,6 +322,10 @@ export const MAX_ICEBREAKER = 280;
  * which are "a subset of the roster" by construction.
  */
 export const MAX_ROSTER = 2000;
+/** Retired E_inbox secrets one event-keys backup / organizer grant carries. */
+export const MAX_PRIOR_INBOXES = 64;
+/** Organizer accounts (creator + co-organizers) one event's custody records name. */
+export const MAX_ORGANIZERS = 32;
 /**
  * Attendee entries in ONE 31604 page. Not the operative limit and not meant to
  * be: the 65,535-byte NIP-44 plaintext ceiling always binds first (the smallest
@@ -813,6 +817,14 @@ export const organizerGrantContentSchema = z.object({
   eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   config_relays: z.array(z.string()).max(MAX_RELAYS),
   granted_by: hex32,
+  // Every ACCOUNT the sender knows holds organizer custody for this event, its own
+  // included (audit SB-90). A co-organizer is a different account, and only the
+  // devices that know of it can re-issue custody to it when the E_inbox / ECK
+  // rotate; carrying the set in the grant lets every holder do so. Additive.
+  organizers: z.array(hex32).max(MAX_ORGANIZERS).optional(),
+  // Retired E_inbox secrets, so a re-issued grant after a rotation still reads
+  // submissions sealed to the old inbox (NIP §3.7). Additive.
+  prior_einbox_nsecs: z.array(secretKeyHex).max(MAX_PRIOR_INBOXES).optional(),
 });
 export type OrganizerGrantContent = z.infer<typeof organizerGrantContentSchema>;
 
@@ -1241,6 +1253,27 @@ export const userSettingsSchema = z.object({
 });
 export type UserSettings = z.infer<typeof userSettingsSchema>;
 
+/**
+ * Removed entries a per-event settings clock keeps per field (tombstones), on
+ * top of the present ones. A tombstone is what stops another device's stale
+ * copy from resurrecting a removed favourite; past this many the oldest are
+ * dropped (a very old removal can then come back from a device that slept
+ * through it, the gentler failure than an unbounded payload).
+ */
+export const MAX_SETTINGS_TOMBSTONES = 200;
+const settingsStamps = z
+  .record(hex32, z.number().int().nonnegative())
+  .refine((r) => Object.keys(r).length <= MAX_ROSTER + MAX_SETTINGS_TOMBSTONES, {
+    message: "too many settings stamps",
+  });
+export const settingsClockSchema = z.object({
+  favorites: settingsStamps.default({}),
+  want_to_meet: settingsStamps.default({}),
+  met: settingsStamps.default({}),
+  notes: settingsStamps.default({}),
+});
+export type SettingsClock = z.infer<typeof settingsClockSchema>;
+
 export const perEventSettingsSchema = z.object({
   v: version,
   favorites: z.array(hex32).max(MAX_ROSTER).default([]),
@@ -1255,6 +1288,14 @@ export const perEventSettingsSchema = z.object({
       message: `too many notes (max ${MAX_NOTES})`,
     })
     .default({}),
+  // Per-entry change stamps for the cross-device merge (audit SB-88, see
+  // settings-merge.ts). ADDITIVE and optional, so the payload stays `v: 2`: a
+  // client that predates them reads the four fields above exactly as before
+  // (zod and kotlinx both drop unknown keys) and, when it writes, simply omits
+  // them, which a newer reader treats as a whole-document write at that event's
+  // created_at. `base` (ms) is the stamp of every entry the clock does not name.
+  clock: settingsClockSchema.optional(),
+  base: z.number().int().nonnegative().optional(),
 });
 export type PerEventSettings = z.infer<typeof perEventSettingsSchema>;
 
@@ -1301,6 +1342,18 @@ export const eventKeysBackupSchema = z.object({
   // (never attached, or a backup written before generations); a re-attach reads it
   // back and uses lastGen + 1, so generations strictly increase across devices.
   coordinator_gen: z.number().int().nonnegative().optional(),
+  // ECK versions minted by a rotation whose publishes were not yet confirmed when
+  // this backup was written (audit DS41-002): custody, but not current. Recovery
+  // restores them as staged and a client promotes one once it finds the 31604
+  // written under it. Additive: older readers ignore it.
+  pending_eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS).optional(),
+  // E_inbox secrets retired by a rotation (NIP §3.7), so a recovered device can
+  // still read submissions sealed to a pre-rotation inbox, and two devices that
+  // each rotated keep both (audit SB-89). Additive.
+  prior_einbox_nsecs: z.array(secretKeyHex).max(MAX_PRIOR_INBOXES).optional(),
+  // Other accounts this organizer has handed custody to (21605), so every device
+  // of the account re-issues it to them on a rotation (audit SB-90). Additive.
+  co_organizers: z.array(hex32).max(MAX_ORGANIZERS).optional(),
 });
 export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 

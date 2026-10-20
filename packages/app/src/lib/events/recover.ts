@@ -22,6 +22,8 @@ import {
   hexToBytes,
   blindedD,
   compareLatest,
+  unionEck,
+  mergeEventKeysBackups,
   type EventKeysBackup,
 } from "@nostrautica/protocol";
 import { deriveBlindingKey } from "./blinding.js";
@@ -144,25 +146,47 @@ async function resolveCoordinate(
 }
 
 /**
- * Restore a backup into the keystore, merging with any existing local record so
- * a fresher local ECK set (e.g. after a revocation rotation) is never clobbered
- * by an older backup — union the ECK versions, keep local secrets when present.
+ * Restore a backup into the keystore, merging with any existing local record the
+ * same way a backup write does (`mergeEventKeysBackups`, audit SB-89): ECK
+ * versions unioned by (id, key) so the other key of a same-id collision is added
+ * (NIP §4.1, SB-86), staged versions kept staged, the higher install generation,
+ * and EVERY E_inbox secret kept: the local current one stays current (Admin
+ * adopts the one the newest 31600 names) and the rest, the backup's included,
+ * become prior inboxes that still read old submissions. This used to keep only
+ * the local inbox and drop the record's prior list altogether.
  */
 async function restore(coordinate: string, backup: EventKeysBackup, owner: string): Promise<void> {
   const existing = await loadEventKeys(coordinate, owner).catch(() => undefined);
-  const byId = new Map<number, { id: number; key: string }>();
-  for (const v of existing?.eck ?? []) byId.set(v.id, v);
-  for (const v of backup.eck) if (!byId.has(v.id)) byId.set(v.id, v);
+  const local: EventKeysBackup | undefined =
+    existing?.eidNsecHex && existing.einboxNsecHex
+      ? {
+          v: 2,
+          a: coordinate,
+          eid_nsec: existing.eidNsecHex,
+          einbox_nsec: existing.einboxNsecHex,
+          eck: existing.eck,
+          coordinator_gen: existing.coordinatorGen ?? 0,
+          ...(existing.pendingEck?.length ? { pending_eck: existing.pendingEck } : {}),
+          ...(existing.priorEinboxNsecs?.length ? { prior_einbox_nsecs: existing.priorEinboxNsecs } : {}),
+          ...(existing.coOrganizers?.length ? { co_organizers: existing.coOrganizers } : {}),
+        }
+      : undefined;
+  const merged = local
+    ? mergeEventKeysBackups(local, backup)
+    : mergeEventKeysBackups({ ...backup, eck: unionEck(existing?.eck ?? [], backup.eck) }, backup);
   await saveEventKeys({
+    ...(existing ?? {}),
     coordinate,
     role: "organizer",
-    eck: [...byId.values()].sort((a, b) => a.id - b.id),
-    eidNsecHex: existing?.eidNsecHex ?? backup.eid_nsec,
-    einboxNsecHex: existing?.einboxNsecHex ?? backup.einbox_nsec,
-    // The install generation (NIP §3.5) only grows — keep the higher of the local
-    // record and the backup so a re-attach on a fresh device still increments past
-    // the last-used gen instead of colliding at gen 1.
-    coordinatorGen: Math.max(existing?.coordinatorGen ?? 0, backup.coordinator_gen ?? 0) || undefined,
+    eck: merged.eck,
+    eidNsecHex: existing?.eidNsecHex ?? merged.eid_nsec,
+    einboxNsecHex: merged.einbox_nsec,
+    priorEinboxNsecs: merged.prior_einbox_nsecs,
+    // The install generation (NIP §3.5) only grows.
+    coordinatorGen: merged.coordinator_gen || undefined,
+    // Staged versions stay staged (DS41-002); loadRoster promotes the one in use.
+    pendingEck: merged.pending_eck,
+    coOrganizers: merged.co_organizers,
   }, owner);
 }
 

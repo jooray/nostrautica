@@ -6,6 +6,7 @@ import kotlinx.serialization.json.buildJsonObject
 import today.cypherpunk.nostrautica.nostr.Relays
 import today.cypherpunk.nostrautica.protocol.Bytes
 import today.cypherpunk.nostrautica.protocol.Coordinate
+import today.cypherpunk.nostrautica.protocol.EckIdentity
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.EventConfig
 import today.cypherpunk.nostrautica.protocol.EventKeysBackup
@@ -178,10 +179,13 @@ object OrganizerEvents {
     // ── Roster rewrite (organizer.ts loadRoster / rosterForRewrite / buildRosterEvents) ──
 
     sealed interface RosterRead {
-        data class Ok(val roster: RosterContent, val at: Long) : RosterRead
+        /** [eck]: the held version the roster's `eck` tag named and that decrypted it. */
+        data class Ok(val roster: RosterContent, val at: Long, val eck: EckVersion? = null) : RosterRead
         /** Nothing came back; [suspect] when this device has seen a roster before. */
         data class Absent(val suspect: Boolean) : RosterRead
         data class Unreadable(val at: Long) : RosterRead
+        /** Written under a key this device does not hold: another device rotated (SB-90, NIP §4.1). */
+        data class Foreign(val at: Long) : RosterRead
     }
 
     class RosterUnreadable : Exception(
@@ -189,9 +193,22 @@ object OrganizerEvents {
             "Rewriting it now would remove everyone already approved. Check your connection and try again.",
     )
 
+    /** organizer.ts KeysChangedElsewhereError. */
+    class KeysChangedElsewhere : Exception(
+        "This event's keys were changed on another device, and this device still holds the old ones. " +
+            "Open the event on the device that changed them, or have it send this account a fresh organizer grant.",
+    )
+
+    /** organizer.ts EckCollisionError: two keys share the current id (NIP §4.1). */
+    class EckCollision : Exception(
+        "This event's member key was changed on two devices at the same time. " +
+            "Use \"Repair keys\" on the Admin page, then try again.",
+    )
+
     /** Only a genuine first roster (nothing came back, never seen one) may be rewritten from empty. */
     fun rosterForRewrite(read: RosterRead, eckCurrent: Int): Pair<RosterContent, Long> = when (read) {
         is RosterRead.Ok -> read.roster to read.at
+        is RosterRead.Foreign -> throw KeysChangedElsewhere()
         is RosterRead.Unreadable -> throw RosterUnreadable()
         is RosterRead.Absent -> if (read.suspect) throw RosterUnreadable() else RosterContent(2, eckCurrent, null, null, emptyList()) to 0L
     }
@@ -223,7 +240,7 @@ object OrganizerEvents {
             if (onRelay.getOrNull(page) == json) return@mapIndexedNotNull null
             UnsignedEvent(
                 eid, createdAt, Kinds.ROSTER,
-                listOf(listOf("d", Roster.pageD(identifier, page)), listOf("a", coordinate), listOf("eck", eckId.toString()), listOf("v", "2")),
+                listOf(listOf("d", Roster.pageD(identifier, page)), listOf("a", coordinate), EckIdentity.tag(eckId, eck), listOf("v", "2")),
                 Nip44.eckEncrypt(eck, json),
             ).signWith(eidSk)
         }

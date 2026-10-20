@@ -143,6 +143,7 @@ private fun AdminBody(p: androidx.compose.foundation.layout.PaddingValues, naddr
         st.loading = false
         launch { st.refreshLiveness() }
         launch { st.refreshPosts() }
+        launch { st.refreshKeyStatus(reconcile = true) }
         st.refresh()
     }
     // A live 1059 subscription to the inboxes while this screen is visible,
@@ -192,6 +193,19 @@ private fun AdminBody(p: androidx.compose.foundation.layout.PaddingValues, naddr
         item { OverviewCard(st) }
         item { SectionHead(s.t("admin.section.operations")) }
         if (st.missingEid) item { SoftCard(color = t.warnSoft) { Text(s.t("admin.noEidKey.title"), fontWeight = FontWeight.SemiBold); Dim(s.t("admin.noEidKey.body")) } }
+        // Custody across devices (SB-90 / SB-86): same cards as the PWA's Admin.
+        val ks = st.keyStatus
+        if (ks?.changedElsewhere == true) item { SoftCard(color = t.warnSoft) { Dim(s.t("admin.keys.changedElsewhere")) } }
+        else if (ks?.collision == true && !st.repaired) item {
+            SoftCard(color = t.warnSoft) {
+                if (st.coordinatorNow != null) Dim(s.t("admin.keys.collisionCoordinator"))
+                else {
+                    Dim(s.t("admin.keys.collision"))
+                    SmallButton(s.t("admin.keys.repair"), { st.repairKeys() }, enabled = !st.repairing, selected = true)
+                }
+            }
+        }
+        else if (st.repaired) item { Card { Dim(s.t("admin.keys.repaired")) } }
         if (!st.selfEnrolled && !st.missingEid) item {
             Card {
                 Text(s.t("admin.enrollSelf.title"), fontWeight = FontWeight.SemiBold)

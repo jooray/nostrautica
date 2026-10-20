@@ -31,6 +31,7 @@ import {
   type CoordinatorStatusContent,
   type CoordinatorAnnounce,
   type TalkContent,
+  eckFingerprint,
 } from "@nostrautica/protocol";
 
 export interface PublishKeys {
@@ -68,7 +69,7 @@ export function buildDirectoryEntry(
       tags: [
         ["d", d],
         ["a", coordinate],
-        ["eck", String(keys.eckId)],
+        ["eck", String(keys.eckId), eckFingerprint(keys.eck)],
         ["v", "2"],
       ],
       content: eckEncrypt(keys.eck, JSON.stringify(entry)),
@@ -108,7 +109,7 @@ export function buildRoster(
       tags: [
         ["d", d],
         ["a", coordinate],
-        ["eck", String(keys.eckId)],
+        ["eck", String(keys.eckId), eckFingerprint(keys.eck)],
         ["v", "2"],
       ],
       content: eckEncrypt(keys.eck, JSON.stringify(roster)),
@@ -157,7 +158,7 @@ export function buildMatchMatrix(
       tags: [
         ["d", identifier],
         ["a", coordinate],
-        ["eck", String(keys.eckId)],
+        ["eck", String(keys.eckId), eckFingerprint(keys.eck)],
         ["v", "2"],
       ],
       content: eckEncrypt(keys.eck, JSON.stringify(content)),
@@ -191,7 +192,7 @@ export function buildTalkEntry(
       tags: [
         ["d", d],
         ["a", coordinate],
-        ["eck", String(keys.eckId)],
+        ["eck", String(keys.eckId), eckFingerprint(keys.eck)],
         ["v", "2"],
       ],
       content: eckEncrypt(keys.eck, JSON.stringify(content)),

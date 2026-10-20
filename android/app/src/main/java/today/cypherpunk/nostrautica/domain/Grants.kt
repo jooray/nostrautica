@@ -226,7 +226,7 @@ class Grants(
                             if (!authenticateOrganizerGrant(rumor, g, config)) {
                                 memo[wrap.id] = MemoEntry(done = true); dirty = true
                             } else {
-                                keys.applyOrganizerGrant(pubkey, g.a, g.eck, g.eidNsec, g.einboxNsec)
+                                keys.applyOrganizerGrant(pubkey, g.a, g.eck, g.eidNsec, g.einboxNsec, g.priorEinboxNsecs, g.organizers)
                                 heldNow = keys.list(pubkey)
                                 gained += g.a
                                 memo[wrap.id] = MemoEntry(g.a, g.eck.map { it.id }, organizer = true); dirty = true

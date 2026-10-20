@@ -22,6 +22,7 @@ import today.cypherpunk.nostrautica.protocol.Nip44
 import today.cypherpunk.nostrautica.protocol.NostrEvent
 import today.cypherpunk.nostrautica.protocol.PerEventSettings
 import today.cypherpunk.nostrautica.protocol.ProtocolCrypto
+import today.cypherpunk.nostrautica.protocol.SettingsMerge
 import today.cypherpunk.nostrautica.protocol.Wire
 
 // Services of the People area, registered lazily on the container. The keys are
@@ -44,7 +45,7 @@ val AppContainer.peopleSocial: PeopleSocial get() = area("people.social") { Peop
  */
 class EventSettingsStore(private val nostr: Nostr, private val cache: Cache, private val accounts: Accounts) {
     @Serializable
-    data class Cached(val id: String, val settings: PerEventSettings)
+    data class Cached(val id: String, val settings: PerEventSettings, val at: Long = 0)
 
     private val lock = Mutex()
     private fun key(coordinate: String) = "evsettings:$coordinate"
@@ -73,12 +74,20 @@ class EventSettingsStore(private val nostr: Nostr, private val cache: Cache, pri
         }
         // The store only keeps events by their own author for this (kind, pubkey, d),
         // so a foreign 30078 can't wedge the latest-pick.
-        val latest = nostr.store.latest(Kinds.APP_DATA, pk, d) ?: return PerEventSettings()
         val c = cache.get(pk, key(ctx.coordinate), Cached.serializer())
+        // A copy cached before per-entry stamps existed is stamped from when it was saved.
+        val latest = nostr.store.latest(Kinds.APP_DATA, pk, d)
+            ?: return c?.let { SettingsMerge.merge(it.settings, it.at, SettingsMerge.empty(), 0) } ?: SettingsMerge.empty()
         if (c?.id == latest.id) return c.settings
         val json = signer.nip44Decrypt(pk, latest.content)
-        val s = Wire.parse(PerEventSettings.serializer(), json)
-        cache.put(pk, key(ctx.coordinate), Cached.serializer(), Cached(latest.id, s), latest.createdAt)
+        val remote = Wire.parse(PerEventSettings.serializer(), json)
+        // Merge, never pick (SB-88): the relay copy may carry another device's edits
+        // and this phone's copy a save that has not reached a relay yet. Per-entry
+        // stamps keep the newest of each (SettingsMerge, same rule as the PWA).
+        val s = if (c != null) SettingsMerge.merge(remote, latest.createdAt, c.settings, c.at)
+        else SettingsMerge.merge(remote, latest.createdAt, SettingsMerge.empty(), 0)
+        val at = maxOf(latest.createdAt, c?.at ?: 0)
+        cache.put(pk, key(ctx.coordinate), Cached.serializer(), Cached(latest.id, s, at), at)
         return s
     }
 
@@ -88,7 +97,7 @@ class EventSettingsStore(private val nostr: Nostr, private val cache: Cache, pri
         val d = d(ctx.coordinate)
         val content = signer.nip44Encrypt(pk, Wire.encode(PerEventSettings.serializer(), s))
         val (ev, result) = accounts.signAndPublish(Kinds.APP_DATA, content, listOf(listOf("d", d)), Relays.DEFAULT, "settings")
-        cache.put(pk, key(ctx.coordinate), Cached.serializer(), Cached(ev.id, s), ev.createdAt)
+        cache.put(pk, key(ctx.coordinate), Cached.serializer(), Cached(ev.id, s, ev.createdAt), ev.createdAt)
         return result
     }
 

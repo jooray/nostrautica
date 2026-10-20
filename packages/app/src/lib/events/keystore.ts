@@ -19,7 +19,7 @@
  * recover.ts; attendee/co-organizer: the 21602/21605 grants themselves). This
  * store is a fast local cache.
  */
-import type { EckVersion } from "@nostrautica/protocol";
+import { canonicalEck, unionEck, type EckVersion } from "@nostrautica/protocol";
 
 export interface EventKeys {
   coordinate: string;
@@ -34,6 +34,22 @@ export interface EventKeys {
   /** Last coordinator install generation this organizer used (NIP §3.5). A
    *  re-attach uses lastGen + 1; absent = never attached (0). Organizer only. */
   coordinatorGen?: number;
+  /**
+   * ECK versions this device minted for a rotation whose publishes have not been
+   * confirmed yet (audit DS41-002). Persisted BEFORE anything encrypted under them
+   * goes out, so a crash can never leave relays holding ciphertext under a key no
+   * device has, but NOT current: posts, grants and approvals keep using `eck`
+   * until the rotation's roster is on the relays (organizer.ts promotes them when
+   * `loadRoster` finds it, or when the rotation finishes). Organizer only.
+   */
+  pendingEck?: EckVersion[];
+  /**
+   * Other ACCOUNTS known to hold organizer custody for this event: the ones this
+   * account handed a 21605 to, plus the ones a received 21605 named (audit
+   * SB-90). Every rotation re-issues custody to them, since a co-organizer is
+   * not an attendee and receives nothing else. Organizer only.
+   */
+  coOrganizers?: string[];
 }
 
 /** On-disk shape: an EventKeys record scoped to the identity that owns it. */
@@ -109,6 +125,8 @@ function toPublic(r: StoredEventKeys): EventKeys {
     einboxNsecHex: r.einboxNsecHex,
     ...(r.priorEinboxNsecs ? { priorEinboxNsecs: r.priorEinboxNsecs } : {}),
     coordinatorGen: r.coordinatorGen,
+    ...(r.pendingEck?.length ? { pendingEck: r.pendingEck } : {}),
+    ...(r.coOrganizers?.length ? { coOrganizers: r.coOrganizers } : {}),
   };
 }
 
@@ -342,7 +360,7 @@ export async function loadEventKeys(
   return undefined;
 }
 
-/** Merge new ECK versions into a stored record (dedupe by id), keeping the max. */
+/** Merge new ECK versions into a stored record (union by (id, key), NIP §4.1). */
 export async function addEckVersions(
   coordinate: string,
   versions: EckVersion[],
@@ -355,24 +373,29 @@ export async function addEckVersions(
     role,
     eck: [],
   };
-  const byId = new Map<number, EckVersion>();
-  for (const v of existing.eck) byId.set(v.id, v);
-  for (const v of versions) byId.set(v.id, v);
-  existing.eck = [...byId.values()].sort((a, b) => a.id - b.id);
+  existing.eck = unionEck(existing.eck, versions);
   await saveEventKeys(existing, o);
   return existing;
 }
 
 /**
  * Fold an authenticated 21605 organizer grant into the stored record (audit
- * APPK-4): UNION the ECK versions by id — never shrink the set — so an
+ * APPK-4): UNION the ECK versions (by id and key) — never shrink the set — so an
  * authentic-but-stale grant (ECK v1) processed after a fresher 21602 (v2) can't
  * clobber the record back to v1-only (wraps are memoized, so the loss used to
  * be permanent). Role + custody secrets update from the grant.
  */
 export async function applyOrganizerGrant(
   coordinate: string,
-  grant: { eck: EckVersion[]; eidNsecHex: string; einboxNsecHex: string },
+  grant: {
+    eck: EckVersion[];
+    eidNsecHex: string;
+    einboxNsecHex: string;
+    /** 21605 `prior_einbox_nsecs` (SB-90): retired inboxes the sender still holds. */
+    priorEinboxNsecs?: string[];
+    /** 21605 `organizers` (SB-90): every account the sender knows holds custody. */
+    organizers?: string[];
+  },
   owner?: string,
 ): Promise<EventKeys> {
   const o = ownerForWrite(owner);
@@ -381,15 +404,52 @@ export async function applyOrganizerGrant(
     role: "organizer" as const,
     eck: [],
   };
-  const byId = new Map<number, EckVersion>();
-  for (const v of existing.eck) byId.set(v.id, v);
-  for (const v of grant.eck) byId.set(v.id, v);
-  existing.eck = [...byId.values()].sort((a, b) => a.id - b.id);
+  existing.eck = unionEck(existing.eck, grant.eck);
   existing.role = "organizer";
   existing.eidNsecHex = grant.eidNsecHex;
+  // The grant's inbox becomes current, but an inbox this record already held is
+  // RETIRED, never dropped (a re-issued grant after a rotation, or a stale one
+  // arriving late: either way that secret still reads submissions sealed to it;
+  // Admin re-adopts whichever inbox the newest 31600 names).
+  const prior = [
+    ...new Set([
+      ...(existing.priorEinboxNsecs ?? []),
+      ...(grant.priorEinboxNsecs ?? []),
+      ...(existing.einboxNsecHex ? [existing.einboxNsecHex] : []),
+    ]),
+  ].filter((s) => s !== grant.einboxNsecHex);
   existing.einboxNsecHex = grant.einboxNsecHex;
+  existing.priorEinboxNsecs = prior.length > 0 ? prior : undefined;
+  const co = [...new Set([...(existing.coOrganizers ?? []), ...(grant.organizers ?? [])])].filter((p) => p !== o);
+  existing.coOrganizers = co.length > 0 ? co : undefined;
   await saveEventKeys(existing, o);
   return existing;
+}
+
+/**
+ * Make the E_inbox the newest 31600 names current when this record holds it as
+ * a retired one (audit SB-89/SB-90): two devices that each rotated, or a stale
+ * organizer grant processed after a fresh one, can leave a superseded inbox
+ * current, and then every new join request is sealed to an inbox this device is
+ * not reading. Returns true when it changed something. `inboxPubkeyOf` derives
+ * a secret's pubkey (injected to keep this module free of curve code).
+ */
+export async function adoptConfigInbox(
+  coordinate: string,
+  configInbox: string,
+  inboxPubkeyOf: (secretHex: string) => string,
+  owner?: string,
+): Promise<boolean> {
+  const o = ownerForWrite(owner);
+  const keys = await loadEventKeys(coordinate, o);
+  if (!keys?.einboxNsecHex) return false;
+  if (inboxPubkeyOf(keys.einboxNsecHex) === configInbox) return false;
+  const match = (keys.priorEinboxNsecs ?? []).find((s) => inboxPubkeyOf(s) === configInbox);
+  if (!match) return false;
+  keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []).filter((s) => s !== match), keys.einboxNsecHex];
+  keys.einboxNsecHex = match;
+  await saveEventKeys(keys, o);
+  return true;
 }
 
 /**
@@ -448,13 +508,11 @@ export async function lockEventKeysForLogout(
  * the one outcome this module exists to prevent.
  */
 function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
-  const byId = new Map<number, EckVersion>();
-  for (const v of fallback.eck) byId.set(v.id, v);
-  for (const v of primary.eck) byId.set(v.id, v); // current wins on conflict
   return {
     coordinate: primary.coordinate,
     role: primary.role === "organizer" || fallback.role === "organizer" ? "organizer" : primary.role,
-    eck: [...byId.values()].sort((a, b) => a.id - b.id),
+    // Both keys of a same-id collision survive (NIP §4.1, audit SB-86).
+    eck: unionEck(primary.eck, fallback.eck),
     eidNsecHex: primary.eidNsecHex ?? fallback.eidNsecHex,
     einboxNsecHex: primary.einboxNsecHex ?? fallback.einboxNsecHex,
     // UNION, not "primary wins". These are retired E_inbox secrets kept so the
@@ -478,6 +536,18 @@ function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
     // The install generation only grows, so keep the higher of the two views —
     // never let a stale snapshot regress a re-attach's newer generation.
     coordinatorGen: Math.max(primary.coordinatorGen ?? 0, fallback.coordinatorGen ?? 0) || undefined,
+    // A staged version is still custody: keep it unless it was promoted meanwhile.
+    ...(() => {
+      const current = unionEck(primary.eck, fallback.eck);
+      const pending = unionEck(primary.pendingEck ?? [], fallback.pendingEck ?? []).filter(
+        (p) => !current.some((v) => v.id === p.id && v.key === p.key),
+      );
+      return pending.length > 0 ? { pendingEck: pending } : {};
+    })(),
+    ...(() => {
+      const co = [...new Set([...(primary.coOrganizers ?? []), ...(fallback.coOrganizers ?? [])])];
+      return co.length > 0 ? { coOrganizers: co } : {};
+    })(),
   };
 }
 
@@ -520,8 +590,12 @@ export async function unlockEventKeysForLogin(
   return complete;
 }
 
-/** The highest-numbered ECK version the user holds, or undefined. */
+/**
+ * The current ECK version: the highest id, and of two keys under that id (an
+ * unhealed concurrent rotation, NIP §4.1 / audit SB-86) the one with the lowest
+ * fingerprint, so every holder of the same set agrees. Undefined when none.
+ */
 export function currentEck(keys: EventKeys | undefined): EckVersion | undefined {
   if (!keys || keys.eck.length === 0) return undefined;
-  return keys.eck.reduce((max, v) => (v.id > max.id ? v : max));
+  return canonicalEck(keys.eck);
 }

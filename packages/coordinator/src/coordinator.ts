@@ -111,6 +111,8 @@ import {
   COORDINATOR_RUMOR_KINDS,
   MAX_SKILLS,
   MAX_MEDIA_FILE_BYTES as PROTOCOL_MAX_MEDIA_FILE_BYTES,
+  unionEck,
+  canonicalEck,
 } from "@nostrautica/protocol";
 import type { GiftWrap, Rumor, RumorKind } from "@nostrautica/protocol";
 
@@ -380,20 +382,15 @@ function parseHeldEck(json: string): EckVersion[] {
 }
 
 /**
- * Union of two ECK version lists by id, ascending (NIP §4: grants union-merge, so a
- * stale list never drops a version the holder already has). `prefer` picks whose
- * key survives when both name the same id.
+ * Union of two ECK version lists (NIP §4: grants union-merge, so a stale list never
+ * drops a version the holder already has). By `(id, key)`, not by id (NIP §4.1,
+ * audit SB-86): two organizer devices that rotated concurrently minted the same id
+ * with different keys, and keeping one of them stranded everyone who was granted
+ * the other. Which of two same-id keys is current is `canonicalEck`'s tie-break,
+ * the same one every client computes.
  */
-export function unionEckVersions(
-  held: EckVersion[],
-  incoming: EckVersion[],
-  prefer: "held" | "incoming",
-): EckVersion[] {
-  const byId = new Map<number, EckVersion>();
-  const [first, second] = prefer === "held" ? [incoming, held] : [held, incoming];
-  for (const v of first) byId.set(v.id, v);
-  for (const v of second) byId.set(v.id, v);
-  return [...byId.values()].sort((a, b) => a.id - b.id);
+export function unionEckVersions(held: EckVersion[], incoming: EckVersion[]): EckVersion[] {
+  return unionEck(held, incoming);
 }
 
 /**
@@ -1550,12 +1547,9 @@ export class Coordinator {
     // stale grant never downgrades custody; audit SB-121). The grant's list is the
     // organizer's view at signing time and lacks any version this daemon minted on
     // a revoke since, so writing it verbatim rolled the event back to a key the
-    // revoked attendee holds. On a clash of ids the held key wins for a resume of
-    // the same gen, the grant's for a newer gen.
+    // revoked attendee holds. Two keys under one id are both kept (NIP §4.1).
     const held = this.deps.store.getEvent(grant.coordinate);
-    const eck = held
-      ? unionEckVersions(parseHeldEck(held.eck_json), grant.eck, gen > held.gen ? "incoming" : "held")
-      : grant.eck;
+    const eck = held ? unionEckVersions(parseHeldEck(held.eck_json), grant.eck) : grant.eck;
     this.deps.store.upsertEvent({
       coordinate: grant.coordinate,
       configJson: JSON.stringify(config ?? {}),
@@ -1726,7 +1720,9 @@ export class Coordinator {
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
-    const latest = state.eck.reduce((m, v) => (v.id > m.id ? v : m));
+    // Highest id, ties to the lowest fingerprint (NIP §4.1): the same version every
+    // organizer device picks when it holds both keys of an id collision.
+    const latest = canonicalEck(state.eck)!;
     return { bytes: base64ToBytes(latest.key), id: latest.id };
   }
 

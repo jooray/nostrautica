@@ -180,6 +180,27 @@ describe("applyOrganizerGrant (audit APPK-4)", () => {
     expect(keys?.einboxNsecHex).toBe("2".repeat(64));
   });
 
+  // Audit SB-86: two organizer devices rotated concurrently and both minted v2
+  // with different keys. Union-by-id kept whichever arrived last, so half the
+  // attendees (the ones granted the dropped key) became unreadable for good.
+  it("keeps both keys of a same-id collision, and agrees on which is current", async () => {
+    const k2a = btoa(String.fromCharCode(...new Uint8Array(32).fill(0xa2)));
+    const k2b = btoa(String.fromCharCode(...new Uint8Array(32).fill(0xb2)));
+    await addEckVersions(COORD, [{ id: 1, key: "k1" }, { id: 2, key: k2a }], "attendee");
+    await applyOrganizerGrant(COORD, {
+      eck: [{ id: 1, key: "k1" }, { id: 2, key: k2b }],
+      eidNsecHex: "1".repeat(64),
+      einboxNsecHex: "2".repeat(64),
+    });
+    const keys = await loadEventKeys(COORD);
+    expect(keys?.eck.filter((v) => v.id === 2).map((v) => v.key).sort()).toEqual([k2a, k2b].sort());
+    // The other arrival order converges on the same current key.
+    setActiveOwner(B);
+    await addEckVersions(COORD, [{ id: 1, key: "k1" }, { id: 2, key: k2b }], "attendee");
+    await addEckVersions(COORD, [{ id: 2, key: k2a }], "attendee");
+    expect(currentEck(await loadEventKeys(COORD))).toEqual(currentEck(keys));
+  });
+
   it("creates the organizer record when none exists yet", async () => {
     await applyOrganizerGrant(COORD, {
       eck: [{ id: 1, key: "k1" }],

@@ -15,3 +15,6 @@ export * from "./media.js";
 export * from "./config.js";
 export * from "./hierarchy.js";
 export * from "./languages.js";
+export * from "./settings-merge.js";
+export * from "./eck-identity.js";
+export * from "./keys-backup.js";

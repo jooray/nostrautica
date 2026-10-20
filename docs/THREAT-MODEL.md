@@ -151,6 +151,17 @@ protecting future content only. For conference intro videos and match lists (dat
 of bounded sensitivity and time-bounded relevance), this is an accepted trade-off,
 stated in the UI where organizers configure events and where they revoke.
 
+**Concurrent rotations across organizer devices.** Two organizer devices (or an
+organizer and a co-organizer) that revoke at the same moment each mint "v(n+1)" with
+different keys. The protocol keeps both keys everywhere and heals by a further rotation
+(NIP §4.1), so no one loses access to content they held a key for. What it cannot
+recover is the losing device's roster: a person removed only on that device is on the
+surviving roster, and the repair re-grants everyone on it. The organizer is told to
+check and revoke again. A co-organizer's account learns about a rotation only from the
+fresh 21605 the rotating device re-issues; one this device never heard of (neither
+granted by it nor named in a grant it received) stays on the old keys and sees "keys
+changed on another device".
+
 ## Client hygiene
 
 - Local keys in IndexedDB (not localStorage strings where avoidable).

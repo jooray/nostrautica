@@ -9,7 +9,11 @@ import {
   blindedD,
   perEventSettingsSchema,
   pickLatest,
+  mergePerEventSettings,
+  editPerEventSettings,
+  emptyPerEventSettings,
   type PerEventSettings,
+  type SettingsEdit,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { VerifiedEvent } from "nostr-tools/pure";
@@ -55,10 +59,6 @@ function settingsKey(coordinate: string): string {
 /** Cached per-event settings for a coordinate (no network), or undefined. */
 export function cachedPerEventSettings(coordinate: string): PerEventSettings | undefined {
   return cacheGet<PerEventSettings>(settingsKey(coordinate))?.data;
-}
-
-function empty(): PerEventSettings {
-  return { v: 2, favorites: [], want_to_meet: [], met: [], notes: {} };
 }
 
 function clone(s: PerEventSettings): PerEventSettings {
@@ -140,16 +140,36 @@ async function readSettings(
     // Nothing came back. A copy this device wrote (possibly still sitting in the
     // outbox) beats a blank either way. Without one, an answered read is a
     // genuine first save and an unanswered one is "unknown", not "empty".
-    if (local) return { settings: clone(local.data), known: true };
-    return { settings: empty(), known: answered };
+    // Normalized through the merge so a copy cached before per-entry stamps existed
+    // gets its stamps from the time it was saved, not from zero (which would make
+    // every entry in it lose to the next older-client write).
+    if (local) {
+      return {
+        settings: mergePerEventSettings(
+          { settings: clone(local.data), createdAt: local.at },
+          { settings: emptyPerEventSettings(), createdAt: 0 },
+        ),
+        known: true,
+      };
+    }
+    return { settings: emptyPerEventSettings(), known: answered };
   }
   const json = await signer.nip44Decrypt(pubkey, latest.content);
-  const settings = perEventSettingsSchema.parse(JSON.parse(json));
-  // A save from THIS device that has not reached the relays yet (queued offline)
-  // is newer than what they returned; building the next save on the relay copy
-  // would silently undo it.
-  if (local && local.at > (latest.created_at ?? 0)) return { settings: clone(local.data), known: true };
-  scopedSet(scope, settingsKey(ctx.coordinate), settings, latest.created_at ?? 0);
+  const remote = perEventSettingsSchema.parse(JSON.parse(json));
+  const remoteAt = latest.created_at ?? 0;
+  // Merge, never pick (audit SB-88). The relay copy may hold another device's
+  // edits this one has not seen; this device's copy may hold a save still queued
+  // in the outbox. Each entry carries its own change stamp, so the union keeps
+  // both sides' newest state per favourite / met marker / note, and a clock-less
+  // payload from an older client counts as a whole-document write at its
+  // created_at (protocol settings-merge.ts).
+  const settings = mergePerEventSettings(
+    { settings: remote, createdAt: remoteAt },
+    local
+      ? { settings: local.data, createdAt: local.at }
+      : { settings: emptyPerEventSettings(), createdAt: 0 },
+  );
+  scopedSet(scope, settingsKey(ctx.coordinate), settings, Math.max(remoteAt, local?.at ?? 0));
   return { settings, known: true };
 }
 
@@ -180,15 +200,15 @@ async function saveSettings(
  * Load → edit → publish one settings document under a per-document lock, so two
  * quick taps (or a toggle racing a note save) cannot both build on the same
  * baseline and erase each other (audit DS41-007). The read inside the lock is a
- * fresh one, so it also picks up a save another device made since the page
- * loaded; two devices writing within the same few seconds still need a real merge
- * on the wire (audit SB-88).
+ * fresh one merged with this device's copy, and the edit is stamped per entry, so
+ * a save another device makes within the same few seconds is folded in by
+ * whichever write comes next instead of being overwritten (audit SB-88).
  */
 async function mutateSettings(
   signer: AppSigner,
   ctx: EventContext,
   blindingKey: Uint8Array,
-  edit: (settings: PerEventSettings) => void,
+  edit: SettingsEdit,
 ): Promise<PerEventSettings> {
   const scope = captureScope();
   const pubkey = await signer.getPublicKey();
@@ -196,17 +216,14 @@ async function mutateSettings(
   return withMutationLock(`rmw:${pubkey}:${KIND_APP_DATA}:${d}`, async () => {
     const { settings, known } = await readSettings(signer, ctx, blindingKey, scope);
     if (!known) throw new SettingsUnreadableError();
-    edit(settings);
-    const createdAt = await saveSettings(signer, ctx, blindingKey, settings);
-    // Write-through (§2.8), stamped with the created_at actually published so the
-    // next read can tell this copy apart from an older relay answer.
-    scopedSet(scope, settingsKey(ctx.coordinate), settings, createdAt);
-    return settings;
+    // `settings` always carries a clock here (the read merges into one), so the
+    // createdAt passed alongside it is never consulted.
+    const next = editPerEventSettings({ settings, createdAt: 0 }, edit, Date.now());
+    const createdAt = await saveSettings(signer, ctx, blindingKey, next);
+    // Write-through (§2.8), stamped with the created_at actually published.
+    scopedSet(scope, settingsKey(ctx.coordinate), next, createdAt);
+    return next;
   });
-}
-
-function toggle(list: string[], pubkey: string): string[] {
-  return list.includes(pubkey) ? list.filter((x) => x !== pubkey) : [...list, pubkey];
 }
 
 export type SettingList = "favorites" | "want_to_meet" | "met";
@@ -219,9 +236,7 @@ export async function toggleSetting(
   list: SettingList,
   pubkey: string,
 ): Promise<PerEventSettings> {
-  return mutateSettings(signer, ctx, blindingKey, (settings) => {
-    settings[list] = toggle(settings[list], pubkey);
-  });
+  return mutateSettings(signer, ctx, blindingKey, { kind: "toggle", list, pubkey });
 }
 
 /** Set (or clear) a private note about an attendee and persist. */
@@ -232,8 +247,5 @@ export async function setNote(
   pubkey: string,
   note: string,
 ): Promise<PerEventSettings> {
-  return mutateSettings(signer, ctx, blindingKey, (settings) => {
-    if (note.trim()) settings.notes[pubkey] = note.trim();
-    else delete settings.notes[pubkey];
-  });
+  return mutateSettings(signer, ctx, blindingKey, { kind: "note", pubkey, note });
 }

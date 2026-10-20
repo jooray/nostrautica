@@ -30,6 +30,9 @@ import {
   type MergedMenuItem,
   type MergedSection,
   pickLatest,
+  eckTag,
+  readEckTag,
+  eckCandidates,
 } from "@nostrautica/protocol";
 import { fetchEventsAnswered } from "$lib/nostr/ndk.js";
 import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
@@ -71,10 +74,6 @@ export function cachedEventPage(coordinate: string): EventPageModel | undefined 
   return { ...hit, sources: hit.sources ?? [] };
 }
 
-function tag(tags: string[][], name: string): string | undefined {
-  return tags.find((t) => t[0] === name)?.[1];
-}
-
 /**
  * Fetch + assemble the event page. Members-only parts decrypt with the ECK
  * version named by the event's `eck` tag (never assumed current); without the
@@ -112,8 +111,8 @@ export async function fetchEventPage(
   let priv: EventPagePrivate = { v: 2, menu: [], sections: [] };
   if (content.private) {
     const keys = await loadEventKeys(ctx.coordinate);
-    const versionId = Number(tag(latest.tags, "eck")) || undefined;
-    const version = keys?.eck.find((v) => v.id === versionId);
+    const ref = readEckTag(latest.tags);
+    const version = ref && keys ? eckCandidates(keys.eck, ref)[0] : undefined;
     if (version) {
       try {
         priv = decryptEventPagePrivate(base64ToBytes(version.key), content.private);
@@ -157,7 +156,7 @@ export async function publishEventPage(
   if (hasPrivate) {
     const eck = currentEck(keys);
     if (!eck) throw new Error("event content key not available");
-    tags.push(["eck", String(eck.id)]);
+    tags.push(eckTag(eck));
     privateCiphertext = encryptEventPagePrivate(base64ToBytes(eck.key), {
       v: 2,
       menu: menu.privateItems,

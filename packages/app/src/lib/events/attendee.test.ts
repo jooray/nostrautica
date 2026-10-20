@@ -24,6 +24,7 @@ import {
   KIND_ROSTER,
   eckEncrypt,
   makeMembershipProof,
+  eckTag,
 } from "@nostrautica/protocol";
 import { loadParentProof, loadParentConsent } from "./community-join.js";
 import { LocalSigner } from "$lib/signer/local.js";
@@ -483,6 +484,29 @@ describe("roster reads are scoped to the identity that started them (DS41-003)",
     // write is dropped rather than landing in B's scope.
     expect((await forA)?.attendees).toHaveLength(1);
     expect(cachedRoster(coordinate)).toBeUndefined();
+  });
+
+  // DS41-002 / SB-86 (NIP §4.1): the roster names its key in its `eck` tag. An
+  // attendee granted v2 whose roster is still under v1 (the rotation's roster
+  // publish never landed) used to try only the current key and lose People.
+  it("decrypts with the version the roster's eck tag names, not only the current one", async () => {
+    const v2 = generateEck();
+    await saveEventKeys(
+      { coordinate, role: "attendee", eck: [{ id: 1, key: bytesToBase64(eck) }, { id: 2, key: bytesToBase64(v2) }] },
+      A,
+    );
+    const tagged = finalizeEvent(
+      {
+        kind: KIND_ROSTER,
+        created_at: 1_700_000_000,
+        tags: [["d", "scoped-roster"], eckTag({ id: 1, key: bytesToBase64(eck) })],
+        content: eckEncrypt(eck, JSON.stringify(roster)),
+      },
+      eidSk,
+    );
+    streamEvents.mockReturnValue({ ready: Promise.resolve([tagged]), stop: () => {} });
+
+    expect((await fetchRoster(ctx))?.attendees).toHaveLength(1);
   });
 });
 

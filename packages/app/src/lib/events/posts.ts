@@ -27,6 +27,9 @@ import {
   type EckVersion,
   type ExternalFeed,
   supersedes,
+  eckTag,
+  readEckTag,
+  eckCandidates,
 } from "@nostrautica/protocol";
 import { fetchEvents, fetchEventsAnswered, type Filter } from "$lib/nostr/ndk.js";
 import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
@@ -138,9 +141,11 @@ export function toEventPost(
       authorPubkey: e.pubkey,
     };
   }
-  const eckVersion = Number(tag(e.tags, "eck")) || undefined;
-  // Pick the key the POST names — never assume the current version.
-  const version = eckVersions.find((v) => v.id === eckVersion);
+  const ref = readEckTag(e.tags);
+  const eckVersion = ref?.id;
+  // Pick the key the POST names — never assume the current version — by id AND
+  // fingerprint when the tag carries one (NIP §4.1: two keys can share an id).
+  const version = ref ? eckCandidates(eckVersions, ref)[0] : undefined;
   const base = {
     d,
     kind: e.kind,
@@ -524,7 +529,7 @@ export async function publishMembersPost(
           tags: [
             ["d", d],
             ["v", "2"],
-            ["eck", String(eck.id)],
+            eckTag(eck),
           ],
           content: ciphertext,
         },

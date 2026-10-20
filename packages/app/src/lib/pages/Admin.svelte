@@ -41,6 +41,9 @@
     sendAdminCommand,
     checkForOrganizerGrant,
     pollForOrganizerGrant,
+    checkOrganizerKeys,
+    repairEventKeys,
+    CoordinatorAttachedError,
     type PendingRequest,
     type GeneratedInvite,
   } from "$lib/events/organizer.js";
@@ -236,8 +239,49 @@
     }
   }
 
+  // ── Custody across devices (audit SB-90, SB-86, SB-91) ─────────────────────
+  // Every refresh reads the newest 31600 once (no signer): routing approvals
+  // through a coordinator that another device attached since this page loaded
+  // (SB-91), and telling the organizer when another device rotated the keys
+  // (SB-90) or two devices rotated at once (SB-86). The first check on open also
+  // folds in the account's key backup, which is how this device learns about a
+  // rotation its sibling made.
+  let keyStatus = $state<{ changedElsewhere: boolean; collision: boolean } | null>(null);
+  let repairing = $state(false);
+  let repaired = $state(false);
+
+  async function refreshKeyStatus(reconcile: boolean): Promise<void> {
+    const c = ctx;
+    if (!c) return;
+    const bk = reconcile && session.signer ? await deriveBlindingKey(session.signer).catch(() => undefined) : undefined;
+    const st = await checkOrganizerKeys(c, { organizer: session.signer, blindingKey: bk, reconcile }).catch(() => undefined);
+    if (!st || destroyed || ctx !== c) return;
+    keyStatus = { changedElsewhere: st.changedElsewhere, collision: st.collision };
+    if ((st.config.coordinator ?? null) !== (c.config.coordinator ?? null) || st.config.inbox !== c.config.inbox) {
+      ctx = { ...c, config: st.config };
+    }
+    keys = (await loadEventKeys(c.coordinate)) ?? keys;
+  }
+
+  async function repairKeys() {
+    if (!ctx || !session.signer || repairing) return;
+    repairing = true;
+    try {
+      await repairEventKeys(session.signer, ctx, await deriveBlindingKey(session.signer));
+      repaired = true;
+      await refreshKeyStatus(false);
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      repairing = false;
+    }
+  }
+
   async function refresh() {
     if (!ctx || !keys) return;
+    // In parallel with the queue scan; the local approve/revoke paths re-check the
+    // noted config themselves, so nothing waits on it.
+    void refreshKeyStatus(false);
     // Fetch pending + roster CONCURRENTLY and assign atomically (same tick): a
     // sequential `pending = await fetchPending(...)` followed by a separate
     // `await fetchRoster(...)` opens a window where `pending` already includes
@@ -363,7 +407,7 @@
       // user-facing slices (pending + updates) settle, rather than lingering for
       // the slowest background member. network-settled (finally) still waits for
       // everything, so perf marks stay meaningful.
-      const background = Promise.allSettled([refreshLiveness()]);
+      const background = Promise.allSettled([refreshLiveness(), refreshKeyStatus(true)]);
       await Promise.allSettled([refresh()]);
       refreshing = false;
       await background;
@@ -929,7 +973,21 @@
 
   /** Approve one attendee by pubkey (coordinator command or local approve).
    *  Throws on failure so the bulk runner can record a per-item outcome. */
-  async function approveOne(pubkey: string): Promise<"done" | "queued"> {
+  async function approveOne(pubkey: string, retried = false): Promise<"done" | "queued"> {
+    if (!ctx || !session.signer) throw new Error("not ready");
+    try {
+      return await approveOnce(pubkey);
+    } catch (e) {
+      // Another device attached a coordinator since this page last looked (SB-91):
+      // adopt the newest config and route this approval through it instead.
+      if (!(e instanceof CoordinatorAttachedError) || retried) throw e;
+      await refreshKeyStatus(false);
+      if (!ctx?.config.coordinator) throw e;
+      return approveOne(pubkey, true);
+    }
+  }
+
+  async function approveOnce(pubkey: string): Promise<"done" | "queued"> {
     if (!ctx || !session.signer) throw new Error("not ready");
     if (ctx.config.coordinator) {
       // Route through the coordinator so IT grants + publishes the directory
@@ -1022,7 +1080,7 @@
 
   // Inline, screenshotable revoke confirmation lives in AdminPeople (which owns the
   // confirm state); the parent performs the revoke and updates its data model.
-  async function revoke(pubkey: string) {
+  async function revoke(pubkey: string, retried = false) {
     if (!ctx || !session.signer) return;
     try {
       if (ctx.config.coordinator) {
@@ -1040,6 +1098,11 @@
       revokedSet = new Set([...revokedSet, pubkey]);
       approvedSet = new Set([...approvedSet].filter((p) => p !== pubkey));
     } catch (e) {
+      // A coordinator attached elsewhere (SB-91): the removal is its to make.
+      if (e instanceof CoordinatorAttachedError && !retried) {
+        await refreshKeyStatus(false);
+        if (ctx?.config.coordinator) return revoke(pubkey, true);
+      }
       error = e instanceof Error ? e.message : String(e);
     }
   }
@@ -1066,6 +1129,21 @@
 <AdminTabs {naddr} />
 
 {#if error}<div class="card warn">{error}</div>{/if}
+
+{#if keyStatus?.changedElsewhere}
+  <div class="card warn" role="status">{t("admin.keys.changedElsewhere")}</div>
+{:else if keyStatus?.collision && !repaired}
+  <div class="card warn" role="status">
+    {#if ctx?.config.coordinator}
+      <p style="margin:0">{t("admin.keys.collisionCoordinator")}</p>
+    {:else}
+      <p>{t("admin.keys.collision")}</p>
+      <button class="btn inline" disabled={repairing} onclick={() => void repairKeys()}>{t("admin.keys.repair")}</button>
+    {/if}
+  </div>
+{:else if repaired}
+  <div class="card" role="status">{t("admin.keys.repaired")}</div>
+{/if}
 
 {#if notOrganizer}
   <div class="card">

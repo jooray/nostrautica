@@ -151,6 +151,12 @@ object Limits {
     const val MAX_PRIVACY_ROLES = 32
     const val MAX_PRIVACY_ROLE = 64
     const val MAX_PRIVACY_TIER = 200
+    /** Tombstones a per-event settings clock keeps per field (settings-merge.ts). */
+    const val MAX_SETTINGS_TOMBSTONES = 200
+    /** Retired E_inbox secrets one event-keys backup / organizer grant carries. */
+    const val MAX_PRIOR_INBOXES = 64
+    /** Organizer accounts one event's custody records name. */
+    const val MAX_ORGANIZERS = 32
     const val MAX_TALK_TITLE = 200
     const val MAX_TALK_DESC = 2000
     const val MAX_CHAT_KEY_LABEL = 60
@@ -460,11 +466,17 @@ data class OrganizerGrantContent(
     val eck: List<EckVersion>,
     @SerialName("config_relays") val configRelays: List<String>,
     @SerialName("granted_by") val grantedBy: String,
+    /** Accounts the sender knows hold custody, itself included (SB-90). */
+    val organizers: List<String>? = null,
+    /** Retired E_inbox secrets (SB-90). */
+    @SerialName("prior_einbox_nsecs") val priorEinboxNsecs: List<String>? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v); check(Coordinate.isSpace(a)) { "a" }
         checkHex32(eidNsec, "eid_nsec"); checkHex32(einboxNsec, "einbox_nsec"); checkHex32(grantedBy, "granted_by")
         checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }; checkList(configRelays, Limits.MAX_RELAYS, "config_relays")
+        checkList(organizers, Limits.MAX_ORGANIZERS, "organizers"); organizers?.forEach { checkHex32(it, "organizers") }
+        checkList(priorEinboxNsecs, Limits.MAX_PRIOR_INBOXES, "prior_einbox_nsecs"); priorEinboxNsecs?.forEach { checkHex32(it, "prior_einbox_nsecs") }
     }
 }
 
@@ -797,11 +809,32 @@ data class PerEventSettings(
     @SerialName("want_to_meet") val wantToMeet: List<String> = emptyList(),
     val met: List<String> = emptyList(),
     val notes: Map<String, String> = emptyMap(),
+    /** Per-entry change stamps (ms) for the cross-device merge, SB-88 — see [SettingsMerge]. */
+    val clock: SettingsClock? = null,
+    /** The stamp of every entry [clock] does not name. */
+    val base: Long? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v)
         for (l in listOf(favorites, wantToMeet, met)) { checkList(l, Limits.MAX_ROSTER, "list"); l.forEach { checkHex32(it, "pubkey") } }
         check(notes.size <= Limits.MAX_NOTES) { "too many notes" }; notes.values.forEach { checkLen(it, Limits.MAX_NOTE, "note") }
+        clock?.validate()
+        check(base == null || base >= 0) { "base" }
+    }
+}
+
+@Serializable
+data class SettingsClock(
+    val favorites: Map<String, Long> = emptyMap(),
+    @SerialName("want_to_meet") val wantToMeet: Map<String, Long> = emptyMap(),
+    val met: Map<String, Long> = emptyMap(),
+    val notes: Map<String, Long> = emptyMap(),
+) : Validated {
+    override fun validate() {
+        for (m in listOf(favorites, wantToMeet, met, notes)) {
+            check(m.size <= Limits.MAX_ROSTER + Limits.MAX_SETTINGS_TOMBSTONES) { "too many settings stamps" }
+            m.forEach { (k, at) -> checkHex32(k, "stamp key"); check(at >= 0) { "stamp" } }
+        }
     }
 }
 
@@ -824,11 +857,20 @@ data class EventKeysBackup(
     @SerialName("einbox_nsec") val einboxNsec: String,
     val eck: List<EckVersion>,
     @SerialName("coordinator_gen") val coordinatorGen: Int? = null,
+    /** Staged ECK versions (DS41-002): custody, not current. */
+    @SerialName("pending_eck") val pendingEck: List<EckVersion>? = null,
+    /** Retired E_inbox secrets (SB-89): they still read pre-rotation submissions. */
+    @SerialName("prior_einbox_nsecs") val priorEinboxNsecs: List<String>? = null,
+    /** Accounts this one handed custody to (SB-90). */
+    @SerialName("co_organizers") val coOrganizers: List<String>? = null,
 ) : Validated {
     override fun validate() {
+        checkList(coOrganizers, Limits.MAX_ORGANIZERS, "co_organizers"); coOrganizers?.forEach { checkHex32(it, "co_organizers") }
         checkVersion(v); checkHex32(eidNsec, "eid_nsec"); checkHex32(einboxNsec, "einbox_nsec")
         checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }
         check(coordinatorGen == null || coordinatorGen >= 0) { "coordinator_gen" }
+        checkList(pendingEck, Limits.MAX_ECK_VERSIONS, "pending_eck"); pendingEck?.forEach { it.validate() }
+        checkList(priorEinboxNsecs, Limits.MAX_PRIOR_INBOXES, "prior_einbox_nsecs"); priorEinboxNsecs?.forEach { checkHex32(it, "prior_einbox_nsecs") }
     }
 }
 
