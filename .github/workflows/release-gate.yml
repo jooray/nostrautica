@@ -134,6 +134,9 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       # Docs generator path handling + internal link/anchor checks (audit O6/O7).
+      # (`pnpm check` in the build job runs every scripts/*.test.mjs too, including
+      # the release-manifest tests that pin the service-worker revision; this
+      # job keeps its own run so a docs failure is named as one.)
       - run: node --test scripts/build-docs.test.mjs
       # Full site build: emits every page and fails on a broken internal link/anchor.
       - run: node scripts/build-docs.mjs
