@@ -4,7 +4,12 @@
   import { session } from "$lib/signer/session.svelte.js";
   import { router } from "$lib/router/router.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
-  import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
+  import {
+    loadEventContext,
+    cachedEventContext,
+    ensureEventContext,
+    type EventContext,
+  } from "$lib/events/event-context.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { receiveGrants } from "$lib/events/attendee.js";
   import { loadEventKeys, currentEck } from "$lib/events/keystore.js";
@@ -89,8 +94,12 @@
   // otherwise be able to grant camera access and upload to Blossom before the
   // coordinator ever rejects (or ignores) the event rumor. Resolve the role first,
   // render an explicit state, and only then expose the composer.
-  type RecordRole = "loading" | "visitor" | "pending" | "revoked" | "approved";
+  // "failed": the role could not be resolved because loading threw. The
+  // ErrorState above carries the retry; without this state the "Resolving your
+  // membership…" card stayed up forever under it (audit DS41-017).
+  type RecordRole = "loading" | "failed" | "visitor" | "pending" | "revoked" | "approved";
   let role = $state<RecordRole>("loading");
+  let retrying = $state(false);
 
   // Cache-first (§2.7): the composer opens instantly with the last library/intro
   // from cache while the fresh copies refresh in the background.
@@ -227,25 +236,52 @@
     else saveDraft(introDraftId, textIntro);
   });
 
-  onMount(async () => {
+  onMount(() => {
+    // Editing an existing talk (handed off from TalkDetail): prefill + reuse id.
+    // Local and consume-once, so it runs here rather than in a retryable init().
+    if (talk) {
+      const draft = takeTalkEditDraft();
+      if (draft) {
+        editingTalk = true;
+        talkId = draft.talkId;
+        talkTitle = draft.title;
+        talkDescription = draft.description;
+        talkRevision = draft.revision + 1;
+      } else {
+        talkId = newTalkId();
+      }
+    }
+    void init();
+  });
+
+  async function retry(): Promise<void> {
+    retrying = true;
+    if (role === "failed") role = "loading";
+    try {
+      await init();
+    } finally {
+      retrying = false;
+    }
+  }
+
+  async function init(): Promise<void> {
+    error = null;
     try {
       await connectNdk();
-      ctx = await loadEventContext(naddr);
-      // Editing an existing talk (handed off from TalkDetail): prefill + reuse id.
-      if (talk) {
-        const draft = takeTalkEditDraft();
-        if (draft) {
-          editingTalk = true;
-          talkId = draft.talkId;
-          talkTitle = draft.title;
-          talkDescription = draft.description;
-          talkRevision = draft.revision + 1;
-        } else {
-          talkId = newTalkId();
-        }
+      // Cache-first (DS41-017): with a cached context, resolve the role on it now
+      // and refresh the context in the background. Awaiting the three relay
+      // queries of loadEventContext first kept the role on "loading" for the
+      // whole round-trip, and any failure there left the page dead.
+      let c: EventContext;
+      if (ctx) {
+        c = ctx;
+        void ensureEventContext(naddr, (fresh) => (ctx = fresh));
+      } else {
+        c = await loadEventContext(naddr);
+        ctx = c;
       }
       // Resolve the role BEFORE any capture/upload affordance renders (U5).
-      role = await resolveRole(ctx);
+      role = await resolveRole(c);
       // Only load the member-scoped composer data (reuse library, self-copy) once
       // we know the account is actually approved — don't do member work for a
       // visitor/pending/revoked deep-link.
@@ -255,12 +291,15 @@
         library = lib.media;
         libraryAt = lib.at;
         textLibrary = lib.texts;
-        const self = await loadSelfCopy(session.signer, ctx, bk);
-        if (self?.introText) textIntro = self.introText;
+        // The composer is live from the cached paint, so don't overwrite text the
+        // member typed while the self-copy was loading.
+        const typedBefore = textIntro;
+        const self = await loadSelfCopy(session.signer, c, bk);
+        if (self?.introText && textIntro === typedBefore) textIntro = self.introText;
         // U9: restore an unsent draft that differs from the published intro.
-        if (!talk) {
-          introDraftId = `intro:${ctx.coordinate}`;
-          publishedIntro = textIntro;
+        if (!talk && !introLoaded) {
+          introDraftId = `intro:${c.coordinate}`;
+          publishedIntro = self?.introText || typedBefore;
           const draft = loadDraft(introDraftId);
           if (draft && draft.trim() && draft !== publishedIntro) {
             textIntro = draft;
@@ -271,10 +310,11 @@
       }
     } catch (e) {
       error = e;
+      if (role === "loading") role = "failed";
     } finally {
       perfMark("Record", "network-settled");
     }
-  });
+  }
 
   /**
    * Resolve the viewer's membership role for this event (U5). Approved requires
@@ -811,7 +851,7 @@
 
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
 
-{#if error}<ErrorState {error} />{/if}
+{#if error}<ErrorState {error} onRetry={() => void retry()} {retrying} />{/if}
 
 <!-- Real byte progress while the ciphertext goes out — the same information the
      download side already shows in MediaPlayer. Shown wherever an upload can be
@@ -857,6 +897,8 @@
 {:else if role === "loading"}
   <!-- Resolve membership before exposing any capture/upload affordance (U5). -->
   <div class="card" role="status"><p class="muted">{t("record.role.resolving")}</p></div>
+{:else if role === "failed"}
+  <!-- Nothing to resolve the role on: the ErrorState above says why and retries. -->
 {:else if role === "pending"}
   <div class="card" role="status">
     <p>{t("record.role.pending")}</p>
