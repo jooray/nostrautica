@@ -162,6 +162,9 @@ class Grants(
                 // the user is waiting for them come from the Join/Overview screens,
                 // which call receive() interactively; a background scan stops here.
                 outcome.truncated = true; break
+            } catch (e: today.cypherpunk.nostrautica.signer.SignerUnavailable) {
+                // A remote signer that didn't answer this wrap won't answer the next: stop, don't wait again per wrap.
+                failed++; outcome.truncated = true; break
             } catch (e: Exception) {
                 failed++; continue // transient: not memoized, retried next scan
             }

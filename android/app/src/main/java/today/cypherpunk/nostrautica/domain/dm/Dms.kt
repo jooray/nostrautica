@@ -44,6 +44,7 @@ import today.cypherpunk.nostrautica.protocol.Wire
 import today.cypherpunk.nostrautica.protocol.nowSec
 import today.cypherpunk.nostrautica.signer.Session
 import today.cypherpunk.nostrautica.signer.SignerNeedsUser
+import today.cypherpunk.nostrautica.signer.SignerUnavailable
 import today.cypherpunk.nostrautica.signer.silently
 
 /** The DM service, registered lazily from this file. */
@@ -257,6 +258,8 @@ class Dms(
                 throw e
             } catch (e: SignerNeedsUser) {
                 break // ciphertext stays ciphertext until the user opens Messages
+            } catch (e: SignerUnavailable) {
+                break // a remote signer that didn't answer this one won't answer the next either
             } catch (e: GiftWrap.UnwrapException) {
                 DmMemoEntry(null, wrap.createdAt) // foreign kind, forged seal, malformed: definitive
             } catch (e: Nip44.DecryptException) {

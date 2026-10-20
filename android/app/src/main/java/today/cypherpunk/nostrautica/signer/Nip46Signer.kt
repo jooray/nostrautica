@@ -12,7 +12,7 @@ import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -100,9 +100,17 @@ class Nip46Signer private constructor(
             put("id", id); put("method", method); put("params", JsonArray(params.map(::JsonPrimitive)))
         })
         val ev = client.signNow(client.template(Kinds.NIP46, client.nip44Encrypt(session.signerPubkey, body), listOf(listOf("p", session.signerPubkey))))
-        pool.publish(ev, session.relays)
         val reply = try {
-            withTimeout(timeoutMs) { d.await() }
+            val sent = pool.publish(ev, session.relays)
+            // Every signer relay refused or was unreachable: nothing can answer, so
+            // don't sit out the whole timeout.
+            if (sent.isNotEmpty() && sent.values.all { it is RelayPool.PublishOutcome.Rejected }) {
+                throw SignerUnavailable("no signer relay is reachable")
+            }
+            // withTimeoutOrNull, not withTimeout: a TimeoutCancellationException is a
+            // CancellationException, which callers treat as "the user left" and
+            // swallow (or rethrow, ending an enclosing scan).
+            withTimeoutOrNull(timeoutMs) { d.await() } ?: throw SignerUnavailable("the signer did not answer")
         } finally {
             pendingLock.withLock { pending.remove(id) }
         }
@@ -177,7 +185,7 @@ class Nip46Signer private constructor(
         /** Wait for the signer to answer a [nostrConnectOffer]. */
         suspend fun awaitNostrConnect(pool: RelayPool, offer: Offer): Nip46Signer {
             val client = LocalSigner(Bytes.fromHex(offer.clientSk))
-            val signerPubkey = withTimeout(NOSTRCONNECT_TIMEOUT_MS) {
+            val signerPubkey = withTimeoutOrNull(NOSTRCONNECT_TIMEOUT_MS) {
                 val found = CompletableDeferred<String>()
                 val job = CoroutineScope(Dispatchers.IO).launch {
                     pool.subscribe(offer.relays, listOf(Filter(kinds = listOf(Kinds.NIP46), tags = mapOf("p" to listOf(client.pubkey)), since = nowSec() - 30)))
@@ -189,7 +197,7 @@ class Nip46Signer private constructor(
                         }
                 }
                 try { found.await() } finally { job.cancel() }
-            }
+            } ?: throw SignerUnavailable("the signer did not answer; show a fresh code and try again")
             val probe = Nip46Signer(pool, Session(offer.clientSk, signerPubkey, signerPubkey, offer.relays, offer.secret))
             val user = probe.call("get_public_key", emptyList(), CONNECT_TIMEOUT_MS).trim()
             require(user.isHex32()) { "the signer returned an unreadable key" }

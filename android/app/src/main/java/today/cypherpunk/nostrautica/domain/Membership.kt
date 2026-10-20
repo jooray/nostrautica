@@ -112,7 +112,15 @@ class Membership(
             val remembered = memo[e.id]
             if (remembered != null) { if (remembered.isNotEmpty()) found.merge(remembered, e.createdAt, ::maxOf); continue }
             if (!signer.isLocal && budget-- <= 0) break
-            val pt = runCatching { signer.nip44Decrypt(pk, e.content) }.getOrNull() ?: continue
+            val pt = try {
+                signer.nip44Decrypt(pk, e.content)
+            } catch (x: kotlinx.coroutines.CancellationException) {
+                throw x
+            } catch (x: today.cypherpunk.nostrautica.signer.SignerUnavailable) {
+                break // a remote signer that didn't answer won't answer the next one either
+            } catch (x: Exception) {
+                null
+            } ?: continue
             val a = (jsonObjectOf(pt)?.get("a") as? JsonPrimitive)?.content?.takeIf { Coordinate.isSpace(it) } ?: ""
             memo[e.id] = a
             dirty = true
