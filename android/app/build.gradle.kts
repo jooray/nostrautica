@@ -10,7 +10,7 @@ plugins {
 
 // Optional release signing with the shared publisher key, kept outside the repo
 // (~/.apk-signing-keystore/signing.properties, or APP_SIGNING_PROPERTIES).
-// Without it the release APK is built unsigned.
+// Without it a release build fails (see preReleaseBuild below).
 val signingProperties = Properties().apply {
     val path = System.getenv("APP_SIGNING_PROPERTIES")
         ?: "${System.getProperty("user.home")}/.apk-signing-keystore/signing.properties"
@@ -105,6 +105,23 @@ android {
     dependenciesInfo {
         includeInApk = false
         includeInBundle = false
+    }
+}
+
+// A release build without the signing properties used to succeed with an UNSIGNED
+// APK, which only fails at install time (or after publishing). Fail the build
+// instead; -PunsignedRelease=true opts in deliberately (e.g. a reproducibility check
+// that signs separately).
+val hasReleaseSigning = signingProperties.getProperty("storeFile") != null
+val allowUnsignedRelease = project.findProperty("unsignedRelease") == "true"
+tasks.matching { it.name == "preReleaseBuild" }.configureEach {
+    doFirst {
+        if (!hasReleaseSigning && !allowUnsignedRelease) {
+            throw GradleException(
+                "release signing properties not found (~/.apk-signing-keystore/signing.properties or " +
+                    "APP_SIGNING_PROPERTIES); refusing to build an unsigned release. Pass -PunsignedRelease=true to build one anyway.",
+            )
+        }
     }
 }
 
