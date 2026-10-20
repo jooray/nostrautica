@@ -122,6 +122,8 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
     val network by c.nostr.network.collectAsState()
     val coord = ev.coordinate
     val code = remember(coord) { c.joinFlow.loadInvite(coord) }
+    /** An invite-only space and no code in hand: say so, don't send (BUG-3). */
+    val inviteRequired = JoinRules.needsInvite(ev.ctx.cfg.approval, code != null)
 
     var approved by remember { mutableStateOf(ev.isMember) }
     var sent by remember { mutableStateOf(false) }
@@ -239,6 +241,7 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
 
     fun submit() {
         error = null
+        if (inviteRequired) return
         if (nameInvalid) { showErrors = true; return }
         busy = true
         scope.launch {
@@ -343,7 +346,16 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
                 item {
                     Card {
                         if (sentQueued || !network) Text(s.t("sync.queued"), color = t.warn)
-                        Text(if (code != null) s.t("join.waiting.invite") else s.t("join.waiting.manual"))
+                        // A code-less request already out in an invite-only space (sent before this
+                        // check existed, or from another client): the coordinator rejected it, and
+                        // only a manual approval can still let the person in.
+                        Text(
+                            when {
+                                code != null -> s.t("join.waiting.invite")
+                                inviteRequired -> s.t("join.waiting.inviteOnly")
+                                else -> s.t("join.waiting.manual")
+                            },
+                        )
                         val at = lastCheckedAt
                         Dim(
                             (if (at != null) s.t("join.waiting.checked", "time" to clockTime(at, s.locale), "sec" to pollSec) else s.t("join.waiting.checking", "sec" to pollSec)) +
@@ -373,7 +385,12 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
                     }
                 }
                 if (code != null) item { Pill(s.t("join.inviteRecognized"), t.okSoft, t.ok) }
-                item {
+                if (inviteRequired) item {
+                    SoftCard(color = t.warnSoft) {
+                        Text(s.t("join.inviteOnly.title"), fontWeight = FontWeight.SemiBold)
+                        Dim(s.t("join.inviteOnly.body"))
+                    }
+                } else item {
                     Card {
                         if (loggedIn) {
                             when (profileState) {

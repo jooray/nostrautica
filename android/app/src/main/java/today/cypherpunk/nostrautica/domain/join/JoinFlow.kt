@@ -62,6 +62,18 @@ object JoinRules {
         else -> JoinLanding.FORM
     }
 
+    /**
+     * The join form must not send: the space admits by invite only (`approval:
+     * "invite"`) and there is no code in hand (join.ts joinNeedsInvite, manual e2e BUG-3).
+     *
+     * Its coordinator REJECTS such a join (NIP §6.2), it does not queue it, yet the
+     * form sent it anyway, said the organizer would review it, and polled for an
+     * approval that was never coming. The join form never carries a `member_of`
+     * proof (that path is the community join via a child event), so without a code
+     * there is no entitlement to send. Other modes queue a code-less join, so they still send.
+     */
+    fun needsInvite(approval: String?, hasInvite: Boolean): Boolean = approval == "invite" && !hasInvite
+
     data class LoadedProfile(val state: ProfileLoadState, val name: String, val about: String, val picture: String)
 
     /** A fetch error is NOT an empty profile (UX-O1). */

@@ -385,7 +385,10 @@ private fun RequestCard(st: AdminState, req: today.cypherpunk.nostrautica.domain
     Card {
         PersonLine(req.attendeePubkey, req.name, st.ctx.relays)
         FlowRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            // Invite-only and neither an invite nor a member_of claim: the coordinator REJECTED
+            // this (NIP §6.2), it did not queue it, so Approve here is a deliberate override.
             if (req.invite != null) Pill(s.t("admin.requests.invite"), t.accentSoft, t.accent)
+            else if (st.ctx.cfg.approval == "invite" && req.memberOf.isEmpty()) Pill(s.t("admin.requests.noInvite"), t.warnSoft, t.warn)
             st.memberOfVerified[req.attendeePubkey]?.let { m ->
                 Pill(s.t("hierarchy.admin.memberOf", "title" to m.title.ifEmpty { s.t("hierarchy.admin.memberOf.unnamed") }), t.okSoft, t.ok)
             }

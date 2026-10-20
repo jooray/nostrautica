@@ -30,6 +30,17 @@ class JoinRulesTest {
         assertEquals(JoinLanding.FORM, JoinRules.landing(approved = false, joinSent = false, hasInvite = false))
     }
 
+    // Manual e2e BUG-3: a code-less join to an `invite` space is rejected by the
+    // coordinator (NIP §6.2), so the form must say so instead of sending it and
+    // promising a review.
+    @Test fun needsInviteBlocksACodelessJoinOnlyWhenTheSpaceIsInviteOnly() {
+        assertTrue(JoinRules.needsInvite("invite", hasInvite = false))
+        assertFalse(JoinRules.needsInvite("invite", hasInvite = true))
+        for (mode in listOf("manual", "manual+invite", "open", null)) {
+            assertFalse(JoinRules.needsInvite(mode, hasInvite = false))
+        }
+    }
+
     @Test fun profileLoadIsNeverConfusedWithEmpty() {
         assertEquals(ProfileLoadState.FAILED, JoinRules.classifyProfile("Alice", "bio", null, failed = true).state)
         assertEquals(ProfileLoadState.LOADED, JoinRules.classifyProfile(" Alice ", null, null, failed = false).state)
