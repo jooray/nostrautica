@@ -276,6 +276,15 @@ function applyBaselineDDL(db: DatabaseSync): void {
     /* column already exists */
   }
   db.exec("CREATE INDEX IF NOT EXISTS idx_jobs_claim_priority ON jobs (state, next_run_at, priority, id)");
+  // Migration (audit DS41-032): how many times a job was picked up again after its
+  // lease ran out, i.e. after the process holding it died. Same reasoning as
+  // `priority`: a plain defaulted column, invisible to an older binary, so no
+  // SCHEMA_VERSION bump.
+  try {
+    db.exec("ALTER TABLE jobs ADD COLUMN reclaims INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
 }
 
 /**
@@ -886,6 +895,8 @@ export interface JobRow {
   worker_token: string | null;
   /** Scheduling class, written from the type at enqueue ({@link jobPriority}). */
   priority: number;
+  /** Times the job was recovered from an expired lease (its worker died; DS41-032). */
+  reclaims: number;
 }
 
 /** A stored attendee row (audit Q11: typed instead of `any` at the pipeline boundary). */
@@ -3027,13 +3038,17 @@ export class Store {
         this.db.exec("COMMIT");
         return undefined;
       }
+      // Taking a `running` row is taking it from a worker whose lease ran out: a
+      // crash, a SIGKILL, an OOM. Counted, so a job that kills the process every
+      // time it runs is eventually poisoned instead of reclaimed forever (DS41-032).
+      const reclaims = (row.reclaims ?? 0) + (row.state === "running" ? 1 : 0);
       this.db
         .prepare(
-          "UPDATE jobs SET state = 'running', claimed_at = ?, lease_until = ?, worker_token = ? WHERE id = ?",
+          "UPDATE jobs SET state = 'running', claimed_at = ?, lease_until = ?, worker_token = ?, reclaims = ? WHERE id = ?",
         )
-        .run(now, now + leaseMs, workerToken, row.id);
+        .run(now, now + leaseMs, workerToken, reclaims, row.id);
       this.db.exec("COMMIT");
-      return { ...row, state: "running", claimed_at: now, lease_until: now + leaseMs, worker_token: workerToken };
+      return { ...row, state: "running", claimed_at: now, lease_until: now + leaseMs, worker_token: workerToken, reclaims };
     } catch (e) {
       try {
         this.db.exec("ROLLBACK");
@@ -3108,7 +3123,7 @@ export class Store {
   reclaimExpiredLeases(now: number): number {
     const info = this.db
       .prepare(
-        "UPDATE jobs SET state = 'pending', worker_token = NULL, lease_until = NULL WHERE state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?",
+        "UPDATE jobs SET state = 'pending', worker_token = NULL, lease_until = NULL, reclaims = reclaims + 1 WHERE state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?",
       )
       .run(now);
     return Number(info.changes);

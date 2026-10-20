@@ -23,6 +23,14 @@ export type EnqueueFn = (
 const IDLE_POLL_MS = 50;
 
 /**
+ * Lease-expiry recoveries after which a job is poisoned rather than run again
+ * (audit DS41-032). A graceful shutdown releases its job without counting, so
+ * only a process that died holding the job counts; three leaves room for a
+ * couple of unrelated hard kills (an OOM elsewhere, a SIGKILL'd deploy).
+ */
+export const MAX_LEASE_RECLAIMS = 3;
+
+/**
  * What ONE drain call currently has in flight: workers claiming or running a job
  * (`busy`), and how many of those are in each lane.
  *
@@ -416,6 +424,21 @@ export class JobRunner {
       // (a rename, a half-applied deploy) vanished into the poison state silently.
       console.warn(`[${stamp()}] [job] ${job.type} #${job.id} POISONED: no handler registered`);
       this.store.failJob(job.id, job.attempts + 1, this.now(), `no handler for ${job.type}`, true, token);
+      return;
+    }
+    // A job whose worker died under it this many times is presumed to be what
+    // killed it (audit DS41-032): a native crash or an OOM decoding a pathological
+    // file never reaches failJob, so `attempts` never moved and the row was
+    // re-claimed after every restart, re-downloading and re-billing each time,
+    // until systemd's StartLimitBurst gave up on the whole daemon. Poison it and
+    // tell the organizer instead.
+    if ((job.reclaims ?? 0) >= MAX_LEASE_RECLAIMS) {
+      const msg = `recovered ${job.reclaims} times after its worker died mid-run — presumed to crash the process`;
+      console.warn(`[${stamp()}] [job] ${job.type} #${job.id} POISONED: ${msg}`);
+      const owned = this.store.failJob(job.id, job.attempts + 1, this.now(), msg, true, token);
+      if (owned && this.onPoison) {
+        this.onPoison({ type: job.type, payload: safeParse(job.payload), attempts: job.attempts + 1, error: msg });
+      }
       return;
     }
     const startedAt = this.now();

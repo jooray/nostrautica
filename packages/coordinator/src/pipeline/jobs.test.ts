@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Store } from "../store/db.js";
-import { JobRunner } from "./jobs.js";
+import { JobRunner, MAX_LEASE_RECLAIMS } from "./jobs.js";
 
 function fixedClock(start = 1000) {
   let t = start;
@@ -799,5 +799,51 @@ describe("JobRunner timers never throw out of a store error", () => {
     expect(store.pendingJobCount()).toBe(0);
     expect(warned.join("\n")).toMatch(/lease heartbeat failed/);
     expect(warned.join("\n")).toMatch(/queue report failed/);
+  });
+});
+
+/**
+ * Audit DS41-032. Only a caught handler failure advanced `attempts`, so a job that
+ * kills the process (a native crash, an OOM on a pathological file) was reclaimed
+ * after every restart with its counter unchanged, forever.
+ */
+describe("a job that keeps killing its worker is poisoned", () => {
+  it("poisons after MAX_LEASE_RECLAIMS lease expiries, both recovery paths counted", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const poisoned: string[] = [];
+    const runner = new JobRunner(store, { now: clock.now, leaseMs: 1000, onPoison: (p) => void poisoned.push(p.error) });
+    let runs = 0;
+    runner.register("crashy", async () => {
+      runs++;
+    });
+    runner.enqueue("crashy", "k", {});
+    // Three "crashes": the job is claimed and its worker dies holding the lease.
+    for (let i = 0; i < MAX_LEASE_RECLAIMS; i++) {
+      expect(store.claimNextJob(clock.now(), `dead-${i}`, 1000)).toBeDefined();
+      clock.advance(2000);
+      if (i % 2 === 0) runner.recoverStrandedJobs(); // boot recovery; the claim arm covers the rest
+    }
+    await runner.drain();
+    expect(runs).toBe(0);
+    expect(store.poisonJobs()).toHaveLength(1);
+    expect(poisoned[0]).toMatch(/worker died/);
+  });
+
+  it("a graceful release does not count", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, { now: clock.now, leaseMs: 1000 });
+    let runs = 0;
+    runner.register("ok", async () => {
+      runs++;
+    });
+    runner.enqueue("ok", "k", {});
+    for (let i = 0; i < MAX_LEASE_RECLAIMS + 2; i++) {
+      const job = store.claimNextJob(clock.now(), `t-${i}`, 1000)!;
+      store.releaseJob(job.id, `t-${i}`);
+    }
+    await runner.drain();
+    expect(runs).toBe(1);
   });
 });
