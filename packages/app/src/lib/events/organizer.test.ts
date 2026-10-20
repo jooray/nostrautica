@@ -78,6 +78,7 @@ import {
   updateEventConfig,
   attachCoordinator,
   loadRoster,
+  sendAdminCommand,
   type PendingRequest,
   fetchPending,} from "./organizer.js";
 import {
@@ -893,6 +894,34 @@ describe("fetchPending surfaces withdrawals", () => {
 
     const pending = await fetchPending(inboxCtx, (await loadEventKeys(COORD))!);
     expect(pending.find((p) => p.attendeePubkey === ATTENDEE)?.withdrawn).toBeUndefined();
+  });
+});
+
+// Audit SB-03: Admin marked a request approved/revoked whatever happened to the
+// command, because sendAdminCommand dropped publishOrQueue's answer.
+describe("sendAdminCommand outcome", () => {
+  it("reports `queued` when the command only reached the outbox", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+    vi.stubGlobal("navigator", { onLine: false });
+    const withCoord = {
+      ...ctx,
+      config: { ...ctx.config, coordinator: getPublicKey(generateSecretKey()) },
+    } as EventContext;
+
+    expect(await sendAdminCommand(withCoord, "approve", { pubkey: OWNER })).toBe("queued");
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("reports `published` when it went out", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+    const withCoord = {
+      ...ctx,
+      config: { ...ctx.config, coordinator: getPublicKey(generateSecretKey()) },
+    } as EventContext;
+
+    expect(await sendAdminCommand(withCoord, "revoke", { pubkey: OWNER })).toBe("published");
   });
 });
 

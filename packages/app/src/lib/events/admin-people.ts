@@ -194,7 +194,12 @@ export function buildApprovedPeople(params: BuildPeopleParams): AdminPerson[] {
 
 // ── Bulk approval (UX-A4) ────────────────────────────────────────────────────
 
-export type BulkItemState = "queued" | "publishing" | "confirmed" | "failed";
+/**
+ * `queued` is "not started yet" in the bulk run. `outbox` is "sent to this
+ * device's outbox, not to the coordinator yet" (audit SB-03): finished as far as
+ * the run is concerned, but neither approved nor failed.
+ */
+export type BulkItemState = "queued" | "publishing" | "confirmed" | "outbox" | "failed";
 
 export interface BulkItem {
   pubkey: string;
@@ -214,7 +219,7 @@ export function summarizeBulk(items: Iterable<BulkItem>): {
   for (const it of items) {
     if (it.state === "confirmed") approved++;
     else if (it.state === "failed") needRetry++;
-    else pendingWork = true;
+    else if (it.state !== "outbox") pendingWork = true;
   }
   return { approved, needRetry, done: !pendingWork };
 }

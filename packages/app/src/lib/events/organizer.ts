@@ -754,12 +754,17 @@ function splitCoordinate(coordinate: string): { identifier: string } {
  * coordinator authenticates commands as coming from the event authority). Used
  * for manual approval, recompute, reprocess, and revoke when a coordinator is
  * attached.
+ *
+ * Returns whether the command actually went out or only reached the durable
+ * outbox. The caller must not show "approved"/"revoked" for a queued one: the
+ * coordinator has not acted, and for a revoke the member keeps their chat leaf
+ * until it does (audit SB-03).
  */
 export async function sendAdminCommand(
   ctx: EventContext,
   cmd: "approve" | "recompute" | "reprocess" | "revoke" | "talk_publish" | "talk_reject",
   args: Record<string, unknown> = {},
-): Promise<void> {
+): Promise<PublishOutcome> {
   if (!ctx.config.coordinator) throw new Error("no coordinator attached");
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
@@ -771,7 +776,7 @@ export async function sendAdminCommand(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd, args, expires },
   });
-  await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays);
+  return toOutcome(await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays));
 }
 
 /**
