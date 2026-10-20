@@ -137,7 +137,7 @@ fun MeScreen() {
                     } else {
                         SecondaryButton(s.t("me.logout"), {
                             scope.launch {
-                                unsent = c.nostr.observeOutbox(a.pubkey).first().size
+                                unsent = c.nostr.observeUnsent(a.pubkey).first().size
                                 if (a.method == Session.Method.LOCAL && needsBackup || unsent > 0) keyLoss = true
                                 else { logout(c); router.resetTo(Route.Home) }
                             }

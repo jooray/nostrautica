@@ -7,6 +7,7 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.shadows.ShadowNetworkCapabilities
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -70,6 +71,34 @@ class NostrOutboxTest {
         val r = nostr.publish(event(), listOf(slow.url), me.pubkey)
         assertEquals(Nostr.PublishResult.Queued, r)
         assertEquals(1, db.outbox().all().size)
+    }
+
+    // Manual e2e BUG-5: one dead inbox relay kept a delivered DM "queued" and the logout
+    // warning counting it forever. Reaching one relay is sent; the rest is quiet convergence.
+    @Test fun aSendThatReachedOneRelayIsNotUnsentWhileTheDeadOneIsRetried() = runBlocking {
+        val ok = relay()
+        val dead = refusing("rate-limited: never answers")
+        val sent = event()
+        val r = nostr.publish(sent, listOf(ok.url, dead.url), me.pubkey)
+        assertTrue(r is Nostr.PublishResult.Published)
+        val rows = db.outbox().all()
+        assertEquals("the dead relay is still carried", listOf(sent.id), rows.map { it.id })
+        assertTrue(rows.single().partial)
+        assertEquals(emptyList<String>(), nostr.observeUnsent(me.pubkey).first().map { it.id })
+
+        // Nobody took this one: it is unsent and stays visible.
+        val waiting = event()
+        assertEquals(Nostr.PublishResult.Queued, nostr.publish(waiting, listOf(dead.url), me.pubkey))
+        assertEquals(listOf(waiting.id), nostr.observeUnsent(me.pubkey).first().map { it.id })
+    }
+
+    @Test fun aPartialRowIsDroppedAfterItsLastRetry() = runBlocking {
+        val ok = relay()
+        val dead = refusing("rate-limited: never answers")
+        nostr.publish(event(), listOf(ok.url, dead.url), me.pubkey)
+        nostr.activeOwner = { me.pubkey }
+        repeat(5) { nostr.flush(force = true) }
+        assertEquals("bounded: the outbox drains", 0, db.outbox().all().size)
     }
 
     // Audit SB-39: the flusher only publishes the signed-in account's rows.

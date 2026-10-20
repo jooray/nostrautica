@@ -127,7 +127,7 @@ class Dms(
 
     /** Wrap ids still waiting in the outbox (sends not yet on any relay), with whether they are parked as failed. */
     val outbox: StateFlow<Map<String, Boolean>> = session.account
-        .flatMapLatest { a -> a?.let { nostr.observeOutbox(it.pubkey).map { rows -> rows.associate { r -> r.id to r.failed } } } ?: flowOf(emptyMap()) }
+        .flatMapLatest { a -> a?.let { nostr.observeUnsent(it.pubkey).map { rows -> rows.associate { r -> r.id to r.failed } } } ?: flowOf(emptyMap()) }
         .stateIn(scope, SharingStarted.Eagerly, emptyMap())
 
     private val prefills = HashMap<String, String>()

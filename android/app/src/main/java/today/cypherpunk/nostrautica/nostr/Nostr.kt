@@ -151,7 +151,16 @@ class Nostr(
         ))
     }
 
-    fun observeOutbox(owner: String) = outbox.observe(owner)
+    /**
+     * The owner's unsent actions: what the user is waiting on, for "queued" labels and
+     * the logout warning (publish-queue.ts listQueued / pendingCount). A partial row is
+     * left out. Its event already reached a relay, so it has been sent; the row only
+     * carries it on to the relays that have not acknowledged it. Counting it kept a
+     * delivered DM labelled "queued" for as long as one of the recipient's inbox relays
+     * stayed dead (manual e2e BUG-5). Such a row still gets its bounded retries in
+     * [flush] and is dropped quietly after the last one.
+     */
+    fun observeUnsent(owner: String): Flow<List<OutboxRow>> = outbox.observe(owner).map { unsent(it) }
 
     suspend fun discard(id: String) = outbox.delete(id)
 
@@ -211,6 +220,9 @@ class Nostr(
     fun onBackground() = pool.setForeground(false)
 
     companion object {
+        /** [observeUnsent]'s rule: a row that reached at least one relay is not unsent. */
+        fun unsent(rows: List<OutboxRow>): List<OutboxRow> = rows.filterNot { it.partial }
+
         private val BACKOFF_MS = longArrayOf(0, 15_000, 60_000, 300_000, 900_000)
         private const val MAX_ATTEMPTS = 5
 
