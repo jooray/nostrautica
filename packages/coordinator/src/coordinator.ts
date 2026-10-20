@@ -1568,7 +1568,7 @@ export class Coordinator {
       configCreatedAt: cfgEvent?.created_at ?? 0,
       gen,
       retentionDays: config?.retentionDays,
-      eventEndSec: parseEventEndSec(evtEvent),
+      eventEndSec: this.retentionAnchorFor(grant.coordinate, evtEvent),
       metaEventId: evtEvent?.id,
       metaCreatedAt: evtEvent?.created_at ?? 0,
       retentionExpired: this.deps.store.isRetentionExpired(grant.coordinate) || undefined,
@@ -6178,6 +6178,28 @@ export class Coordinator {
    * retention anchor `eventEndSec` — so a moved end date re-times the retention
    * sweep instead of leaving it pinned to the install-time value.
    */
+  /**
+   * The retention anchor for a space record (audit SB-07). A record that carries
+   * a usable `end`/`start` moves the anchor and is remembered; one that carries
+   * neither keeps the held anchor, exactly as title/summary fall back to the held
+   * value. Before, a title-only edit from a NIP-52 client that omits the dates
+   * zeroed the anchor and the retention sweep skipped the event forever, and a
+   * restart re-read that same newest record. Removing a retention window is a
+   * 31600 `retention` change, which applyConfigUpdate handles on purpose.
+   */
+  private retentionAnchorFor(coordinate: string, record: NostrEvent | undefined): number {
+    const parsed = parseEventEndSec(record);
+    if (parsed > 0) {
+      this.deps.store.setRetentionAnchor(coordinate, parsed);
+      return parsed;
+    }
+    const held = this.deps.store.getRetentionAnchor(coordinate);
+    if (held > 0 && record) {
+      log(`[config] ${coordinate}: space record ${record.id.slice(0, 8)} has no usable end/start — keeping the retention anchor ${held}`);
+    }
+    return held;
+  }
+
   private handleMetaUpdate(coordinate: string, event: NostrEvent): void {
     const state = this.events.get(coordinate);
     if (!state) return;
@@ -6195,7 +6217,7 @@ export class Coordinator {
     } else if (event.created_at < state.metaCreatedAt) {
       return;
     }
-    state.eventEndSec = parseEventEndSec(event);
+    state.eventEndSec = this.retentionAnchorFor(coordinate, event);
     state.scoringCtx = {
       ...state.scoringCtx,
       title: event.tags.find((t) => t[0] === "title")?.[1] ?? state.scoringCtx.title,

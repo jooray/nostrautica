@@ -232,6 +232,15 @@ function applyBaselineDDL(db: DatabaseSync): void {
       /* column already exists */
     }
   }
+  // Migration (audit SB-07): the last usable end time of the space record, so a
+  // revision without `end`/`start` cannot zero the retention anchor, including
+  // across a restart. Plain defaulted column: an older binary ignores it, and an
+  // upsert of the events row (ON CONFLICT DO UPDATE) leaves it alone.
+  try {
+    db.exec("ALTER TABLE events ADD COLUMN event_end_sec INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
   // Migration (audit C9): the CANDIDATE relay set of an in-progress handover (coord-1).
   try {
     db.exec("ALTER TABLE events ADD COLUMN pending_relays TEXT");
@@ -1749,6 +1758,17 @@ export class Store {
     } catch {
       return undefined;
     }
+  }
+  /** The last usable end time (unix seconds) seen on the space record, or 0
+   *  (audit SB-07: the retention anchor must survive a record without dates). */
+  getRetentionAnchor(coordinate: string): number {
+    const row = this.db.prepare("SELECT event_end_sec FROM events WHERE coordinate = ?").get(coordinate) as
+      | { event_end_sec: number }
+      | undefined;
+    return row?.event_end_sec ?? 0;
+  }
+  setRetentionAnchor(coordinate: string, endSec: number): void {
+    this.db.prepare("UPDATE events SET event_end_sec = ? WHERE coordinate = ?").run(endSec, coordinate);
   }
   /** Clear a pending handover's candidate set (promoted, or abandoned). */
   clearPendingRelays(coordinate: string): void {

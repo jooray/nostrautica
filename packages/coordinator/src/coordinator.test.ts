@@ -5142,6 +5142,29 @@ describe("audit P9 — 31923 metadata selection uses the latest-event comparator
     } as any);
     expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
   });
+
+  /** Audit SB-07: a record without `end`/`start` zeroed the anchor, so the
+   *  retention sweep skipped the event forever, restarts included. */
+  it("a newer 31923 without dates keeps the anchor, live and after a restart", async () => {
+    const h = await setup(0, { eventEndSec: 1000 });
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(31923) && s.filter.kinds?.includes(31600),
+    )!;
+    const undated = {
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: 20, id: "ev-undated",
+      tags: [["d", "cypherpunk"], ["title", "Renamed"]], content: "", sig: "",
+    } as any;
+    cfgSub.onEvent(undated);
+    expect(h.coordinator.scoringContextOf(h.coordinate)).toMatchObject({ title: "Renamed" });
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(1000);
+    // The relay now holds the undated record as the newest one; a restart reads it.
+    h.transport.seed.push(undated);
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"], gen: 1, source: "restore",
+    });
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(1000);
+  });
 });
 
 describe("a community's metadata is read under its OWN kind (31612), not 31923", () => {
