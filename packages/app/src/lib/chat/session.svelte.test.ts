@@ -447,3 +447,57 @@ describe("chat session — phase follows MEMBERSHIP, not leftover group state", 
     await vi.waitFor(() => expect(chatSession.phase).toBe("ready"));
   });
 });
+
+/**
+ * DS41-054: opening a room replays its whole history synchronously through
+ * `onMessage`. Each message used to copy + sort the list and structured-clone it
+ * to every follower tab — quadratic in the room's size. A burst is now one merge
+ * and one broadcast, with the same de-dupe and ordering.
+ */
+describe("chat session — a history replay is ingested as one batch", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    FakeChannel.buses.clear();
+    const locks = new FakeLockManager();
+    resolveChatIdentity.mockResolvedValue({ pubkey: "c".repeat(64) });
+    chatCreate.mockImplementation(async () => fakeChat());
+    __setChatCoordinatorFactoryForTests(
+      (opts: TabCoordinatorOptions) =>
+        new ChatTabCoordinator({
+          ...opts,
+          locks: locks as never,
+          createChannel: (n: string) => new FakeChannel(n) as never,
+        }),
+    );
+  });
+
+  afterEach(() => {
+    chatSession.dispose();
+    __setChatCoordinatorFactoryForTests(null);
+  });
+
+  it("de-dupes, sorts, and broadcasts once for a synchronous burst", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
+    const coordinator = chatSession.__coordinatorForTests as unknown as ChatTabCoordinator;
+    const broadcast = vi.spyOn(coordinator, "broadcastState");
+    const chat = chatSession.chat as unknown as { onMessage: (m: unknown) => void };
+
+    const N = 500;
+    for (let i = N - 1; i >= 0; i--) {
+      chat.onMessage({ id: `m${i}`, pubkey: "c".repeat(64), content: `${i}`, createdAt: i, kind: 9 });
+    }
+    chat.onMessage({ id: "m7", pubkey: "c".repeat(64), content: "dup", createdAt: 7, kind: 9 });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(chatSession.messages).toHaveLength(N);
+    expect(chatSession.messages.map((m) => m.createdAt)).toEqual([...Array(N).keys()]);
+    expect(broadcast).toHaveBeenCalledTimes(1);
+
+    // A lone live message afterwards still lands (and broadcasts) on its own.
+    chat.onMessage({ id: "late", pubkey: "c".repeat(64), content: "x", createdAt: N, kind: 9 });
+    await vi.waitFor(() => expect(chatSession.messages).toHaveLength(N + 1));
+    expect(broadcast).toHaveBeenCalledTimes(2);
+  });
+});
