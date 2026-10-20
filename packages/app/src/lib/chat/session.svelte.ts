@@ -437,8 +437,20 @@ class ChatSessionStore {
    *  problem Rejoin exists for), as opposed to a transport failure. */
   private async demoteIfUnroutable(): Promise<boolean> {
     const gid = await this.chat?.nostrGroupId().catch(() => undefined);
-    if (gid) return false;
-    if (this.phase === "ready") this.phase = "setup";
+    if (!gid) {
+      if (this.phase === "ready") this.phase = "setup";
+      return true;
+    }
+    // Holding a group is not being in it (audit DS41-052): a removed member keeps
+    // the group state, so `gid` resolves while every send fails. Ask about the
+    // LEAF, as syncPhase does — and, like it, leave an unreadable member list
+    // (undefined) alone rather than demote a room we could not inspect.
+    const members = await Promise.resolve()
+      .then(() => this.chat?.groupMemberPubkeys())
+      .catch(() => undefined);
+    const me = this.chat?.identity.pubkey;
+    if (!members || !me || members.includes(me)) return false;
+    if (this.phase === "ready") this.phase = "evicted";
     return true;
   }
 

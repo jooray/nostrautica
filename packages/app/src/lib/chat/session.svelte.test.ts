@@ -368,6 +368,22 @@ describe("chat session — a failed send says WHICH failure it was", () => {
     await expect(chatSession.send("hi")).rejects.toBeInstanceOf(ChatUnroutableError);
     expect(chatSession.phase).toBe("setup");
   });
+
+  // DS41-052: a removed member still holds the group (a "corpse"), so the group id
+  // resolves. The leaf is what decides — that is what makes Rejoin appear.
+  it("a send from a group we hold but have no leaf in is a ChatUnroutableError (evicted)", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
+    const chat = chatSession.chat as unknown as {
+      send: ReturnType<typeof vi.fn>;
+      groupMemberPubkeys: ReturnType<typeof vi.fn>;
+    };
+    chat.send.mockRejectedValue(new Error("not a member of this group"));
+    chat.groupMemberPubkeys.mockResolvedValue(["d".repeat(64)]); // not us
+
+    await expect(chatSession.send("hi")).rejects.toBeInstanceOf(ChatUnroutableError);
+    expect(chatSession.phase).toBe("evicted");
+  });
 });
 
 /**
