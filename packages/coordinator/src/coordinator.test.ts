@@ -4695,6 +4695,68 @@ function secondCoordinator(h: Harness, coordSkB: Uint8Array): { coordinator: Coo
   return { coordinator, store: storeB };
 }
 
+/**
+ * Hand the event over from coordinator A (the harness's) to a fresh coordinator B
+ * the way the organizer's client does it: a newer 31600 names B at gen 2, and an
+ * E_id-sealed 21603 goes to B's inbox through the REAL grant path
+ * (handleCoordinatorWrap → installEvent → bootstrapHandover), so the wire field
+ * `prev_coordinator` is exercised end to end. `prev` omitted = a grant from an
+ * organizer client that predates the field (NIP §3.7, audit SB-122).
+ */
+async function handOverTo(
+  h: Harness,
+  coordSkB: Uint8Array,
+  opts: { prev?: string; cfgId?: string } = {},
+): Promise<{ coordinator: Coordinator; store: Store }> {
+  const identifier = h.coordinate.split(":").slice(2).join(":");
+  const coordPkB = getPublicKey(coordSkB);
+  h.transport.seed.push({
+    kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: opts.cfgId ?? "cfg-b", sig: "", content: "",
+    tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
+  } as any);
+  const b = secondCoordinator(h, coordSkB);
+  const grantWrap = wrapRumor(h.eidSk, coordPkB, {
+    kind: KIND_COORDINATOR_GRANT,
+    content: {
+      v: 2,
+      a: h.coordinate,
+      gen: 2,
+      inbox_nsec: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      config_relays: ["wss://test"],
+      ...(opts.prev ? { prev_coordinator: opts.prev } : {}),
+    },
+  });
+  await b.coordinator.handleCoordinatorWrap(grantWrap as any);
+  expect(b.store.getEvent(h.coordinate), "B installed the event").toBeDefined();
+  await b.coordinator.jobs.drain();
+  return b;
+}
+
+/** A 31604 at the event's public `d`, ECK-encrypted, authored by `pubkey`. */
+function seedRoster(
+  h: Harness,
+  pubkey: string,
+  attendees: { pubkey: string; role: "attendee" | "organizer" }[],
+  opts: { id: string; createdAt?: number },
+): void {
+  const identifier = h.coordinate.split(":").slice(2).join(":");
+  h.transport.seed.push({
+    kind: KIND_ROSTER,
+    pubkey,
+    created_at: opts.createdAt ?? Math.floor(h.clock.t / 1000) + 60,
+    id: opts.id,
+    sig: "",
+    tags: [["d", identifier], ["a", h.coordinate]],
+    content: eckEncrypt(h.eck, JSON.stringify({ v: 2, eck_current: 1, attendees: attendees.map((a) => ({ ...a, d: "x" })) })),
+  } as any);
+}
+
+/** Every gift wrap published to (a 21602 key grant, for these tests) `pubkey`. */
+function wrapsTo(h: Harness, pubkey: string): NostrEvent[] {
+  return h.transport.published.filter((e) => e.kind === 1059 && e.tags.some((t) => t[0] === "p" && t[1] === pubkey));
+}
+
 describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
   it("a replacement coordinator republishes a complete directory/roster under its own key", async () => {
     // Coordinator A installs + processes two invite-approved attendees.
@@ -4708,27 +4770,14 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
     expect(h.transport.published.some((e) => e.kind === KIND_ROSTER && e.pubkey === getPublicKey(h.coordSk))).toBe(true);
 
     // The organizer replaces A with B: a NEWER 31600 names B at gen 2 (same E_inbox
-    // + same ECK granted to B, so B can decrypt A's still-published records).
-    const identifier = h.coordinate.split(":").slice(2).join(":");
+    // + same ECK granted to B, so B can decrypt A's still-published records), and the
+    // E_id-sealed grant names A as the outgoing coordinator — the only thing that
+    // makes A's roster adoptable (SB-122). B's E_inbox backfill sees no joins here
+    // (the harness delivered them to A directly), so everything B knows came from
+    // A's roster.
     const coordSkB = generateSecretKey();
     const coordPkB = getPublicKey(coordSkB);
-    h.transport.seed.push({
-      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-b", sig: "", content: "",
-      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
-    } as any);
-
-    // Install B as a fresh grant at gen 2 → runs the handover bootstrap.
-    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
-    await coordB.installEvent({
-      coordinate: h.coordinate,
-      inboxSkHex: bytesToHex(h.einboxSk),
-      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
-      configRelays: ["wss://test"],
-      gen: 2,
-      source: "grant",
-      backfill: "full",
-    });
-    await coordB.jobs.drain();
+    const { store: storeB } = await handOverTo(h, coordSkB, { prev: getPublicKey(h.coordSk) });
 
     // B reconstructed the approved set from A's roster.
     const approvedB = storeB.approvedAttendees(h.coordinate).map((a) => a.pubkey).sort();
@@ -4784,24 +4833,7 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
       content: eckEncrypt(h.eck, JSON.stringify(forged)),
     } as any);
 
-    const coordSkB = generateSecretKey();
-    const coordPkB = getPublicKey(coordSkB);
-    h.transport.seed.push({
-      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-b2", sig: "", content: "",
-      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
-    } as any);
-
-    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
-    await coordB.installEvent({
-      coordinate: h.coordinate,
-      inboxSkHex: bytesToHex(h.einboxSk),
-      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
-      configRelays: ["wss://test"],
-      gen: 2,
-      source: "grant",
-      backfill: "full",
-    });
-    await coordB.jobs.drain();
+    const { store: storeB } = await handOverTo(h, generateSecretKey(), { prev: getPublicKey(h.coordSk), cfgId: "cfg-b2" });
 
     // Mallory is nowhere in B's state, and never received a key grant.
     expect(storeB.getAttendee(h.coordinate, malloryPk)).toBeUndefined();
@@ -4821,6 +4853,9 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
    * every join and approval is held to.
    */
   it("adopts nothing from a merged roster larger than the roster cap", async () => {
+    // The forger here is the outgoing coordinator the grant NAMES — a roster
+    // authority, so this exercises the cap itself rather than the SB-122 author
+    // check (which would refuse a stranger's roster before the cap is reached).
     const h = await setup();
     const identifier = h.coordinate.split(":").slice(2).join(":");
     const forgerSk = generateSecretKey();
@@ -4857,7 +4892,94 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
       gen: 2,
       source: "grant",
       backfill: "full",
+      prevCoordinator: forgerPk,
     });
+    expect(storeB.attendeeCount(h.coordinate)).toBe(0);
+  });
+
+  /**
+   * Audit SB-122. The attendee-planted case above is stopped by any author check;
+   * the hole was a FRESH key. An attendee mints throwaway key K, encrypts a roster
+   * naming K as an organizer under the ECK they hold, and publishes it at the
+   * event's public `d`, newest of all. K is no attendee, so the old "an attendee is
+   * never a roster authority" check let it through, and B seeded K approved +
+   * organizer (MLS co-admin) and granted it the ECK.
+   */
+  it("SB-122: a roster forged by a throwaway key holding the ECK adopts nothing", async () => {
+    const h = await setup();
+    const alicePk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const throwawayPk = getPublicKey(generateSecretKey());
+    const victimPk = getPublicKey(generateSecretKey()); // e.g. a revoked attendee to re-instate
+    seedRoster(
+      h,
+      throwawayPk,
+      [{ pubkey: throwawayPk, role: "organizer" }, { pubkey: victimPk, role: "attendee" }],
+      { id: "throwaway-roster", createdAt: Math.floor(h.clock.t / 1000) + 600 },
+    );
+
+    const { store: storeB } = await handOverTo(h, generateSecretKey(), { prev: getPublicKey(h.coordSk) });
+
+    for (const pk of [throwawayPk, victimPk]) {
+      expect(storeB.getAttendee(h.coordinate, pk), pk.slice(0, 8)).toBeUndefined();
+      expect(wrapsTo(h, pk), pk.slice(0, 8)).toHaveLength(0);
+    }
+    // The newest AUTHORIZED roster (A's) was adopted instead.
+    expect(storeB.getAttendee(h.coordinate, alicePk)?.status).toBe("approved");
+  });
+
+  it("SB-122: the throwaway roster is refused even when no other roster exists", async () => {
+    // Nothing to fall back to: the forgery is the only 31604 at the address.
+    const h = await setup();
+    const throwawayPk = getPublicKey(generateSecretKey());
+    seedRoster(h, throwawayPk, [{ pubkey: throwawayPk, role: "organizer" }], { id: "only-roster" });
+    const { store: storeB } = await handOverTo(h, generateSecretKey(), { prev: getPublicKey(h.coordSk) });
+    expect(storeB.attendeeCount(h.coordinate)).toBe(0);
+    expect(wrapsTo(h, throwawayPk)).toHaveLength(0);
+  });
+
+  it("SB-122: a roster from the outgoing coordinator the grant names is adopted, roles included", async () => {
+    const h = await setup();
+    const coordPkA = getPublicKey(h.coordSk);
+    const coOrgPk = getPublicKey(generateSecretKey());
+    const memberPk = getPublicKey(generateSecretKey());
+    seedRoster(h, coordPkA, [{ pubkey: coOrgPk, role: "organizer" }, { pubkey: memberPk, role: "attendee" }], { id: "a-roster" });
+
+    const { store: storeB } = await handOverTo(h, generateSecretKey(), { prev: coordPkA });
+
+    expect(storeB.getAttendee(h.coordinate, coOrgPk)).toMatchObject({ status: "approved", role: "organizer" });
+    expect(storeB.getAttendee(h.coordinate, memberPk)).toMatchObject({ status: "approved", role: "attendee" });
+    expect(wrapsTo(h, coOrgPk).length).toBeGreaterThan(0);
+  });
+
+  it("SB-122: a legacy grant without prev_coordinator adopts only an E_id-authored roster", async () => {
+    // Older organizer client: no prev_coordinator. A's roster — the very one the
+    // test above adopts — is now NOT adoptable (fail safe: nobody vouched for A),
+    // and neither is a throwaway's; E_id's roster is.
+    const h = await setup();
+    const coordPkA = getPublicKey(h.coordSk);
+    const fromA = getPublicKey(generateSecretKey());
+    const fromEid = getPublicKey(generateSecretKey());
+    const throwawayPk = getPublicKey(generateSecretKey());
+    const t = Math.floor(h.clock.t / 1000);
+    seedRoster(h, getPublicKey(h.eidSk), [{ pubkey: fromEid, role: "organizer" }], { id: "eid-roster", createdAt: t + 10 });
+    seedRoster(h, coordPkA, [{ pubkey: fromA, role: "attendee" }], { id: "a-roster", createdAt: t + 20 });
+    seedRoster(h, throwawayPk, [{ pubkey: throwawayPk, role: "organizer" }], { id: "k-roster", createdAt: t + 30 });
+
+    const { store: storeB } = await handOverTo(h, generateSecretKey());
+
+    expect(storeB.getAttendee(h.coordinate, fromEid)).toMatchObject({ status: "approved", role: "organizer" });
+    expect(storeB.getAttendee(h.coordinate, fromA)).toBeUndefined();
+    expect(storeB.getAttendee(h.coordinate, throwawayPk)).toBeUndefined();
+    expect(wrapsTo(h, throwawayPk)).toHaveLength(0);
+    expect(wrapsTo(h, fromA)).toHaveLength(0);
+  });
+
+  it("SB-122: a legacy grant with only a coordinator-authored roster adopts nothing", async () => {
+    const h = await setup();
+    const fromA = getPublicKey(generateSecretKey());
+    seedRoster(h, getPublicKey(h.coordSk), [{ pubkey: fromA, role: "organizer" }], { id: "a-only" });
+    const { store: storeB } = await handOverTo(h, generateSecretKey());
     expect(storeB.attendeeCount(h.coordinate)).toBe(0);
   });
 });

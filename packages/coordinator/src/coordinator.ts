@@ -1322,6 +1322,13 @@ export class Coordinator {
      * "restore".
      */
     source?: "grant" | "restore";
+    /**
+     * The outgoing coordinator named by the E_id-sealed 21603 (`prev_coordinator`,
+     * NIP §3.7, audit SB-122): the only key other than E_id whose 31604 the handover
+     * bootstrap may adopt. Absent on a grant from an older organizer client — the
+     * bootstrap then adopts an E_id-authored roster only.
+     */
+    prevCoordinator?: string;
   }): Promise<void> {
     const { kind: spaceKind, pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
@@ -1633,10 +1640,11 @@ export class Coordinator {
     // Handover bootstrap (NIP §3.7): a FRESH grant install may be a replacement
     // coordinator taking over an event that already has a published record set under
     // the previous coordinator's key. Reconstruct the approved set from the prior
-    // roster (decryptable with the granted ECK) and republish under our own key, so
+    // roster, authored by E_id or by the outgoing coordinator the grant names
+    // (SB-122; decrypting it is not enough), and republish under our own key, so
     // record-authority pinning never leaves members without a readable directory.
     if (source === "grant" && grant.backfill === "full") {
-      await this.bootstrapHandover(state).catch((e) =>
+      await this.bootstrapHandover(state, grant.prevCoordinator).catch((e) =>
         log(`[handover] ${state.coordinate}: bootstrap failed (non-fatal): ${e instanceof Error ? e.message : e}`),
       );
     }
@@ -2205,6 +2213,7 @@ export class Coordinator {
           gen: grant.gen,
           backfill: known ? "recent" : "full",
           source: "grant",
+          prevCoordinator: grant.prev_coordinator,
         });
       } else if (rumor.kind === KIND_ADMIN_COMMAND) {
         const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
@@ -3091,8 +3100,9 @@ export class Coordinator {
    * pinning never leaves members without a readable directory. The previous
    * coordinator's manual-approval decisions arrived as 21604 commands addressed to
    * ITS key, so a fresh E_inbox re-scan alone cannot reconstruct who was approved.
-   * This reads the previous coordinator's still-decryptable 31604 roster (ECK
-   * custody was granted to us) to learn the approved set, seeds each attendee's
+   * This reads the newest 31604 roster authored by E_id or by the outgoing
+   * coordinator the E_id-sealed 21603 names (`prev_coordinator`, audit SB-122;
+   * decryptability alone is not authority) to learn the approved set, seeds each attendee's
    * profile/ai_profile from their 31603 where available, marks them approved, and
    * republishes directory + roster + grants under THIS coordinator's key. Matches
    * are rebuilt by re-enqueuing the pipeline (the previous 31605s are per-recipient
@@ -3151,33 +3161,44 @@ export class Coordinator {
     return out;
   }
 
-  private async bootstrapHandover(state: EventState): Promise<void> {
+  private async bootstrapHandover(state: EventState, prevCoordinator?: string): Promise<void> {
     const { identifier } = parseCoordinate(state.coordinate);
+    // ROSTER AUTHORITY, NOT DECRYPTABILITY (NIP §3.7, audit SB-122). 31604's `d`
+    // is the event's PUBLIC `d`, so anyone can publish there, and the ECK is held
+    // by every approved attendee — `tryEckDecrypt` walks every version we hold, so
+    // a REVOKED attendee's old key opens their forgery too. A roster is therefore
+    // adopted only from an author the event identity vouched for:
+    //   • E_id itself (the organizer's client republishes the roster under E_id
+    //     when it rotates the ECK on a replace or detach), or
+    //   • the outgoing coordinator the E_id-sealed 21603 names in
+    //     `prev_coordinator`.
+    // Nobody else: not a "non-attendee", not a throwaway key. Roles (an
+    // `organizer` entry is an MLS co-admin) therefore come only from those authors.
+    //
+    // A grant WITHOUT `prev_coordinator` (an organizer client that predates the
+    // field, or a first attach) fails SAFE: E_id rosters only, never "whoever can
+    // decrypt". The E_inbox backfill still reconstructs invite approvals, and the
+    // organizer's own E_id roster (written on rotation) covers a replace.
+    const authorities = new Set<string>([state.eidPubkey]);
+    if (prevCoordinator && prevCoordinator !== this.coordPubkey && prevCoordinator !== state.eidPubkey) {
+      authorities.add(prevCoordinator);
+      log(
+        `[handover] ${state.coordinate}: the grant names ${short(prevCoordinator)} as the outgoing coordinator — its roster is adoptable alongside E_id's`,
+      );
+    } else if (!prevCoordinator) {
+      log(
+        `[handover] ${state.coordinate}: the grant names no outgoing coordinator (a first attach, or an organizer client predating prev_coordinator) — adopting an E_id-authored roster only`,
+      );
+    }
     let rosterEvents: NostrEvent[];
     try {
       rosterEvents = await this.deps.transport.fetch(
-        { kinds: [KIND_ROSTER], "#d": [identifier] },
+        { kinds: [KIND_ROSTER], authors: [...authorities], "#d": [identifier] },
         state.configRelays,
       );
     } catch {
       return;
     }
-    // Pick the newest roster from a plausible prior authority (the previous
-    // coordinator, or E_id) that we can decrypt.
-    //
-    // ECK-DECRYPTABILITY IS NOT AUTHORITY (2026-09-04 audit). 31604's `d` is the
-    // event's PUBLIC `d`, so anyone can publish at this address, and the ECK is
-    // held by every approved attendee — `tryEckDecrypt` even walks every version
-    // we hold, so a REVOKED attendee's old key still opens their forgery. Left
-    // unchecked, an attendee could plant a roster naming pubkeys they control and
-    // have the next attached coordinator grant them the event's key material
-    // (see the grants published at the end of this method).
-    //
-    // A full fix needs an author the EVENT IDENTITY vouches for. The wire has no
-    // field naming the outgoing coordinator, and PROTOCOL-NIP.md is frozen against
-    // format changes, so that is an owner decision, not one to make here. What
-    // follows raises the bar as far as the current wire allows, and — critically —
-    // makes the trusted author visible in the log instead of implicit.
     const nowSec = Math.floor(this.now() / 1000);
     let roster: RosterContent | undefined;
     let rosterAuthor: string | undefined;
@@ -3185,18 +3206,13 @@ export class Coordinator {
     // created_at-only sort left two same-second rosters to relay arrival order, so
     // two coordinators bootstrapping the same handover could adopt different ones.
     for (const ev of [...rosterEvents].sort(compareLatest)) {
-      if (ev.pubkey === this.coordPubkey) continue; // our own record — nothing to bootstrap from
+      // Re-checked here, never trusted to the relay's `authors`/`#d` filter.
+      if (!authorities.has(ev.pubkey)) continue;
+      if (!ev.tags.some((t) => t[0] === "d" && t[1] === identifier)) continue;
       // A roster dated in the future is a bid to win newest-wins against every
       // legitimate one. Same 15-minute tolerance the rumor path already applies.
       if ((ev.created_at ?? 0) > nowSec + 900) {
         log(`[handover] ${state.coordinate}: ignoring 31604 from ${short(ev.pubkey)} dated ${(ev.created_at ?? 0) - nowSec}s in the future`);
-        continue;
-      }
-      // An attendee is never a roster authority. This does not stop a fresh
-      // throwaway key, but it does stop the attacker the ECK actually hands this
-      // capability to: a current or revoked member of this very event.
-      if (this.deps.store.getAttendee(state.coordinate, ev.pubkey)) {
-        log(`[handover] ${state.coordinate}: REJECTED 31604 from ${short(ev.pubkey)} — an attendee of this event is not a record authority`);
         continue;
       }
       const json = this.tryEckDecrypt(state, ev.content);
@@ -3242,7 +3258,7 @@ export class Coordinator {
     }
     log(
       `[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from a roster authored by ${short(rosterAuthor)}` +
-        (rosterAuthor === state.eidPubkey ? " (E_id)" : " (prior coordinator)"),
+        (rosterAuthor === state.eidPubkey ? " (E_id)" : " (the outgoing coordinator the grant names)"),
     );
 
     let seeded = 0;
