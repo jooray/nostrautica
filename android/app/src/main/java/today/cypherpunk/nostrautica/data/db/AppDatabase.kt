@@ -12,6 +12,7 @@ import androidx.room.RawQuery
 import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.Transaction
+import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteQuery
 import kotlinx.coroutines.flow.Flow
 
@@ -154,16 +155,33 @@ interface OutboxDao {
     suspend fun deleteOwner(owner: String)
 }
 
-@Database(entities = [EventRow::class, TagRow::class, KvRow::class, OutboxRow::class], version = 1, exportSchema = true)
+@Database(entities = [EventRow::class, TagRow::class, KvRow::class, OutboxRow::class], version = AppDatabase.VERSION, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun events(): EventDao
     abstract fun kv(): KvDao
     abstract fun outbox(): OutboxDao
 
     companion object {
+        /**
+         * The schema version. This database holds the durable outbox (queued joins,
+         * DMs, talk submissions, attestations), not only rebuildable cache, so an
+         * upgrade must MIGRATE: bump this, commit the new schemas/…/<n>.json, and
+         * add the n-1 → n step to [MIGRATIONS]. There is deliberately no destructive
+         * fallback on upgrade; a missing step fails loudly on first open instead of
+         * silently dropping what the user queued. AppDatabaseSchemaTest checks that
+         * every version has its schema file and its migration.
+         */
+        const val VERSION = 1
+
+        /** Every step k → k+1, oldest first. */
+        val MIGRATIONS: Array<Migration> = arrayOf()
+
         fun open(context: Context): AppDatabase =
             Room.databaseBuilder(context, AppDatabase::class.java, "nostrautica.db")
-                .fallbackToDestructiveMigration(dropAllTables = true)
+                .addMigrations(*MIGRATIONS)
+                // Only a downgrade (an older build installed over a newer database,
+                // which needs `adb install -d`) may start from scratch.
+                .fallbackToDestructiveMigrationOnDowngrade(dropAllTables = true)
                 .build()
     }
 }
