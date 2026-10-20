@@ -140,7 +140,18 @@ async function readSettings(
     // Nothing came back. A copy this device wrote (possibly still sitting in the
     // outbox) beats a blank either way. Without one, an answered read is a
     // genuine first save and an unanswered one is "unknown", not "empty".
-    if (local) return { settings: clone(local.data), known: true };
+    // Normalized through the merge so a copy cached before per-entry stamps existed
+    // gets its stamps from the time it was saved, not from zero (which would make
+    // every entry in it lose to the next older-client write).
+    if (local) {
+      return {
+        settings: mergePerEventSettings(
+          { settings: clone(local.data), createdAt: local.at },
+          { settings: emptyPerEventSettings(), createdAt: 0 },
+        ),
+        known: true,
+      };
+    }
     return { settings: emptyPerEventSettings(), known: answered };
   }
   const json = await signer.nip44Decrypt(pubkey, latest.content);

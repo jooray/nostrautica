@@ -42,7 +42,7 @@ vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
 import { loadPerEventSettings, toggleSetting, setNote, cachedPerEventSettings } from "./settings.js";
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
-import { __resetPersistForTests, setActiveCacheOwner, cacheGet } from "$lib/cache/persist.js";
+import { __resetPersistForTests, setActiveCacheOwner, cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 const ME = "a".repeat(64);
 const OTHER = "b".repeat(64);
@@ -189,6 +189,20 @@ describe("per-event settings read-modify-write safety", () => {
     expect(written.want_to_meet).toEqual([OTHER]);
     expect(written.notes[FRIEND]).toBe(SAVED.notes[FRIEND]);
     expect(written.met).toEqual([FRIEND]);
+  });
+
+  // SB-88: a copy cached before per-entry stamps existed must be stamped from when
+  // it was saved, or every entry in it would lose to any older-client write.
+  it("stamps a pre-clock cached copy from its own save time", async () => {
+    cacheSet(`evsettings:${COORD}`, SAVED, 500, ME);
+    relay.answered = false;
+    fetchEvents.mockResolvedValue([]);
+    const store = { content: "" };
+
+    await toggleSetting(signer(store), ctx, BLINDING, "want_to_meet", OTHER);
+
+    const written: PerEventSettings = JSON.parse(store.content.replace(/^enc:/, ""));
+    expect(written.clock?.favorites[FRIEND]).toBe(500_000);
   });
 
   // DS41-003 pattern: an account switch while the read is in flight must not

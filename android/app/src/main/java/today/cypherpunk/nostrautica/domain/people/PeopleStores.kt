@@ -75,7 +75,9 @@ class EventSettingsStore(private val nostr: Nostr, private val cache: Cache, pri
         // The store only keeps events by their own author for this (kind, pubkey, d),
         // so a foreign 30078 can't wedge the latest-pick.
         val c = cache.get(pk, key(ctx.coordinate), Cached.serializer())
-        val latest = nostr.store.latest(Kinds.APP_DATA, pk, d) ?: return c?.settings ?: SettingsMerge.empty()
+        // A copy cached before per-entry stamps existed is stamped from when it was saved.
+        val latest = nostr.store.latest(Kinds.APP_DATA, pk, d)
+            ?: return c?.let { SettingsMerge.merge(it.settings, it.at, SettingsMerge.empty(), 0) } ?: SettingsMerge.empty()
         if (c?.id == latest.id) return c.settings
         val json = signer.nip44Decrypt(pk, latest.content)
         val remote = Wire.parse(PerEventSettings.serializer(), json)
