@@ -10,6 +10,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import today.cypherpunk.nostrautica.protocol.JsJson
 import today.cypherpunk.nostrautica.protocol.Kinds
+import today.cypherpunk.nostrautica.protocol.LocalSigner
 
 @RunWith(RobolectricTestRunner::class)
 class RelayPoolTest {
@@ -33,6 +34,20 @@ class RelayPoolTest {
         val got = pool.fetch(listOf(r.url), filter, timeoutMs = 5_000)
         assertEquals(1, got.answered)
         assertTrue(got.complete)
+    }
+
+    // Audit DS41-058: the OK waits run side by side, so two dead relays cost one timeout, not two.
+    @Test fun publishWaitsForAllRelaysUnderOneDeadline() = runBlocking {
+        val ok = relay()
+        val deadA = relay().apply { onEvent = { _, _ -> } }
+        val deadB = relay().apply { onEvent = { _, _ -> } }
+        val ev = LocalSigner.generate().let { it.signNow(it.template(Kinds.APP_DATA, "x", emptyList())) }
+        val started = System.currentTimeMillis()
+        val out = pool.publish(ev, listOf(deadA.url, deadB.url, ok.url), timeoutMs = 2_000)
+        val took = System.currentTimeMillis() - started
+        assertTrue("took $took ms", took < 3_500) // sequential: ≥ 4 s
+        assertEquals(RelayPool.PublishOutcome.Ok, out[RelayPool.normalize(ok.url)])
+        assertEquals(RelayPool.PublishOutcome.Timeout, out[RelayPool.normalize(deadA.url)])
     }
 
     // Audit DS41-062: one relay's EOSE is not the end of a history another relay didn't answer.

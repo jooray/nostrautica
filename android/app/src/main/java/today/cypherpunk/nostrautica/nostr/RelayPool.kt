@@ -7,6 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -160,11 +161,20 @@ class RelayPool(private val http: OkHttpClient) {
         data object Timeout : PublishOutcome
     }
 
-    /** Publish to every relay in [urls], waiting at most [timeoutMs] for each OK. */
+    /**
+     * Publish to every relay in [urls], waiting at most [timeoutMs] for the OKs.
+     * The waits run side by side under one deadline: one after another, a dead
+     * relay cost the full timeout before the next was even looked at, so a DM to
+     * 20 inbox relays could sit in "sending" for minutes.
+     */
     suspend fun publish(event: NostrEvent, urls: Collection<String>, timeoutMs: Long = PUBLISH_TIMEOUT_MS): Map<String, PublishOutcome> {
         val targets = urls.map(::normalize).distinct()
         val waits = targets.associateWith { relay(it).publish(event) }
-        return waits.mapValues { (_, d) -> withTimeoutOrNull(timeoutMs) { d.await() } ?: PublishOutcome.Timeout }
+        val got = ConcurrentHashMap<String, PublishOutcome>()
+        withTimeoutOrNull(timeoutMs) {
+            coroutineScope { waits.forEach { (url, d) -> launch { got[url] = d.await() } } }
+        }
+        return targets.associateWith { got[it] ?: PublishOutcome.Timeout }
     }
 
     // ── One relay ───────────────────────────────────────────────────────────
