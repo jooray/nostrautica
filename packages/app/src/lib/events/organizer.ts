@@ -1226,11 +1226,27 @@ export async function revokeAttendeeClient(
   }
   const remaining = roster.attendees.filter((a) => a.pubkey !== removedPubkey);
 
-  // 3. Mint ECK v(n+1) and persist locally, then re-encrypt everyone else's
-  //    directory entry under it and re-grant to each.
+  // 3. Mint ECK v(n+1) and build EVERYTHING under it — every re-encrypted
+  //    directory entry, every re-grant, the new roster — before making it current.
+  //
+  //    This used to persist the new ECK first and then walk the attendees one
+  //    relay read at a time (up to 8 s each). Closing the tab, losing the network
+  //    or one hanging read part-way left this device with v(n+1) as its CURRENT
+  //    key while the relays still held the v(n) roster: every later loadRoster
+  //    decrypted with the new key, failed, and refused approve/revoke/post with
+  //    "Couldn't read this event's current roster" (audit DS41-002). Building is
+  //    now one batched read and local crypto; only then is the key saved, and
+  //    then everything is published.
   const newId = keys.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
   const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
-  keys.eck = [...keys.eck, newEck];
+  const eckAll = [...keys.eck, newEck];
+  const newEckBytes = base64ToBytes(newEck.key);
+  const rekeyed = await rekeyRoster(ctx, eidSk, prevEckBytes, remaining, newEckBytes, newId, eckAll, {
+    keepChatKeys: false,
+  });
+  const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
+
+  keys.eck = eckAll;
   await saveEventKeys(keys);
   // The new ECK must reach the DURABLE backup, not just this device.
   //
@@ -1252,18 +1268,59 @@ export async function revokeAttendeeClient(
       "[organizer] revoke rotated the ECK with no blinding key — the new key exists only on this device",
     );
   }
-  const newEckBytes = base64ToBytes(newEck.key);
-  const publisher = directoryPublisher(ctx);
-  const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
-  const pubs: Promise<unknown>[] = [publishOrQueue(deletion, ctx.config.relays)];
+  await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
+}
 
-  for (const a of remaining) {
-    // Fetch + decrypt the attendee's current entry (old ECK).
+interface Rekeyed {
+  roster: RosterContent;
+  entries: VerifiedEvent[];
+  grants: { to: string; wrap: unknown }[];
+}
+
+/**
+ * Re-key every listed attendee under a new ECK, WITHOUT publishing anything:
+ * their directory entry re-encrypted at its new blinded `d`, a 21602 re-grant of
+ * the full ECK set sealed by E_id, and the new roster content. Shared by revoke
+ * and coordinator rotation, which both used to interleave one relay read and the
+ * publishes per attendee with the key change (audit DS41-002).
+ *
+ * The current entries come from ONE batched read (chunked `#d`), pinned to the
+ * accepted record authors and resolved per `d` by §3.1 (DS41-013). An entry that
+ * can't be found or decrypted is not republished, as before.
+ */
+async function rekeyRoster(
+  ctx: EventContext,
+  eidSk: Uint8Array,
+  prevEckBytes: Uint8Array,
+  attendees: RosterContent["attendees"],
+  newEckBytes: Uint8Array,
+  newId: number,
+  eckAll: EckVersion[],
+  opts: { keepChatKeys: boolean },
+): Promise<Rekeyed> {
+  const authors = acceptedRecordAuthors(ctx);
+  const ds = attendees.map((a) => a.d);
+  const found: { id: string; created_at?: number; tags: string[][]; content: string }[] = [];
+  for (let i = 0; i < ds.length; i += DIRECTORY_READ_CHUNK) {
+    const chunk = ds.slice(i, i + DIRECTORY_READ_CHUNK);
     const events = await fetchEvents(
-      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": [a.d] },
+      { kinds: [KIND_DIRECTORY_ENTRY], authors, "#d": chunk },
       ctx.config.relays,
     );
-    const latest = events.sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))[0];
+    found.push(...(onlyByAuthors(onlyVerified(events), authors) as unknown as typeof found));
+  }
+  const byD = new Map<string, typeof found>();
+  for (const e of found) {
+    const d = e.tags.find((t) => t[0] === "d")?.[1];
+    if (d) byD.set(d, [...(byD.get(d) ?? []), e]);
+  }
+
+  const eidPubkey = getPublicKey(eidSk);
+  const roster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
+  const entries: VerifiedEvent[] = [];
+  const grants: { to: string; wrap: unknown }[] = [];
+  for (const a of attendees) {
+    const latest = pickLatest(byD.get(a.d) ?? []);
     let content: unknown;
     try {
       content = latest ? JSON.parse(eckDecrypt(prevEckBytes, latest.content)) : undefined;
@@ -1271,43 +1328,63 @@ export async function revokeAttendeeClient(
       content = undefined;
     }
     const newD = blindedD(newEckBytes, ctx.coordinate, a.pubkey);
-    newRoster.attendees.push({ pubkey: a.pubkey, d: newD, role: a.role });
-
-    if (content) {
-      const entryEvent = finalizeEvent(
-        {
-          kind: KIND_DIRECTORY_ENTRY,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
-          content: eckEncrypt(newEckBytes, JSON.stringify(content)),
-        },
-        eidSk,
-      );
-      pubs.push(publishOrQueue(entryEvent, ctx.config.relays));
-    }
-
-    // Re-grant the new ECK set (all versions) to this attendee — sealed by E_id
-    // so C2 authentication accepts it.
-    const grantWrap = wrapRumor(eidSk, a.pubkey, {
-      kind: KIND_KEY_GRANT,
-      content: {
-        v: 2,
-        a: ctx.coordinate,
-        role: a.role,
-        eck: keys.eck,
-        granted_by: getPublicKey(eidSk),
-        ...(await grantParentField(ctx, eidSk, a.pubkey)),
-      },
+    roster.attendees.push({
+      pubkey: a.pubkey,
+      d: newD,
+      role: a.role,
+      ...(opts.keepChatKeys && a.chat_keys ? { chat_keys: a.chat_keys } : {}),
     });
-    pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
+    if (content) {
+      entries.push(
+        finalizeEvent(
+          {
+            kind: KIND_DIRECTORY_ENTRY,
+            created_at: Math.floor(Date.now() / 1000),
+            tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
+            content: eckEncrypt(newEckBytes, JSON.stringify(content)),
+          },
+          eidSk,
+        ),
+      );
+    }
+    // Re-grant the new ECK set (all versions) — sealed by E_id so C2
+    // authentication accepts it.
+    grants.push({
+      to: a.pubkey,
+      wrap: wrapRumor(eidSk, a.pubkey, {
+        kind: KIND_KEY_GRANT,
+        content: {
+          v: 2,
+          a: ctx.coordinate,
+          role: a.role,
+          eck: eckAll,
+          granted_by: eidPubkey,
+          ...(await grantParentField(ctx, eidSk, a.pubkey)),
+        },
+      }),
+    });
   }
+  return { roster, entries, grants };
+}
 
-  // No `previous`: every entry's blinded `d` was re-derived under the NEW ECK, so
-  // every page genuinely changed and there is nothing on the relay to skip.
-  for (const ev of buildRosterEvents(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt)) {
-    pubs.push(publishOrQueue(ev, ctx.config.relays));
-  }
-  await Promise.all(pubs);
+/** How many directory `d`s one REQ asks for when re-keying a roster. */
+const DIRECTORY_READ_CHUNK = 100;
+
+/** Publish what {@link rekeyRoster} built (plus any extra events) and wait for all of it. */
+async function publishRekeyed(
+  ctx: EventContext,
+  extra: VerifiedEvent[],
+  rekeyed: Rekeyed,
+  rosterEvents: VerifiedEvent[],
+): Promise<void> {
+  await Promise.all([
+    ...extra.map((e) => publishOrQueue(e, ctx.config.relays)),
+    ...rekeyed.entries.map((e) => publishOrQueue(e, ctx.config.relays)),
+    ...rekeyed.grants.map((g) => publishAccountGiftWrap(g.wrap as any, g.to, ctx.config.relays)),
+    // No `previous` in rosterEvents: every entry's blinded `d` was re-derived
+    // under the NEW ECK, so every page genuinely changed.
+    ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
+  ]);
 }
 
 /**
@@ -1330,7 +1407,6 @@ async function rotateEckAndInbox(
   blindingKey?: Uint8Array,
 ): Promise<{ newInboxNsecHex: string; newInboxPubkey: string; eck: EckVersion[] }> {
   const eidSk = hexToBytes(keys.eidNsecHex!);
-  const eidPubkey = getPublicKey(eidSk);
   const prevEck = currentEck(keys);
   if (!prevEck) throw new Error("no ECK available");
   const prevEckBytes = base64ToBytes(prevEck.key);
@@ -1353,55 +1429,14 @@ async function rotateEckAndInbox(
 
   // Re-encrypt every attendee's directory entry under the new ECK (new blinded d),
   // republish the roster, and re-grant the new ECK set to each — no one removed.
+  // Built first, published after the keys are saved (DS41-002): the new ECK must
+  // never be on the relays without also being in this device's keystore, and
+  // never current here while the slow per-attendee work is still pending.
   const { roster, at: rosterAt } = rosterForRewrite(rosterRead, prevEck.id);
-  const publisher = directoryPublisher(ctx);
-  const newRoster: RosterContent = { v: 2, eck_current: newId, attendees: [] };
-  const pubs: Promise<unknown>[] = [];
-  for (const a of roster.attendees) {
-    const events = await fetchEvents(
-      { kinds: [KIND_DIRECTORY_ENTRY], authors: [publisher], "#d": [a.d] },
-      ctx.config.relays,
-    );
-    const latest = events.sort((x, y) => (y.created_at ?? 0) - (x.created_at ?? 0))[0];
-    let content: unknown;
-    try {
-      content = latest ? JSON.parse(eckDecrypt(prevEckBytes, latest.content)) : undefined;
-    } catch {
-      content = undefined;
-    }
-    const newD = blindedD(newEckBytes, ctx.coordinate, a.pubkey);
-    newRoster.attendees.push({ pubkey: a.pubkey, d: newD, role: a.role, ...(a.chat_keys ? { chat_keys: a.chat_keys } : {}) });
-    if (content) {
-      const entryEvent = finalizeEvent(
-        {
-          kind: KIND_DIRECTORY_ENTRY,
-          created_at: Math.floor(Date.now() / 1000),
-          tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
-          content: eckEncrypt(newEckBytes, JSON.stringify(content)),
-        },
-        eidSk,
-      );
-      pubs.push(publishOrQueue(entryEvent, ctx.config.relays));
-    }
-    const grantWrap = wrapRumor(eidSk, a.pubkey, {
-      kind: KIND_KEY_GRANT,
-      content: {
-        v: 2,
-        a: ctx.coordinate,
-        role: a.role,
-        eck: eckAll,
-        granted_by: eidPubkey,
-        ...(await grantParentField(ctx, eidSk, a.pubkey)),
-      },
-    });
-    pubs.push(publishAccountGiftWrap(grantWrap as any, a.pubkey, ctx.config.relays));
-  }
-  // No `previous`: every entry's blinded `d` was re-derived under the NEW ECK, so
-  // every page genuinely changed and there is nothing on the relay to skip.
-  for (const ev of buildRosterEvents(ctx, eidSk, newEckBytes, newId, newRoster, rosterAt)) {
-    pubs.push(publishOrQueue(ev, ctx.config.relays));
-  }
-  await Promise.all(pubs);
+  const rekeyed = await rekeyRoster(ctx, eidSk, prevEckBytes, roster.attendees, newEckBytes, newId, eckAll, {
+    keepChatKeys: true,
+  });
+  const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
 
   // Persist: append the new ECK, retain the old inbox secret for history reading,
   // and adopt the new inbox as primary.
@@ -1409,6 +1444,7 @@ async function rotateEckAndInbox(
   if (keys.einboxNsecHex) keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []), keys.einboxNsecHex];
   keys.einboxNsecHex = newInboxNsecHex;
   await saveEventKeys(keys);
+  await publishRekeyed(ctx, [], rekeyed, rosterEvents);
   // Never silent (audit EV-11). The rotation has already happened locally; if the
   // backup does not publish, the durable record of the new ECK and the new inbox
   // simply is not there, and a later recovery on a fresh device restores an event

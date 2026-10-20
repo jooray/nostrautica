@@ -723,6 +723,42 @@ describe("roster read-modify-write safety", () => {
     expect((await loadEventKeys(COORD))?.eck).toHaveLength(1);
   });
 
+  // Audit DS41-002: the new ECK was saved as current BEFORE the per-attendee
+  // reads; one failing read left this device on v2 against a v1 roster, and
+  // every later roster read failed to decrypt.
+  it("leaves the ECK untouched when the directory read fails part-way", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+        { pubkey: CAROL, d: "d-carol", role: "attendee" },
+      ]),
+    ]);
+    fetchEvents.mockRejectedValue(new Error("relay hung up"));
+
+    await expect(revokeAttendeeClient({} as AppSigner, ctx, BOB)).rejects.toThrow(/hung up/);
+
+    expect((await loadEventKeys(COORD))?.eck).toHaveLength(1);
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("reads every remaining member's directory entry in one request", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+        { pubkey: CAROL, d: "d-carol", role: "attendee" },
+      ]),
+    ]);
+    fetchEvents.mockClear();
+
+    await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+
+    const dirReads = fetchEvents.mock.calls.filter((c) => (c[0] as { "#d"?: string[] })["#d"]);
+    expect(dirReads).toHaveLength(1);
+    expect((dirReads[0]![0] as { "#d": string[] })["#d"]).toEqual(["d-alice", "d-carol"]);
+  });
+
   it("revokes normally when the roster does list them", async () => {
     fetchEventsRelayOnly.mockResolvedValue([
       rosterEvent([
