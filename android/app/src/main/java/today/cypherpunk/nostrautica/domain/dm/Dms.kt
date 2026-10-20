@@ -216,7 +216,13 @@ class Dms(
             val r = nostr.fetch(relays, inboxFilter(me, until = until, limit = DmLogic.HISTORY_PAGE_LIMIT), timeoutMs = 10_000)
             if (r.answered == 0) break
             r.events.forEach { ids += it.id }
-            if (r.events.size < DmLogic.HISTORY_PAGE_LIMIT) { complete = true; until = null; break }
+            if (r.events.size < DmLogic.HISTORY_PAGE_LIMIT) {
+                // A short page is the end only if EVERY inbox relay answered: one that
+                // timed out or sent CLOSED may hold older DMs. Otherwise keep the cursor
+                // and walk this window again on a later scan.
+                if (r.complete) { complete = true; until = null }
+                break
+            }
             until = DmLogic.nextHistoryUntil(until, r.events.minOf { it.createdAt })
             page++
         }

@@ -79,8 +79,16 @@ class Grants(
         return (Relays.DEFAULT + accounts.inboxRelays(pubkey) + hints).map(RelayPool::normalize).distinct()
     }
 
+    /**
+     * [ended]: the answering relays ran out of history (what Home reports as a full
+     * scan). [complete]: that, AND every relay answered, the only evidence strong
+     * enough to latch the weekly backfill (a short page from one relay while
+     * another timed out or sent CLOSED says nothing about the silent one).
+     */
+    private data class WrapRead(val wraps: List<NostrEvent>, val ended: Boolean, val complete: Boolean)
+
     /** Page back through 1059s `#p` = me (newest first). */
-    private suspend fun readWraps(pubkey: String, relays: List<String>, since: Long): Pair<List<NostrEvent>, Boolean> {
+    private suspend fun readWraps(pubkey: String, relays: List<String>, since: Long): WrapRead {
         val seen = LinkedHashMap<String, NostrEvent>()
         var until: Long? = null
         repeat(MAX_PAGES) {
@@ -91,11 +99,11 @@ class Grants(
                 if (seen.put(w.id, w) == null) added++
                 if (oldest == null || w.createdAt < oldest!!) oldest = w.createdAt
             }
-            if (r.events.size < PAGE_SIZE) return seen.values.toList() to (r.answered > 0)
-            if (added == 0 || oldest == null) return seen.values.toList() to false
+            if (r.events.size < PAGE_SIZE) return WrapRead(seen.values.toList(), r.answered > 0, r.complete)
+            if (added == 0 || oldest == null) return WrapRead(seen.values.toList(), false, false)
             until = oldest
         }
-        return seen.values.toList() to false
+        return WrapRead(seen.values.toList(), false, false)
     }
 
     fun authenticateKeyGrant(rumor: Rumor, grant: KeyGrantContent, config: EventConfig?): Boolean {
@@ -126,8 +134,8 @@ class Grants(
         val full = force || backfillExpired || held.isEmpty()
         val relays = scanRelays(pubkey, held)
         val since = if (full) 0 else nowSec() - LOOKBACK_SEC
-        val (wraps, complete) = readWraps(pubkey, relays, since)
-        if (!complete) outcome.truncated = true
+        val (wraps, ended, complete) = readWraps(pubkey, relays, since)
+        if (!ended) outcome.truncated = true
         nostr.store.put(wraps)
 
         val memoSer = MapSerializer(String.serializer(), MemoEntry.serializer())
