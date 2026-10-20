@@ -78,12 +78,21 @@ export function isLinked(
   );
 }
 
-/** The keys allowed to sign a membership proof for `child`: its E_id and current coordinator. */
+/**
+ * The keys allowed to sign a membership proof for `child`: its E_id and current
+ * coordinator. Total, like every other predicate here (audit SB-29): a malformed
+ * `child` has no authorities, so nothing verifies against it (fail-closed).
+ */
 export function membershipAuthorities(
   child: string,
   childCfg: Pick<EventConfig, "coordinator">,
 ): string[] {
-  const { pubkey: eid } = parseCoordinate(child);
+  let eid: string;
+  try {
+    eid = parseCoordinate(child).pubkey;
+  } catch {
+    return [];
+  }
   return childCfg.coordinator ? [eid, childCfg.coordinator] : [eid];
 }
 
