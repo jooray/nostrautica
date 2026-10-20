@@ -7069,6 +7069,22 @@ describe("audit SB-99 — a join in flight across a detach publishes nothing", (
   });
 });
 
+/** Audit SB-24: building the roster ran one chat-key query per attendee. */
+describe("audit SB-24 — the roster reads the event's chat keys in one query", () => {
+  it("does not query chat keys per attendee", async () => {
+    const h = await setup();
+    for (let i = 0; i < 5; i++) await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const perAccount = vi.spyOn(h.store, "chatKeysForAccount");
+    const perEvent = vi.spyOn(h.store, "activeChatKeys");
+    const state = (h.coordinator as any).events.get(h.coordinate);
+    const roster = (h.coordinator as any).buildRosterContent(state);
+    expect(roster.attendees).toHaveLength(5);
+    expect(perAccount).not.toHaveBeenCalled();
+    expect(perEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
 /** Audit DS41-046: the revoked attendee's own 31605 stayed readable to them. */
 describe("audit DS41-046 — revoke deletes the match list published to the removed attendee", () => {
   it("the revoke's NIP-09 deletion names their 31605 at the pre-rotation d", async () => {

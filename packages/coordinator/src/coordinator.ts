@@ -3445,6 +3445,16 @@ export class Coordinator {
     // room members should route to. Absent when chat is off / no group exists.
     const group = this.deps.store.getMarmotGroup(state.coordinate);
     const nostrGroupId = group?.status === "active" ? group.nostr_group_id : undefined;
+    // Every active chat key of the event in ONE query, grouped by account (audit
+    // SB-24): a query per attendee made each approval O(N) queries, and the
+    // capacity probe plus the publish run this twice per approval. Same rows and
+    // order (both read the (coordinate, chat_pubkey) primary key).
+    const keysByAccount = new Map<string, import("./store/db.js").MarmotChatKeyRow[]>();
+    for (const k of this.deps.store.activeChatKeys(state.coordinate)) {
+      const list = keysByAccount.get(k.account_pubkey);
+      if (list) list.push(k);
+      else keysByAccount.set(k.account_pubkey, [k]);
+    }
     const roster: RosterContent = {
       v: 2,
       eck_current: this.currentEck(state).id,
@@ -3454,9 +3464,7 @@ export class Coordinator {
         // active bindings, capped at MAX_CHAT_KEYS_PER_ACCOUNT, so clients dedupe
         // the member list by account and render per-device labels. Only emitted
         // when the attendee has attested at least one device.
-        const chatKeys = this.deps.store
-          .chatKeysForAccount(state.coordinate, a.pubkey)
-          .filter((k) => k.status === "active")
+        const chatKeys = (keysByAccount.get(a.pubkey) ?? [])
           .slice(0, MAX_CHAT_KEYS_PER_ACCOUNT)
           .map((k) => ({
             pubkey: k.chat_pubkey,
