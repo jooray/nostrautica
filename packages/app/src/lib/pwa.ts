@@ -38,7 +38,7 @@ const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
  * around the poll — which is why the 2026-07-28 stale-`sw.js` incident ran for
  * days with the only symptom being "users are on an old build".
  */
-const health = new UpdateHealth(RELEASE_MANIFEST.releaseId);
+const health = new UpdateHealth(RELEASE_MANIFEST.swRevision);
 
 /** Exposed for support: `__nostrauticaPwaHealth.warnIfSilent()` from the console. */
 export function pwaHealth(): UpdateHealth {
@@ -123,7 +123,7 @@ export function registerPwa(): void {
           // Reading the body is free here (the HTTP cache write already
           // happened) and it is the only evidence available in the client about
           // WHICH build the server is actually serving: the precache manifest
-          // inside sw.js carries `revision: <releaseId>` for index.html (see
+          // inside sw.js carries `revision: <swRevision>` for index.html (see
           // vite.config.ts). A body that never mentions our release, check after
           // check, means the update path is wedged — a stale proxy/cache answer,
           // or a worker that cannot activate — and that is exactly the state
