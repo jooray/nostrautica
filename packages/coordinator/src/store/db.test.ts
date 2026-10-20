@@ -18,6 +18,7 @@ import {
   inspectPipelineReadOnly,
   SCHEMA_VERSION,
   DEFAULT_BUSY_TIMEOUT_MS,
+  DETACHED_NO_DEADLINE_GRACE_SEC,
 } from "./db.js";
 
 const ENC_PREFIX = "nip44:";
@@ -634,6 +635,78 @@ describe("schema migrations (audit O3)", () => {
     expect(store.claimInvite("31923:e:x", "code2", "carol", 20, 2)).toBe(false);
     expect(store.inviteRedemptions("31923:e:x", "code2")).toBe(2);
     store.close();
+  });
+
+  it("adds the detached_events purge ledger to a v5 database (v6, audit SB-16)", async () => {
+    const path = tmpDb();
+    // A v5 database as the previous binary left it: everything but the ledger.
+    new Store(path).close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec("DROP TABLE detached_events");
+    raw.prepare("INSERT INTO install_state (coordinate, high_gen, tombstoned, detached_at) VALUES (?, ?, 1, ?)").run("31923:e:x", 3, 50);
+    raw.exec("PRAGMA user_version = 5");
+    raw.close();
+
+    const store = new Store(path);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(6);
+    // Existing tombstones carry over untouched; a tombstone with no data left gets
+    // no ledger row (the backfill only schedules coordinates that still hold data).
+    expect(store.isInstallTombstoned("31923:e:x")).toBe(true);
+    expect(store.dueDetachedEvents(Number.MAX_SAFE_INTEGER)).toEqual([]);
+    // And works: first detach wins, due is inclusive, a re-install cancels.
+    store.recordDetachedEvent("31923:e:x", 100, 50);
+    store.recordDetachedEvent("31923:e:x", 10, 60);
+    expect(store.getDetachedEvent("31923:e:x")).toEqual({ coordinate: "31923:e:x", purge_after_sec: 100, detached_at: 50 });
+    expect(store.dueDetachedEvents(99)).toEqual([]);
+    expect(store.dueDetachedEvents(100).map((r) => r.coordinate)).toEqual(["31923:e:x"]);
+    store.recordInstalledGen("31923:e:x", 4);
+    expect(store.getDetachedEvent("31923:e:x")).toBeUndefined();
+    store.close();
+  });
+
+  it("v6 backfills a ledger row, a week out, for every pre-v6 detached event that still holds data", async () => {
+    const path = tmpDb();
+    const seed = new Store(path);
+    // A: detached under v5 — attendee rows left, no events row.
+    seed.upsertAttendee({ coordinate: "31923:a:x", pubkey: "p1", profileJson: "{}", now: 1 });
+    // B: only pair reasoning left. C: only a transcript ownership ref. D: only a parked job.
+    seed.putPair({ coordinate: "31612:b:x", a: "p1", b: "p2", inputsHash: "h", score: 0.5, similarity: 0.5, complementarity: 0.5, reasoningForA: "r", reasoningForB: "r", now: 1 });
+    seed.recordTranscriptRef("ab".repeat(32), "31923:c:x", "p1", 1);
+    seed.enqueueJob("process_attendee", "k-d", { coordinate: "31923:d:x", pubkey: "p1" });
+    (seed as any)["db"].prepare("UPDATE jobs SET state = 'waiting' WHERE dedupe_key = 'k-d'").run();
+    // E: still installed — its data is live and must not be scheduled.
+    seed.upsertEvent({ coordinate: "31923:e:x", configJson: "{}", inboxNsec: "00", eckJson: "[]", configRelays: "[]", gen: 1, now: 1 });
+    seed.upsertAttendee({ coordinate: "31923:e:x", pubkey: "p1", profileJson: "{}", now: 1 });
+    seed.close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec("DROP TABLE detached_events");
+    raw.exec("PRAGMA user_version = 5");
+    raw.close();
+
+    const before = Math.floor(Date.now() / 1000);
+    const store = new Store(path);
+    const after = Math.floor(Date.now() / 1000);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    const rows = store.dueDetachedEvents(Number.MAX_SAFE_INTEGER);
+    expect(rows.map((r) => r.coordinate).sort()).toEqual(["31612:b:x", "31923:a:x", "31923:c:x", "31923:d:x"]);
+    for (const r of rows) {
+      expect(r.purge_after_sec).toBeGreaterThanOrEqual(before + DETACHED_NO_DEADLINE_GRACE_SEC);
+      expect(r.purge_after_sec).toBeLessThanOrEqual(after + DETACHED_NO_DEADLINE_GRACE_SEC);
+    }
+    // Nothing is due yet: the week to re-attach is real.
+    expect(store.dueDetachedEvents(after)).toEqual([]);
+    expect(store.getDetachedEvent("31923:e:x")).toBeUndefined();
+    store.close();
+    // Re-running the migration (an open interrupted before its version stamp) adds nothing.
+    const raw2 = new DatabaseSync(path);
+    raw2.exec("PRAGMA user_version = 5");
+    raw2.close();
+    const again = new Store(path);
+    expect(again.dueDetachedEvents(Number.MAX_SAFE_INTEGER)).toEqual(rows);
+    again.close();
   });
 
   it("REFUSES to open a database written by a newer binary", async () => {

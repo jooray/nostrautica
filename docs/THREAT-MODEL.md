@@ -75,17 +75,24 @@ system protects, what it deliberately leaks, and who must be trusted.
   unencrypted-backup disclosure reveals attendee bios, transcripts, inferred
   interests, and pairwise reasoning without the coordinator identity key. Operators
   must protect the database file and encrypt backups at rest accordingly.
-- **A detached coordinator keeps what it learned** (audit SB-16). A detach deletes
-  the coordinator's custody of the event (the `E_inbox` key and every ECK), so it
-  cannot read anything published after that. It does not delete the attendee-derived
-  data it already holds: profiles, AI profiles, transcripts, pair reasoning, talks
-  and summaries. That data is removed only by the retention sweep (hourly, for an
-  installed event whose 31600 declares `retention`, once its end time plus the
-  declared days has passed) or by the operator. The sweep covers installed events
-  only, so in practice a detached event's data stays on the old coordinator until
-  it is re-attached there and its window elapses, or until the operator deletes it.
-  An organizer replacing a coordinator should treat the old one as still holding
-  everything it processed. See COORDINATOR-OPERATOR-GUIDE.md §9.
+- **A detached coordinator keeps what it learned only until the event's retention
+  deadline** (audit SB-16). A detach deletes the coordinator's custody of the event
+  (the `E_inbox` key and every ECK), so it cannot read anything published after
+  that, and it drops the event's queued, running and parked (`waiting`) jobs. The
+  attendee-derived data it already holds (profiles, AI profiles, transcripts, pair
+  reasoning, talks, summaries) is kept until the deadline retention would have
+  applied had the event stayed installed: the event's end time plus the `retention`
+  days of its last 31600 this coordinator saw. Then the hourly sweep runs the same
+  reference-counted local purge it runs for an installed event. If that deadline has
+  already passed, the data goes at the next sweep, within the hour. If the event has
+  none (no `retention` tag, or no end date, as for every 31612 community), it goes
+  7 days after the detach, so a mistaken detach can still be undone. A re-attach to
+  the same coordinator before the deadline cancels the purge. Two limits: the
+  purge is local only (with the ECKs gone, the old coordinator can no longer address
+  its blinded relay records to send NIP-09 deletions), and backups taken before the
+  purge still hold the data. An organizer replacing a coordinator should treat the
+  old one as holding everything it processed until that deadline (or for a week). See
+  COORDINATOR-OPERATOR-GUIDE.md §9.
 - **LLM / STT provider**: sees plaintext transcripts and summaries. Mitigations:
   v1 prefers Venice private/TEE-tier models (`require_private`); v2 uses
   operator-chosen Routstr nodes.
