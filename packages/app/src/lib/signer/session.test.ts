@@ -276,6 +276,61 @@ describe("cross-tab remote logout (H-5)", () => {
 });
 
 /**
+ * A tab the browser froze in the background never hears the logout broadcast
+ * (audit SB-95). The logout's durable trace is the wiped persisted login, and the
+ * layout re-checks it whenever the tab comes back to the front.
+ */
+describe("a resumed tab checks the persisted login (SB-95)", () => {
+  beforeEach(async () => {
+    await session.logout().catch(() => {});
+  });
+  afterEach(() => {
+    keystore.loadLoginMethod.mockResolvedValue(null);
+    keystore.saveNip46Session.mockImplementation(async () => {});
+  });
+
+  it("signs this tab out when another tab's logout wiped the persisted login", async () => {
+    await session.createLocalKey();
+    keystore.loadLoginMethod.mockResolvedValue(null); // the other tab ran clearKeystore()
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(false);
+    expect(recentEventsSetOwner).toHaveBeenLastCalledWith(null);
+  });
+
+  it("stays signed in while the login is still on disk", async () => {
+    await session.createLocalKey();
+    keystore.loadLoginMethod.mockResolvedValue("local");
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(true);
+  });
+
+  it("never mistakes a login that has not persisted yet for a remote logout", async () => {
+    // NIP-46 adopts first and saves the session after — and the user returning
+    // from the signer app fires exactly the visibility event this runs on.
+    let saved!: () => void;
+    keystore.saveNip46Session.mockImplementation(() => new Promise<void>((r) => (saved = r)));
+    keystore.loadLoginMethod.mockResolvedValue(null);
+    const pk = "c".repeat(64);
+    const signer = {
+      method: "nip46",
+      getPublicKey: async () => pk,
+      nip44Decrypt: async () => "",
+      nip44Encrypt: async () => "",
+      signEvent: async () => ({}),
+      serialize: () => ({}),
+      close: async () => {},
+    } as unknown as Nip46Signer;
+    const login = session.loginNip46(signer);
+    for (let i = 0; i < 20 && !session.loggedIn; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(session.loggedIn).toBe(true);
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(true);
+    saved();
+    expect(await login).toBe(true);
+  });
+});
+
+/**
  * Logout must not be hostage to an unreachable signer (2026-09-04).
  *
  * Each custody-lock step is an encrypt through the active signer, and for NIP-46
