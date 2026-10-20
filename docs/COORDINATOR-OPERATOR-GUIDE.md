@@ -433,6 +433,35 @@ after an operational detach, verify subscriptions closed, stored event state, an
 the coordinator logs. Before decommissioning, define who retains group
 administration and confirm the handoff.
 
+**Detach deletes custody, not attendee data (audit SB-16).** A detach (a 31600
+that stops naming this coordinator or its `gen`, or a signed `21604 detach`)
+deletes the event row: the `E_inbox` key, every ECK, the stored config, and any
+rotation progress. It also closes the subscriptions and cancels queued and running
+jobs. It does **not** delete what the coordinator derived from attendees. Profiles,
+AI profiles, transcripts, display names, corrections, pair scores and reasoning,
+talks, Nostr summaries, pipeline status rows, usage counters, the frozen Marmot
+group state and chat-device bindings all stay in `coordinator.sqlite`, along with
+jobs parked as `waiting`. Keeping them is deliberate: a re-attach resumes from
+them instead of paying to re-process every attendee.
+
+What removes them:
+
+- **The retention sweep**, but only for an event that is installed. It runs at boot
+  and then hourly. For an event whose 31600 carries `["retention", <days>]`, once
+  the event's end time plus `<days>` has passed, it runs the full local purge (the
+  same reference-counted purge described in §6) and deletes the relay records. A
+  detached event is no longer installed, so **the sweep never reaches it**. Its data
+  is swept only if the event is re-attached to this coordinator and its retention
+  window then elapses. An event without a `retention` tag is never swept.
+- **An attendee's `delete_data` withdrawal** purges that attendee, but only while the
+  event is installed. After a detach the coordinator no longer reads the inbox.
+- **The operator.** There is no built-in command for this. To honor an organizer's
+  request to forget a detached event, delete its rows by coordinate yourself, take
+  a backup first, and expire older backups (§6).
+
+Tell organizers this before they detach. Detaching moves custody away from this
+coordinator, but it does not erase what this coordinator already learned.
+
 **Periodic restore drill.** On a schedule, `verify-backup` the latest snapshot and
 `restore` it onto an isolated host with subscriptions and provider calls disabled;
 confirm it opens, decrypts, and publishes/spends nothing. A drill that publishes or
