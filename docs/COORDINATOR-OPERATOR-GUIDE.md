@@ -255,11 +255,12 @@ draining in-flight work…` for an intentional stop, and a final one-line
 `FATAL` or signal line above it means nothing in the daemon asked to stop, read the
 journal for the code and signal.
 
-Note that the unit and a detached restart script cannot both own the lifecycle: as
-long as the deploy path starts the daemon itself with `setsid`, a manually started
-instance holds the single-daemon lock and the unit's copy fails to acquire it. Point
-the deploy at `systemctl --user restart nostrautica-coordinator` before enabling the
-unit.
+The unit and a detached restart script cannot both own the lifecycle: a daemon
+started outside the unit holds the single-daemon lock and the unit's copy fails to
+acquire it. The shipped `restart-coordinator.sh` already handles this. When the
+user unit is installed it only runs `systemctl --user restart` and waits for
+readiness; its `setsid` path is used only on hosts without the unit. A custom
+deploy script must do the same.
 
 ## 5. Back up: `backup`
 
