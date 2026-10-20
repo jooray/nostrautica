@@ -5,9 +5,15 @@
 import { CHAT_INTEROP_RELAYS } from "@nostrautica/protocol";
 
 /**
- * Build-time overrides for local dev / e2e / screenshot runs: point the whole
- * app at a dockerized relay + Blossom (docker/docker-compose.yml) so test
- * traffic never touches public infrastructure. Comma-separated URLs.
+ * Build-time overrides for local dev / e2e / screenshot runs: point the app at a
+ * local relay + Blossom (docker/docker-compose.yml, or `nak serve`).
+ * Comma-separated URLs.
+ *
+ * This replaces the app's OWN default relays (and Blossom servers) and nothing
+ * else. Relays named in other people's data are still contacted: a recipient's
+ * NIP-17 kind-10050 DM inboxes, a user's kind-10002 list, relay hints in an
+ * naddr or a bunker URI. A test run can therefore still reach public relays, and
+ * that is fine.
  */
 const ENV_RELAYS = (import.meta.env?.VITE_NOSTRAUTICA_RELAYS as string | undefined)
   ?.split(",")
@@ -86,7 +92,7 @@ export function chatRelaysOf(config: { chatRelays?: string[] }): string[] {
  * (packages/coordinator/src/coordinator.ts) so both sides derive the same set.
  *
  * An event whose relays are all loopback is a local dev/e2e event: it gets none,
- * so a test run never dials public infrastructure. (`VITE_NOSTRAUTICA_RELAYS`
+ * so its chat traffic stays on the local relay. (`VITE_NOSTRAUTICA_RELAYS`
  * already empties the list at build time; this covers a normal build pointed at
  * a local relay, which the build-time check alone would miss.)
  */
