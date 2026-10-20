@@ -133,6 +133,11 @@ class BoundedSeenIds {
  * them back to {@link NostrClient.subscribe}'s per-relay retry loop.
  */
 export class OrphanSafePool extends SimplePool {
+  /** Every relay url currently in the pool. */
+  knownRelayUrls(): string[] {
+    return [...this.relays.keys()];
+  }
+
   override ensureRelay(url: string, params?: Parameters<SimplePool["ensureRelay"]>[1]) {
     const key = normalizeURL(url);
     // super's body runs synchronously up to its first await, so the relay it
@@ -587,8 +592,10 @@ export class NostrClient {
     });
   }
 
+  /** Close every relay the pool holds, not only the defaults (audit SB-33): each
+   *  event's E_inbox/config/chat subscriptions run on its own config relays. */
   close(): void {
-    this.pool.close(this.defaultRelays);
+    this.pool.close([...new Set([...this.defaultRelays, ...this.pool.knownRelayUrls()])]);
   }
 }
 

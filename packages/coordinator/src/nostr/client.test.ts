@@ -179,6 +179,17 @@ describe("NostrClient.fetchAll pagination (audit R4)", () => {
  * regression is a missing constructor argument, and the library's own reconnect
  * machinery is not ours to re-test.
  */
+describe("NostrClient.close (audit SB-33)", () => {
+  it("closes every relay in the pool, not only the defaults", () => {
+    const client = new NostrClient(["wss://default.example"]);
+    const pool = (client as any).pool;
+    pool.relays.set("wss://event-only.example/", { close() {} });
+    const spy = vi.spyOn(pool, "close").mockImplementation(() => {});
+    client.close();
+    expect(spy.mock.calls[0]![0]).toEqual(expect.arrayContaining(["wss://default.example", "wss://event-only.example/"]));
+  });
+});
+
 describe("NostrClient relay pool durability (audit 2026-09-04)", () => {
   it("enables reconnect and keepalive ping on the pool", () => {
     const client = new NostrClient(["wss://stub"]);
