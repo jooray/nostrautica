@@ -271,7 +271,7 @@ or orphans the coordinator's MLS admin role. Back it up.
 
 ```sh
 nostrautica-coordinator backup /home/nostrautica/backups/$(date +%F-%H%M).sqlite \
-  --config /home/nostrautica/state/coordinator.toml
+  --config /path/to/coordinator.toml
 ```
 
 `backup` takes a crash-consistent snapshot via `VACUUM INTO` (WAL snapshot
@@ -351,6 +351,27 @@ decryption.
 
 ## 7. Upgrade
 
+**Which commands depend on the layout.** The blocks in §6, §7 and §8 are written
+for §1 + §4: a `git clone` driven by the **system** unit. On the §4b layout (a
+user unit, code rsynced into the service account's home, which is how the
+reference instance runs) two of their commands fail. `sudo systemctl …` addresses
+the system manager, where the unit does not exist, so it reports "Unit not loaded"
+and **leaves the daemon running**. `git pull` / `git checkout` fail because an
+rsynced tree has no `.git`. On that layout:
+
+- use `systemctl --user stop|start nostrautica-coordinator` (as the service
+  account) and `journalctl --user -u nostrautica-coordinator`;
+- upgrade or roll back the code by deploying the target commit from the build
+  host, not on the coordinator host; see "Rollback" in
+  [DEPLOYMENT.md](DEPLOYMENT.md), which also lists where each kind of backup
+  lives. The daemon writes its own pre-migration backup beside the database
+  whenever a schema migration is pending, so a rollback point exists even if
+  the step below was skipped.
+
+Always confirm the daemon is actually stopped (`systemctl --user is-active` or
+`is-active` on the system unit) before `restore`. `restore` refuses a live
+database, but only after the rest of the rollback has started.
+
 ```sh
 sudo systemctl stop nostrautica-coordinator
 nostrautica-coordinator backup /home/nostrautica/backups/pre-upgrade-$(date +%F).sqlite --config coordinator.toml
@@ -372,7 +393,8 @@ accepts if you roll back (§8).
 
 ## 8. Roll back
 
-If a new release misbehaves:
+If a new release misbehaves (system-unit + git layout; for the §4b user-unit
+layout see the note at the top of §7):
 
 ```sh
 sudo systemctl stop nostrautica-coordinator
