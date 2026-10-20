@@ -324,13 +324,23 @@ export async function publishOrQueue(
   event: VerifiedEvent,
   relays?: string[],
 ): Promise<boolean> {
+  // U1 attribution, captured NOW rather than when the publish gives up (audit
+  // DS41-010). The retries below can run for seconds, plus each relay's own
+  // timeout, and a logout or account switch in that window used to stamp the
+  // item with whoever was active at the END: the next account (whose flush would
+  // then publish this one's join/DM/approval under its session), or — logged out
+  // — `event.pubkey`, which for a gift wrap is a throwaway key and for an
+  // organizer record is E_id, neither of which any session ever matches, so the
+  // item could never be flushed, shown, or discarded. The author fallback is now
+  // reached only by a publish that STARTED with nobody signed in.
+  const owner = activeCacheOwner() ?? event.pubkey;
   const online = typeof navigator === "undefined" || navigator.onLine;
   if (online) {
     // Offline skips retries entirely (below); online gets 1 + PUBLISH_BACKOFFS_MS.length tries.
     for (let attempt = 0; ; attempt++) {
       try {
         const outcomes = await publishSigned(event, relays);
-        await queueUndelivered(event, outcomes);
+        await queueUndelivered(event, outcomes, owner);
         return true;
       } catch {
         if (attempt >= PUBLISH_BACKOFFS_MS.length) break; // exhausted — fall through to queue
@@ -351,10 +361,8 @@ export async function publishOrQueue(
     relays: relays ? [...relays] : undefined,
     queuedAt: Date.now(),
     attempts: 0,
-    // U1: stamp the queuing account. Falls back to the event author when logged
-    // out (no active cache owner) so an item is never silently ownerless — the
-    // author signed it, so it belongs to that key.
-    owner: activeCacheOwner() ?? event.pubkey,
+    // U1: stamp the queuing account, as captured at entry (above).
+    owner,
   });
   return false;
 }
@@ -378,6 +386,7 @@ export async function publishOrQueue(
 async function queueUndelivered(
   event: VerifiedEvent,
   outcomes: RelayPublishOutcome[],
+  owner: string,
 ): Promise<void> {
   try {
     if (!backend) return;
@@ -396,7 +405,7 @@ async function queueUndelivered(
       queuedAt: existing?.queuedAt ?? Date.now(),
       attempts: existing?.attempts ?? 0,
       partial: true,
-      owner: activeCacheOwner() ?? event.pubkey,
+      owner,
     });
   } catch {
     /* convergence is best-effort; the event is already out on at least one relay */

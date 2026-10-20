@@ -232,6 +232,31 @@ describe("publish-queue owner isolation (audit U1)", () => {
     expect(store.has("b1")).toBe(true); // B's item survives A's logout
   });
 
+  it("stamps the account that STARTED the publish, not whoever is active when it gives up (DS41-010)", async () => {
+    vi.useFakeTimers();
+    try {
+      setActiveCacheOwner(A);
+      vi.stubGlobal("navigator", { onLine: true });
+      // A NIP-59 gift wrap: its author is a one-time key no session ever has.
+      const wrapKey = "9".repeat(64);
+      publishSigned.mockImplementation(async () => {
+        // A logs out / B signs in while the publish is still retrying.
+        setActiveCacheOwner(B);
+        throw new Error("relay timeout");
+      });
+      const done = publishOrQueue(evtFor("wrap1", wrapKey) as never, ["wss://r"]);
+      await vi.runAllTimersAsync();
+      expect(await done).toBe(false);
+      expect(store.get("wrap1")?.owner).toBe(A);
+      // B can neither see nor flush it; A can.
+      expect(await listQueued()).toEqual([]);
+      setActiveCacheOwner(A);
+      expect((await listQueued()).map((i) => i.event.id)).toEqual(["wrap1"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("drops a legacy ownerless item on flush rather than publishing it", async () => {
     setActiveCacheOwner(A);
     vi.stubGlobal("navigator", { onLine: true });
