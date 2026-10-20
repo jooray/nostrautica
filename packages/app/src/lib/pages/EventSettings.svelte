@@ -20,7 +20,7 @@
     pollForOrganizerGrant,
   } from "$lib/events/organizer.js";
   import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
-  import { updateEventMetadata } from "$lib/events/event-metadata.js";
+  import { updateEventMetadata, type EventMetadataInput } from "$lib/events/event-metadata.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import {
@@ -117,16 +117,39 @@
     return local.toISOString().slice(0, 16);
   }
 
+  // What the form was seeded with, in the shape `updateEventMetadata` takes. The
+  // save sends it as the base so only the fields edited HERE override the newest
+  // relay copy; a stale page no longer reverts another device's edits (BUG-2).
+  let metadataBase: EventMetadataInput | undefined;
+
+  function metadataFormInput(): EventMetadataInput {
+    return {
+      title: metadataTitle.trim(),
+      summary: metadataSummary.trim(),
+      start: Math.floor(new Date(metadataStart).getTime() / 1000),
+      end: metadataEnd ? Math.floor(new Date(metadataEnd).getTime() / 1000) : undefined,
+      location: metadataLocation.trim() || undefined,
+      icon: metadataIcon.trim() || undefined,
+      banner: metadataBanner.trim() || undefined,
+    };
+  }
+
+  function seedMetadata(from: EventContext) {
+    metadataTitle = from.title;
+    metadataSummary = from.summary;
+    metadataStart = localDateTime(from.start);
+    metadataEnd = localDateTime(from.end);
+    metadataLocation = from.location ?? "";
+    metadataIcon = from.icon ?? "";
+    metadataBanner = from.banner ?? "";
+    metadataBase = metadataFormInput();
+    metadataSeededFor = from.coordinate;
+  }
+
   $effect(() => {
     if (!ctx || metadataSeededFor === ctx.coordinate) return;
-    metadataTitle = ctx.title;
-    metadataSummary = ctx.summary;
-    metadataStart = localDateTime(ctx.start);
-    metadataEnd = localDateTime(ctx.end);
-    metadataLocation = ctx.location ?? "";
-    metadataIcon = ctx.icon ?? "";
-    metadataBanner = ctx.banner ?? "";
-    metadataSeededFor = ctx.coordinate;
+    const from = ctx;
+    untrack(() => seedMetadata(from));
   });
 
   function pickMetadataImage(e: Event, which: "icon" | "banner") {
@@ -167,16 +190,15 @@
     metadataSaved = false;
     error = null;
     try {
-      const { ctx: updated, outcome } = await updateEventMetadata(ctx, {
-        title: metadataTitle.trim(),
-        summary: metadataSummary.trim(),
-        start: Math.floor(new Date(metadataStart).getTime() / 1000),
-        end: metadataEnd ? Math.floor(new Date(metadataEnd).getTime() / 1000) : undefined,
-        location: metadataLocation.trim() || undefined,
-        icon: metadataIcon.trim() || undefined,
-        banner: metadataBanner.trim() || undefined,
-      });
+      const { ctx: updated, outcome } = await updateEventMetadata(
+        ctx,
+        metadataFormInput(),
+        metadataBase,
+      );
       ctx = updated;
+      // Show what was published, other devices' edits included, and make it the
+      // base for the next save.
+      seedMetadata(updated);
       recentEvents.record({
         coordinate: ctx.coordinate,
         naddr: ctx.naddr,

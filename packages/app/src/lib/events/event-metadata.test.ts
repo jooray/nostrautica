@@ -217,4 +217,73 @@ describe("updateEventMetadata", () => {
     const { outcome } = await updateEventMetadata(ctx, { title: "T", summary: "", start });
     expect(outcome).toBe("queued");
   });
+  // e2e BUG-2 (the 31923 twin of audit SB-87): two organizer devices on the
+  // Settings page. Device 1 saved a summary; device 2, still showing the old
+  // snapshot, then saved a location and republished its stale summary with it.
+  describe("a save from a stale page (BUG-2)", () => {
+    const seeded = { title: "Old title", summary: "Old summary", start, location: undefined, icon: undefined, banner: undefined };
+    function serveNewer() {
+      const calendar = finalizeEvent(
+        {
+          kind: KIND_CALENDAR_EVENT,
+          created_at: 30,
+          tags: [
+            ["d", identifier],
+            ["title", "Old title"],
+            ["start", String(start)],
+            ["summary", "Summary from device 1"],
+          ],
+          content: "Summary from device 1",
+        },
+        eidSk,
+      );
+      const profile = finalizeEvent(
+        {
+          kind: KIND_PROFILE,
+          created_at: 30,
+          tags: [],
+          content: JSON.stringify({ name: "Old title", about: "Summary from device 1", picture: "https://d1.example/icon.jpg" }),
+        },
+        eidSk,
+      );
+      fetchEvents.mockImplementation((filter: { kinds?: number[] }) =>
+        Promise.resolve(filter.kinds?.[0] === KIND_CALENDAR_EVENT ? [calendar] : [profile]),
+      );
+    }
+
+    it("keeps a field another device changed since the page loaded", async () => {
+      serveNewer();
+      const { ctx: updated } = await updateEventMetadata(
+        ctx,
+        { ...seeded, location: "Prague" },
+        seeded,
+      );
+      const nextCalendar = published.find((e) => e.kind === KIND_CALENDAR_EVENT)!;
+      const nextProfile = published.find((e) => e.kind === KIND_PROFILE)!;
+      expect(nextCalendar.tags).toContainEqual(["location", "Prague"]);
+      expect(nextCalendar.tags).toContainEqual(["summary", "Summary from device 1"]);
+      expect(nextCalendar.content).toBe("Summary from device 1");
+      expect(JSON.parse(nextProfile.content)).toMatchObject({
+        about: "Summary from device 1",
+        picture: "https://d1.example/icon.jpg",
+      });
+      expect(updated).toMatchObject({ summary: "Summary from device 1", location: "Prague" });
+    });
+
+    it("still applies the field this page changed, even back to an older value", async () => {
+      serveNewer();
+      await updateEventMetadata(ctx, { ...seeded, summary: "Mine wins" }, seeded);
+      const nextCalendar = published.find((e) => e.kind === KIND_CALENDAR_EVENT)!;
+      expect(nextCalendar.tags).toContainEqual(["summary", "Mine wins"]);
+    });
+
+    it("clears a field this page cleared", async () => {
+      serveNewer();
+      const withLocation = { ...seeded, location: "Brno" };
+      await updateEventMetadata(ctx, { ...seeded, location: undefined }, withLocation);
+      const nextCalendar = published.find((e) => e.kind === KIND_CALENDAR_EVENT)!;
+      expect(nextCalendar.tags.some((t: string[]) => t[0] === "location")).toBe(false);
+      expect(nextCalendar.tags).toContainEqual(["summary", "Summary from device 1"]);
+    });
+  });
 });
