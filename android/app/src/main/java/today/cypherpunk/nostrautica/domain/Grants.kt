@@ -68,6 +68,7 @@ class Grants(
     data class MemoEntry(val coordinate: String? = null, val versions: List<Int> = emptyList(), val organizer: Boolean = false, val done: Boolean = false)
 
     private val lock = Mutex()
+    private val joinLock = Mutex()
 
     private fun satisfied(e: MemoEntry?, held: List<EventKeys>): Boolean {
         if (e == null) return false
@@ -131,9 +132,37 @@ class Grants(
     suspend fun receive(signer: NostrSigner, force: Boolean = false, maxUnwraps: Int = 60, outcome: ScanOutcome = ScanOutcome(), interactive: Boolean = true): Set<String> =
         // Off the main thread: Home and Join call this from a LaunchedEffect, and the scan does
         // Keystore, database and network work.
-        withContext(Dispatchers.IO) { scan(signer, force, maxUnwraps, outcome, interactive) }
+        withContext(Dispatchers.IO) {
+            val (gained, newProofChildren) = scan(signer, force, maxUnwraps, outcome, interactive)
+            communityJoin(signer, newProofChildren, signer.isLocal || interactive)
+            gained
+        }
 
-    private suspend fun scan(signer: NostrSigner, force: Boolean, maxUnwraps: Int, outcome: ScanOutcome, interactive: Boolean): Set<String> = lock.withLock {
+    /**
+     * §15.5: join the community of any event the person consented to, from the proofs just
+     * stored AND from earlier ones (a grant is memoized once processed, so a join that failed
+     * then would otherwise never be retried). Fail-soft: it must not be able to fail the scan.
+     *
+     * Outside the scan lock (SB-23): a join does relay round trips and signs, and with a NIP-55
+     * signer that waits on the user in the signer's consent screen; another screen's grant scan
+     * must not queue behind that. Its own lock is only tried, never waited on: a join already
+     * running covers this pass, because every pass re-reads all stored proofs.
+     */
+    private suspend fun communityJoin(signer: NostrSigner, newProofChildren: Set<String>, interactive: Boolean) {
+        val hook = afterScan ?: return
+        if (!joinLock.tryLock()) return
+        try {
+            hook(signer, newProofChildren, interactive)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("Grants", "community auto-join skipped: ${e.javaClass.simpleName}")
+        } finally {
+            joinLock.unlock()
+        }
+    }
+
+    private suspend fun scan(signer: NostrSigner, force: Boolean, maxUnwraps: Int, outcome: ScanOutcome, interactive: Boolean): Pair<Set<String>, Set<String>> = lock.withLock {
         val pubkey = signer.pubkey
         val held = keys.list(pubkey)
         val last = prefs.getLong("grants-backfilled:$pubkey").takeIf { it > 0 }
@@ -244,17 +273,7 @@ class Grants(
             while (memo.size > MAX_MEMO) memo.remove(memo.keys.first())
             cache.put(pubkey, MEMO_KEY, memoSer, memo, nowSec())
         }
-        // §15.5: join the community of any event the person consented to, from the proofs just
-        // stored AND from earlier ones (a grant is memoized once processed, so a join that failed
-        // then would otherwise never be retried). Fail-soft: it must not be able to fail the scan.
-        try {
-            afterScan?.invoke(signer, newProofChildren, signer.isLocal || interactive)
-        } catch (e: kotlinx.coroutines.CancellationException) {
-            throw e
-        } catch (e: Exception) {
-            android.util.Log.w("Grants", "community auto-join skipped: ${e.javaClass.simpleName}")
-        }
-        gained
+        gained to newProofChildren
     }
 
     /** 21606 to this attendee about their own pipeline items (attendee-status.ts), latest per stage. */
