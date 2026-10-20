@@ -22,6 +22,7 @@
   import FollowButton from "$lib/components/FollowButton.svelte";
   import Icon from "$lib/components/icons/Icon.svelte";
   import { listEventKeys } from "$lib/events/keystore.js";
+  import { mapLimit } from "$lib/util/map-limit.js";
   import { mutes } from "$lib/stores/mutes.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { perfMark } from "$lib/perf.js";
@@ -106,35 +107,64 @@
   type SharedEvent = { title: string; naddr: string; start: number | undefined; end: number | undefined };
   let sharedEvents = $state<SharedEvent[]>([]);
 
-  async function loadSharedEvents(peerPubkey: string): Promise<void> {
+  // Opening ONE conversation used to run loadEventContext (three relay queries)
+  // plus fetchRoster for every event this account holds a key for, all at once,
+  // just to fill this line: dozens of reads on a fresh device, racing the
+  // conversation's own refresh on venue Wi-Fi (audit DS41-024). Now the cached
+  // pass paints first with no relay traffic, and the network pass waits for the
+  // thread's first refresh and runs a few events at a time.
+  const SHARED_EVENTS_CONCURRENCY = 3;
+
+  async function loadSharedEvents(peerPubkey: string, afterFirstRefresh: Promise<void>): Promise<void> {
     try {
       const keys = await listEventKeys();
       const withEck = keys.filter((k) => k.eck.length > 0);
-      const found = await Promise.all(
-        withEck.map(async (k) => {
-          try {
-            const naddr = coordinateToNaddr(k.coordinate);
-            const cachedR = cachedRoster(k.coordinate);
-            if (cachedR?.attendees.some((a) => a.pubkey === peerPubkey)) {
-              const c =
-                cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
-              return { title: c.title, naddr, start: c.start, end: c.end };
-            }
-            const ctx = cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
-            const roster = await fetchRoster(ctx);
-            return roster?.attendees.some((a) => a.pubkey === peerPubkey)
-              ? { title: ctx.title, naddr, start: ctx.start, end: ctx.end }
-              : undefined;
-          } catch {
-            return undefined; // one bad event must not blank the whole list
+      const found: (SharedEvent | undefined)[] = new Array(withEck.length);
+      const misses: number[] = [];
+      withEck.forEach((k, i) => {
+        try {
+          const naddr = coordinateToNaddr(k.coordinate);
+          const c = cachedEventContext(naddr);
+          if (c && cachedRoster(k.coordinate)?.attendees.some((a) => a.pubkey === peerPubkey)) {
+            found[i] = { title: c.title, naddr, start: c.start, end: c.end };
+          } else {
+            misses.push(i);
           }
-        }),
-      );
-      sharedEvents = found.filter((e): e is SharedEvent => !!e);
-      // Want-to-meet / Open profile hang off the chosen shared event, so their
-      // state can only load once that list exists.
-      const primary = primaryEvent;
-      if (primary) void loadEventActions(primary.naddr);
+        } catch {
+          /* one bad event must not blank the whole list */
+        }
+      });
+      let actionsFor: string | undefined;
+      const publish = () => {
+        sharedEvents = found.filter((e): e is SharedEvent => !!e);
+        // Want-to-meet / Open profile hang off the chosen shared event, so their
+        // state can only load once that list exists.
+        const primary = primaryEvent;
+        if (primary && primary.naddr !== actionsFor) {
+          actionsFor = primary.naddr;
+          void loadEventActions(primary.naddr);
+        }
+      };
+      if (found.some(Boolean)) publish();
+      if (misses.length === 0) return;
+      await afterFirstRefresh;
+      await mapLimit(misses, SHARED_EVENTS_CONCURRENCY, async (i) => {
+        const k = withEck[i];
+        try {
+          const naddr = coordinateToNaddr(k.coordinate);
+          const ctx = cachedEventContext(naddr) ?? (await loadEventContext(naddr, { adoptLang: false }));
+          // A cached roster that lists the peer only lacked the context; one that
+          // doesn't list them may be stale, so it falls through to a real fetch
+          // rather than under-reporting.
+          const listed =
+            cachedRoster(k.coordinate)?.attendees.some((a) => a.pubkey === peerPubkey) ||
+            (await fetchRoster(ctx))?.attendees.some((a) => a.pubkey === peerPubkey);
+          if (listed) found[i] = { title: ctx.title, naddr, start: ctx.start, end: ctx.end };
+        } catch {
+          /* one bad event must not blank the whole list */
+        }
+      });
+      publish();
     } catch {
       sharedEvents = [];
     }
@@ -235,6 +265,9 @@
     }
   }
 
+  let firstRefreshDone: () => void = () => {};
+  const firstRefresh = new Promise<void>((resolve) => (firstRefreshDone = resolve));
+
   async function refresh() {
     if (!session.signer || !peer) return;
     try {
@@ -304,7 +337,7 @@
           if (p) profile = p;
         })
         .catch(() => {});
-      void loadSharedEvents(peer);
+      void loadSharedEvents(peer, firstRefresh);
     }
     if (session.signer) {
       void fetchFollowSet(session.signer)
@@ -314,7 +347,11 @@
         })
         .catch(() => {});
     }
-    await refresh();
+    try {
+      await refresh();
+    } finally {
+      firstRefreshDone();
+    }
     timer = setInterval(refresh, 5_000);
     document.addEventListener("visibilitychange", markVisibleRead);
   });
