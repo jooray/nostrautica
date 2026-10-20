@@ -5,7 +5,7 @@
   import FileButton from "$lib/components/FileButton.svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { connectNdk, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
-  import { unionRelays, chatInteropRelays, chatRelaysOf } from "$lib/nostr/relays.js";
+  import { unionRelays, chatRelaysOf } from "$lib/nostr/relays.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
   import { receiveGrants } from "$lib/events/attendee.js";
@@ -458,8 +458,9 @@
     talksSaved = false;
     error = null;
     try {
-      await updateEventConfig(ctx, { talks: talksMode });
-      ctx = { ...ctx, config: { ...ctx.config, talks: talksMode } };
+      // Adopt the config as published: it was built on the newest 31600, so it
+      // also carries whatever another device changed since this page loaded.
+      ctx = { ...ctx, config: await updateEventConfig(ctx, { talks: talksMode }) };
       talksSaved = true;
       setTimeout(() => (talksSaved = false), 1500);
     } catch (e) {
@@ -484,8 +485,7 @@
     error = null;
     try {
       const chat: ("marmot")[] = chatEnabled ? ["marmot"] : [];
-      await updateEventConfig(ctx, { chat });
-      ctx = { ...ctx, config: { ...ctx.config, chat } };
+      ctx = { ...ctx, config: await updateEventConfig(ctx, { chat }) };
       chatSaved = true;
       setTimeout(() => (chatSaved = false), 1500);
     } catch (e) {
@@ -523,8 +523,7 @@
     retentionSaved = false;
     error = null;
     try {
-      await updateEventConfig(ctx, { retentionDays });
-      ctx = { ...ctx, config: { ...ctx.config, retentionDays } };
+      ctx = { ...ctx, config: await updateEventConfig(ctx, { retentionDays }) };
       retentionSaved = true;
       setTimeout(() => (retentionSaved = false), 1500);
     } catch (e) {
@@ -571,22 +570,13 @@
     relaysSaved = false;
     error = null;
     try {
-      await updateEventConfig(ctx, { relays });
       // The saved set is exactly what was typed. Chat-enabled events also carry a
       // separate `chat_relay` set (updateEventConfig keeps the Marmot interop pair
       // in it), which is deliberately NOT mixed back into this box: those relays
       // accept only chat kinds, and showing them here invited an organizer to
       // treat them as event relays — which is how they ended up rejecting every
       // config/roster/deletion publish in the first place.
-      const chatRelays = unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays));
-      ctx = {
-        ...ctx,
-        config: {
-          ...ctx.config,
-          relays,
-          chatRelays: ctx.config.chat.length > 0 ? chatRelays : chatRelaysOf(ctx.config),
-        },
-      };
+      ctx = { ...ctx, config: await updateEventConfig(ctx, { relays }) };
       relaysInput = relays.join("\n");
       relaysSaved = true;
       setTimeout(() => (relaysSaved = false), 1500);

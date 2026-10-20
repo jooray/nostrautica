@@ -61,6 +61,7 @@ import {
   EVENT_INBOX_RUMOR_KINDS,
   ADMIN_COMMAND_TTL_SEC,
   type EventKeysBackup,
+  type EventConfig,
   type InviteProof,
   type AttendeeProfile,
   type MediaDescriptor,
@@ -84,7 +85,7 @@ import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
-import { grantParentField, withFreshLinks } from "./hierarchy.js";
+import { grantParentField, fetchNewestConfig } from "./hierarchy.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
 // paints instantly and refreshes in parallel (CACHING-PLAN §2.11). Wiped on
@@ -1428,11 +1429,62 @@ async function rotateEckAndInbox(
  * authenticates the install by matching the seal author against the coordinate's
  * E_id pubkey (spec §7.2, ENCRYPTION-AND-PRIVACY.md F2).
  */
+const CONFIG_UNREADABLE =
+  "Couldn't read this event's current settings from its relays, so nothing was published. " +
+  "Publishing from this page's copy could undo changes made elsewhere. " +
+  "Check your connection and try again.";
+
+/**
+ * The newest 31600 on the relays, which every config write must build on.
+ *
+ * Config writes republish the WHOLE 31600, and they used to build it from the
+ * page's `ctx.config` — whatever the page read when it loaded, possibly hours
+ * ago, on another device. Saving one field from a stale Settings page therefore
+ * reverted every other field changed since (retention, relays, approval…), and
+ * worst of all dropped a coordinator another device had attached: a 31600 that
+ * no longer names the coordinator is a durable detach on the daemon side (audit
+ * SB-02, SB-87). The earlier `withFreshLinks` fixed this for `parent`/`children`
+ * only; this replaces it.
+ *
+ * Throws rather than falling back to `ctx.config`: a write built on a config we
+ * could not read is exactly the write that destroys something.
+ */
+async function freshConfig(ctx: EventContext): Promise<EventConfig> {
+  const cfg = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(
+    () => undefined,
+  );
+  if (!cfg) throw new Error(CONFIG_UNREADABLE);
+  return cfg;
+}
+
+/**
+ * Refuse to rotate or hand out keys this device no longer holds the current
+ * version of. Another organizer device (or a co-organizer) that rotated the
+ * E_inbox/ECK on attach/detach published the new inbox and `eck` on the 31600;
+ * a device still on the old ones would grant the coordinator a dead inbox secret
+ * and mint a colliding ECK version (audit SB-90, SB-86). Fail loudly instead.
+ */
+function assertCurrentCustody(cfg: EventConfig, keys: EventKeys): void {
+  // Current OR prior inbox: a device whose own rotation got as far as saving the
+  // new inbox but not as far as the 31600 is ahead of the config, not behind it.
+  const heldInboxes = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])]
+    .filter((h): h is string => !!h)
+    .map((h) => getPublicKey(hexToBytes(h)));
+  const heldEck = keys.eck.reduce((m, v) => Math.max(m, v.id), 0);
+  if ((heldInboxes.length > 0 && !heldInboxes.includes(cfg.inbox)) || cfg.eck > heldEck) {
+    throw new Error(
+      "This event's keys were changed on another device, and this device still holds the old ones. " +
+        "Open the event on the device that changed them, or have it send this account a fresh organizer grant.",
+    );
+  }
+}
+
 /**
  * Republish the event's 31600 config with changed fields (signed by E_id). Used by
  * Admin to flip live-editable settings like the prerecorded-talks mode (spec F2).
- * Every other field is preserved from `ctx.config`, so a talks-off event's config
- * stays byte-identical except for the one changed tag.
+ * Every other field is preserved from the NEWEST config on the relays (see
+ * {@link freshConfig}), and the config as published is returned so the caller
+ * can adopt it.
  */
 export async function updateEventConfig(
   ctx: EventContext,
@@ -1443,21 +1495,22 @@ export async function updateEventConfig(
     retentionDays: number | undefined;
     relays: string[];
   }>,
-): Promise<void> {
+): Promise<EventConfig> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
+  if (changes.relays && unionRelays(changes.relays).length === 0) {
+    throw new Error("at least one relay is required");
+  }
+  const current = await freshConfig(ctx);
   // Relay list. An admin can rewrite it explicitly (Settings → Relays); otherwise
   // the event keeps the relays it was published with. We NEVER silently migrate a
   // live event onto changed app defaults — only newly created events pick those up
   // (create.ts).
-  const chatActive = (changes.chat ?? ctx.config.chat).length > 0;
-  const relays = changes.relays ? unionRelays(changes.relays) : ctx.config.relays;
-  if (changes.relays && relays.length === 0) {
-    throw new Error("at least one relay is required");
-  }
+  const chatActive = (changes.chat ?? current.chat).length > 0;
+  const relays = changes.relays ? unionRelays(changes.relays) : current.relays;
   // Chat relays are a SEPARATE set (`chat_relay` tags) and are never folded into
   // the list above: the Whitenoise interop pair refuses every kind we publish
   // except the chat ones, so having them in `relays` — as this did until
@@ -1470,11 +1523,10 @@ export async function updateEventConfig(
   // clearing it: the group may still exist and be draining, and a re-enable must
   // not have to rediscover the relays it was routing over.
   const chatRelays = chatActive
-    ? unionRelays(chatRelaysOf(ctx.config), chatInteropRelays(relays))
-    : chatRelaysOf(ctx.config);
-  const built = buildEventConfig(
-    await withFreshLinks(ctx, { ...ctx.config, ...changes, relays, chatRelays }),
-  );
+    ? unionRelays(chatRelaysOf(current), chatInteropRelays(relays))
+    : chatRelaysOf(current);
+  const next: EventConfig = { ...current, ...changes, relays, chatRelays };
+  const built = buildEventConfig(next);
   // Monotonic republish (audit P3): a config change made in the same second as
   // the previous 31600 must win the §3.1 tie-break, or the stale config stays
   // authoritative and the setting silently doesn't take. Read + publish across the
@@ -1483,15 +1535,16 @@ export async function updateEventConfig(
   // relays existing subscribers watch and any newly added ones.
   await publishMonotonic({
     kind: built.kind,
-    author: ctx.config.eidPubkey,
-    identifier: ctx.config.d,
-    relays: unionRelays(ctx.config.relays, relays),
+    author: current.eidPubkey,
+    identifier: current.d,
+    relays: unionRelays(ctx.config.relays, current.relays, relays),
     sign: (created_at) =>
       finalizeEvent(
         { kind: built.kind, created_at, tags: built.tags, content: built.content },
         eidSk,
       ),
   });
+  return next;
 }
 
 export async function attachCoordinator(
@@ -1505,11 +1558,19 @@ export async function attachCoordinator(
     throw new Error("organizer keys not available on this device");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
+  // Build on the newest 31600, not the page's copy (SB-02/SB-87): `previous`
+  // below decides whether this is a replacement (detach + rotate), and a stale
+  // page that had not seen another device's attach skipped both.
+  const current = await freshConfig(ctx);
+  assertCurrentCustody(current, keys);
+  ctx = { ...ctx, config: current };
 
   // Install generation (NIP §3.5): strictly increase across every attach/detach/
   // re-attach so a replayed historical 21603 can never re-install. The last-used
-  // gen lives on the local record + the 30078 backup (durable across devices).
-  const gen = (keys.coordinatorGen ?? 0) + 1;
+  // gen lives on the local record + the 30078 backup, and is also on the wire in
+  // the newest 31600: take the highest, so a second device that attached since
+  // this one last did cannot make it reuse a generation (SB-89b).
+  const gen = Math.max(keys.coordinatorGen ?? 0, current.coordinatorGen ?? 0) + 1;
 
   // 0. Coordinator replacement: if a DIFFERENT coordinator is currently attached,
   //    detach it first (signed 21604) so it disposes of custody promptly, then rotate
@@ -1549,7 +1610,7 @@ export async function attachCoordinator(
     coordinatorGen: gen,
     eck: currentEckId,
   };
-  const built = buildEventConfig(await withFreshLinks(ctx, cfg));
+  const built = buildEventConfig(cfg);
 
   // 2. Gift-wrap the Coordinator Grant (21603) carrying the same gen, sealed by
   //    E_id so the coordinator can authenticate the install against the coordinate.
@@ -1648,13 +1709,21 @@ export async function detachCoordinator(
   ctx: EventContext,
   blindingKey?: Uint8Array,
 ): Promise<void> {
-  const previous = ctx.config.coordinator;
-  if (!previous) return;
+  if (!ctx.config.coordinator) return;
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
+  // The coordinator to detach, and every field republished below, come from the
+  // newest 31600 rather than the page's copy (SB-02/SB-87). If another device
+  // already detached it there is nothing left to do; if it attached a different
+  // one, that is the one actually holding custody.
+  const current = await freshConfig(ctx);
+  const previous = current.coordinator;
+  if (!previous) return;
+  assertCurrentCustody(current, keys);
+  ctx = { ...ctx, config: current };
 
   // 1. Signed 21604 detach to the current coordinator (immediate custody disposal),
   //    sent up front so the departing coordinator stops serving promptly.
@@ -1680,9 +1749,7 @@ export async function detachCoordinator(
   void _c;
   void _g;
   const currentEckId = rotatedEck.reduce((m, v) => Math.max(m, v.id), ctx.config.eck);
-  const built = buildEventConfig(
-    await withFreshLinks(ctx, { ...rest, inbox: newInboxPubkey, eck: currentEckId }),
-  );
+  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey, eck: currentEckId });
   // Monotonic republish (audit P3): a detach in the same second as the previous
   // config must win the §3.1 tie-break, or the coordinator-bearing config can
   // stay authoritative and the detach silently doesn't take.

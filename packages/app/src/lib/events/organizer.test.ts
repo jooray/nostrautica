@@ -76,6 +76,7 @@ import {
   revokeAttendeeClient,
   sharedInviteExp,
   updateEventConfig,
+  attachCoordinator,
   type PendingRequest,
   fetchPending,} from "./organizer.js";
 import {
@@ -865,7 +866,16 @@ describe("updateEventConfig relay editing", () => {
     talks: "off",
     chat: [] as ChatBackend[],
   };
+  /** Serve `cfg` as the newest 31600 on the relays (what config writes build on). */
+  function serveConfig(cfg: Record<string, unknown>) {
+    const built = buildEventConfig(cfg as never);
+    fetchEventsRelayOnly.mockResolvedValue([
+      { id: "cfg", kind: KIND_EVENT_CONFIG, pubkey: EID_PUBKEY, created_at: 1000, tags: built.tags, content: "" },
+    ]);
+  }
+  /** A page context whose config matches what the relays hold. */
   function ctxWith(overrides: Partial<typeof fullConfig>): EventContext {
+    serveConfig({ ...fullConfig, ...overrides });
     return {
       coordinate: COORD,
       naddr: "naddr1test",
@@ -941,15 +951,85 @@ describe("updateEventConfig relay editing", () => {
   it("keeps a link made after the caller's context was loaded (hierarchy fields come from the relays)", async () => {
     await saveEventKeys(organizerKeys(), OWNER);
     const parent = makeCoordinate(getPublicKey(generateSecretKey()), "some-community", KIND_COMMUNITY);
-    const newest = buildEventConfig({ ...fullConfig, parent } as never);
-    fetchEventsRelayOnly.mockResolvedValue([
-      { id: "cfg", kind: KIND_EVENT_CONFIG, pubkey: EID_PUBKEY, created_at: 1000, tags: newest.tags, content: "" },
-    ]);
+    const stale = ctxWith({}); // ctx has no parent
+    serveConfig({ ...fullConfig, parent });
 
-    await updateEventConfig(ctxWith({}), { retentionDays: 30 }); // ctx has no parent
+    await updateEventConfig(stale, { retentionDays: 30 });
 
     expect(publishedTags("parent")).toEqual([parent]);
     expect(publishedTags("retention")).toEqual(["30"]);
+  });
+
+  // Audit SB-87: the laptop's Settings page loaded before the phone attached a
+  // coordinator. Saving the chat toggle used to republish a 31600 with no
+  // coordinator tag, which the daemon treats as a durable detach.
+  it("keeps a coordinator attached since the page loaded", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const coordinator = getPublicKey(generateSecretKey());
+    const stale = ctxWith({});
+    serveConfig({ ...fullConfig, coordinator, coordinatorGen: 3 });
+
+    await updateEventConfig(stale, { chat: ["marmot"] });
+
+    const ev = publishSigned.mock.calls[0][0] as { tags: string[][] };
+    expect(ev.tags.find((t) => t[0] === "coordinator")).toEqual(["coordinator", coordinator, "3"]);
+  });
+
+  // Audit SB-02: every other field came from the page's copy too.
+  it("keeps every field changed elsewhere, not just the one being saved", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const stale = ctxWith({});
+    serveConfig({ ...fullConfig, retentionDays: 30, approval: "auto", relays: ["wss://moved.example"] });
+
+    const next = await updateEventConfig(stale, { talks: "on" });
+
+    expect(publishedTags("retention")).toEqual(["30"]);
+    expect(publishedRelayTags()).toEqual(["wss://moved.example"]);
+    expect(publishedTags("talks")).toEqual(["on"]);
+    expect(next.retentionDays).toBe(30);
+  });
+
+  describe("attachCoordinator", () => {
+    const INBOX_SK = generateSecretKey();
+    const withInbox = () => ({ ...organizerKeys(), eck: [{ id: 1, key: bytesToBase64(generateEck()) }], einboxNsecHex: bytesToHex(INBOX_SK) });
+
+    // Audit SB-89b: the install generation came from this device's keystore
+    // alone, so a device that had not seen another device's attach reused a gen.
+    it("takes the install generation from the wire when it is ahead of this device", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const coordinator = getPublicKey(generateSecretKey());
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK), coordinator, coordinatorGen: 4 });
+
+      await attachCoordinator({} as AppSigner, stale, coordinator);
+
+      const cfg = publishSigned.mock.calls
+        .map((c) => c[0] as { kind: number; tags: string[][] })
+        .find((e) => e.kind === KIND_EVENT_CONFIG)!;
+      expect(cfg.tags.find((t) => t[0] === "coordinator")).toEqual(["coordinator", coordinator, "5"]);
+    });
+
+    // Audit SB-90: another organizer device rotated the inbox on a detach; this
+    // one would have granted the coordinator a dead inbox secret.
+    it("refuses when this device's inbox key is no longer the event's", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(generateSecretKey()), eck: 2 });
+
+      await expect(
+        attachCoordinator({} as AppSigner, stale, getPublicKey(generateSecretKey())),
+      ).rejects.toThrow(/changed on another device/);
+      expect(publishSigned).not.toHaveBeenCalled();
+    });
+  });
+
+  it("publishes nothing when the current config can't be read", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const c = ctxWith({});
+    fetchEventsRelayOnly.mockResolvedValue([]);
+    await expect(updateEventConfig(c, { retentionDays: 30 })).rejects.toThrow(/current settings/);
+    expect(publishSigned).not.toHaveBeenCalled();
   });
 
   it("dedupes/trims the set and rejects an all-empty relay list", async () => {

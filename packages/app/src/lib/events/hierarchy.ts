@@ -31,7 +31,7 @@ import {
   type MembershipProof,
 } from "@nostrautica/protocol";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
-import { onlyVerified } from "$lib/nostr/verify.js";
+import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { loadEventKeys, listEventKeys } from "./keystore.js";
@@ -152,31 +152,20 @@ export async function fetchNewestConfig(
   const hints = unionRelays(relays, eventRelayHints(coordinate), DEFAULT_RELAYS);
   const filter = { kinds: [KIND_EVENT_CONFIG], authors: [coord.pubkey], "#d": [coord.identifier] };
   const events = opts.fresh ? await fetchEventsRelayOnly(filter, hints) : await fetchEvents(filter, hints);
-  const latest = pickLatest(onlyVerified(events));
+  // `authors` and `#d` are requests a relay may ignore. Organizer config writes
+  // now rebuild the 31600 from this read and re-sign it with E_id, so a foreign
+  // or mis-addressed event here would be laundered into the event's own config.
+  const latest = pickLatest(
+    onlyByAuthors(onlyVerified(events), [coord.pubkey]).filter((e) =>
+      e.tags.some((t) => t[0] === "d" && t[1] === coord.identifier),
+    ),
+  );
   if (!latest) return undefined;
   try {
     return parseEventConfig(coord.pubkey, latest.tags);
   } catch {
     return undefined;
   }
-}
-
-/**
- * `cfg` with its hierarchy fields (`parent`, `children`) taken from the newest
- * 31600 on the relays. For every config write that is built from a page's cached
- * context (attach/detach a coordinator, live settings): the link is changed from
- * elsewhere (the other half of the pair, another tab or device), so a spread of
- * `ctx.config` republishes whatever the page saw at load and silently ends a link
- * made since. Reads relays only; if the config cannot be read, `cfg` is returned
- * as given (the publish that follows would fail on the same relays anyway).
- */
-export async function withFreshLinks<T extends Pick<EventConfig, "parent" | "children">>(
-  ctx: Pick<EventContext, "coordinate" | "config">,
-  cfg: T,
-): Promise<T> {
-  const fresh = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(() => undefined);
-  if (!fresh) return cfg;
-  return { ...cfg, parent: fresh.parent, children: fresh.children };
 }
 
 // Link status is asked once per approval, and "Approve all" approves dozens in a
