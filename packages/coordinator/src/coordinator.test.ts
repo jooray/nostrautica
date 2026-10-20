@@ -425,6 +425,11 @@ async function setup(
     eidSk?: Uint8Array;
     transport?: FakeTransport;
     extraConfigTags?: string[][];
+    /** The seeded 31600 `approval` (SB-124). Defaults to "manual+invite" — the
+     *  PWA's recommended mode and the one every invite test was written against. */
+    approval?: "manual" | "invite" | "manual+invite" | "open";
+    /** 31601 labels for the harness invites, by index (SB-124: "organizer-self"). */
+    inviteLabels?: (string | undefined)[];
   } = {},
 ): Promise<Harness> {
   adminNonce = 0; // per-test admin created_at offset (NIP §3.4 watermark ordering)
@@ -446,8 +451,8 @@ async function setup(
   const transport = opts.transport ?? new FakeTransport();
   transport.seed.push(
     { kind: spaceKind, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Cypherpunk Assembly"], ["t", "cypherpunk"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: "e1", sig: "" } as any,
-    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : []), ...(opts.extraConfigTags ?? [])], content: "", id: "e2", sig: "" } as any,
-    { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk) => ({ h: inviteHash(getPublicKey(sk)) })) }), id: "e3", sig: "" } as any,
+    { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", opts.matching ?? "on"], ["nostr_context", String(nostrContextN)], ["match_visibility", opts.matchVisibility ?? "pair"], ...(opts.maxVideoSec !== undefined ? [["max_video_sec", String(opts.maxVideoSec)]] : []), ...(opts.maxTalkSec !== undefined ? [["max_talk_sec", String(opts.maxTalkSec)]] : []), ["coordinator", opts.foreignCoordinator ?? coordPubkey, "1"], ...(opts.chat ? [["chat", "marmot"]] : []), ...(opts.lang ? [["lang", opts.lang]] : []), ...(opts.talks ? [["talks", opts.talks]] : []), ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : []), ...(opts.extraConfigTags ?? []), ["approval", opts.approval ?? "manual+invite"]], content: "", id: "e2", sig: "" } as any,
+    { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: invites.map((sk, i) => ({ h: inviteHash(getPublicKey(sk)), ...(opts.inviteLabels?.[i] ? { label: opts.inviteLabels[i] } : {}) })) }), id: "e3", sig: "" } as any,
     ...(opts.extraSeed?.({ eidPubkey, d, coordPubkey, inboxPubkey: getPublicKey(einboxSk) }) ?? []),
   );
 
@@ -7297,4 +7302,122 @@ describe("audit DS41-043 — a long talk transcript still publishes", () => {
       expect(fitTalkContent(small)).toBe(small);
     });
   }
+});
+
+/**
+ * Audit SB-124 — the 31600 `approval` tag is enforced on every join.
+ *
+ * It used to be parsed and never read, so `approval: "manual"` auto-approved any
+ * holder of a valid invite and `approval: "invite"` queued joins it should have
+ * refused. The organizer's own self-join (the create flow's "enroll me") is the
+ * one auto-approval a manual event allows, recognised by its E_id-labelled code.
+ */
+describe("audit SB-124 — the approval policy is enforced", () => {
+  /** Send a join carrying harness invite `idx` (or none), no submission. */
+  async function joinWith(h: Harness, sk: Uint8Array, idx: number | undefined, name = "x"): Promise<string> {
+    const pk = getPublicKey(sk);
+    const tags: string[][] = [["a", h.coordinate]];
+    if (idx !== undefined) {
+      const inviteSk = h.invites[idx]!;
+      tags.push(["invite", getPublicKey(inviteSk), makeInviteProof(inviteSk, h.coordinate, pk).sig]);
+    }
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, getPublicKey(h.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name, message: "", rsvp_public: false },
+        tags,
+      }) as any,
+    );
+    return pk;
+  }
+
+  it("manual: a valid invite is queued, not auto-approved, and its claim is not spent", async () => {
+    const h = await setup(0, { approval: "manual" });
+    const sk = generateSecretKey();
+    const pk = await joinWith(h, sk, 0);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(grantsTo(h, sk)).toHaveLength(0);
+
+    // The code is still unspent: once the organizer relaxes the policy, a
+    // DIFFERENT person can redeem it. Had the manual join claimed it, they could not.
+    await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["approval", "manual+invite"]], 10));
+    const sk2 = generateSecretKey();
+    const pk2 = await joinWith(h, sk2, 0);
+    expect(h.store.getAttendee(h.coordinate, pk2)?.status).toBe("approved");
+  });
+
+  it("manual: the organizer's own self-join (organizer-self code) still auto-approves", async () => {
+    const h = await setup(0, { approval: "manual", inviteLabels: ["organizer-self"] });
+    const organizerSk = generateSecretKey();
+    const pk = await joinWith(h, organizerSk, 0, "Olga");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(grantsTo(h, organizerSk).length).toBeGreaterThan(0);
+  });
+
+  it("manual: an organizer-self code admits only its first redeemer, and a forged proof none", async () => {
+    const h = await setup(0, { approval: "manual", inviteLabels: ["organizer-self"] });
+    await joinWith(h, generateSecretKey(), 0); // the organizer
+    const otherSk = generateSecretKey();
+    const other = await joinWith(h, otherSk, 0); // a second person with the same code
+    expect(h.store.getAttendee(h.coordinate, other)?.status).toBe("pending");
+
+    // A proof bound to someone else's pubkey does not verify for this sender.
+    const h2 = await setup(0, { approval: "manual", inviteLabels: ["organizer-self"] });
+    const thiefSk = generateSecretKey();
+    const thief = getPublicKey(thiefSk);
+    const inviteSk = h2.invites[0]!;
+    const proofForOther = makeInviteProof(inviteSk, h2.coordinate, getPublicKey(generateSecretKey()));
+    await h2.coordinator.handleInboxWrap(
+      h2.coordinate,
+      wrapRumor(thiefSk, getPublicKey(h2.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "thief", message: "", rsvp_public: false },
+        tags: [["a", h2.coordinate], ["invite", getPublicKey(inviteSk), proofForOther.sig]],
+      }) as any,
+    );
+    expect(h2.store.getAttendee(h2.coordinate, thief)?.status).toBe("pending");
+  });
+
+  it("invite: a join without a proof is rejected outright — no row, no queue", async () => {
+    const h = await setup(0, { approval: "invite" });
+    const pk = await joinWith(h, generateSecretKey(), undefined);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+
+  it("invite: a valid code admits; an already-used one is rejected, not queued", async () => {
+    const h = await setup(0, { approval: "invite" });
+    const first = await joinWith(h, generateSecretKey(), 0);
+    expect(h.store.getAttendee(h.coordinate, first)?.status).toBe("approved");
+    const second = await joinWith(h, generateSecretKey(), 0); // single-use, already claimed
+    expect(h.store.getAttendee(h.coordinate, second)).toBeUndefined();
+  });
+
+  it("invite: the organizer can still approve a rejected person by hand", async () => {
+    const h = await setup(0, { approval: "invite" });
+    const sk = generateSecretKey();
+    const pk = await joinWith(h, sk, undefined);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    await admin(h, "approve", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    expect(grantsTo(h, sk).length).toBeGreaterThan(0);
+  });
+
+  it("manual+invite and open: a valid code auto-approves, no code waits in the queue", async () => {
+    for (const approval of ["manual+invite", "open"] as const) {
+      const h = await setup(0, { approval });
+      const withCode = await joinWith(h, generateSecretKey(), 0);
+      const without = await joinWith(h, generateSecretKey(), undefined);
+      expect(h.store.getAttendee(h.coordinate, withCode)?.status, approval).toBe("approved");
+      expect(h.store.getAttendee(h.coordinate, without)?.status, approval).toBe("pending");
+    }
+  });
+
+  it("a 31600 without an approval tag is treated as the NIP default, manual", async () => {
+    const h = await setup(0, { approval: "manual+invite" });
+    // configUpdate carries no approval tag at all.
+    await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [], 10));
+    const pk = await joinWith(h, generateSecretKey(), 0);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+  });
 });

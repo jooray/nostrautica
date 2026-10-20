@@ -15,6 +15,7 @@ import {
   adminCommandContentSchema,
   inviteListContentSchema,
   invitePolicyOf,
+  ORGANIZER_SELF_INVITE_LABEL,
   INVITE_USES_UNLIMITED,
   myProfileContentSchema,
   directoryEntryContentSchema,
@@ -231,6 +232,10 @@ describe("every §7 payload round-trips through JSON", () => {
     expect(invitePolicyOf({})).toEqual({ uses: 1 });
     expect(invitePolicyOf({ uses: INVITE_USES_UNLIMITED })).toEqual({ uses: 0 });
     expect(invitePolicyOf({ uses: 5, exp: 42 })).toEqual({ uses: 5, exp: 42 });
+  });
+
+  it("invitePolicyOf carries the label, so a coordinator can spot the organizer's own code (SB-124)", () => {
+    expect(invitePolicyOf({ label: ORGANIZER_SELF_INVITE_LABEL })).toEqual({ uses: 1, label: "organizer-self" });
   });
 
   it("31601 invite list: an unknown-key entry from a NEWER publisher still parses", () => {

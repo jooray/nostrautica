@@ -20,6 +20,7 @@ import {
   coordinateToNaddr,
   buildEventConfig,
   blindedD,
+  ORGANIZER_SELF_INVITE_LABEL,
   type Approval,
   type EventConfig,
   type MatchVisibility,
@@ -343,7 +344,7 @@ export async function enrollOrganizerAsParticipant(
     links: [],
   };
 
-  const [invite] = await generateInvites(organizer, ctx, 1, appBaseUrl, "organizer-self");
+  const [invite] = await generateInvites(organizer, ctx, 1, appBaseUrl, ORGANIZER_SELF_INVITE_LABEL);
   await sendJoinRequest(
     organizer,
     ctx,

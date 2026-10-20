@@ -60,9 +60,13 @@ Zvolte **Vytvořit akci** a vyplňte formulář:
 - **Název, shrnutí, začátek/konec, místo**: veřejně viditelné pro kohokoli s
   odkazem.
 - **Schvalování** určuje, jak se lidé dostanou dovnitř:
-  - *Ruční posouzení*: každá žádost čeká na vaše schválení.
+  - *Ruční posouzení*: každá žádost čeká na vaše schválení, i když člověk
+    přišel přes pozvánkový odkaz. Výjimkou je jen vaše vlastní registrace jako
+    účastníka, ta projde automaticky.
   - *Pouze pozvánkové kódy*: dovnitř se dostanete jen přes pozvánkový odkaz,
-    jinak nijak.
+    jinak nijak. Je-li připojený koordinátor, žádosti bez platného kódu
+    odmítne a do fronty je nezařadí. V Admin seznamu je ale pořád uvidíte,
+    takže někoho můžete schválit i ručně.
   - *Pozvánkové kódy + ruční*: pozvánkové odkazy schvalují automaticky (je-li
     připojen koordinátor); ostatní čekají na vás. **Doporučeno pro většinu
     akcí.**

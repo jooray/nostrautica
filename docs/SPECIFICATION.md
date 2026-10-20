@@ -781,7 +781,7 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) for supported PWA modes, header guarantees, r
 
 ## 12. Ticketing & approvals
 
-- **Approval modes:** `approval = manual | invite | manual+invite` (§6.5, §8), both available from day one.
+- **Approval modes:** `approval = manual | invite | manual+invite | open` (§6.5, §8), both available from day one. The coordinator enforces the mode (PROTOCOL-NIP.md §6.2, audit SB-124): `manual` queues every join, invite-backed ones included, except the organizer's own `organizer-self` code; `invite` admits only a valid entitlement and rejects the rest; `manual+invite` and `open` auto-approve an entitlement and queue the rest.
 - **Future: Cashu ticketing + door check-in (§13):** buy a ticket → receive a Cashu token (P2PK-locked to the attendee npub, NIP-61-style; BTCPayServer/mint integration); join request carries `["payment", <cashu-token>]`; the coordinator's entitlement checker redeems it and auto-grants. No protocol change: it is one more checker beside `invite`. Related merged primitives: NIP-60 (relay-stored wallets), NIP-61 (nutzaps). There is **no standard ticketing NIP**. This convention is app-defined and documented here.
 
 ## 13. Future features

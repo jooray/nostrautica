@@ -477,10 +477,27 @@ export interface InvitePolicy {
   uses: number;
   /** Unix seconds after which the code no longer auto-approves. */
   exp?: number;
+  /** The entry's organizer-facing label, carried so a coordinator can recognise
+   *  {@link ORGANIZER_SELF_INVITE_LABEL} (PROTOCOL-NIP.md §7). */
+  label?: string;
 }
 
-export function invitePolicyOf(entry: { uses?: number; exp?: number }): InvitePolicy {
-  return { uses: entry.uses ?? 1, ...(entry.exp !== undefined ? { exp: entry.exp } : {}) };
+/**
+ * The `31601` label of the code an organizer client mints for the organizer's
+ * OWN self-join (the create flow's "enroll me as a participant"). Under
+ * `approval: "manual"` a coordinator queues every join, including invite-backed
+ * ones (audit SB-124), and this label is how it tells the organizer's own join
+ * apart: the list is signed by `E_id`, so only the event authority can mark a
+ * code this way, and the code's nsec never leaves the organizer's device.
+ */
+export const ORGANIZER_SELF_INVITE_LABEL = "organizer-self";
+
+export function invitePolicyOf(entry: { uses?: number; exp?: number; label?: string }): InvitePolicy {
+  return {
+    uses: entry.uses ?? 1,
+    ...(entry.exp !== undefined ? { exp: entry.exp } : {}),
+    ...(entry.label !== undefined ? { label: entry.label } : {}),
+  };
 }
 
 // ── 21600 Join Request rumor content ─────────────────────────────────────────

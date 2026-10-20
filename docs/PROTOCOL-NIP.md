@@ -367,7 +367,32 @@ silently drop them.
   - `["max_talk_sec", <int>]`: talk cap, default 900; `"0"` means unlimited.
   - `["matching", "on"|"off"]`: default `"off"` (only the literal `"on"` enables it).
   - `["match_visibility", "pair"|"event"]`: default `"pair"`.
-  - `["approval", "manual"|"invite"|"manual+invite"]`: default `"manual"`.
+  - `["approval", "manual"|"invite"|"manual+invite"|"open"]`: default `"manual"`
+    (`"open"` is the community default, §1.1). A coordinator **MUST** enforce it on
+    every `21600` it decides:
+    - `"manual"`: every join waits for the organizer, including one carrying a valid
+      invite (§7) or membership proof (§15), and no invite claim is consumed. The one
+      exception is the organizer's own self-join: a valid invite whose `31601` entry
+      carries `label: "organizer-self"` is verified and claimed like any invite and
+      auto-approves. Only `E_id` can write that label, and organizer clients mint
+      such a code only for the organizer's own participant enrollment.
+    - `"invite"`: a valid entitlement (invite, or a `member_of` proof on a community)
+      auto-approves. Anything else is **rejected**: no proof at all, or a code that is
+      unknown, already used up or expired. The coordinator does not queue a rejected
+      join. The organizer client still sees it in `E_inbox`, so the organizer remains
+      free to approve the person by hand, and the coordinator honours that `21604
+      approve` even for someone it rejected. A valid entitlement refused only because
+      the roster is full stays pending, as everywhere else.
+    - `"manual+invite"` and `"open"`: a valid entitlement auto-approves, and everything
+      else waits for the organizer.
+
+    **Compatibility.** No wire change. A coordinator that predates enforcement treats
+    every value as `"manual+invite"`. In a `"manual"` event it auto-approves valid
+    invites, which is looser than declared, and in an `"invite"` event it queues
+    instead of rejecting. Organizer clients that predate the `organizer-self` label
+    get their self-join queued under `"manual"`. That is stricter than intended, and
+    the organizer can approve themselves from the queue. An organizer client without
+    a coordinator applies the policy itself.
   - `["eck", <int>]`: **bootstrap only**: the ECK version in force when this config
     was last signed by `E_id` (default/floor 1). It is **NOT** the authority for the
     *current* ECK version. Because a coordinator cannot sign the `E_id`-authored 31600,
@@ -1041,7 +1066,8 @@ An invite code is a throwaway nsec, transported only in the URL fragment
   serialize to the same bytes.
 - Verification is stateless: `sha256(invite-pubkey) ∈ newest 31601` ∧ signature valid.
 - **Single-use:** the coordinator claims per invite pubkey, **first-processed wins**;
-  later uses fall back to the manual approval queue (a benign failure mode). This is
+  later uses fall back to the manual approval queue (a benign failure mode), or are
+  rejected in an `approval: "invite"` event (§6.2). This is
   eventually consistent by design: the organizer client and the coordinator do not share
   claim state, so a code can independently be "used" once locally by each.
 

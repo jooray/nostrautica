@@ -58,8 +58,13 @@ Choose **Create an event** and fill in the form:
 
 - **Title, summary, start/end, location**: shown publicly to anyone with the link.
 - **Approval** decides how people get in:
-  - *Manual review*: every request waits for your approval.
-  - *Invite codes only*: an invite link gets you in; no other way.
+  - *Manual review*: every request waits for your approval, including people
+    who arrive with an invite link. Your own enrollment as a participant is
+    the one exception and goes through automatically.
+  - *Invite codes only*: an invite link gets you in; no other way. With a
+    coordinator attached, requests without a working code are turned away
+    rather than queued. They still show up in your Admin list, so you can
+    approve someone by hand if you want to.
   - *Invite codes + manual*: invite links auto-approve (with a coordinator
     attached); people without a code wait for you. **Recommended for most events.**
 - **Event language**: see below.

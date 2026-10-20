@@ -45,6 +45,10 @@ import {
   inviteListContentSchema,
   invitePolicyOf,
   type InvitePolicy,
+  type Approval,
+  type InviteProof,
+  inviteHash,
+  ORGANIZER_SELF_INVITE_LABEL,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
   coordinatorGrantContentSchema,
@@ -110,7 +114,7 @@ import type { GiftWrap, Rumor, RumorKind } from "@nostrautica/protocol";
 
 import { Store, DAEMON_PARK_REASON, EVENT_NOT_LIVE_PARK_REASON, type BillingStateRow, type EnqueueOutcome } from "./store/db.js";
 import { JobRunner, ParkJobError } from "./pipeline/jobs.js";
-import { InviteChecker, MemberOfChecker, evaluateEntitlement, type LinkConfig } from "./pipeline/entitlement.js";
+import { InviteChecker, MemberOfChecker, evaluateEntitlement, type EntitlementDecision, type LinkConfig } from "./pipeline/entitlement.js";
 import { processAttendee } from "./pipeline/process.js";
 import { extractProfileBio, type NostrPost } from "./pipeline/profile.js";
 import {
@@ -716,6 +720,13 @@ interface EventState {
   /** Whether AI matching runs for this event (audit H4). "off" disables all AI stages. */
   matching: "on" | "off";
   matchVisibility: "pair" | "event";
+  /**
+   * The 31600 `approval` policy (PROTOCOL-NIP.md §6.2), enforced on every join
+   * (audit SB-124): `manual` queues everything, `invite` admits only a valid
+   * entitlement and rejects the rest, `manual+invite` / `open` auto-approve an
+   * entitlement and queue the rest. See {@link Coordinator.handleJoinLocked}.
+   */
+  approval: Approval;
   /** Prerecorded-talks journey mode (spec F2). "off" ⇒ talk submissions are ignored. */
   talks: TalksMode;
   /** Blossom origins media may be fetched from (audit C3 allowlist). Empty = derive from media urls, IP-guarded. */
@@ -1560,6 +1571,8 @@ export class Coordinator {
       nostrContextN: config?.nostrContext ?? 0,
       matching: config?.matching ?? "off",
       matchVisibility: config?.matchVisibility ?? "pair",
+      // The NIP default, and the strict one: no config means nothing auto-approves.
+      approval: config?.approval ?? "manual",
       talks: config?.talks ?? "off",
       blossomOrigins: config?.blossom ?? [],
       lang: config?.lang ?? "en",
@@ -1586,7 +1599,7 @@ export class Coordinator {
     };
     this.events.set(grant.coordinate, state);
     log(
-      `[install] event "${state.scoringCtx.title}" installed — matching=${state.matching}, nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, lang=${state.lang}, talks=${state.talks}`,
+      `[install] event "${state.scoringCtx.title}" installed — matching=${state.matching}, nostr_context=${state.nostrContextN}, match_visibility=${state.matchVisibility}, approval=${state.approval}, lang=${state.lang}, talks=${state.talks}`,
     );
     log(`          coordinate ${grant.coordinate}`);
     // Subscribe to this event's E_inbox NOW (not only at startup), so an install
@@ -2722,6 +2735,20 @@ export class Coordinator {
     const invite = inviteTag && inviteTag[1] && inviteTag[2]
       ? { invitePubkey: inviteTag[1], sig: inviteTag[2] }
       : undefined;
+    const hasMemberOf = state.spaceKind === KIND_COMMUNITY && parseMemberOfTags(tags).length > 0;
+
+    // `approval: "invite"` (audit SB-124): a join carrying no entitlement at all can
+    // never be admitted here, so it is rejected before anything is enrolled — no
+    // pending row, no queue entry. The organizer can still approve the person by
+    // hand: their client reads E_inbox itself, and an E_id `approve` creates the row
+    // (see handleAdmin). A row that already exists is left exactly as it is.
+    if (state.approval === "invite" && !invite && !hasMemberOf) {
+      log(
+        `[join] ${short(attendeePubkey)} REJECTED: approval is "invite" and the request carries no invite or membership proof` +
+          (existing ? ` (keeping their existing '${existing.status}' row)` : ""),
+      );
+      return;
+    }
 
     // Enroll BEFORE the entitlement round-trip below (production incident,
     // 2026-07-29). The app publishes a join (21600) and a profile submission
@@ -2746,6 +2773,35 @@ export class Coordinator {
       displayName: name.trim() || null,
       now: this.now(),
     });
+
+    // `approval: "manual"` (audit SB-124): every join waits for the organizer — a
+    // valid invite or membership proof included, which is the whole difference from
+    // `manual+invite`. The single exception is the organizer's own self-join (the
+    // create flow's "enroll me"), recognised by its E_id-labelled code.
+    if (state.approval === "manual") {
+      const decision = await this.organizerSelfJoin(state, attendeePubkey, invite);
+      if (decision.grant && !(await this.admitToRoster(state, attendeePubkey))) {
+        log(`[join] ${short(attendeePubkey)} organizer self-join refused: event roster is full`);
+        return;
+      }
+      if (!this.eventStillLive(state.coordinate, state.gen)) {
+        log(`[join] ${short(attendeePubkey)}: ${state.coordinate} is no longer live (detached/expired mid-join) — dropping the decision`);
+        return;
+      }
+      const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+      this.deps.store.upsertAttendee({
+        coordinate: state.coordinate,
+        pubkey: attendeePubkey,
+        status: decision.grant ? "approved" : (current?.status ?? "pending"),
+        displayName: name.trim() || null,
+        now: this.now(),
+      });
+      log(
+        `[join] ${short(attendeePubkey)} invite=${invite ? "yes" : "no"} approval=manual → ${decision.grant ? "AUTO-APPROVED (" + decision.reason + ")" : "manual queue (" + decision.reason + ")"}`,
+      );
+      if (decision.grant) await this.grantAndPublish(state, attendeePubkey);
+      return;
+    }
 
     const publishedInvites = await this.fetchInviteHashes(state);
     let decision = evaluateEntitlement([this.inviteChecker], {
@@ -2782,7 +2838,7 @@ export class Coordinator {
     // Only tried when the invite path did not already grant, and only on a community
     // — a dated event ignores the tag (isLinked needs a 31612 parent).
     let viaMemberOf: string | undefined;
-    if (!decision.grant && state.spaceKind === KIND_COMMUNITY && parseMemberOfTags(tags).length > 0) {
+    if (!decision.grant && hasMemberOf) {
       const memberOf = await this.memberOfChecker.check({
         coordinate: state.coordinate,
         attendeePubkey,
@@ -2797,6 +2853,15 @@ export class Coordinator {
         decision = { grant: false, reason: decision.reason === "no invite proof" ? memberOf.reason : `${decision.reason}; ${memberOf.reason}` };
       }
     }
+
+    // `approval: "invite"` (audit SB-124): an entitlement that does not hold — a
+    // used, expired or unknown code, an unverifiable membership proof — rejects the
+    // join instead of queueing it. Only a row THIS join created is removed (with
+    // anything a racing profile submission stored on it); a pre-existing row keeps
+    // whatever status it has. Decided before the roster ceiling on purpose: a VALID
+    // code refused for space stays pending below, because that person is entitled
+    // and the organizer has been told the roster is full.
+    const inviteOnlyReject = state.approval === "invite" && !decision.grant;
 
     // The roster ceiling applies to an auto-approval exactly as it does to an
     // organizer's (audit B-8): an invite code cannot conjure space that the 31604
@@ -2821,6 +2886,14 @@ export class Coordinator {
       log(`[join] ${short(attendeePubkey)}: ${state.coordinate} is no longer live (detached/expired mid-join) — dropping the decision`);
       return;
     }
+    if (inviteOnlyReject) {
+      if (!existing) this.deps.store.purgeAttendeeArtifacts(state.coordinate, attendeePubkey);
+      log(
+        `[join] ${short(attendeePubkey)} REJECTED: approval is "invite" and the entitlement did not hold (${decision.reason})` +
+          (existing ? ` — keeping their existing '${existing.status}' row` : ""),
+      );
+      return;
+    }
     const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
     const status = decision.grant ? "approved" : (current?.status ?? "pending");
     if (!decision.grant && current && current.status !== "pending") {
@@ -2841,6 +2914,41 @@ export class Coordinator {
       `[join] ${short(attendeePubkey)} invite=${invite ? "yes" : "no"}${viaMemberOf ? ` ${viaMemberOf}` : ""} → ${decision.grant ? "AUTO-APPROVED" : "manual queue (" + decision.reason + ")"}`,
     );
     if (decision.grant) await this.grantAndPublish(state, attendeePubkey);
+  }
+
+  /**
+   * The one auto-approval `approval: "manual"` allows (audit SB-124): the organizer's
+   * own participant enrollment. Organizer clients mint that join's code under the
+   * {@link ORGANIZER_SELF_INVITE_LABEL} label in the `E_id`-signed 31601 BEFORE
+   * sending the join, so the label is already readable when the join is, and only
+   * the event authority can have written it. The code must still verify and claim
+   * like any invite (pubkey-bound signature, first-come single use), so the label
+   * alone admits nobody. Everything else — a plain invite, a membership proof, no
+   * proof — is queued for the organizer, and no other code's claim is consumed.
+   */
+  private async organizerSelfJoin(
+    state: EventState,
+    attendeePubkey: string,
+    invite: InviteProof | undefined,
+  ): Promise<EntitlementDecision> {
+    const queued = { grant: false as const, reason: 'approval is "manual": every join waits for the organizer' };
+    if (!invite) return queued;
+    const h = inviteHash(invite.invitePubkey);
+    let invites = await this.fetchInviteHashes(state);
+    // Same single bypass re-fetch as the invite path: the organizer's code was
+    // published seconds ago and the cache may predate it.
+    if (!invites.has(h)) invites = await this.fetchInviteHashes(state, { force: true });
+    const policy = invites.get(h);
+    if (policy?.label !== ORGANIZER_SELF_INVITE_LABEL) return queued;
+    const decision = evaluateEntitlement([this.inviteChecker], {
+      coordinate: state.coordinate,
+      attendeePubkey,
+      invite,
+      publishedInvites: new Map([[h, policy]]),
+    }, this.now());
+    return decision.grant
+      ? { grant: true, reason: "organizer self-join" }
+      : { grant: false, reason: `organizer self-join code did not hold (${decision.reason}); ${queued.reason}` };
   }
 
   private async handleSubmission(
@@ -4673,7 +4781,22 @@ export class Coordinator {
       // Ownership token recheck (audit R1, belt to the mutex): a superseded handler
       // that somehow got past the mutex must not apply its decision.
       if (order && !this.stillOwnsSubject(coordinate, subject, order.rumorId)) return;
-      const attendee = pubkey ? this.deps.store.getAttendee(coordinate, pubkey) : undefined;
+      let attendee = pubkey ? this.deps.store.getAttendee(coordinate, pubkey) : undefined;
+      // No enrollment row: a join this coordinator rejected under `approval:
+      // "invite"` (audit SB-124), or one it never received. The organizer read the
+      // request from E_inbox themselves and E_id is the admission authority, so
+      // their approval creates the row instead of being silently dropped. The
+      // person's profile submission, held back by the enrollment gate, is picked up
+      // by the periodic inbox rescan.
+      if (!attendee && /^[0-9a-f]{64}$/.test(pubkey)) {
+        if (this.deps.store.attendeeCount(coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+          log(`[approve] REFUSED ${short(pubkey)}: event ${coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
+          return;
+        }
+        this.deps.store.upsertAttendee({ coordinate, pubkey, status: "pending", now: this.now() });
+        attendee = this.deps.store.getAttendee(coordinate, pubkey);
+        log(`[approve] ${short(pubkey)} had no enrollment row — creating it for the organizer's approval`);
+      }
       if (attendee) {
         // The roster has a real ceiling well below the 2,000-member intake cap
         // (audit B-8) — refuse BEFORE the grant rather than throwing mid-publish
@@ -6545,6 +6668,7 @@ export class Coordinator {
     }
     state.matching = config.matching;
     state.matchVisibility = config.matchVisibility;
+    state.approval = config.approval;
     state.talks = config.talks;
     state.lang = config.lang;
     state.scoringCtx = { ...state.scoringCtx, lang: config.lang };
@@ -6582,7 +6706,7 @@ export class Coordinator {
         log(`[retention] ${coordinate}: policy extended/removed — retention expiry lifted, parked work resumed`);
       }
     }
-    log(`[config] applied live 31600 update — matching=${state.matching}, match_visibility=${state.matchVisibility}, lang=${state.lang}`);
+    log(`[config] applied live 31600 update — matching=${state.matching}, match_visibility=${state.matchVisibility}, approval=${state.approval}, lang=${state.lang}`);
 
     // Relay handover (audit COORD-8 + C9 + R10 make-before-break): a relay change
     // records the candidate DURABLY under the config lock (so pending reflects the
