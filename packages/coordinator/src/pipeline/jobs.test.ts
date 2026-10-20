@@ -142,20 +142,30 @@ describe("JobRunner (spec §9.2)", () => {
       const order: string[] = [];
       let release!: () => void;
       const held = new Promise<void>((r) => (release = r));
+      // Sequenced on the handlers themselves, not on wall-clock sleeps (audit
+      // SB-61): a 60 ms budget for the score job to be claimed was a flake on a
+      // loaded runner. If the regression returns, the score job never runs while
+      // the serial job is held, `scored` never resolves, and the test times out.
+      let serialStarted!: () => void;
+      const started = new Promise<void>((r) => (serialStarted = r));
+      let scored!: () => void;
+      const scoreRan = new Promise<void>((r) => (scored = r));
       runner.register("process_attendee", async () => {
         order.push("serial-start");
+        serialStarted();
         await held;
         order.push("serial-end");
       });
       runner.register("score_batch", async () => {
         order.push("score");
+        scored();
       });
       runner.enqueue("process_attendee", "p", {});
       const drain = runner.drain();
-      await new Promise((r) => setTimeout(r, 5));
+      await started;
       // Queued only AFTER the drain started and the serial lane was already held.
       runner.enqueue("score_batch", "s", {});
-      await new Promise((r) => setTimeout(r, 60));
+      await scoreRan;
       release();
       await drain;
       // The score job ran while the serial job was still blocked.
@@ -479,27 +489,40 @@ describe("job leases and crash recovery (audit H1)", () => {
   });
 
   it("heartbeats a long-running job so a second worker can't reclaim its lease (P0-6)", async () => {
-    const store = new Store();
-    // Real wall-clock `now` (default) so the heartbeat timer and the lease math
-    // agree. Short lease so the test is fast; the handler runs well past it.
-    const runner = new JobRunner(store, { leaseMs: 90, maxAttempts: 1 });
-    let release!: () => void;
-    const gate = new Promise<void>((r) => (release = r));
-    runner.register("slow", async () => {
-      await gate;
-    });
-    store.enqueueJob("slow", "k", {});
-    const running = runner.runOne(); // claims the job and parks on the gate
+    // Fake interval timer + an injected clock, advanced together (audit SB-61).
+    // This used real wall-clock time with a 90 ms lease, so one event-loop stall
+    // of a lease length (GC, a loaded CI runner) let the lease lapse and failed
+    // the only test of the heartbeat. Now the heartbeat timer and the lease math
+    // see the same, deterministic time.
+    vi.useFakeTimers({ toFake: ["setInterval", "clearInterval"] });
+    try {
+      let t = 1_000_000;
+      const store = new Store();
+      const runner = new JobRunner(store, { leaseMs: 90, maxAttempts: 1, now: () => t });
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      runner.register("slow", async () => {
+        await gate;
+      });
+      store.enqueueJob("slow", "k", {});
+      const running = runner.runOne(); // claims the job and parks on the gate
+      await Promise.resolve();
 
-    // Park well past 2× the lease. With the heartbeat the lease is continuously
-    // extended; pre-fix (no heartbeat) it would have lapsed at ~90ms.
-    await new Promise((r) => setTimeout(r, 250));
-    const stolen = store.claimNextJob(Date.now(), "worker-2", 90);
-    expect(stolen).toBeUndefined(); // still owned by the original worker
+      // Park well past 2× the lease, one heartbeat interval (90/3) at a time.
+      // With the heartbeat the lease keeps moving; without it, it lapses at 90.
+      for (let i = 0; i < 9; i++) {
+        t += 30;
+        await vi.advanceTimersByTimeAsync(30);
+      }
+      const stolen = store.claimNextJob(t, "worker-2", 90);
+      expect(stolen).toBeUndefined(); // still owned by the original worker
 
-    release();
-    await running;
-    expect(store.pendingJobCount()).toBe(0); // completed by the original owner
+      release();
+      await running;
+      expect(store.pendingJobCount()).toBe(0); // completed by the original owner
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
