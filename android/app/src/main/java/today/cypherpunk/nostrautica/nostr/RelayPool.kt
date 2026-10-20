@@ -103,12 +103,17 @@ class RelayPool(private val http: OkHttpClient) {
 
     /**
      * One-shot fetch (nostr/stream.ts semantics): settles [graceMs] after the
-     * first EOSE, or when every reachable relay has answered, or at [timeoutMs].
-     * [answered] tells "none exist" apart from "nobody replied".
+     * first EOSE, or when every reachable relay has finished, or at [timeoutMs].
+     *
+     * [FetchResult.answered] counts real EOSEs only, so it tells "none exist"
+     * apart from "nobody replied". A `CLOSED` (auth-required, rate-limited, or our
+     * own "connection lost") ends that relay's part of the wait but is not an
+     * answer: a rate-limiting relay must never read as "you have no blind seed".
      */
     suspend fun fetch(urls: Collection<String>, filters: List<Filter>, timeoutMs: Long = 8_000, graceMs: Long = 600): FetchResult {
         val events = LinkedHashMap<String, NostrEvent>()
         val eosed = HashSet<String>()
+        val closed = HashSet<String>()
         val targets = urls.map(::normalize).distinct()
         if (targets.isEmpty()) return FetchResult(emptyList(), 0)
         withTimeoutOrNull(timeoutMs) {
@@ -119,25 +124,33 @@ class RelayPool(private val http: OkHttpClient) {
                 when (m) {
                     is Message.Event -> events[m.event.id] = m.event
                     is Message.Eose -> eosed += m.relay
-                    is Message.Closed -> eosed += m.relay
+                    is Message.Closed -> if (m.relay !in eosed) closed += m.relay
                     else -> Unit
                 }
                 if (firstEose < 0 && eosed.isNotEmpty()) firstEose = System.currentTimeMillis()
-                val dead = targets.count { relay(it).isDead && it !in eosed }
-                val allAnswered = eosed.size + dead >= targets.size
+                val finished = eosed + closed
+                val dead = targets.count { relay(it).isDead && it !in finished }
+                val allFinished = finished.size + dead >= targets.size
                 val graceOver = firstEose > 0 && System.currentTimeMillis() - firstEose > graceMs
                 emit(Unit)
-                !(allAnswered || graceOver)
+                !(allFinished || graceOver)
             }.collect()
         }
-        return FetchResult(events.values.toList(), eosed.size)
+        return FetchResult(events.values.toList(), eosed.size, targets.size)
     }
 
     private object Tick
 
     private fun ticker(): Flow<Any> = flow { while (true) { delay(150); emit(Tick) } }
 
-    data class FetchResult(val events: List<NostrEvent>, val answered: Int)
+    /**
+     * [answered] = relays that sent EOSE; [targets] = relays asked. [complete] =
+     * every one of them answered, the only evidence that a short page is really
+     * the end of a history (a silent, slow or CLOSED relay may hold older events).
+     */
+    data class FetchResult(val events: List<NostrEvent>, val answered: Int, val targets: Int = answered) {
+        val complete: Boolean get() = targets > 0 && answered >= targets
+    }
 
     // ── Publishing ──────────────────────────────────────────────────────────
 
