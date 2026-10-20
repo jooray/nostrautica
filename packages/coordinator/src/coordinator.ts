@@ -2758,6 +2758,14 @@ export class Coordinator {
     // here because the failure it prevents (an attendee holding a granted ECK while
     // every server-side view calls them pending) is silent, and because any future
     // path that writes this row without the mutex would reintroduce it.
+    // The invite fetches above are relay round trips, and detachEvent awaits job
+    // handlers but not inbound ones (audit SB-99). If the event was detached (or
+    // expired, or re-installed at another gen) meanwhile, stop: approving now would
+    // publish a grant carrying the deleted ECK and a roster for a torn-down event.
+    if (!this.eventStillLive(state.coordinate, state.gen)) {
+      log(`[join] ${short(attendeePubkey)}: ${state.coordinate} is no longer live (detached/expired mid-join) — dropping the decision`);
+      return;
+    }
     const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
     const status = decision.grant ? "approved" : (current?.status ?? "pending");
     if (!decision.grant && current && current.status !== "pending") {
@@ -2967,6 +2975,12 @@ export class Coordinator {
   /** Grant the ECK and publish the directory entry + roster for a new attendee. */
   async grantAndPublish(state: EventState, attendeePubkey: string): Promise<void> {
     const proof = await this.parentProofFor(state, attendeePubkey);
+    // Re-checked after the (relay-reading) proof lookup: never publish ECK custody
+    // for an event detached while this approval was in flight (audit SB-99).
+    if (!this.eventStillLive(state.coordinate, state.gen)) {
+      log(`[grant] ${short(attendeePubkey)}: ${state.coordinate} is no longer live — grant not published`);
+      return;
+    }
     const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, attendeePubkey, state.eck, "attendee", proof);
     await this.deps.transport.publish(grant, this.accountRelays(state));
     await this.publishDirectory(state, attendeePubkey);

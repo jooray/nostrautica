@@ -7010,6 +7010,31 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
 });
 
 /**
+ * Audit SB-99. detachEvent awaits job handlers but not inbound ones, and the join
+ * handler reads the invite list from relays mid-flight. A detach in that window
+ * left the join to publish a grant carrying the deleted ECK and a roster for a
+ * torn-down event.
+ */
+describe("audit SB-99 — a join in flight across a detach publishes nothing", () => {
+  it("drops the decision when the event was detached during the invite fetch", async () => {
+    const h = await setup();
+    h.transport.beforeFetch = (filter) => {
+      if (filter.kinds?.includes(31601)) {
+        h.transport.beforeFetch = undefined;
+        void h.coordinator.detachEvent(h.coordinate, { reason: "test detach", gen: 1 });
+      }
+    };
+    (h.coordinator as any).inviteHashCache.clear();
+    const before = h.transport.published.length;
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(grantsTo(h, sk)).toHaveLength(0);
+    expect(h.transport.published.slice(before).some((e) => e.kind === KIND_ROSTER)).toBe(false);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+  });
+});
+
+/**
  * Coordinator twin of audit SB-10. The install path picked the newest 31600 out of
  * the relay's answer by kind alone, trusting the relay to have honoured `authors`
  * and `#d`. A relay that does not could hand it another address's newer config.
