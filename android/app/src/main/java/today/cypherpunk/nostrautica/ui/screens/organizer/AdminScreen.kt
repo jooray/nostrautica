@@ -500,6 +500,7 @@ private fun InvitesCard(st: AdminState) {
     val s = LocalStrings.current
     val t = LocalTokens.current
     val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
     var count by remember { mutableStateOf("5") }
     var sharedOpen by remember { mutableStateOf(false) }
     var sharedUses by remember { mutableStateOf("100") }
@@ -552,8 +553,11 @@ private fun InvitesCard(st: AdminState) {
             RadioLine(s.t("admin.invites.format.csv"), csv, enabled = st.invites.isNotEmpty()) { csv = true }
             RadioLine(s.t("admin.invites.format.txt"), !csv, enabled = st.invites.isNotEmpty()) { csv = false }
             SmallButton(if (csv) s.t("admin.invites.downloadCsv") else s.t("admin.invites.download"), {
-                if (csv) shareFile(ctx, Invites.exportFilename("codes", naddr, "csv"), "text/csv") { it.writeText(Invites.CSV_BOM + Invites.codesCsv(st.invites)) }
-                else shareFile(ctx, Invites.exportFilename("codes", naddr, "txt"), "text/plain") { it.writeText(Invites.codesTxt(st.invites)) }
+                val invites = st.invites
+                scope.launch {
+                    if (csv) shareFile(ctx, Invites.exportFilename("codes", naddr, "csv"), "text/csv") { it.writeText(Invites.CSV_BOM + Invites.codesCsv(invites)) }
+                    else shareFile(ctx, Invites.exportFilename("codes", naddr, "txt"), "text/plain") { it.writeText(Invites.codesTxt(invites)) }
+                }
             }, enabled = st.invites.isNotEmpty())
             Text(s.t("admin.invites.exportUsed.title"), fontWeight = FontWeight.SemiBold)
             Dim(s.t("admin.invites.exportUsed.body"), size = 13)
@@ -563,7 +567,10 @@ private fun InvitesCard(st: AdminState) {
                 RadioLine(s.t("admin.invites.scope.all"), !unusedOnly) { unusedOnly = false }
                 RadioLine(s.t("admin.invites.scope.unused"), unusedOnly) { unusedOnly = true }
                 SmallButton(s.t("admin.invites.exportUsed.download"), {
-                    shareFile(ctx, Invites.exportFilename("used", naddr, "csv"), "text/csv") { it.writeText(Invites.CSV_BOM + Invites.usageCsv(Invites.filterUsageRows(rows, unusedOnly))) }
+                    val only = unusedOnly
+                    scope.launch {
+                        shareFile(ctx, Invites.exportFilename("used", naddr, "csv"), "text/csv") { it.writeText(Invites.CSV_BOM + Invites.usageCsv(Invites.filterUsageRows(rows, only))) }
+                    }
                 })
                 Dim(if (st.reportBusy) s.t("admin.invites.exportBusy") else s.t("admin.invites.usedNote"), size = 12)
             }
@@ -573,8 +580,11 @@ private fun InvitesCard(st: AdminState) {
                 if (st.invites.size > 1) SmallButton(s.t("admin.invites.copyAll"), { copyText(ctx, Invites.codesTxt(st.invites)); Toasts.show(s.t("admin.invites.copiedAll")) })
                 SmallButton(s.t("admin.invites.printSheet"), {
                     val sheet = Invites.forSheet(st.invites, st.report.used)
-                    shareFile(ctx, Invites.exportFilename("codes", naddr, "pdf"), "application/pdf") { f ->
-                        writeInviteSheetPdf(f, sheet, st.ctx.title, s.t("admin.inviteSheet.scanHint"))
+                    val hint = s.t("admin.inviteSheet.scanHint")
+                    scope.launch {
+                        shareFile(ctx, Invites.exportFilename("codes", naddr, "pdf"), "application/pdf") { f ->
+                            writeInviteSheetPdf(f, sheet, st.ctx.title, hint)
+                        }
                     }
                 })
             }
