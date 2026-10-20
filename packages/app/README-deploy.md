@@ -9,20 +9,25 @@ different HTTP-header guarantees.
 Uses [`nsyte`](https://github.com/sandwichfarm/nsyte) to publish the build as an
 nsite (NIP-5A: kinds 15128/35128 manifest + blobs to Blossom).
 
+nsyte is a Deno CLI published on JSR, not npm, so `npx nsyte` does not resolve.
+Use the same pinned version as `.github/workflows/deploy.yml`:
+
 ```sh
 pnpm --filter @nostrautica/app build
-npx nsyte deploy packages/app/build \
+deno run -A jsr:@nsyte/cli@0.27.2 deploy packages/app/build \
   --fallback /index.html \
   --relays wss://relay.primal.net,wss://relay.damus.io,wss://nos.lol
 ```
 
 `--fallback /index.html` publishes the SPA fallback that nsite gateways serve
 (with HTTP status 404 — which is exactly why the app uses hash routing, spec
-§10.1). CI signs with a NIP-46 bunker key held in a CI secret:
+§10.1). CI signs with a NIP-46 bunker key held in a CI secret. The signing
+option is `--sec`, which auto-detects a `bunker://` URL, `nbunksec` or `nsec`
+(0.27.2 has no `--bunker`):
 
 ```sh
-npx nsyte deploy packages/app/build --fallback /index.html \
-  --bunker "$NSYTE_BUNKER_URI"
+deno run -A jsr:@nsyte/cli@0.27.2 deploy packages/app/build --fallback /index.html \
+  --sec "$NSYTE_BUNKER_URI" --non-interactive
 ```
 
 ## Conventional static host (Netlify / Cloudflare / nginx)

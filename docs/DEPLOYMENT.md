@@ -6,7 +6,7 @@ This document separates supported deployment modes. They use the same static PWA
 
 ### nsite reference workflow
 
-`.github/workflows/deploy.yml` builds tagged releases and publishes with `nsyte` using a NIP-46 bunker capability. This is a reference Nostr-native delivery path. It uses an SPA fallback and hash routing.
+`.github/workflows/deploy.yml` runs the release gate, builds the PWA and publishes it with `nsyte` using a NIP-46 bunker capability. It runs only when dispatched by hand from the GitHub Actions tab: release tags are not pushed to the public mirror, so nothing publishes the nsite automatically when a release is tagged. This is a reference Nostr-native delivery path. It uses an SPA fallback and hash routing.
 
 nsite gateways control their response headers. They cannot be assumed to provide the same CSP, anti-framing, cache-control, or other HTTP-header policy as a conventional host. Treat nsite as a delivery option, not as equivalent to a configured web origin.
 
