@@ -161,6 +161,19 @@ class Nip46Signer private constructor(
             return Offer(uri, sk, secret, relays)
         }
 
+        /**
+         * Does this decrypted reply complete a `nostrconnect://` handshake? Only one
+         * that echoes the offer's secret: the client pubkey is public (it is in the QR
+         * and in the REQ every relay sees), so anyone can encrypt a reply to it, and
+         * the secret is the one proof the responder actually saw the code. A bare
+         * `"ack"` proves nothing and would let a relay peer become the user's signer.
+         * Same rule as nostr-tools (`response.result === secret`), which the PWA uses.
+         */
+        internal fun acceptsNostrConnect(msg: JsonObject, secret: String): Boolean {
+            val result = msg["result"] as? JsonPrimitive ?: return false
+            return result.isString && secret.isNotEmpty() && result.content == secret
+        }
+
         /** Wait for the signer to answer a [nostrConnectOffer]. */
         suspend fun awaitNostrConnect(pool: RelayPool, offer: Offer): Nip46Signer {
             val client = LocalSigner(Bytes.fromHex(offer.clientSk))
@@ -172,8 +185,7 @@ class Nip46Signer private constructor(
                         .collect { m ->
                             val text = runCatching { client.nip44Decrypt(m.event.pubkey, m.event.content) }.getOrNull() ?: return@collect
                             val msg = runCatching { Json.parseToJsonElement(text) as JsonObject }.getOrNull() ?: return@collect
-                            val result = (msg["result"] as? JsonPrimitive)?.content
-                            if (result == offer.secret || result == "ack") found.complete(m.event.pubkey)
+                            if (acceptsNostrConnect(msg, offer.secret)) found.complete(m.event.pubkey)
                         }
                 }
                 try { found.await() } finally { job.cancel() }
