@@ -23,6 +23,14 @@ export type EnqueueFn = (
 const IDLE_POLL_MS = 50;
 
 /**
+ * Lease-expiry recoveries after which a job is poisoned rather than run again
+ * (audit DS41-032). A graceful shutdown releases its job without counting, so
+ * only a process that died holding the job counts; three leaves room for a
+ * couple of unrelated hard kills (an OOM elsewhere, a SIGKILL'd deploy).
+ */
+export const MAX_LEASE_RECLAIMS = 3;
+
+/**
  * What ONE drain call currently has in flight: workers claiming or running a job
  * (`busy`), and how many of those are in each lane.
  *
@@ -395,7 +403,16 @@ export class JobRunner {
 
   /** Start the periodic queue report (unref'd). Returns a stop function. */
   startQueueReporter(intervalMs = 60_000): () => void {
-    const timer = setInterval(() => this.reportQueueDepth(), intervalMs);
+    // Diagnostics only: a store error here (SQLITE_BUSY during a backup, say) is
+    // logged, never thrown. A throw inside a timer is an uncaughtException, which
+    // lifecycle.ts turns into exit(1) (audit SB-13).
+    const timer = setInterval(() => {
+      try {
+        this.reportQueueDepth();
+      } catch (e) {
+        console.warn(`[${stamp()}] [jobs] queue report failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }, intervalMs);
     (timer as { unref?: () => void }).unref?.();
     return () => clearInterval(timer);
   }
@@ -407,6 +424,21 @@ export class JobRunner {
       // (a rename, a half-applied deploy) vanished into the poison state silently.
       console.warn(`[${stamp()}] [job] ${job.type} #${job.id} POISONED: no handler registered`);
       this.store.failJob(job.id, job.attempts + 1, this.now(), `no handler for ${job.type}`, true, token);
+      return;
+    }
+    // A job whose worker died under it this many times is presumed to be what
+    // killed it (audit DS41-032): a native crash or an OOM decoding a pathological
+    // file never reaches failJob, so `attempts` never moved and the row was
+    // re-claimed after every restart, re-downloading and re-billing each time,
+    // until systemd's StartLimitBurst gave up on the whole daemon. Poison it and
+    // tell the organizer instead.
+    if ((job.reclaims ?? 0) >= MAX_LEASE_RECLAIMS) {
+      const msg = `recovered ${job.reclaims} times after its worker died mid-run — presumed to crash the process`;
+      console.warn(`[${stamp()}] [job] ${job.type} #${job.id} POISONED: ${msg}`);
+      const owned = this.store.failJob(job.id, job.attempts + 1, this.now(), msg, true, token);
+      if (owned && this.onPoison) {
+        this.onPoison({ type: job.type, payload: safeParse(job.payload), attempts: job.attempts + 1, error: msg });
+      }
       return;
     }
     const startedAt = this.now();
@@ -422,7 +454,17 @@ export class JobRunner {
     // the process alive on its own.
     const heartbeatMs = Math.max(1, Math.floor(this.leaseMs / 3));
     const heartbeat = setInterval(() => {
-      this.store.heartbeatJob(job.id, token, this.now() + this.leaseMs);
+      // A failed heartbeat is logged and skipped, not fatal (audit SB-13): a throw
+      // here is an uncaughtException and would exit the daemon mid-job. One missed
+      // beat costs nothing (the next one is a third of a lease later), and a lease
+      // that does lapse is exactly what the expiry path is built to handle.
+      try {
+        this.store.heartbeatJob(job.id, token, this.now() + this.leaseMs);
+      } catch (e) {
+        console.warn(
+          `[${stamp()}] [job] ${job.type} #${job.id} lease heartbeat failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     }, heartbeatMs);
     (heartbeat as { unref?: () => void }).unref?.();
     try {

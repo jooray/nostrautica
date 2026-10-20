@@ -104,6 +104,26 @@ warn_if_slow() {
 # evidence that did not exist for the original outage.
 UNIT="nostrautica-coordinator"
 if systemctl --user cat "$UNIT" >/dev/null 2>&1; then
+  # A daemon this unit did not start (a leftover legacy setsid instance, or one
+  # started by hand) holds the single-daemon SQLite lock. Restarting the unit then
+  # starts a process that exits at once on that lock, Restart=always retries until
+  # StartLimitBurst marks the unit failed, and the OLD build keeps serving while
+  # this deploy fails its readiness wait (audit DS41-033). Refuse up front, with
+  # the instruction, rather than restart into a known conflict. Deliberately no
+  # automatic kill: an unexplained second daemon is for a human to look at.
+  # Membership is read from /proc/<pid>/cgroup, which names the unit's cgroup.
+  foreign=""
+  for pid in $(running_pids); do
+    [ -r "/proc/$pid/cgroup" ] || continue
+    grep -q "/$UNIT.service" "/proc/$pid/cgroup" 2>/dev/null || foreign="$foreign $pid"
+  done
+  if [ -n "$foreign" ]; then
+    echo "!!! a coordinator NOT managed by $UNIT is running (pid(s):$foreign) and holds the database lock."
+    echo "!!! Restarting the unit now would crash-loop against it while the old build keeps serving."
+    echo "!!! Stop it (kill -TERM$foreign; wait for it to exit, up to ~45s), then re-run this script."
+    echo "!!! refusing to restart $UNIT while an unmanaged coordinator is running — the OLD build is still serving $(date -Is)"
+    exit 1
+  fi
   log_offset=0
   [ -f "$LOG" ] && log_offset="$(wc -c < "$LOG" | tr -d ' ')"
   echo "=== coordinator restarting via systemd --user ($UNIT) $(date -Is) ==="

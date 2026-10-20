@@ -53,7 +53,7 @@ import {
   type EckVersion,
 } from "@nostrautica/protocol";
 import { Store } from "./store/db.js";
-import { Coordinator, type Transport } from "./coordinator.js";
+import { Coordinator, sanitizeMatchList, fitTalkContent, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
 import type { RoleRoutes } from "./providers/types.js";
 import type { ChatMls } from "./chat/mls.js";
@@ -2087,6 +2087,29 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     const attendee = h.store.getAttendee(h.coordinate, pk)!;
     expect(attendee.ai_profile_json).toBeTruthy();
   });
+
+  /** Audit DS41-039: rejected / opted-out talks kept feeding the profile. */
+  it("a rejected or opted-out talk stops feeding the profile, and the profile is re-derived", async () => {
+    const h = await setup(0, { talks: "on", matching: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    h.stt.setTranscript("651", "A talk about zero-knowledge proofs.");
+    h.stt.setTranscript("652", "Another talk about mixnets.");
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "ZK", media: talkMedia(651, "1b".repeat(32)), processForMatching: true });
+    await submitTalk(h, speakerSk, { talkD: "t2", title: "Mix", media: talkMedia(652, "1c".repeat(32)), processForMatching: true });
+    await h.coordinator.jobs.drain();
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toHaveLength(2);
+
+    await admin(h, "talk_reject", { pubkey: pk, talk_d: "t1" });
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toEqual(["Another talk about mixnets."]);
+    // Same media, now without process_for_matching: the stored transcript is kept
+    // on the row but no longer counts.
+    await submitTalk(h, speakerSk, { talkD: "t2", title: "Mix", media: talkMedia(652, "1c".repeat(32)), revision: 1 });
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toEqual([]);
+    const keys = (h.store as any).db.prepare("SELECT dedupe_key FROM jobs WHERE dedupe_key LIKE '%talk-out%'").all().map((r: any) => r.dedupe_key);
+    expect(keys).toHaveLength(2);
+  });
 });
 
 /** Decode every gift-wrapped kind-21602 key grant addressed to `recipientSk`. */
@@ -3331,6 +3354,16 @@ describe("audit COORD-8 — relay handover re-creates subscriptions", () => {
     expect(inboxSubs[1]!.closed).toBe(false);
     expect(inboxSubs[1]!.relays).toEqual(["wss://new.relay"]);
   });
+
+  it("repeated handovers do not grow the stop() list (audit SB-32)", async () => {
+    const h = await setup();
+    const closers = (h.coordinator as any).closers as Set<unknown>;
+    const before = closers.size;
+    for (let i = 0; i < 5; i++) {
+      await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", `wss://r${i}.relay`]], 10 + i));
+    }
+    expect(closers.size).toBe(before);
+  });
 });
 
 /** A minimal ChatMls stub (COORD-9 tests). */
@@ -3865,6 +3898,18 @@ describe("audit COORD-13 — roster embeddings are cached by profile hash + mode
     h.coordinator.jobs.enqueue("match_recompute", "re-embed-check", { coordinate: h.coordinate, pubkey: aPk });
     await h.coordinator.jobs.drain();
     expect(h.llm.embedCalls).toBe(callsAfterFirst); // all embeddings came from the cache
+  });
+
+  it("…and re-reads (decrypts) none of them from the store either (audit SB-15)", async () => {
+    const h = await setup(0, { prefilter: { threshold: 1, topM: 5, randomN: 1 } });
+    const aPk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const spy = vi.spyOn(h.store, "getArtifact");
+    h.coordinator.jobs.enqueue("match_recompute", "re-read-check", { coordinate: h.coordinate, pubkey: aPk });
+    await h.coordinator.jobs.drain();
+    expect(spy.mock.calls.filter((c) => c[0] === "roster_embedding")).toHaveLength(0);
+    spy.mockRestore();
   });
 });
 
@@ -4768,6 +4813,53 @@ describe("NIP §3.7 — coordinator handover (A → B convergence)", () => {
     // The genuine attendee, reconstructed from A's real roster, is unaffected.
     expect(storeB.getAttendee(h.coordinate, alicePk)?.status).toBe("approved");
   });
+
+  /**
+   * Audit SB-123. Every page is schema-capped at 700 entries but the merge was
+   * not, so a paginated roster could seed up to 40 × 700 "approved" members — each
+   * granted the ECK and handed paid pipeline work — past the 2,000-member cap that
+   * every join and approval is held to.
+   */
+  it("adopts nothing from a merged roster larger than the roster cap", async () => {
+    const h = await setup();
+    const identifier = h.coordinate.split(":").slice(2).join(":");
+    const forgerSk = generateSecretKey();
+    const forgerPk = getPublicKey(forgerSk);
+    const pages = 5; // 5 × 450 = 2,250 > MAX_ROSTER (a full 700-entry page is past NIP-44)
+    for (let p = 0; p < pages; p++) {
+      const attendees = Array.from({ length: 450 }, () => ({
+        pubkey: getPublicKey(generateSecretKey()),
+        d: "x",
+        role: "attendee" as const,
+      }));
+      const content = { v: 3, eck_current: 1, ...(p === 0 ? { pages } : {}), attendees };
+      h.transport.seed.push({
+        kind: KIND_ROSTER,
+        pubkey: forgerPk,
+        created_at: Math.floor(h.clock.t / 1000),
+        id: `big-roster-${p}`,
+        sig: "",
+        tags: [["d", rosterPageD(identifier, p)], ["a", h.coordinate]],
+        content: eckEncrypt(h.eck, JSON.stringify(content)),
+      } as any);
+    }
+    const coordSkB = generateSecretKey();
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: "cfg-big", sig: "", content: "",
+      tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", getPublicKey(coordSkB), "2"]],
+    } as any);
+    const { coordinator: coordB, store: storeB } = secondCoordinator(h, coordSkB);
+    await coordB.installEvent({
+      coordinate: h.coordinate,
+      inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"],
+      gen: 2,
+      source: "grant",
+      backfill: "full",
+    });
+    expect(storeB.attendeeCount(h.coordinate)).toBe(0);
+  });
 });
 
 // ── NIP §6.2 — match icebreakers (31605) ─────────────────────────────────────
@@ -5154,6 +5246,29 @@ describe("audit P9 — 31923 metadata selection uses the latest-event comparator
       tags: [["d", "cypherpunk"], ["title", "Stale"], ["end", "1"]], content: "", sig: "",
     } as any);
     expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(8000);
+  });
+
+  /** Audit SB-07: a record without `end`/`start` zeroed the anchor, so the
+   *  retention sweep skipped the event forever, restarts included. */
+  it("a newer 31923 without dates keeps the anchor, live and after a restart", async () => {
+    const h = await setup(0, { eventEndSec: 1000 });
+    const cfgSub = h.transport.subs.find(
+      (s) => s.filter.kinds?.includes(31923) && s.filter.kinds?.includes(31600),
+    )!;
+    const undated = {
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: 20, id: "ev-undated",
+      tags: [["d", "cypherpunk"], ["title", "Renamed"]], content: "", sig: "",
+    } as any;
+    cfgSub.onEvent(undated);
+    expect(h.coordinator.scoringContextOf(h.coordinate)).toMatchObject({ title: "Renamed" });
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(1000);
+    // The relay now holds the undated record as the newest one; a restart reads it.
+    h.transport.seed.push(undated);
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"], gen: 1, source: "restore",
+    });
+    expect(h.coordinator.eventEndSecOf(h.coordinate)).toBe(1000);
   });
 });
 
@@ -5693,6 +5808,60 @@ describe("audit C1 — commands resume to full completion after a partial failur
     // allowed to RESUME (pre-fix: rejected as stale), so the group was finally created.
     expect(h.store.getEvent(h.coordinate)).toBeDefined();
     expect(h.store.getMarmotGroup(h.coordinate)).toBeDefined();
+  });
+});
+
+/**
+ * Audit SB-121 / SB-127. The same-gen "resume" exception accepted a fresh 21603 for
+ * an install that had COMPLETED (the event row exists and is not tombstoned either
+ * way), and wrote the grant's ECK list verbatim. A grant signed before a revoke
+ * carries only v1, so the replay dropped the coordinator-minted v2 and the revoked
+ * attendee could read everything published afterwards.
+ */
+describe("audit SB-121 — a same-gen grant never rolls back a revocation", () => {
+  async function revokeOne(h: Harness): Promise<void> {
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+  }
+  function replayGrant(h: Harness): any {
+    return wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"],
+      },
+    });
+  }
+  const heldIds = (h: Harness) => (JSON.parse(h.store.getEvent(h.coordinate)!.eck_json) as EckVersion[]).map((v) => v.id);
+
+  it("rejects a same-gen grant for an install that already completed", async () => {
+    const h = await setup();
+    await revokeOne(h);
+    expect(heldIds(h)).toEqual([1, 2]);
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((m: unknown) => void logs.push(String(m)));
+    try {
+      await h.coordinator.handleCoordinatorWrap(replayGrant(h));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(heldIds(h)).toEqual([1, 2]);
+    expect(logs.join("\n")).toMatch(/already installed at gen 1/);
+    expect(logs.join("\n")).not.toMatch(/resuming a partially-completed install/);
+  });
+
+  it("a genuine resume union-merges the ECK set instead of replacing it", async () => {
+    const h = await setup();
+    await revokeOne(h);
+    // As if the daemon had crashed mid-install: nothing marks the install complete.
+    (h.coordinator as any).completedInstallGen.clear();
+    await h.coordinator.handleCoordinatorWrap(replayGrant(h));
+    expect(heldIds(h)).toEqual([1, 2]);
+    const live = (h.coordinator as any).events.get(h.coordinate);
+    expect(Math.max(...live.eck.map((v: EckVersion) => v.id))).toBe(2);
   });
 });
 
@@ -6933,4 +7102,199 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
     // The installed event answers from live state: no relay read of its 31600.
     expect(h.transport.fetches.slice(fetchesBefore).some((f) => f.kinds?.includes(31600) && f.authors?.includes(childEid))).toBe(false);
   });
+});
+
+/**
+ * Audit SB-99. detachEvent awaits job handlers but not inbound ones, and the join
+ * handler reads the invite list from relays mid-flight. A detach in that window
+ * left the join to publish a grant carrying the deleted ECK and a roster for a
+ * torn-down event.
+ */
+describe("audit SB-99 — a join in flight across a detach publishes nothing", () => {
+  it("drops the decision when the event was detached during the invite fetch", async () => {
+    const h = await setup();
+    h.transport.beforeFetch = (filter) => {
+      if (filter.kinds?.includes(31601)) {
+        h.transport.beforeFetch = undefined;
+        void h.coordinator.detachEvent(h.coordinate, { reason: "test detach", gen: 1 });
+      }
+    };
+    (h.coordinator as any).inviteHashCache.clear();
+    const before = h.transport.published.length;
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(grantsTo(h, sk)).toHaveLength(0);
+    expect(h.transport.published.slice(before).some((e) => e.kind === KIND_ROSTER)).toBe(false);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+  });
+});
+
+/** Audit SB-24: building the roster ran one chat-key query per attendee. */
+describe("audit SB-24 — the roster reads the event's chat keys in one query", () => {
+  it("does not query chat keys per attendee", async () => {
+    const h = await setup();
+    for (let i = 0; i < 5; i++) await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    const perAccount = vi.spyOn(h.store, "chatKeysForAccount");
+    const perEvent = vi.spyOn(h.store, "activeChatKeys");
+    const state = (h.coordinator as any).events.get(h.coordinate);
+    const roster = (h.coordinator as any).buildRosterContent(state);
+    expect(roster.attendees).toHaveLength(5);
+    expect(perAccount).not.toHaveBeenCalled();
+    expect(perEvent).toHaveBeenCalledTimes(1);
+  });
+});
+
+/** Audit DS41-046: the revoked attendee's own 31605 stayed readable to them. */
+describe("audit DS41-046 — revoke deletes the match list published to the removed attendee", () => {
+  it("the revoke's NIP-09 deletion names their 31605 at the pre-rotation d", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const listD = blindedD(h.eck, h.coordinate, pk);
+    expect(latestMatchList(h.transport, sk, getPublicKey(h.coordSk), listD)).toBeDefined();
+    const before = h.transport.published.length;
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+    const want = `${KIND_MATCH_LIST}:${getPublicKey(h.coordSk)}:${listD}`;
+    const deletions = h.transport.published.slice(before).filter((e) => e.kind === KIND_DELETION);
+    expect(deletions.some((e) => e.tags.some((t) => t[0] === "a" && t[1] === want))).toBe(true);
+  });
+});
+
+/** Audit DS41-042 / SB-98: a forward and a reverse batch for one directed pair both paid. */
+describe("audit SB-98 — one directed pair is scored once, however many batches hold it", () => {
+  it("concurrent forward + reverse batches make one provider call", async () => {
+    const h = await setup();
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const db = (h.store as any).db;
+    const row = db.prepare("SELECT a, b, inputs_hash FROM pairs WHERE coordinate = ?").get(h.coordinate);
+    db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(h.coordinate);
+    const pair = { a: row.a, b: row.b, inputsHash: row.inputs_hash };
+    const before = h.counters.batchCalls.length + h.counters.reverseCalls.length;
+    const c = h.coordinator as any;
+    await Promise.all([c.scoreBatchJob(h.coordinate, [pair]), c.scoreReverseBatchJob(h.coordinate, [pair])]);
+    expect(h.counters.batchCalls.length + h.counters.reverseCalls.length - before).toBe(1);
+    expect(c.pairsInFlight.size).toBe(0);
+  });
+});
+
+/** Audit SB-31: a store throw between the in-flight claim and dispatch leaked the claim. */
+describe("audit SB-31 — a store error before dispatch releases the rumor claim", () => {
+  it("the same join is processed on redelivery after bumpInboxRate threw", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = getPublicKey(sk);
+    const inviteSk = h.invites[h.nextInvite++]!;
+    const proof = makeInviteProof(inviteSk, h.coordinate, pk);
+    const wrap = wrapRumor(sk, getPublicKey(h.einboxSk), {
+      kind: KIND_JOIN_REQUEST,
+      content: { v: 2, name: "x", message: "", rsvp_public: false },
+      tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), proof.sig]],
+    });
+    const real = h.store.bumpInboxRate.bind(h.store);
+    (h.store as any).bumpInboxRate = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+    await expect(h.coordinator.handleInboxWrap(h.coordinate, wrap as any)).rejects.toThrow(/SQLITE_BUSY/);
+    (h.store as any).bumpInboxRate = real;
+    await h.coordinator.handleInboxWrap(h.coordinate, wrap as any);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+});
+
+/**
+ * Coordinator twin of audit SB-10. The install path picked the newest 31600 out of
+ * the relay's answer by kind alone, trusting the relay to have honoured `authors`
+ * and `#d`. A relay that does not could hand it another address's newer config.
+ */
+describe("install re-checks the 31600's author and d", () => {
+  it("ignores a newer 31600 at another d or by another author", async () => {
+    const h = await setup(0, { skipAutoInstall: true });
+    const eid = getPublicKey(h.eidSk);
+    const stranger = getPublicKey(generateSecretKey());
+    const forged = (pubkey: string, d: string, id: string) =>
+      ({
+        kind: 31600, pubkey, created_at: 99, id, sig: "", content: "",
+        tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", stranger, "1"]],
+      }) as any;
+    const realFetch = h.transport.fetch.bind(h.transport);
+    // A relay that ignores the filter and returns everything it has.
+    h.transport.fetch = async (filter: any, relays?: string[]) => [
+      ...(await realFetch(filter, relays)),
+      forged(eid, "some-other-event", "f1"),
+      forged(stranger, "cypherpunk", "f2"),
+    ];
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+  });
+});
+
+/**
+ * Audit DS41-034. A 31605 is ONE NIP-44 payload (65,535 plaintext bytes) and the
+ * client schema caps it at 100 matches. Reasoning is capped in characters, so CJK
+ * text could take a long list past the byte ceiling (nip44Encrypt throws on every
+ * retry, the attendee never gets a list), and a top_k over 100 published a list
+ * every client rejects.
+ */
+describe("audit DS41-034 — a match list always fits one NIP-44 payload", () => {
+  it("caps the count and trims from the weakest end until it fits", () => {
+    const matches = Array.from({ length: 120 }, (_, i) => ({
+      pubkey: getPublicKey(generateSecretKey()),
+      score: 1 - i / 200,
+      similarity: 0.5,
+      complementarity: 0.5,
+      reasoning: "協力".repeat(900), // 1,800 chars, 5,400 UTF-8 bytes
+    }));
+    const out = sanitizeMatchList({ v: 2, computed_at: 1, matches });
+    expect(out.matches.length).toBeGreaterThan(0);
+    expect(out.matches.length).toBeLessThanOrEqual(100);
+    expect(new TextEncoder().encode(JSON.stringify(out)).length).toBeLessThanOrEqual(65_535);
+    // Strongest first, kept in order.
+    expect(out.matches[0]!.pubkey).toBe(matches[0]!.pubkey);
+    expect(() => matchListContentSchema.parse(out)).not.toThrow();
+    // A short list is untouched.
+    expect(sanitizeMatchList({ v: 2, computed_at: 1, matches: matches.slice(0, 3) }).matches).toHaveLength(3);
+  });
+});
+
+/**
+ * Audit DS41-043. MAX_TRANSCRIPT_TEXT allows 100,000 characters, and the stored
+ * transcript went into the ECK-encrypted 31610 verbatim: a long keynote's
+ * transcript alone is past NIP-44's 65,535 bytes, so the talk could never publish.
+ */
+describe("audit DS41-043 — a long talk transcript still publishes", () => {
+  const base = {
+    v: 2 as const,
+    pubkey: "a".repeat(64),
+    talk_d: "t1",
+    title: "Keynote",
+    description: "",
+    speakers: [],
+    external_url: "https://example.com/talk",
+    external_kind: "youtube" as any,
+    lang: "en",
+    revision: 1,
+    status: "published" as const,
+    published_at: 1,
+  };
+  for (const [label, text] of [["ascii", "word ".repeat(20_000)], ["cjk", "演講".repeat(50_000)]] as const) {
+    it(`trims an oversized ${label} transcript to fit, and leaves a small one alone`, () => {
+      const content = { ...base, transcript: { x: "b".repeat(64), text, lang: "en", source: "stt" as const, updated_at: 1 } };
+      const fitted = fitTalkContent(content);
+      expect(new TextEncoder().encode(JSON.stringify(fitted)).length).toBeLessThanOrEqual(65_535);
+      expect(fitted.transcript!.text.endsWith("…")).toBe(true);
+      expect(text.startsWith(fitted.transcript!.text.slice(0, -1))).toBe(true);
+      expect(() => eckEncrypt(new Uint8Array(32), JSON.stringify(fitted))).not.toThrow();
+      const small = { ...content, transcript: { ...content.transcript, text: "short" } };
+      expect(fitTalkContent(small)).toBe(small);
+    });
+  }
 });

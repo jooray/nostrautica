@@ -106,6 +106,19 @@ export async function resolveRoleRoutes(
             `[coordinator] models.${role} "${ref.model}" not found in ${ref.provider} catalogue — cannot verify privacy tier`,
           );
         }
+        // The decision model rides on a SEPARATE catalogue page, and a failure to
+        // fetch that page is indistinguishable from "no decision models" by the
+        // time it reaches here (audit DS41-045). Publishing `match_score: "private"`
+        // for it would be a tier nobody checked, so it fails closed exactly like an
+        // unfetchable catalogue: an unverifiable private-required decision role
+        // needs the explicit escape hatch.
+        if (role === "match_score" && requirePrivate && !deps.allowUnverified) {
+          throw new Error(
+            `could not verify privacy for models.match_score "${ref.model}" — not in the ${ref.provider} ` +
+              `catalogue (its decision page may have failed to load) and the role requires a private-tier model. ` +
+              `Check the model id, or explicitly boot unverified with security.allow_unverified_model_privacy = true`,
+          );
+        }
         privacy = requirePrivate ? "private" : "non-private";
       } else if (info.private) {
         privacy = "private";

@@ -7,6 +7,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   safeFetch,
+  abandonHop,
   isBlockedAddress,
   SafeFetchError,
   pinnedLookup,
@@ -225,5 +226,41 @@ describe("isBlockedAddress — embedded IPv4 in IPv6 (audit 2026-09-04)", () => 
   it("still allows a genuinely public mapped address and ordinary global IPv6", () => {
     expect(isBlockedAddress("::ffff:808:808")).toBe(false); // 8.8.8.8
     expect(isBlockedAddress("2606:4700:4700::1111")).toBe(false);
+  });
+});
+
+/**
+ * Audit DS41-029. A redirect / non-2xx / over-cap hop used to clear its timeout and
+ * then await dispatcher.close(), which undici resolves only once no request is
+ * running; an unread, never-ending body keeps it running for undici's 300 s
+ * bodyTimeout. abandonHop must return promptly.
+ */
+describe("abandoning a hop with a stalled body", () => {
+  it("returns promptly where a plain close() would hang", async () => {
+    const { createServer } = await import("node:http");
+    const { Agent } = await import("undici");
+    const server = createServer((_req, res) => {
+      res.writeHead(500, { "content-type": "text/plain" });
+      res.write("partial");
+      // never ends
+    });
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", () => r()));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const agent = new Agent();
+      const controller = new AbortController();
+      const res = await fetch(`http://127.0.0.1:${port}/`, {
+        signal: controller.signal,
+        dispatcher: agent as unknown as NonNullable<RequestInit["dispatcher"]>,
+      });
+      expect(res.status).toBe(500);
+      const timer = setTimeout(() => {}, 60_000);
+      const started = Date.now();
+      await abandonHop(res, controller, timer, agent);
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
   });
 });

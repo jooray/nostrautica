@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from "vitest";
 import { encryptMedia } from "@nostrautica/protocol";
 import { Store } from "../store/db.js";
 import { transcribeMedia, MediaPolicyError, MIN_AUDIO_BYTES_TO_EXPECT_SPEECH } from "./transcribe.js";
-import { ProbeUnavailableError } from "./audio.js";
+import { ProbeUnavailableError, SubprocessError } from "./audio.js";
 import { MockStt } from "../providers/mock.js";
 
 async function fixture(durationDeclared = 30) {
@@ -388,4 +388,27 @@ describe("a limit-dependent media rejection is not cached across events", () => 
     expect((await transcribeMedia(deps, descriptor as any)).text).toBe("spoken words");
   });
 
+});
+
+/** Audit DS41-037: deterministic decrypt/decode failures rode the 3-day retry tail. */
+describe("deterministic media failures reject the media, not the attendee", () => {
+  const deps = (store: Store, ciphertext: Uint8Array, extractAudio?: any) => ({
+    store, stt: new MockStt({ default: "x" }), sttModel: "m",
+    fetchBlob: async () => ciphertext, probeDuration: async () => 10,
+    ...(extractAudio ? { extractAudio } : {}),
+  });
+  it("a descriptor whose key does not decrypt the blob is a MediaPolicyError", async () => {
+    const { ciphertext, descriptor } = await fixture();
+    const wrongKey = { ...descriptor, "decryption-key": btoa(String.fromCharCode(...new Uint8Array(32))) };
+    await expect(transcribeMedia(deps(new Store(":memory:"), ciphertext) as any, wrongKey as any)).rejects.toThrow(MediaPolicyError);
+  });
+  it("an ffmpeg exit is a MediaPolicyError; a timeout stays retryable", async () => {
+    const { ciphertext, descriptor } = await fixture();
+    const exit = async () => { throw new SubprocessError("ffmpeg exited 1", "exit"); };
+    await expect(transcribeMedia(deps(new Store(":memory:"), ciphertext, exit) as any, descriptor as any)).rejects.toThrow(MediaPolicyError);
+    const timeout = async () => { throw new SubprocessError("ffmpeg timed out", "timeout"); };
+    const err = await transcribeMedia(deps(new Store(":memory:"), ciphertext, timeout) as any, descriptor as any).catch((e) => e);
+    expect(err).toBeInstanceOf(SubprocessError);
+    expect(err).not.toBeInstanceOf(MediaPolicyError);
+  });
 });

@@ -340,8 +340,7 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
 
     // Manual redirect handling: re-validate the next hop.
     if (res.status >= 300 && res.status < 400) {
-      clearTimeout(timer);
-      await dispatcher.close().catch(() => {});
+      await abandonHop(res, controller, timer, dispatcher);
       const loc = res.headers.get("location");
       if (!loc) throw new SafeFetchError(`redirect without Location`, false);
       if (hop === maxRedirects) throw new SafeFetchError(`too many redirects`, false);
@@ -349,16 +348,14 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
       continue;
     }
     if (!res.ok) {
-      clearTimeout(timer);
-      await dispatcher.close().catch(() => {});
+      await abandonHop(res, controller, timer, dispatcher);
       throw new SafeFetchError(`HTTP ${res.status}`, res.status >= 500 || res.status === 429);
     }
 
     // Reject an over-limit declared Content-Length up front.
     const declared = Number(res.headers.get("content-length") ?? "");
     if (Number.isFinite(declared) && declared > opts.maxBytes) {
-      clearTimeout(timer);
-      await dispatcher.close().catch(() => {});
+      await abandonHop(res, controller, timer, dispatcher);
       throw new SafeFetchError(`declared size ${declared} exceeds cap ${opts.maxBytes}`, false);
     }
 
@@ -370,6 +367,28 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
     }
   }
   throw new SafeFetchError(`too many redirects`, false);
+}
+
+/**
+ * Give up on a hop whose body we will not read (a redirect, a non-2xx, an
+ * over-cap Content-Length) without waiting on it (audit DS41-029). This used to
+ * clear the timeout and then `await dispatcher.close()`, but undici's
+ * `Agent.close()` resolves only once no request is running, and an unread body
+ * keeps it running until undici's own bodyTimeout (300 s). A media host could
+ * answer 302/500 with a body that never ends and pin the serial job lane for
+ * five minutes per hop with no deadline armed. Abort the request (which cancels
+ * the body), then destroy the per-hop dispatcher rather than politely close it.
+ */
+export async function abandonHop(
+  res: Response,
+  controller: AbortController,
+  timer: ReturnType<typeof setTimeout>,
+  dispatcher: Dispatcher,
+): Promise<void> {
+  clearTimeout(timer);
+  controller.abort();
+  await res.body?.cancel().catch(() => {});
+  await dispatcher.destroy().catch(() => {});
 }
 
 /** Read a response body, aborting if it exceeds `maxBytes` (streamed cap). */

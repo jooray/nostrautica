@@ -57,6 +57,8 @@ import {
   chatKeyAttestationContentSchema,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   MAX_ROSTER,
+  MAX_MATCHES,
+  NIP44_MAX_PLAINTEXT_BYTES,
   MAX_ROSTER_PAGES,
   splitRoster,
   mergeRosterPages,
@@ -350,6 +352,45 @@ function parseEventEndSec(evt: NostrEvent | undefined): number {
 }
 
 /**
+ * Only the events actually at the address `<kind>:<author>:<d>` we asked for. A
+ * relay's `authors`/`#d` filtering is not a guarantee, and every addressable read
+ * that picks "the newest" from a relay answer must re-check both (audit SB-10, the
+ * coordinator side).
+ */
+function onlyAddressed(events: NostrEvent[], author: string, d: string): NostrEvent[] {
+  return events.filter((e) => e.pubkey === author && e.tags.some((t) => t[0] === "d" && t[1] === d));
+}
+
+/** A stored `events.eck_json`, or [] when it is not a readable version list. */
+function parseHeldEck(json: string): EckVersion[] {
+  try {
+    const v = JSON.parse(json) as unknown;
+    return Array.isArray(v)
+      ? v.filter((x): x is EckVersion => Number.isInteger(x?.id) && typeof x?.key === "string")
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Union of two ECK version lists by id, ascending (NIP §4: grants union-merge, so a
+ * stale list never drops a version the holder already has). `prefer` picks whose
+ * key survives when both name the same id.
+ */
+export function unionEckVersions(
+  held: EckVersion[],
+  incoming: EckVersion[],
+  prefer: "held" | "incoming",
+): EckVersion[] {
+  const byId = new Map<number, EckVersion>();
+  const [first, second] = prefer === "held" ? [incoming, held] : [held, incoming];
+  for (const v of first) byId.set(v.id, v);
+  for (const v of second) byId.set(v.id, v);
+  return [...byId.values()].sort((a, b) => a.id - b.id);
+}
+
+/**
  * Relays the Whitenoise Marmot/MLS client publishes key packages and group
  * traffic to (`CHAT_INTEROP_RELAYS`, shared with the app via the protocol
  * package). Ensured into every chat-enabled event's MLS routing state in
@@ -406,7 +447,7 @@ export interface Transport {
   fetchAll?(
     filter: any,
     relays?: string[],
-    opts?: { pageSize?: number; overlapSec?: number; maxTotal?: number; timeoutMs?: number },
+    opts?: { pageSize?: number; overlapSec?: number; maxTotal?: number; maxPages?: number; timeoutMs?: number },
   ): Promise<NostrEvent[]>;
   /** Prove a relay set is reachable (≥1 relay connects/EOSEs) before a relay
    *  handover promotes it (audit C9). Optional: a transport without it degrades to
@@ -775,7 +816,16 @@ export class Coordinator {
    * treated as authorization to run NOR as a detach.
    */
   private suspended = new Map<string, { inboxSkHex: string; eck: EckVersion[]; configRelays: string[]; gen: number; retryAt: number; attempts: number; reason: string }>();
-  private closers: Array<() => void> = [];
+  /**
+   * Coordinate → the gen an install of it ran to the end at in this process (a
+   * grant install or the boot restore). A same-gen grant for one of these is a
+   * redelivery or a replay, not a partial install to resume (audit SB-121/SB-127).
+   * In memory on purpose: a restart restores every stored event through the full
+   * install chain, which repopulates it, and a crash mid-install leaves no entry,
+   * so the redelivered grant still resumes.
+   */
+  private readonly completedInstallGen = new Map<string, number>();
+  private readonly closers = new Set<() => void>();
   /**
    * Rumor ids whose handler is currently in flight (audit P0-3). Subscription
    * callbacks are dispatched fire-and-forget and two gift wraps can legitimately
@@ -1293,7 +1343,11 @@ export class Coordinator {
     // arbitrary order. Pick with the shared §3.1 comparator — higher created_at,
     // then LOWEST id on a tie (NIP-01). v1 picked the highest id here, which
     // disagreed with the convention and with every other reader.
-    const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === KIND_EVENT_CONFIG));
+    // Re-checked here, not trusted to the relay's filter (the coordinator twin of
+    // audit SB-10): a relay that ignores `authors`/`#d` could otherwise hand us
+    // another address's newer 31600 and have it authorize (or detach) this one.
+    const addressed = onlyAddressed(cfgEvents, eidPubkey, identifier);
+    const cfgEvent = pickLatest(addressed.filter((e) => e.kind === KIND_EVENT_CONFIG));
     // Newest space record wins too (audit P9): relays return replaceable events in
     // arbitrary order and this event controls the title and, critically,
     // `eventEndSec` — the anchor the retention sweep deletes member records from. v1
@@ -1304,7 +1358,7 @@ export class Coordinator {
     // EMPTY scoring context — the matcher prompt said "EVENT: the event" with no
     // ABOUT and no TOPICS for the whole life of the install, and no live title edit
     // could ever repair it.
-    const evtEvent = pickLatest(cfgEvents.filter((e) => e.kind === spaceKind));
+    const evtEvent = pickLatest(addressed.filter((e) => e.kind === spaceKind));
     // A 31600 that is present but UNPARSEABLE — a pre-v2 wire config carrying
     // ["v","1"], a config whose `v` is newer than we speak, or any other malformed
     // tag parseEventConfig rejects — is treated EXACTLY like an unfetchable config:
@@ -1367,6 +1421,18 @@ export class Coordinator {
         if (!resumable) {
           log(
             `[install] REJECTED ${grant.coordinate}: grant gen ${gen} = the high-water mark (${highGen}) with no resumable install — replayed or stale`,
+          );
+          return;
+        }
+        // A row at the high gen is ALSO what a completed install looks like, so the
+        // row alone cannot tell a resume from a replay (audit SB-121/SB-127). This
+        // process finished an install of exactly this gen (a live grant install or
+        // the boot restore): the grant is a redelivery or a replay, and re-running
+        // the install would re-walk the inbox history, re-publish billing and
+        // re-key the event from the grant's ECK list.
+        if (this.completedInstallGen.get(grant.coordinate) === gen) {
+          log(
+            `[install] REJECTED ${grant.coordinate}: already installed at gen ${gen} — a redelivered or replayed grant, nothing to resume`,
           );
           return;
         }
@@ -1460,11 +1526,21 @@ export class Coordinator {
       this.suspended.delete(grant.coordinate);
     }
 
+    // Union-merge the ECK set with what this coordinate already holds (NIP §4: a
+    // stale grant never downgrades custody; audit SB-121). The grant's list is the
+    // organizer's view at signing time and lacks any version this daemon minted on
+    // a revoke since, so writing it verbatim rolled the event back to a key the
+    // revoked attendee holds. On a clash of ids the held key wins for a resume of
+    // the same gen, the grant's for a newer gen.
+    const held = this.deps.store.getEvent(grant.coordinate);
+    const eck = held
+      ? unionEckVersions(parseHeldEck(held.eck_json), grant.eck, gen > held.gen ? "incoming" : "held")
+      : grant.eck;
     this.deps.store.upsertEvent({
       coordinate: grant.coordinate,
       configJson: JSON.stringify(config ?? {}),
       inboxNsec: grant.inboxSkHex,
-      eckJson: JSON.stringify(grant.eck),
+      eckJson: JSON.stringify(eck),
       configRelays: JSON.stringify(relays),
       gen,
       now: this.now(),
@@ -1479,7 +1555,7 @@ export class Coordinator {
       identifier,
       eidPubkey,
       inboxSk: hexToBytes(grant.inboxSkHex),
-      eck: grant.eck,
+      eck,
       configRelays: relays,
       nostrContextN: config?.nostrContext ?? 0,
       matching: config?.matching ?? "off",
@@ -1503,7 +1579,7 @@ export class Coordinator {
       configCreatedAt: cfgEvent?.created_at ?? 0,
       gen,
       retentionDays: config?.retentionDays,
-      eventEndSec: parseEventEndSec(evtEvent),
+      eventEndSec: this.retentionAnchorFor(grant.coordinate, evtEvent),
       metaEventId: evtEvent?.id,
       metaCreatedAt: evtEvent?.created_at ?? 0,
       retentionExpired: this.deps.store.isRetentionExpired(grant.coordinate) || undefined,
@@ -1564,6 +1640,7 @@ export class Coordinator {
         log(`[handover] ${state.coordinate}: bootstrap failed (non-fatal): ${e instanceof Error ? e.message : e}`),
       );
     }
+    this.completedInstallGen.set(grant.coordinate, gen);
   }
 
   /** Suspend an event whose config is unfetchable (NIP §3.5, P0-5): record it for a
@@ -1574,6 +1651,7 @@ export class Coordinator {
     reason = "newest 31600 not fetchable",
   ): void {
     // Make sure a previously-live instance stops serving while suspended.
+    this.completedInstallGen.delete(grant.coordinate);
     for (const map of [this.inboxSubs, this.configSubs, this.chatSubs]) {
       map.get(grant.coordinate)?.close();
       map.delete(grant.coordinate);
@@ -2049,6 +2127,22 @@ export class Coordinator {
     return MAX_RUMORS_PER_EVENT_WINDOW + enrolled * RUMORS_PER_ATTENDEE_WINDOW;
   }
 
+  /**
+   * Run a pre-dispatch step between unwrapFresh's in-flight claim and
+   * processRumorWithRetry (which releases it), releasing the claim if the step
+   * throws (audit SB-31). A store error there (SQLITE_BUSY in bumpInboxRate) used
+   * to leave the rumor id claimed for the life of the process: the rumor could
+   * never be processed again until a restart, and the Set grew with every one.
+   */
+  private releaseClaimOnThrow<T>(rumorId: string, step: () => T): T {
+    try {
+      return step();
+    } catch (e) {
+      this.inFlightRumors.delete(rumorId);
+      throw e;
+    }
+  }
+
   /** Handle a wrap addressed to the coordinator's own pubkey (install/admin). */
   async handleCoordinatorWrap(wrap: GiftWrap): Promise<void> {
     // COORDINATOR_RUMOR_KINDS, not the global registry: this key installs events
@@ -2062,9 +2156,14 @@ export class Coordinator {
     // an event inbox. A rate-rejected wrap is left UNSEEN (not written to the durable
     // seen ledger) so the ledger can't be grown by a flood — a legitimately-throttled
     // rumor is simply retried by a later backfill rescan once the burst subsides.
-    const organizerCommand =
-      rumor.kind === KIND_ADMIN_COMMAND && this.isInstalledEventIdentity(rumor.pubkey);
-    if (!this.inboxRateAllows(COORD_INBOX_RATE_KEY, rumor.pubkey, organizerCommand)) {
+    const allowed = this.releaseClaimOnThrow(rumor.id, () =>
+      this.inboxRateAllows(
+        COORD_INBOX_RATE_KEY,
+        rumor.pubkey,
+        rumor.kind === KIND_ADMIN_COMMAND && this.isInstalledEventIdentity(rumor.pubkey),
+      ),
+    );
+    if (!allowed) {
       log(`[coord-inbox] rate limit — dropping kind ${rumor.kind} from ${short(rumor.pubkey)}`);
       this.inFlightRumors.delete(rumor.id);
       return;
@@ -2166,7 +2265,7 @@ export class Coordinator {
     // burst subsides; a sustained flood is simply re-dropped by this gate each pass.
     // The in-flight claim taken by unwrapFresh is released here since we bypass
     // processRumorWithRetry (which would otherwise release it).
-    if (!this.inboxRateAllows(coordinate, rumor.pubkey)) {
+    if (!this.releaseClaimOnThrow(rumor.id, () => this.inboxRateAllows(coordinate, rumor.pubkey))) {
       // Name the budget: "the event is over its ceiling" and "this one sender is
       // flooding" are the same line otherwise, and they call for opposite
       // responses from whoever is reading the log during an event.
@@ -2182,11 +2281,17 @@ export class Coordinator {
     // not be able to create a pending attendee row by submitting a profile. Left
     // UNSEEN (not marked) so a legitimate submission that merely raced ahead of its
     // own join request is recovered by the next backfill rescan once the join lands.
-    if (
-      rumor.kind === KIND_PROFILE_SUBMISSION &&
-      !this.deps.store.getAttendee(coordinate, rumor.pubkey) &&
-      !(await this.awaitEnrollment(coordinate, rumor))
-    ) {
+    let enrolled: boolean;
+    try {
+      enrolled =
+        rumor.kind !== KIND_PROFILE_SUBMISSION ||
+        !!this.deps.store.getAttendee(coordinate, rumor.pubkey) ||
+        (await this.awaitEnrollment(coordinate, rumor));
+    } catch (e) {
+      this.inFlightRumors.delete(rumor.id); // see releaseClaimOnThrow
+      throw e;
+    }
+    if (!enrolled) {
       log(`[submission] dropped from ${short(rumor.pubkey)}: no enrollment row (never joined) for ${coordinate}`);
       this.inFlightRumors.delete(rumor.id);
       return;
@@ -2428,7 +2533,24 @@ export class Coordinator {
         `[talk] "${content.title}" not processed for matching ` +
           `(${isExternal ? `external ${content.external_kind} URL` : "process_for_matching off"})`,
       );
+      // An earlier revision may have been folded into the profile; it no longer
+      // counts (talkTranscriptsForSpeaker filters it out), so re-derive (DS41-039).
+      this.rederiveAfterTalkWithdrawn(state, pubkey, content.talk_d, content.revision);
     }
+  }
+
+  /**
+   * Re-run the speaker's profile once a talk stops contributing to matching (it
+   * was rejected, or resubmitted without process_for_matching), so the derived
+   * ai_profile, their 31603 and other attendees' match reasoning drop its content
+   * (audit DS41-039). Keyed by the talk and its revision, so redelivery dedupes.
+   */
+  private rederiveAfterTalkWithdrawn(state: EventState, pubkey: string, talkD: string, revision: number): void {
+    if (state.matching !== "on" || !this.deps.store.getAttendee(state.coordinate, pubkey)?.profile_json) return;
+    this.jobs.enqueue("process_attendee", `proc:${state.coordinate}:${pubkey}:talk-out:${talkD}:${revision}`, {
+      coordinate: state.coordinate,
+      pubkey,
+    });
   }
 
   /**
@@ -2691,6 +2813,14 @@ export class Coordinator {
     // here because the failure it prevents (an attendee holding a granted ECK while
     // every server-side view calls them pending) is silent, and because any future
     // path that writes this row without the mutex would reintroduce it.
+    // The invite fetches above are relay round trips, and detachEvent awaits job
+    // handlers but not inbound ones (audit SB-99). If the event was detached (or
+    // expired, or re-installed at another gen) meanwhile, stop: approving now would
+    // publish a grant carrying the deleted ECK and a roster for a torn-down event.
+    if (!this.eventStillLive(state.coordinate, state.gen)) {
+      log(`[join] ${short(attendeePubkey)}: ${state.coordinate} is no longer live (detached/expired mid-join) — dropping the decision`);
+      return;
+    }
     const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
     const status = decision.grant ? "approved" : (current?.status ?? "pending");
     if (!decision.grant && current && current.status !== "pending") {
@@ -2900,6 +3030,12 @@ export class Coordinator {
   /** Grant the ECK and publish the directory entry + roster for a new attendee. */
   async grantAndPublish(state: EventState, attendeePubkey: string): Promise<void> {
     const proof = await this.parentProofFor(state, attendeePubkey);
+    // Re-checked after the (relay-reading) proof lookup: never publish ECK custody
+    // for an event detached while this approval was in flight (audit SB-99).
+    if (!this.eventStillLive(state.coordinate, state.gen)) {
+      log(`[grant] ${short(attendeePubkey)}: ${state.coordinate} is no longer live — grant not published`);
+      return;
+    }
     const grant = buildKeyGrant(this.deps.coordSk, state.coordinate, attendeePubkey, state.eck, "attendee", proof);
     await this.deps.transport.publish(grant, this.accountRelays(state));
     await this.publishDirectory(state, attendeePubkey);
@@ -2913,13 +3049,10 @@ export class Coordinator {
     // brings a kind-0 bio and posts — start the AI pipeline at approval time so
     // matching runs from profile + nostr-context immediately, no intro required.
     // The job is keyed by the submission hash, so when an intro lands later the
-    // changed key re-processes and the scoped recompute re-matches them.
+    // changed key re-processes and the scoped recompute re-matches them. Once:
+    // a second call here was an INSERT OR IGNORE no-op that still ran
+    // supersedePendingJobs's DELETE … LIKE over the jobs table (audit SB-46).
     this.enqueueProcess(state.coordinate, attendeePubkey);
-    // The AI pipeline is kicked off when a profile submission arrives (there is
-    // nothing to transcribe/profile until then). Directory text is already visible.
-    if (this.deps.store.getAttendee(state.coordinate, attendeePubkey)?.profile_json) {
-      this.enqueueProcess(state.coordinate, attendeePubkey);
-    }
     // Marmot (§4.2): add the newly-approved attendee's chat identities to the
     // group. Routed through the durable job runner (audit COORD-9): a transient
     // MLS/relay failure is retried with backoff and surfaces via the poison/21606
@@ -3092,6 +3225,17 @@ export class Coordinator {
       }
       roster = mergeRosterPages([roster, ...rest]);
     }
+    // The roster ceiling applies to a bootstrapped roster too (audit SB-123). Each
+    // page is schema-capped, but the merge is not: 40 pages × 700 entries is 28,000
+    // "approved" members, each granted the ECK and given paid pipeline work. No
+    // roster a coordinator could have published is that large, so one that is was
+    // not written by a coordinator: adopt none of it.
+    if (roster.attendees.length > MAX_ROSTER) {
+      log(
+        `[handover] ${state.coordinate}: ABORTING — the roster from ${short(rosterAuthor)} names ${roster.attendees.length} members, past the ${MAX_ROSTER}-member roster cap`,
+      );
+      return;
+    }
     log(
       `[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from a roster authored by ${short(rosterAuthor)}` +
         (rosterAuthor === state.eidPubkey ? " (E_id)" : " (prior coordinator)"),
@@ -3101,6 +3245,15 @@ export class Coordinator {
     for (const a of roster.attendees) {
       const existing = this.deps.store.getAttendee(state.coordinate, a.pubkey);
       if (existing?.status === "approved") continue; // already reconstructed from E_inbox backfill
+      // The same population cap a join is held to (audit SB-123): the E_inbox
+      // backfill may already have enrolled people, so the merged-roster check above
+      // is not enough on its own.
+      if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+        log(
+          `[handover] ${state.coordinate}: stopped seeding at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap; the rest of the roster was not adopted`,
+        );
+        break;
+      }
       // Recover profile + ai_profile from the prior 31603 (decryptable with our ECK).
       let profileJson: string | undefined;
       let aiProfileJson: string | undefined;
@@ -3303,6 +3456,16 @@ export class Coordinator {
     // room members should route to. Absent when chat is off / no group exists.
     const group = this.deps.store.getMarmotGroup(state.coordinate);
     const nostrGroupId = group?.status === "active" ? group.nostr_group_id : undefined;
+    // Every active chat key of the event in ONE query, grouped by account (audit
+    // SB-24): a query per attendee made each approval O(N) queries, and the
+    // capacity probe plus the publish run this twice per approval. Same rows and
+    // order (both read the (coordinate, chat_pubkey) primary key).
+    const keysByAccount = new Map<string, import("./store/db.js").MarmotChatKeyRow[]>();
+    for (const k of this.deps.store.activeChatKeys(state.coordinate)) {
+      const list = keysByAccount.get(k.account_pubkey);
+      if (list) list.push(k);
+      else keysByAccount.set(k.account_pubkey, [k]);
+    }
     const roster: RosterContent = {
       v: 2,
       eck_current: this.currentEck(state).id,
@@ -3312,9 +3475,7 @@ export class Coordinator {
         // active bindings, capped at MAX_CHAT_KEYS_PER_ACCOUNT, so clients dedupe
         // the member list by account and render per-device labels. Only emitted
         // when the attendee has attested at least one device.
-        const chatKeys = this.deps.store
-          .chatKeysForAccount(state.coordinate, a.pubkey)
-          .filter((k) => k.status === "active")
+        const chatKeys = (keysByAccount.get(a.pubkey) ?? [])
           .slice(0, MAX_CHAT_KEYS_PER_ACCOUNT)
           .map((k) => ({
             pubkey: k.chat_pubkey,
@@ -3832,7 +3993,7 @@ export class Coordinator {
       status: "published",
       published_at: publishedAt,
     };
-    const event = buildTalkEntry(this.publishKeys(state), state.coordinate, content, this.nextCreatedAt);
+    const event = buildTalkEntry(this.publishKeys(state), state.coordinate, fitTalkContent(content), this.nextCreatedAt);
     await this.publish(event, state.configRelays);
     // Record the publish-time ECK id (audit COORD-7): post-rotation deletion must
     // address the entry under the ECK it was published with, not the current one.
@@ -3875,6 +4036,7 @@ export class Coordinator {
     }
     this.deps.store.setTalkStatus(state.coordinate, pubkey, talkD, "rejected", 0, this.now());
     log(`[talk] rejected "${talk.title}" for ${short(pubkey)}`);
+    if (talk.transcript_json) this.rederiveAfterTalkWithdrawn(state, pubkey, talkD, talk.revision);
   }
 
   /**
@@ -3925,6 +4087,36 @@ export class Coordinator {
    * profile_hash + the embedding model id in the artifact table, so a recompute
    * only embeds attendees whose profile CHANGED — not the full roster every time.
    */
+  /**
+   * Roster embeddings already read this process, by their content hash (audit
+   * SB-15). getArtifact is an at-rest decrypt plus a brotli decompress, and every
+   * match_recompute re-read the whole roster's: R attendees' recomputes cost R²
+   * decrypts of R identical vectors (about 91 s of CPU for a 200-person recompute,
+   * hours at the 2,000 cap). The key is the provider/model plus the profile hash,
+   * so an entry can never go stale. LRU-bounded to a full roster plus headroom.
+   */
+  private readonly embeddingCache = new Map<string, number[]>();
+  private static readonly EMBEDDING_CACHE_MAX = 2500;
+
+  private cachedEmbedding(hash: string): number[] | undefined {
+    const hit = this.embeddingCache.get(hash);
+    if (hit) {
+      this.embeddingCache.delete(hash);
+      this.embeddingCache.set(hash, hit);
+      return hit;
+    }
+    const stored = this.deps.store.getArtifact("roster_embedding", hash) as number[] | undefined;
+    if (stored) this.rememberEmbedding(hash, stored);
+    return stored;
+  }
+
+  private rememberEmbedding(hash: string, embedding: number[]): void {
+    this.embeddingCache.set(hash, embedding);
+    if (this.embeddingCache.size > Coordinator.EMBEDDING_CACHE_MAX) {
+      this.embeddingCache.delete(this.embeddingCache.keys().next().value!);
+    }
+  }
+
   private async attachEmbeddings(coordinate: string, roster: AttendeeForMatching[], signal?: AbortSignal): Promise<void> {
     const provider = this.roles.embed.llm;
     if (!provider.embed) return;
@@ -3939,7 +4131,7 @@ export class Coordinator {
     const missing: { index: number; pubkey: string; hash: string; text: string }[] = [];
     roster.forEach((a, index) => {
       const hash = sha256Hex(utf8ToBytes(`${modelKey}:${a.profileHash}`));
-      const cached = this.deps.store.getArtifact("roster_embedding", hash) as number[] | undefined;
+      const cached = this.cachedEmbedding(hash);
       if (cached) a.embedding = cached;
       else missing.push({ index, pubkey: a.pubkey, hash, text: textFor(a.pubkey) });
     });
@@ -3952,6 +4144,7 @@ export class Coordinator {
     missing.forEach((m, i) => {
       const embedding = embeddings[i]!;
       roster[m.index]!.embedding = embedding;
+      this.rememberEmbedding(m.hash, embedding);
       this.deps.store.putArtifact({
         stage: "roster_embedding",
         inputsHash: m.hash,
@@ -3962,6 +4155,40 @@ export class Coordinator {
         owner: { coordinate, pubkey: m.pubkey },
       });
     });
+  }
+
+  /**
+   * Directed pairs (at an inputs_hash) a score batch is paying for right now.
+   *
+   * A's recompute queues the reverse batch {a: B, b: A}; B's recompute queues a
+   * forward batch for the same directed row. Different dedupe keys, so both jobs
+   * exist, and the score lane runs two wide: each re-checked "already scored"
+   * before its call, both saw the row pending, and the provider was paid twice
+   * for one pair (audit DS41-042 / SB-98). A batch now claims its pending pairs
+   * synchronously (no await between check and claim) and skips any another batch
+   * holds. Skipped, not counted as missing: the holder retries on its own failure.
+   */
+  private readonly pairsInFlight = new Set<string>();
+
+  private pairFlightKey(coordinate: string, p: CandidatePair): string {
+    return `${coordinate}|${p.a}|${p.b}|${p.inputsHash}`;
+  }
+
+  private claimPendingPairs(coordinate: string, pairs: CandidatePair[]): CandidatePair[] {
+    const claimed: CandidatePair[] = [];
+    for (const p of pairs) {
+      const dir = this.deps.store.getPairDirection(coordinate, p.a, p.b);
+      if (dir && dir.inputs_hash === p.inputsHash && dir.scored) continue;
+      const key = this.pairFlightKey(coordinate, p);
+      if (this.pairsInFlight.has(key)) continue;
+      this.pairsInFlight.add(key);
+      claimed.push(p);
+    }
+    return claimed;
+  }
+
+  private releasePairs(coordinate: string, pairs: CandidatePair[]): void {
+    for (const p of pairs) this.pairsInFlight.delete(this.pairFlightKey(coordinate, p));
   }
 
   /**
@@ -3984,12 +4211,24 @@ export class Coordinator {
     const targetProfile = this.loadAiProfile(coordinate, target);
     if (!targetProfile) return { scored: [], missing: 0 };
 
-    // Score only pairs still pending for their current inputs_hash.
-    const todo = pairs.filter((p) => {
-      const dir = this.deps.store.getPairDirection(coordinate, p.a, p.b);
-      return !dir || dir.inputs_hash !== p.inputsHash || !dir.scored;
-    });
+    // Score only pairs still pending for their current inputs_hash, and not being
+    // scored right now by another batch (audit DS41-042 / SB-98).
+    const todo = this.claimPendingPairs(coordinate, pairs);
+    try {
+      return await this.scoreClaimedBatch(coordinate, state, target, targetProfile, todo, signal);
+    } finally {
+      this.releasePairs(coordinate, todo);
+    }
+  }
 
+  private async scoreClaimedBatch(
+    coordinate: string,
+    state: EventState,
+    target: string,
+    targetProfile: NonNullable<ReturnType<Coordinator["loadAiProfile"]>>,
+    todo: CandidatePair[],
+    signal?: AbortSignal,
+  ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const candidates: BatchCandidate[] = [];
     const pairById = new Map<string, CandidatePair>();
     for (const p of todo) {
@@ -4086,12 +4325,24 @@ export class Coordinator {
     const sharedProfile = this.loadAiProfile(coordinate, shared);
     if (!sharedProfile) return { scored: [], missing: 0 };
 
-    // Score only pairs still pending for their current inputs_hash.
-    const todo = pairs.filter((p) => {
-      const dir = this.deps.store.getPairDirection(coordinate, p.a, p.b);
-      return !dir || dir.inputs_hash !== p.inputsHash || !dir.scored;
-    });
+    // Score only pairs still pending for their current inputs_hash, and not being
+    // scored right now by another batch (audit DS41-042 / SB-98).
+    const todo = this.claimPendingPairs(coordinate, pairs);
+    try {
+      return await this.scoreClaimedReverseBatch(coordinate, state, shared, sharedProfile, todo, signal);
+    } finally {
+      this.releasePairs(coordinate, todo);
+    }
+  }
 
+  private async scoreClaimedReverseBatch(
+    coordinate: string,
+    state: EventState,
+    shared: string,
+    sharedProfile: NonNullable<ReturnType<Coordinator["loadAiProfile"]>>,
+    todo: CandidatePair[],
+    signal?: AbortSignal,
+  ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const targets: BatchCandidate[] = [];
     const pairByTarget = new Map<string, CandidatePair>();
     for (const p of todo) {
@@ -4632,11 +4883,24 @@ export class Coordinator {
     // 1. Delete the removed attendee's directory entry (addressable, NIP-09) at the
     //    PRE-rotation blinded d.
     const removedD = blindedD(prevBytes, state.coordinate, removedPubkey);
+    // …and the match list published TO them (audit DS41-046): it holds other
+    // attendees' pubkeys, scores and private reasoning, and was replaced for
+    // everyone else by the rotation. Its d is blinded under whichever ECK was
+    // current when it was published, so every pre-rotation version is named.
+    const matchListDs = new Set(
+      state.eck.filter((v) => v.id !== newId).map((v) => blindedD(base64ToBytes(v.key), state.coordinate, removedPubkey)),
+    );
+    matchListDs.add(blindedD(prevBytes, state.coordinate, removedPubkey));
     const deletion = finalizeEvent(
       {
         kind: KIND_DELETION,
         created_at: Math.floor(this.now() / 1000),
-        tags: [["a", `${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${removedD}`], ["k", String(KIND_DIRECTORY_ENTRY)]],
+        tags: [
+          ["a", `${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${removedD}`],
+          ...[...matchListDs].map((d) => ["a", `${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`]),
+          ["k", String(KIND_DIRECTORY_ENTRY)],
+          ["k", String(KIND_MATCH_LIST)],
+        ],
         content: "revoked",
       },
       this.deps.coordSk,
@@ -4782,7 +5046,12 @@ export class Coordinator {
     }
     // Drop live state and DELETE key custody (D6).
     this.events.delete(coordinate);
+    this.completedInstallGen.delete(coordinate);
+    // A later re-install that hits a budget must notify again (audit SB-32).
+    this.budgetNotified.delete(coordinate);
     this.deps.store.deleteEvent(coordinate);
+    // A rotation's resume progress holds an ECK: custody, so it goes too (SB-125).
+    this.deps.store.clearCommandProgressForEvent(coordinate);
     this.inviteHashCache.delete(coordinate);
     if (!already) {
       log(`[detach] ${coordinate} — ${opts.reason} (gen ${gen}); custody deleted, ${cancelled} job(s) cancelled, subscriptions closed`);
@@ -5233,7 +5502,11 @@ export class Coordinator {
       { kinds: [KIND_INVITE_LIST], authors: [state.eidPubkey], "#d": [parseCoordinate(state.coordinate).identifier] },
       state.configRelays,
     );
-    const latest = pickLatest(events);
+    const latest = pickLatest(
+      onlyAddressed(events, state.eidPubkey, parseCoordinate(state.coordinate).identifier).filter(
+        (e) => e.kind === KIND_INVITE_LIST,
+      ),
+    );
     let invites = new Map<string, InvitePolicy>();
     if (latest) {
       try {
@@ -5522,7 +5795,7 @@ export class Coordinator {
     });
 
     const coordCloser = this.subscribeCoordInbox();
-    this.closers.push(coordCloser);
+    this.closers.add(coordCloser);
     // Periodically revalidate suspended events (NIP §3.5, P0-5): one whose config was
     // unfetchable at startup resumes once it's fetchable, or detaches if it now names
     // another coordinator/gen.
@@ -5537,7 +5810,7 @@ export class Coordinator {
     // unref'd 60 s interval that iterates an empty Map.
     const suspendTimer = setInterval(() => void this.retrySuspendedEvents().catch(() => {}), 60_000);
     if (typeof (suspendTimer as any).unref === "function") (suspendTimer as any).unref();
-    this.closers.push(() => clearInterval(suspendTimer));
+    this.closers.add(() => clearInterval(suspendTimer));
     // Retention sweep (NIP §6.2): run once at boot (catches events whose window
     // elapsed while the daemon was down) and then hourly. Cheap — it only touches
     // events that carry a retention policy and are past their deadline.
@@ -5546,7 +5819,7 @@ export class Coordinator {
     );
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
-    this.closers.push(() => clearInterval(retentionTimer));
+    this.closers.add(() => clearInterval(retentionTimer));
     // Profile-refresh sweep: pick up kind-0 bios edited outside Nostrautica (see
     // {@link profileRefreshSweep} for the user report this fixes).
     //
@@ -5570,7 +5843,7 @@ export class Coordinator {
         });
     }, PROFILE_REFRESH_INTERVAL_MS);
     if (typeof (profileTimer as any).unref === "function") (profileTimer as any).unref();
-    this.closers.push(() => clearInterval(profileTimer));
+    this.closers.add(() => clearInterval(profileTimer));
     // Daemon-wide ceiling release (audit SEC-7): work parked because the whole
     // daemon was over its rolling budget has no other way back — the per-event
     // resume paths are driven by billing and by organizer action, and neither
@@ -5590,7 +5863,7 @@ export class Coordinator {
       }
     }, 600_000);
     if (typeof (daemonBudgetTimer as any).unref === "function") (daemonBudgetTimer as any).unref();
-    this.closers.push(() => clearInterval(daemonBudgetTimer));
+    this.closers.add(() => clearInterval(daemonBudgetTimer));
     // Resume any relay handover left pending by a transient outage or a restart
     // (audit C9): probe the stored candidate and promote it once reachable. Run once
     // at boot, then periodically.
@@ -5605,19 +5878,19 @@ export class Coordinator {
       const marmot = this.marmot;
       const linkTimer = setInterval(() => void marmot.sweepExpiredLinks().catch(() => {}), 600_000);
       if (typeof (linkTimer as any).unref === "function") (linkTimer as any).unref();
-      this.closers.push(() => clearInterval(linkTimer));
+      this.closers.add(() => clearInterval(linkTimer));
     }
     // §15: events naming a parent community. Not awaited at boot, so the daemon's
     // readiness never waits on a relay round trip per linked event.
     const hierarchyTimer = setInterval(() => void this.hierarchySweep().catch(() => {}), 300_000);
     if (typeof (hierarchyTimer as any).unref === "function") (hierarchyTimer as any).unref();
-    this.closers.push(() => clearInterval(hierarchyTimer));
+    this.closers.add(() => clearInterval(hierarchyTimer));
     const hierarchyBoot = setTimeout(() => void this.hierarchySweep().catch(() => {}), 30_000);
     if (typeof (hierarchyBoot as any).unref === "function") (hierarchyBoot as any).unref();
-    this.closers.push(() => clearTimeout(hierarchyBoot));
+    this.closers.add(() => clearTimeout(hierarchyBoot));
     const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
     if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
-    this.closers.push(() => clearInterval(relayTimer));
+    this.closers.add(() => clearInterval(relayTimer));
     // Periodic inbox rescan (P1 #14). Every "left unseen for a later backfill
     // rescan" comment in this file — the rate gate, the inbound queue cap, the
     // give-up arm of processRumorWithRetry — was writing a cheque only a RESTART
@@ -5633,7 +5906,7 @@ export class Coordinator {
         });
     }, INBOX_RESCAN_INTERVAL_MS);
     if (typeof (rescanTimer as any).unref === "function") (rescanTimer as any).unref();
-    this.closers.push(() => clearInterval(rescanTimer));
+    this.closers.add(() => clearInterval(rescanTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
 
@@ -5757,10 +6030,13 @@ export class Coordinator {
     const close = () => {
       if (closed) return;
       closed = true;
+      // A superseded or detached subscription leaves the stop() list with it, so
+      // the list does not grow with every relay handover (audit SB-32).
+      this.closers.delete(close);
       raw?.();
     };
     map.set(coordinate, { key, close });
-    this.closers.push(close);
+    this.closers.add(close);
     existing?.close();
   }
 
@@ -6100,6 +6376,28 @@ export class Coordinator {
    * retention anchor `eventEndSec` — so a moved end date re-times the retention
    * sweep instead of leaving it pinned to the install-time value.
    */
+  /**
+   * The retention anchor for a space record (audit SB-07). A record that carries
+   * a usable `end`/`start` moves the anchor and is remembered; one that carries
+   * neither keeps the held anchor, exactly as title/summary fall back to the held
+   * value. Before, a title-only edit from a NIP-52 client that omits the dates
+   * zeroed the anchor and the retention sweep skipped the event forever, and a
+   * restart re-read that same newest record. Removing a retention window is a
+   * 31600 `retention` change, which applyConfigUpdate handles on purpose.
+   */
+  private retentionAnchorFor(coordinate: string, record: NostrEvent | undefined): number {
+    const parsed = parseEventEndSec(record);
+    if (parsed > 0) {
+      this.deps.store.setRetentionAnchor(coordinate, parsed);
+      return parsed;
+    }
+    const held = this.deps.store.getRetentionAnchor(coordinate);
+    if (held > 0 && record) {
+      log(`[config] ${coordinate}: space record ${record.id.slice(0, 8)} has no usable end/start — keeping the retention anchor ${held}`);
+    }
+    return held;
+  }
+
   private handleMetaUpdate(coordinate: string, event: NostrEvent): void {
     const state = this.events.get(coordinate);
     if (!state) return;
@@ -6117,7 +6415,7 @@ export class Coordinator {
     } else if (event.created_at < state.metaCreatedAt) {
       return;
     }
-    state.eventEndSec = parseEventEndSec(event);
+    state.eventEndSec = this.retentionAnchorFor(coordinate, event);
     state.scoringCtx = {
       ...state.scoringCtx,
       title: event.tags.find((t) => t[0] === "title")?.[1] ?? state.scoringCtx.title,
@@ -6728,8 +7026,8 @@ export class Coordinator {
   }
 
   stop(): void {
-    for (const c of this.closers) c();
-    this.closers = [];
+    for (const c of [...this.closers]) c();
+    this.closers.clear();
   }
 
   // expose for grant version bumping
@@ -6773,10 +7071,37 @@ function blindedDFor(eck: Uint8Array, coordinate: string, pubkey: string): strin
  * `reasoning` is length-capped (word boundary) and URLs neutralized so injected
  * text can't smuggle clickable links into clients.
  */
-function sanitizeMatchList(list: MatchListContent): MatchListContent {
-  return {
+/**
+ * A 31610 whose content fits one NIP-44 payload (audit DS41-043). The stored
+ * transcript may be up to MAX_TRANSCRIPT_TEXT (100,000) characters, and a long
+ * keynote's alone is past the 65,535-byte ceiling, so `eckEncrypt` threw and the
+ * talk could never be published. Only the transcript is shortened, cut at a
+ * character boundary and marked with a trailing ellipsis; the full text still
+ * feeds the speaker's profile.
+ */
+export function fitTalkContent(content: TalkContent): TalkContent {
+  const size = (c: TalkContent) => utf8ToBytes(JSON.stringify(c)).length;
+  const transcript = content.transcript;
+  let bytes = size(content);
+  if (bytes <= NIP44_MAX_PLAINTEXT_BYTES || !transcript) return content;
+  let text = transcript.text;
+  while (bytes > NIP44_MAX_PLAINTEXT_BYTES && text.length > 0) {
+    // Scale by the overshoot, then a little more, so this converges in a few steps
+    // however multi-byte the text is.
+    const keep = Math.max(0, Math.floor((text.length * NIP44_MAX_PLAINTEXT_BYTES) / bytes) - 64);
+    text = text.slice(0, keep);
+    // Never leave half a surrogate pair at the cut.
+    if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
+    bytes = size({ ...content, transcript: { ...transcript, text: text + "…" } });
+  }
+  return { ...content, transcript: { ...transcript, text: text + "…" } };
+}
+
+export function sanitizeMatchList(list: MatchListContent): MatchListContent {
+  const out: MatchListContent = {
     ...list,
-    matches: list.matches.map((m) => ({
+    // The client schema caps a 31605 at MAX_MATCHES (audit DS41-034).
+    matches: list.matches.slice(0, MAX_MATCHES).map((m) => ({
       ...m,
       reasoning: sanitizeLlmText(m.reasoning),
       // Icebreakers are LLM-authored too (NIP §6.2): same publish-boundary hygiene
@@ -6787,6 +7112,14 @@ function sanitizeMatchList(list: MatchListContent): MatchListContent {
         : {}),
     })),
   };
+  // One NIP-44 payload, 65,535 plaintext bytes (audit DS41-034). Reasoning is
+  // capped in characters, so CJK or emoji text can take a long list past the
+  // ceiling, and nip44Encrypt would then throw on every retry: the attendee never
+  // gets a list. The list is in rank order, so drop from the weakest end.
+  while (out.matches.length > 0 && utf8ToBytes(JSON.stringify(out)).length > NIP44_MAX_PLAINTEXT_BYTES) {
+    out.matches.pop();
+  }
+  return out;
 }
 
 /**

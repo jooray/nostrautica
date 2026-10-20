@@ -65,6 +65,23 @@ const RESUBSCRIBE_BACKOFF_MS = [5_000, 15_000, 60_000, 300_000];
 const MAX_NO_PROGRESS_PAGES = 100;
 
 /**
+ * Default ceilings on one {@link NostrClient.fetchAll} walk (audit SB-04/SB-132,
+ * DS41-027). The walk keeps every event it returns in memory, and both of its
+ * callers read public inboxes: anyone can p-tag a gift wrap at the coordinator,
+ * and an event's E_inbox lives on relays its organizer chose. Without a ceiling
+ * the number of events held was exactly the number an attacker published, so a
+ * flood could OOM the daemon at boot, every boot.
+ *
+ * 50,000 is ten full pages: about 25 wraps per member of a 2,000-person event,
+ * well above what a real inbox holds, and well under the daemon's memory cap. The
+ * walk is newest-first, so a truncated walk loses the OLDEST history, and it says
+ * so in the log. The page ceiling bounds the round trips separately, because a
+ * hostile relay can make every page add a single new event.
+ */
+export const MAX_FETCH_ALL_EVENTS = 50_000;
+export const MAX_FETCH_ALL_PAGES = 200;
+
+/**
  * Cross-relay event dedupe with a bounded memory footprint.
  *
  * `SimplePool.subscribe` deduped by id across the relay group for us. Subscribing
@@ -116,6 +133,11 @@ class BoundedSeenIds {
  * them back to {@link NostrClient.subscribe}'s per-relay retry loop.
  */
 export class OrphanSafePool extends SimplePool {
+  /** Every relay url currently in the pool. */
+  knownRelayUrls(): string[] {
+    return [...this.relays.keys()];
+  }
+
   override ensureRelay(url: string, params?: Parameters<SimplePool["ensureRelay"]>[1]) {
     const key = normalizeURL(url);
     // super's body runs synchronously up to its first await, so the relay it
@@ -283,47 +305,67 @@ export class NostrClient {
    * {@link MAX_FETCH_EVENTS} cap and SILENTLY TRUNCATES, so an adversary who floods a
    * public inbox with kind-1059 wraps can crowd a legitimate older install/join out of
    * startup recovery. This walks the whole history in `until`-windowed pages, bounding
-   * MEMORY PER PAGE (not per history), deduping across pages, and detecting completeness
-   * (a short page = the end of history). Each page's window is `until = <oldest seen> +
+   * each relay response to one page and the whole walk to `maxTotal` events (it
+   * returns everything it collected, so that is the memory bound), deduping across
+   * pages, and detecting completeness
+   * (see Termination below). Each page's window is `until = <oldest seen> +
    * overlapSec` so an event exactly on a page boundary is never skipped (deduped by id).
    *
-   * Termination: stops on a short page (complete) or at `maxTotal` (a hard safety
-   * bound). A page that adds no NEW events does NOT stop the walk — see below.
+   * Termination: stops when a page comes back empty, or short with nothing new in
+   * it (complete), or at `maxTotal` / `maxPages` (hard safety bounds, logged). A
+   * full page that adds no NEW events does NOT stop the walk — see below.
    * Callers process every returned event through the normal seen-ledger-deduped
    * path, so re-fetched boundary/overlap events are free.
+   *
+   * A short page is NOT on its own the end of history (audit DS41-026). `fetch()`
+   * settles on EOSE or on its timeout alike, and nostr-tools fires a synthetic EOSE
+   * after 4.4 s on a relay that has not answered, so a slow relay's partial page
+   * looks exactly like a complete one. The walk therefore asks once more below the
+   * short page's oldest event, and only a page that brings nothing new ends it.
+   * That costs one extra round trip per walk.
    */
   async fetchAll(
     filter: Filter,
     relays: string[] = this.defaultRelays,
-    opts: { pageSize?: number; overlapSec?: number; maxTotal?: number; timeoutMs?: number } = {},
+    opts: { pageSize?: number; overlapSec?: number; maxTotal?: number; maxPages?: number; timeoutMs?: number } = {},
   ): Promise<NostrEvent[]> {
     const pageSize = opts.pageSize ?? MAX_FETCH_EVENTS;
     const overlapSec = opts.overlapSec ?? 1;
-    const maxTotal = opts.maxTotal ?? Number.POSITIVE_INFINITY;
+    const maxTotal = opts.maxTotal ?? MAX_FETCH_ALL_EVENTS;
+    const maxPages = opts.maxPages ?? MAX_FETCH_ALL_PAGES;
     const timeoutMs = opts.timeoutMs ?? 5000;
     const seen = new Set<string>();
     const all: NostrEvent[] = [];
     let until = filter.until;
+    let pages = 0;
     // Consecutive pages that added nothing (see the cluster step below). Each one
     // costs a relay round trip and moves `until` back by a second, so a relay
     // serving nothing but duplicates can't turn the walk into an unbounded crawl.
     let noProgress = 0;
     for (;;) {
       const page = await this.fetch({ ...filter, until, limit: pageSize }, relays, timeoutMs, pageSize);
+      pages++;
       let added = 0;
       let oldest = Number.POSITIVE_INFINITY;
       for (const e of page) {
         if (e.created_at < oldest) oldest = e.created_at;
+        if (all.length >= maxTotal) break;
         if (!seen.has(e.id)) {
           seen.add(e.id);
           all.push(e);
           added++;
         }
       }
-      // Complete: the relay returned fewer than a full page → end of history reached.
-      if (page.length < pageSize) break;
-      if (!Number.isFinite(oldest)) break; // defensive: a full page with no timestamps
-      if (all.length >= maxTotal) break;
+      // Complete: nothing at all, or a short page that brought nothing new.
+      if (page.length === 0) break;
+      if (page.length < pageSize && added === 0) break;
+      if (!Number.isFinite(oldest)) break; // defensive: a page with no timestamps
+      if (all.length >= maxTotal || pages >= maxPages) {
+        relayLog(
+          `[relay] fetchAll: stopped at ${all.length} event(s) after ${pages} page(s) — the ${all.length >= maxTotal ? `${maxTotal}-event` : `${maxPages}-page`} ceiling; anything older than created_at ${oldest} was NOT fetched`,
+        );
+        break;
+      }
       // Next window: at/just after the oldest we saw, WITH overlap (deduped by id).
       //
       // Unless nothing new arrived. A full page of already-seen ids means the
@@ -345,8 +387,12 @@ export class NostrClient {
         break;
       }
       if (added > 0) noProgress = 0;
-      const nextUntil = added === 0 ? oldest - 1 : oldest + overlapSec;
-      if (until !== undefined && nextUntil >= until) break; // window can't advance
+      let nextUntil = added === 0 ? oldest - 1 : oldest + overlapSec;
+      // The overlap window would not move (every event on the page shares the
+      // current `until` second): step strictly below it, as for a dense cluster,
+      // so `until` always decreases and the walk terminates.
+      if (until !== undefined && nextUntil >= until) nextUntil = oldest - 1;
+      if (until !== undefined && nextUntil >= until) break; // defensive
       until = nextUntil;
     }
     return all;
@@ -458,7 +504,21 @@ export class NostrClient {
    * this time with a fair chance of being the first outcome seen.
    */
   async publish(event: NostrEvent, requested: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
-    const relays = this.usable(requested);
+    // One entry per NORMALIZED url (audit DS41-025). nostr-tools' pool rejects a
+    // repeat spelling of a url already in the list with the bare string
+    // "duplicate url", in the same tick and before anything is sent. Event relays
+    // are stored without a trailing slash and `relays.default` with one, so
+    // `wss://nos.lol` and `wss://nos.lol/` both reach here in normal config, and
+    // that synthetic rejection matched the relay "duplicate:" ack below: publish
+    // resolved "success" before any relay had answered at all.
+    const relays: string[] = [];
+    const keys = new Set<string>();
+    for (const url of this.usable(requested)) {
+      const key = normalizeURL(url);
+      if (keys.has(key)) continue;
+      keys.add(key);
+      relays.push(url);
+    }
     type Outcome = { url: string; ok: boolean; replaced: boolean; reason: string };
     let settledCount = 0;
     let resolvedToCaller = false;
@@ -470,7 +530,10 @@ export class NostrClient {
       // durably there, which is what publish promises. Burst republishes of 31605
       // lists otherwise fail every retry against strfry's "replaced: have newer event".
       const reason = String((err as Error)?.message ?? err);
-      if (/\b(duplicate|replaced)\b/i.test(reason)) {
+      // Only a RELAY's answer can be an ack. nostr-tools rejects with an Error
+      // carrying the relay's OK reason; its own client-side refusals ("duplicate
+      // url", "connection skipped by …") are bare strings and were never sent.
+      if (err instanceof Error && /\b(duplicate|replaced)\b/i.test(reason)) {
         console.debug(
           `[nostr] kind ${event.kind} ${event.id.slice(0, 8)} already-stored on ${url} (${reason.slice(0, 80)}) — treating as success`,
         );
@@ -529,8 +592,10 @@ export class NostrClient {
     });
   }
 
+  /** Close every relay the pool holds, not only the defaults (audit SB-33): each
+   *  event's E_inbox/config/chat subscriptions run on its own config relays. */
   close(): void {
-    this.pool.close(this.defaultRelays);
+    this.pool.close([...new Set([...this.defaultRelays, ...this.pool.knownRelayUrls()])]);
   }
 }
 

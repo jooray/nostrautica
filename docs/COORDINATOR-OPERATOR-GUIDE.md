@@ -39,7 +39,7 @@ startup and a running instance cannot be tied back to a build.
 
 ## 1. Install
 
-Requirements: Node ≥ 22.5, `ffmpeg` **and** `ffprobe` on `PATH`, `pnpm`.
+Requirements: Node ≥ 22.13 (`node:sqlite` needs a flag before that), `ffmpeg` **and** `ffprobe` on `PATH`, `pnpm`.
 
 ```sh
 git clone <repo> nostrautica && cd nostrautica

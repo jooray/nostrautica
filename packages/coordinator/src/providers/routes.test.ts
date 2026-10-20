@@ -247,6 +247,23 @@ describe("models.match_score — the optional decision role (2026-09-19)", () =>
     ).rejects.toThrow(/not a private\/TEE-tier/);
   });
 
+  /** Audit DS41-045: a failed decision page made the model "missing", and a missing
+   *  private-required model was announced as "private" without any check. */
+  it("FAILS startup when a private-required decision model is missing from the catalogue", async () => {
+    const venice = new MockLlm(() => ({}), {
+      id: "venice",
+      models: catalogue.filter((m) => m.id !== "jev-latest"), // the decision page "failed"
+      decide: () => ({}),
+    });
+    const cfg = config({ ...base, match_score: { provider: "venice", model: "jev-latest" } });
+    await expect(resolveRoleRoutes(cfg, { providers: { venice }, logger: silent })).rejects.toThrow(
+      /could not verify privacy for models\.match_score/,
+    );
+    // The explicit escape hatch still boots it.
+    const routes = await resolveRoleRoutes(cfg, { providers: { venice }, logger: silent, allowUnverified: true });
+    expect(routes.match_score?.model).toBe("jev-latest");
+  });
+
   it("FAILS startup when the provider has no decision endpoint", async () => {
     // Otherwise this surfaces as a poisoned scoring job per batch, at run time,
     // on a live event — instead of a refusal to boot.
