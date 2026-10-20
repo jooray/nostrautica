@@ -34,6 +34,7 @@ import { fetchEvents, fetchEventsAnswered, fetchEventsRelayOnly } from "$lib/nos
 import { DEFAULT_BLOSSOM_SERVERS, unionRelays } from "$lib/nostr/relays.js";
 import { preflight, uploadAndMirror, mirror, downloadBlob, isAcceptedBlossomUrl } from "$lib/blossom/client.js";
 import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
+import { withMutationLock } from "$lib/nostr/mutation-lock.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
 
 // The self-copy (31602) and reuse library are decrypted private data, cached
@@ -559,7 +560,26 @@ export async function addToLibrary(
   // exists for), and a decrypt that failed. Either one used to publish a library
   // containing only the clip just recorded, wiping every intro the user had.
   await whenCacheReady();
-  const existing = await loadLibraryFull(signer, blindingKey);
+  // Serialized per library (DS41-009): two submissions finishing together (two
+  // tabs, or record + text intro) both read the same library and the later
+  // publish dropped the other's clip.
+  return withMutationLock(`rmw:${pubkey}:${KIND_MY_PROFILE}:${libD}`, () =>
+    addToLibraryLocked(signer, pubkey, libD, blindingKey, media, texts),
+  );
+}
+
+async function addToLibraryLocked(
+  signer: AppSigner,
+  pubkey: string,
+  libD: string,
+  blindingKey: Uint8Array,
+  media: MediaDescriptor[],
+  texts: string[],
+): Promise<PublishOutcome | "skipped"> {
+  // Relay-only and relay-confirmed (DS41-009): a cache-served copy counted as
+  // "known", so a device whose cache predated a clip added on the user's OTHER
+  // device republished without it whenever no relay answered in time.
+  const existing = await loadLibraryFull(signer, blindingKey, { relayOnly: true });
   if (!existing.known) return "skipped";
 
   // Belt and braces for the case the flag cannot cover: union with this device's
@@ -744,14 +764,24 @@ export async function loadAuthoredState(
 export async function loadLibraryFull(
   signer: AppSigner,
   blindingKey: Uint8Array,
+  /**
+   * `relayOnly` is for the republish in `addToLibrary`: with the dexie cache in
+   * the read, a found event can be this device's own stale copy, and `known`
+   * then means "a relay confirmed it", not "something was found".
+   */
+  opts: { relayOnly?: boolean } = {},
 ): Promise<ReuseLibrary> {
   const pubkey = await signer.getPublicKey();
   const libD = blindedDLiteral(blindingKey, "library");
-  const { events, answered } = await fetchEventsAnswered({
-    kinds: [KIND_MY_PROFILE],
-    authors: [pubkey],
-    "#d": [libD],
-  });
+  const { events, answered } = await fetchEventsAnswered(
+    {
+      kinds: [KIND_MY_PROFILE],
+      authors: [pubkey],
+      "#d": [libD],
+    },
+    undefined,
+    opts.relayOnly ? { relayOnly: true } : {},
+  );
   const latest = pickLatest(events);
   // No event AND no relay answer is not an empty library, it is an unread one.
   // Rendering it as empty is harmless; republishing over it is not.
@@ -771,7 +801,9 @@ export async function loadLibraryFull(
     cacheSet(MEDIALIB_KEY, media, latest.created_at ?? 0);
     cacheSet(TEXTLIB_KEY, texts, latest.created_at ?? 0);
     cacheSet(MEDIALIB_AT_KEY, at, latest.created_at ?? 0);
-    return { media, texts, at, known: true };
+    // An event found without any relay saying EOSE may be only the local cache's
+    // older copy; good enough to display, not to republish over (DS41-009).
+    return { media, texts, at, known: opts.relayOnly ? answered : true };
   } catch {
     // The library IS there and would not decrypt (a signer that dropped the
     // request, a payload from a future schema). The one case where "empty" is

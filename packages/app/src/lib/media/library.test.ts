@@ -187,6 +187,26 @@ describe("cross-event reuse library (media + text)", () => {
     expect(lib.media.map((d) => d.x)).toEqual(["a".repeat(64)]);
   });
 
+  it("does not republish over a copy no relay confirmed (DS41-009)", async () => {
+    // The read FOUND a library, but nobody said EOSE: it can be this device's
+    // own cached copy, older than a clip the user added on another device.
+    // Republishing a merge of that would delete the other device's clip.
+    await addToLibrary(signer, bk, { media: [descriptor("a".repeat(64))] });
+    answeredNext = false; // serveLatestLibrary still hands back the old event
+    const outcome = await addToLibrary(signer, bk, { media: [descriptor("b".repeat(64))] });
+    expect(outcome).toBe("skipped");
+    expect(published).toHaveLength(1);
+  });
+
+  it("serializes two concurrent additions so neither clip is dropped", async () => {
+    await Promise.all([
+      addToLibrary(signer, bk, { media: [descriptor("a".repeat(64))] }),
+      addToLibrary(signer, bk, { media: [descriptor("b".repeat(64))] }),
+    ]);
+    const lib = await loadLibraryFull(signer, bk);
+    expect(lib.media.map((d) => d.x).sort()).toEqual(["a".repeat(64), "b".repeat(64)]);
+  });
+
   it("merges against this device's cached copy, not only the relay read", async () => {
     // Belt and braces for the case the answered-flag cannot cover: the relay
     // answers, but with nothing (a replica that has not caught up). The cached
