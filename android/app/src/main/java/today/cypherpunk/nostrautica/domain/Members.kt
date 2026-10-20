@@ -77,7 +77,8 @@ class Members(
         val roster = fetchRoster(ctx, owner) ?: return@withLock false
         fetchDirectory(ctx, owner, roster)
         if (ctx.cfg.coordinator != null && ctx.cfg.matching) runCatching { fetchMatches(ctx, signer) }
-        cache.markFetched("members:$owner:${ctx.coordinate}")
+        // An empty roster is usually "not here yet": don't let it count as fresh for the TTL.
+        if (roster.attendees.isNotEmpty()) cache.markFetched("members:$owner:${ctx.coordinate}")
         true
     }
 
@@ -113,7 +114,10 @@ class Members(
 
     suspend fun fetchDirectory(ctx: EventContext, owner: String, roster: RosterContent): List<DirectoryEntryContent> {
         if (roster.attendees.isEmpty()) {
-            cache.put(owner, dirKey(ctx.coordinate), ListSerializer(DirectoryEntryContent.serializer()), emptyList())
+            // Stamped 0, not "now": a roster-less pass (offline, or before the roster
+            // arrives) must neither replace a real directory nor outrank the real one
+            // written later, which is stamped with its newest entry's created_at (DS41-056).
+            cache.put(owner, dirKey(ctx.coordinate), ListSerializer(DirectoryEntryContent.serializer()), emptyList(), 0)
             return emptyList()
         }
         val authors = acceptedAuthors(ctx)
