@@ -123,6 +123,7 @@
         accept="image/*"
         onchange={onPicFile}
         label={t("login.photoAdd")}
+        iconOnly
       >
         {#if picPreview}
           <img src={picPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />

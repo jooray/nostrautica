@@ -772,6 +772,7 @@
           accept="image/*"
           onchange={onPicFile}
           label={t("join.photoAdd")}
+          iconOnly
         >
           {#if newPicPreview}
             <img src={newPicPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />
