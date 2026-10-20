@@ -58,12 +58,13 @@
   import ImageCropper from "$lib/components/ImageCropper.svelte";
   import { defaultEventBanner, defaultEventIcon, uploadPublicImage } from "$lib/media/image.js";
   import { recentEvents } from "$lib/stores/recent-events.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
   import AdminTabs from "$lib/components/AdminTabs.svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -772,7 +773,7 @@
     if (f.since !== undefined) {
       parts.push(
         t("admin.page.feeds.sinceLabel", {
-          date: new Date(f.since * 1000).toLocaleDateString(),
+          date: new Date(f.since * 1000).toLocaleDateString(i18n.locale),
         }),
       );
     }
@@ -989,7 +990,7 @@
       {/if}
       {#if grantCheckedAt !== undefined}
         {t("admin.grant.lastChecked", {
-          time: new Date(grantCheckedAt).toLocaleTimeString(),
+          time: new Date(grantCheckedAt).toLocaleTimeString(i18n.locale),
         })}
       {/if}
     </p>
@@ -1145,9 +1146,10 @@
         {/each}
       </div>
     {/if}
-    <input placeholder={t("admin.page.labelPlaceholder")} bind:value={menuLabel} />
+    <input placeholder={t("admin.page.labelPlaceholder")} aria-label={t("admin.page.labelPlaceholder")} bind:value={menuLabel} />
     <input
       placeholder={t("admin.page.targetPlaceholder")}
+      aria-label={t("admin.page.targetPlaceholder")}
       bind:value={menuTarget}
       style="margin-top:0.5rem"
     />
@@ -1381,6 +1383,7 @@
       rows="8"
       class="mono"
       placeholder={t("admin.theme.placeholder")}
+      aria-label={t("admin.theme.title")}
       bind:value={themeCss}
     ></textarea>
     <p class="muted" style="margin:0.25rem 0" class:danger-text={themeOver}>
@@ -1412,8 +1415,8 @@
           {#each coordinators.filter((c) => c.pubkey !== ctx?.config.coordinator) as c (c.pubkey)}
             <div class="card coord-card">
               <div class="row" style="gap:0.6rem;align-items:flex-start">
-                {#if c.announce.picture}
-                  <img src={c.announce.picture} alt="" class="coord-logo" />
+                {#if safeImageSrc(c.announce.picture)}
+                  <img src={safeImageSrc(c.announce.picture)} alt="" class="coord-logo" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />
                 {/if}
                 <div style="flex:1;min-width:0">
                   <strong>{c.announce.name}</strong>
@@ -1453,7 +1456,7 @@
       <!-- Advanced / fallback: paste an npub directly. -->
       <details style="margin-top:0.5rem">
         <summary class="muted" style="cursor:pointer">{t("admin.coordinator.paste")}</summary>
-        <input style="margin-top:0.5rem" placeholder={t("admin.coordinator.placeholder")} bind:value={coordinatorInput} />
+        <input style="margin-top:0.5rem" placeholder={t("admin.coordinator.placeholder")} aria-label={t("admin.coordinator.paste")} bind:value={coordinatorInput} />
         <button class="btn" style="margin-top:0.5rem" onclick={attach} disabled={attaching}>
           {attaching ? t("admin.coordinator.attaching") : replace ? t("admin.coordinator.replace") : t("admin.coordinator.attach")}
         </button>
@@ -1467,7 +1470,7 @@
         <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
       {#if coordAnnounce}
         <div class="row" style="gap:0.6rem;align-items:center;margin:0.35rem 0">
-          {#if coordAnnounce.announce.picture}<img src={coordAnnounce.announce.picture} alt="" class="coord-logo" />{/if}
+          {#if safeImageSrc(coordAnnounce.announce.picture)}<img src={safeImageSrc(coordAnnounce.announce.picture)} alt="" class="coord-logo" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />{/if}
           <div>
             <strong>{coordAnnounce.announce.name}</strong>
             <span class="badge">{pricingLabel(coordAnnounce.announce)}</span>
@@ -1538,7 +1541,7 @@
   <div class="card">
     <div class="field-label">{t("admin.talks.title")}</div>
     <p class="muted">{t("admin.talks.body")}</p>
-    <select bind:value={talksMode}>
+    <select bind:value={talksMode} aria-label={t("admin.talks.title")}>
       <option value="off">{t("create.talks.off")}</option>
       <option value="on">{t("create.talks.on")}</option>
       <!-- Prerecord-first is defined by an event's timeline: "watch ahead, meet
@@ -1645,7 +1648,7 @@
     <p class="muted">
       {t("admin.coorg.body")}
     </p>
-    <input placeholder={t("admin.coorg.placeholder")} bind:value={coOrgInput} />
+    <input placeholder={t("admin.coorg.placeholder")} aria-label={t("admin.coorg.title")} bind:value={coOrgInput} />
     <div class="row" style="margin-top:0.5rem">
       <button class="btn inline" onclick={addCoOrg} disabled={addingCoOrg || !coOrgInput.trim()}>
         {addingCoOrg ? t("admin.coorg.adding") : t("admin.coorg.add")}

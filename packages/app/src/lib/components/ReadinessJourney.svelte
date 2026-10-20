@@ -6,7 +6,7 @@
   // CTA competes.
   import type { Readiness } from "$lib/events/readiness.js";
   import { router } from "$lib/router/router.svelte.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
 
   let {
@@ -31,7 +31,7 @@
   const checkedLabel = $derived(
     lastCheckedAt === undefined
       ? undefined
-      : new Date(lastCheckedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+      : new Date(lastCheckedAt).toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit" }),
   );
 
   // The primary CTA's route carries the naddr readiness was DERIVED from, while

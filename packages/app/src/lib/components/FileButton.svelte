@@ -15,6 +15,7 @@
     onchange,
     disabled = false,
     label,
+    iconOnly = false,
     class: cls = "btn",
     style = "",
     children,
@@ -24,6 +25,12 @@
     disabled?: boolean;
     /** Accessible name for the underlying input (e.g. "Choose a profile picture"). */
     label: string;
+    /**
+     * The button shows only an image or icon (the avatar pickers), so it has no
+     * text of its own: give the focusable button `label` as its accessible name.
+     * Buttons with visible text keep that text as their name (WCAG 2.5.3).
+     */
+    iconOnly?: boolean;
     class?: string;
     style?: string;
     children: Snippet;
@@ -43,6 +50,7 @@
   class={cls}
   {style}
   {disabled}
+  aria-label={iconOnly ? label : undefined}
   onclick={() => {
     if (input) input.value = "";
     input?.click();

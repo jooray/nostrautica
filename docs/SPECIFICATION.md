@@ -499,7 +499,7 @@ content: <raw CSS, ≤ 32 KB>
 - **Public**: branding applies to visitors too.
 - Applied by injecting a single `<style data-event-theme>` element **only while a route under `#/e/<naddr>` is active**, removed on leaving the event; never active on login, settings, key-backup or DM routes.
 - Deliberately *not* stored in 31600 `content`: 31600 is rebuilt from parsed tags and republished by config flows (e.g. coordinator attach), which would silently drop a content payload.
-- **Security (accepted, documented):** only `E_id` holders can set the CSS, and it applies solely inside that event's pages, where the same people already control every rendered string. Residual risks: intra-event UI spoofing by styling, and network beacons via `url(https://…)` (allowed by CSP `img-src https:`; external stylesheet `@import` is blocked by `style-src 'self' 'unsafe-inline'`). The app chrome outside the event is never themed, but some themed event routes currently reveal sensitive values, including chat handoff and admin invite material. `font-src 'self'` limits remote-font text exfiltration; it does not make themes a secret-safe rendering boundary. Treat an event theme as trusted-organizer UI control.
+- **Security (accepted, documented):** only `E_id` holders can set the CSS, and it applies solely inside that event's pages, where the same people already control every rendered string. Residual risks: intra-event UI spoofing by styling, and network beacons via `url(https://…)` (allowed by CSP `img-src https:`; external stylesheet `@import` is blocked by `style-src 'self' 'unsafe-inline'`). The app chrome outside the event is never themed. Inside the event, every surface that shows a secret (admin invite nsecs and QR codes, key backup and reveal, chat device handoff and management) enters a secret-surface guard that removes the event stylesheet synchronously before the secret paints and blocks re-injection until the last such surface closes (NIP §13: clients MUST NOT render event themes where secrets appear). `font-src 'self'` additionally keeps remote-font text exfiltration shut. The theme itself is still not a secret-safe rendering boundary; the guard is what keeps it away from secrets, so a new secret-bearing surface must enter it too. Treat an event theme as trusted-organizer UI control.
 
 ### 7.5 Event group chat
 
@@ -828,7 +828,7 @@ Design-compatible with the current protocol, not yet built. Most of these need n
 
 **Trusted parties:** coordinator (reads event content; cannot impersonate); LLM/STT provider (reads transcripts/summaries; mitigate via Venice private/TEE tiers or operator-chosen Routstr nodes); relays/Blossom (ciphertext + metadata only).
 
-**Client hygiene:** local keys in IndexedDB (not localStorage strings where avoidable), NIP-49 for any at-rest export, `#/login?nsec` stripped from history immediately, no third-party scripts (CSP: `default-src 'self'; connect-src wss:/https: relays+blossom`), NIP-04 lint-banned, NIP-44 scheme always explicit.
+**Client hygiene:** local keys in IndexedDB (not localStorage strings where avoidable), NIP-49 for any at-rest export, `#/login?nsec` stripped from history immediately, no third-party scripts (CSP: `default-src 'self'; connect-src wss:/https: relays+blossom`), NIP-04 lint-banned, NIP-44 scheme always explicit, organizer CSS (31609) suppressed on every surface that shows a secret (§7.4 secret-surface guard).
 
 **Revocation honesty:** rotation is forward-only (§6.3); published ciphertext is forever for past key-holders.
 

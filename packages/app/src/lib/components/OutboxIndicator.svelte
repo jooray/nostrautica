@@ -7,12 +7,28 @@
    */
   import { onMount } from "svelte";
   import { outbox } from "$lib/stores/outbox.svelte.js";
-  import { t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t, tp } from "$lib/i18n/i18n.svelte.js";
+  import { outboxKindKey } from "$lib/nostr/outbox-label.js";
 
   onMount(() => outbox.init());
 
   let open = $state(false);
-  const when = (sec: number) => new Date(sec).toLocaleTimeString();
+  // Discard deletes the durable queue entry for good, and a pending item is only
+  // waiting for connectivity (audit DS41-021). The first tap arms the button for
+  // that one item; the second tap discards. Closing the panel disarms it.
+  let armed = $state<string | null>(null);
+  $effect(() => {
+    if (!open) armed = null;
+  });
+  function discard(id: string): void {
+    if (armed !== id) {
+      armed = id;
+      return;
+    }
+    armed = null;
+    void outbox.discard(id);
+  }
+  const when = (sec: number) => new Date(sec).toLocaleTimeString(i18n.locale);
 </script>
 
 {#if outbox.pending > 0 || outbox.failed.length > 0}
@@ -38,9 +54,13 @@
             {#each outbox.failed as item (item.id)}
               <li>
                 <span class="meta">
-                  {t("outbox.item", { kind: item.kind })} · {when(item.queuedAt)} · {t("outbox.retries", { n: item.attempts })}
+                  {t(outboxKindKey(item.kind))} · {when(item.queuedAt)} · {t("outbox.retries", { n: item.attempts })}
                 </span>
-                {#if item.lastError}<span class="err">{item.lastError}</span>{/if}
+                <details class="details">
+                  <summary>{t("outbox.details")}</summary>
+                  <span>{t("outbox.item", { kind: item.kind })}</span>
+                  {#if item.lastError}<span class="err">{item.lastError}</span>{/if}
+                </details>
                 <span class="acts">
                   <button type="button" class="btn inline" onclick={() => void outbox.retry(item.id)}>
                     {t("outbox.retry")}
@@ -48,9 +68,9 @@
                   <button
                     type="button"
                     class="btn inline ghost danger"
-                    onclick={() => void outbox.discard(item.id)}
+                    onclick={() => discard(item.id)}
                   >
-                    {t("outbox.discard")}
+                    {armed === item.id ? t("outbox.discardConfirm") : t("outbox.discard")}
                   </button>
                 </span>
               </li>
@@ -63,15 +83,15 @@
             {#each outbox.pendingItems as item (item.id)}
               <li>
                 <span class="meta">
-                  {t("outbox.item", { kind: item.kind })} · {when(item.queuedAt)}{#if item.attempts > 0} · {t("outbox.retries", { n: item.attempts })}{/if}
+                  {t(outboxKindKey(item.kind))} · {when(item.queuedAt)}{#if item.attempts > 0} · {t("outbox.retries", { n: item.attempts })}{/if}
                 </span>
                 <span class="acts">
                   <button
                     type="button"
                     class="btn inline ghost danger"
-                    onclick={() => void outbox.discard(item.id)}
+                    onclick={() => discard(item.id)}
                   >
-                    {t("outbox.discard")}
+                    {armed === item.id ? t("outbox.discardConfirm") : t("outbox.discard")}
                   </button>
                 </span>
               </li>
@@ -134,6 +154,14 @@
   .meta {
     font-size: 0.78rem;
     color: var(--text-dim);
+  }
+  .details {
+    width: 100%;
+    font-size: 0.75rem;
+    color: var(--text-dim);
+  }
+  .details summary {
+    cursor: pointer;
   }
   .err {
     display: block;

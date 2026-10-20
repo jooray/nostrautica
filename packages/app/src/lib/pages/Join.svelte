@@ -39,12 +39,13 @@
     prefetchAttendeesTab,
     prefetchGrants,
   } from "$lib/nostr/prefetch.js";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { i18n, t } from "$lib/i18n/i18n.svelte.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import ErrorSummary from "$lib/components/ErrorSummary.svelte";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
   import { recoverFromStaleChunk } from "$lib/stale-chunk.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let { naddr, code: codeParam }: { naddr: string; code?: string } = $props();
 
@@ -340,7 +341,7 @@
   const checkedLabel = $derived(
     lastCheckedAt === null
       ? ""
-      : new Date(lastCheckedAt).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
+      : new Date(lastCheckedAt).toLocaleTimeString(i18n.locale, { hour: "2-digit", minute: "2-digit" }),
   );
 
   // Post-approval routing (U1): lead with "Record your intro" unless one already
@@ -720,8 +721,8 @@
       {:else}
         {#if profileState === "loaded"}
           <div class="row" style="gap:0.75rem;align-items:center">
-            {#if existingPicture}
-              <img src={existingPicture} alt="" width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
+            {#if safeImageSrc(existingPicture)}
+              <img src={safeImageSrc(existingPicture)} alt="" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
             {/if}
             {#if existingAbout}
               <div>
@@ -772,6 +773,7 @@
           accept="image/*"
           onchange={onPicFile}
           label={t("join.photoAdd")}
+          iconOnly
         >
           {#if newPicPreview}
             <img src={newPicPreview} alt="" width="64" height="64" style="border-radius:50%;object-fit:cover" />

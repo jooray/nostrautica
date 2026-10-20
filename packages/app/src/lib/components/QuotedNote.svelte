@@ -13,6 +13,7 @@
   import { fetchProfiles, cachedProfiles, type ProfileMeta } from "$lib/events/social.js";
   import { parsePostContent, imetaUrls } from "$lib/social/render.js";
   import Avatar from "$lib/components/Avatar.svelte";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
 
   let {
@@ -93,7 +94,14 @@
       .trim()
       .slice(0, 280),
   );
-  const images = $derived(tokens.filter((tk) => tk.type === "image").map((tk) => (tk as { url: string }).url));
+  // Image URLs here are chosen by an arbitrary note author: same third-party
+  // image policy as avatars (audit SEC-17 / DS41-020).
+  const images = $derived(
+    tokens
+      .filter((tk) => tk.type === "image")
+      .map((tk) => safeImageSrc((tk as { url: string }).url))
+      .filter((u): u is string => !!u),
+  );
 </script>
 
 {#if !failed}
@@ -109,7 +117,7 @@
       </div>
       {#if preview}<p class="qbody">{preview}</p>{/if}
       {#each [...new Set(images)].slice(0, 2) as img (img)}
-        <img class="qimg" src={img} alt="" loading="lazy" />
+        <img class="qimg" src={img} alt="" loading="lazy" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />
       {/each}
     {/if}
   </div>

@@ -1082,21 +1082,16 @@ async function fetchDirectoryOnce(
   ctx: EventContext,
 ): Promise<DirectoryEntryContent[]> {
   const eck = await eckBytesFor(ctx.coordinate);
-  console.log("[DIAG fetchDirectoryOnce] eck present?", !!eck);
   if (!eck) return [];
   const roster = await fetchRoster(ctx);
-  console.log("[DIAG fetchDirectoryOnce] roster", roster && { n: roster.attendees.length, ds: roster.attendees.map(a=>a.d) });
   if (!roster || roster.attendees.length === 0) return [];
 
   const authors = acceptedRecordAuthors(ctx);
-  console.log("[DIAG fetchDirectoryOnce] authors", authors, "coordinator", ctx.config.coordinator, "eidPubkey", ctx.config.eidPubkey);
   const ds = roster.attendees.map((a) => a.d);
   // Chunked #d filters (UX-22): a 200-attendee roster would otherwise exceed
   // relay filter-size limits and silently return fewer people.
   const rawEvents = await streamDirectoryEvents(authors, ds, ctx.config.relays).ready;
-  console.log("[DIAG fetchDirectoryOnce] rawEvents", rawEvents.map((e:any)=>({id: e.id?.slice(0,8), pubkey: e.pubkey?.slice(0,8), tags: e.tags, created_at: e.created_at})));
   const events = onlyByAuthors(rawEvents, authors);
-  console.log("[DIAG fetchDirectoryOnce] afterOnlyByAuthors count", events.length);
   // Keep the latest event per blinded d.
   const latestByD = new Map<string, (typeof events)[number]>();
   for (const e of events) {
@@ -1112,12 +1107,10 @@ async function fetchDirectoryOnce(
     try {
       entries.push(directoryEntryContentSchema.parse(JSON.parse(eckDecrypt(eck, e.content))));
       if ((e.created_at ?? 0) > newestAt) newestAt = e.created_at ?? 0;
-    } catch (err) {
+    } catch {
       /* skip entries we can't decrypt (e.g. published under a newer ECK) */
-      console.log("[DIAG fetchDirectoryOnce] decrypt/parse FAILED for", e.id?.slice(0,8), err);
     }
   }
-  console.log("[DIAG fetchDirectoryOnce] final entries", entries.map(e=>({pubkey: e.pubkey?.slice(0,8), hasAi: !!e.ai_profile})));
   cacheDirectory(ctx.coordinate, entries, newestAt);
   return entries;
 }

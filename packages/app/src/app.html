@@ -169,10 +169,12 @@
       so there is no untrusted-HTML injection vector. Kept as a meta so it applies
       on any dumb static host and on nsite.
 
-      font-src 'self' is a hard invariant (audit APPR-5): themed event routes
-      (chat/admin) render key material (invite nsecs), and CSS text-exfiltration
-      needs a REMOTE font — pinning fonts to same-origin keeps that exfil channel
-      shut even if another directive ever drifts open.
+      font-src 'self' is a hard invariant (audit APPR-5): event routes (chat/admin)
+      render key material (invite nsecs), and CSS text-exfiltration needs a REMOTE
+      font. Those surfaces already drop the event theme while a secret is shown
+      (secret-surface guard, stores/secret-surface.svelte.ts); pinning fonts to
+      same-origin keeps that exfil channel shut even if a surface ever misses the
+      guard or another directive drifts open.
 
       media-src includes https: because posts render inline <video> from Blossom
       (APPR-11/UX-5); object-src/base-uri/form-action are belt-and-braces for a
