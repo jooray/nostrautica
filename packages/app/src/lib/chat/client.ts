@@ -78,6 +78,8 @@ export class MarmotChat {
   private onInviteDecrypted?: () => void;
   /** Serializes the startup join and every welcome-driven join so two runs don't race the same welcome. */
   private joining?: Promise<number>;
+  /** Welcomes joined into THIS event's verified group (see {@link rejoin}). */
+  private joinedForThisEvent = 0;
   private readonly boundGroups = new Set<string>();
   /** Event-coordinate → nostr_group_id bindings (APPK-3), per chat identity. */
   private readonly eventGroups: ReturnType<typeof makeMarmotStores>["eventGroupStore"];
@@ -562,9 +564,12 @@ export class MarmotChat {
             console.warn(
               "marmot: joined another group — keeping this event's existing verified binding",
             );
+          } else {
+            this.joinedForThisEvent++;
           }
         } else if (advertised && joinedId === advertised) {
           await this.eventGroups.setItem(this.ctx.coordinate, joinedId).catch(() => {});
+          this.joinedForThisEvent++;
         } else {
           console.warn(
             "marmot: joined group left as an unbound candidate (no verified roster id match yet)",
@@ -980,7 +985,15 @@ export class MarmotChat {
     // its Welcome reached us before our own removal did and was left unread.
     // Join that instead of revoking: revoking would remove the very leaf the
     // Welcome is for and start the race again.
-    if ((await this.joinPendingAndBind().catch(() => 0)) > 0) return;
+    //
+    // Only a welcome for THIS event's group counts (audit DS41-050). The invite
+    // store is per chat identity, not per event, so the count joinPending returns
+    // includes another event's welcome on the same coordinator — and a user with
+    // one pending there pressed Rejoin here, saw "Rejoin requested", and nothing
+    // was sent for this event.
+    const joinedHereBefore = this.joinedForThisEvent;
+    await this.joinPendingAndBind().catch(() => 0);
+    if (this.joinedForThisEvent > joinedHereBefore) return;
     // A previous fail-closed refusal may have memoized "the roster advertises no
     // group id" for the life of this client (see currentEventGroups). Drop it, or
     // the rejoin below succeeds and routing still refuses afterwards.

@@ -1136,6 +1136,27 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
     expect(shared.calls.filter((c) => c.startsWith("attest:revoke"))).toEqual([]);
   });
 
+  // DS41-050: the invite store is per chat identity, so a welcome for ANOTHER
+  // event on the same coordinator sits in the same unread list. Joining it is not
+  // a rejoin of this event and must not short-circuit the revoke/re-attest.
+  it("rejoin still re-enrols when the waiting Welcome is for another event", async () => {
+    const identity = "c".repeat(64);
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-this", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    lastClient.invites.unread.push({
+      id: "welcome-other-event",
+      pubkey: COORD,
+      mlsId: "0011223344556677",
+      nostrGroupId: "gid-other-event",
+      members: [COORD, identity],
+    } as never);
+    shared.calls.length = 0;
+
+    await chat.rejoin({ force: true });
+
+    expect(shared.calls).toEqual(["attest:revoke", "kp:rotate", "kp:ensurePublished", "attest:add"]);
+  });
+
   it("never discards a group we still hold a leaf in", async () => {
     // Same collision, but we are a LIVE member — a duplicate/replayed welcome for
     // a working room must not destroy it. The error propagates as before.
