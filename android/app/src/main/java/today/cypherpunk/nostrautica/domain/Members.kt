@@ -69,7 +69,12 @@ class Members(
     suspend fun cachedMatches(owner: String, coordinate: String) = cache.get(owner, matchesKey(coordinate), MatchListContent.serializer())
 
     /** Refresh roster → directory (and matches) if stale. Safe to call on every screen open. */
-    suspend fun refresh(ctx: EventContext, signer: NostrSigner, force: Boolean = false): Boolean = lockFor(ctx.coordinate).withLock {
+    // Main-safe entry points: the directory decrypts and parses one entry per attendee
+    // (hundreds), the roster may be several large pages, and screens call these from
+    // coroutines on the main thread.
+    suspend fun refresh(ctx: EventContext, signer: NostrSigner, force: Boolean = false): Boolean = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { refreshLocked(ctx, signer, force) }
+
+    private suspend fun refreshLocked(ctx: EventContext, signer: NostrSigner, force: Boolean): Boolean = lockFor(ctx.coordinate).withLock {
         val owner = signer.pubkey
         if (keys.get(owner, ctx.coordinate)?.current == null) return@withLock false
         val fresh = !force && cache.isFresh("members:$owner:${ctx.coordinate}", TTL_MS)
@@ -89,7 +94,9 @@ class Members(
             else -> null
         }
 
-    suspend fun fetchRoster(ctx: EventContext, owner: String): RosterContent? {
+    suspend fun fetchRoster(ctx: EventContext, owner: String): RosterContent? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { fetchRosterOffMain(ctx, owner) }
+
+    private suspend fun fetchRosterOffMain(ctx: EventContext, owner: String): RosterContent? {
         val c = ctx.coord
         val authors = acceptedAuthors(ctx)
         nostr.fetch(ctx.relays, Filter(kinds = listOf(Kinds.ROSTER), authors = authors, tags = mapOf("d" to listOf(c.identifier))))
@@ -112,7 +119,10 @@ class Members(
         return roster
     }
 
-    suspend fun fetchDirectory(ctx: EventContext, owner: String, roster: RosterContent): List<DirectoryEntryContent> {
+    suspend fun fetchDirectory(ctx: EventContext, owner: String, roster: RosterContent): List<DirectoryEntryContent> =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { fetchDirectoryOffMain(ctx, owner, roster) }
+
+    private suspend fun fetchDirectoryOffMain(ctx: EventContext, owner: String, roster: RosterContent): List<DirectoryEntryContent> {
         if (roster.attendees.isEmpty()) {
             // Stamped 0, not "now": a roster-less pass (offline, or before the roster
             // arrives) must neither replace a real directory nor outrank the real one

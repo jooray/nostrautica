@@ -355,13 +355,14 @@ private fun RecordBody(ev: EventState, r: Route.Record, p: androidx.compose.foun
         error = null
         scope.launch {
             val cr = ctx.contentResolver
-            val size = runCatching { cr.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { if (it.moveToFirst()) it.getLong(0) else -1L } ?: -1L }.getOrDefault(-1L)
+            // A provider query is IPC into another app (Photos, Drive): never on the main thread.
+            val size = withContext(Dispatchers.IO) { runCatching { cr.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { if (it.moveToFirst()) it.getLong(0) else -1L } ?: -1L }.getOrDefault(-1L) }
             if (size > Precheck.MAX_UPLOAD_BYTES) { rejectOverLimits(size, 0.0); return@launch }
             val probe = withContext(Dispatchers.IO) { shrinker.probe(uri) }
             val duration = probe?.durationSec ?: 0.0
             // A clip over the length limit is rejected before any copy or upload.
             if (rejectOverLimits(maxOf(size, 0), duration)) return@launch
-            val mime = cr.getType(uri) ?: if (mode == "audio") "audio/mp4" else "video/mp4"
+            val mime = withContext(Dispatchers.IO) { cr.getType(uri) } ?: if (mode == "audio") "audio/mp4" else "video/mp4"
             val ext = if (mime.startsWith("audio/")) "m4a" else "mp4"
             val dest = File(File(ctx.cacheDir, "recordings").apply { mkdirs() }, "${java.util.UUID.randomUUID()}.$ext")
             val copied = runCatching { withContext(Dispatchers.IO) { cr.openInputStream(uri)?.use { i -> dest.outputStream().use { o -> i.copyTo(o) } } } }.isSuccess

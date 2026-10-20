@@ -78,6 +78,10 @@ Wähle **Event erstellen** und fülle das Formular aus:
   - *Einladungscodes + manuell*: Einladungslinks genehmigen automatisch
     (wenn ein Coordinator angebunden ist); alle anderen warten auf dich.
     **Für die meisten Events empfohlen.**
+  - *Offen: Wer den Link hat, ist dabei* (nur für Communitys, dort der
+    Standard): Mit angebundenem Coordinator wird jeder, der den Link hat,
+    automatisch genehmigt, mit oder ohne Code. Wen du entfernt hast, kommt so
+    nicht zurück; die neue Anfrage wartet auf dich.
 - **Event-Sprache**: siehe unten.
 - **KI-Matchmaking**: stell es auf *Ein*, wenn du einen Coordinator
   anbinden willst (§5). Du kannst den Coordinator auch später anbinden,

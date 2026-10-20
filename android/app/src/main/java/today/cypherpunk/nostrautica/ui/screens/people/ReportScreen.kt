@@ -202,7 +202,11 @@ fun ReportBody(padding: PaddingValues) {
     var printer by remember { mutableStateOf<WebView?>(null) }
     DisposableEffect(Unit) { onDispose { printer?.destroy(); printer = null } }
     val saveTxt = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/plain")) { uri ->
-        if (uri != null) runCatching { ctx.contentResolver.openOutputStream(uri)?.use { it.write(Report.npubList(report.allPeople).toByteArray()) } }
+        // A document provider (Drive, a file manager) can be slow to open a stream: off the main thread.
+        if (uri != null) {
+            val text = Report.npubList(report.allPeople)
+            scope.launch(kotlinx.coroutines.Dispatchers.IO) { runCatching { ctx.contentResolver.openOutputStream(uri)?.use { it.write(text.toByteArray()) } } }
+        }
     }
 
     Page(padding) {

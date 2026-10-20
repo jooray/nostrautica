@@ -53,7 +53,7 @@ import {
   RUMOR_MAX_CLOCK_SKEW_SEC,
   type EckVersion,
 } from "@nostrautica/protocol";
-import { Store } from "./store/db.js";
+import { Store, DETACHED_NO_DEADLINE_GRACE_SEC } from "./store/db.js";
 import { Coordinator, sanitizeMatchList, fitTalkContent, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
 import type { RoleRoutes } from "./providers/types.js";
@@ -6254,6 +6254,168 @@ describe("audit R12 — event-wide retention purge clears every personal identif
   });
 });
 
+/**
+ * Audit SB-16. A detach deleted the custody (the events row), which is the only
+ * thing the retention sweep iterates, so the attendee data of a detached event
+ * (profiles, ai_profiles, transcripts, pair reasoning, parked jobs) was never
+ * deleted by anything. Owner decision: it gets the retention cleanup it would
+ * have had as an installed event, at the same deadline, or at the next sweep when
+ * it has none; a re-attach before then keeps it.
+ */
+describe("audit SB-16 — a detached event's attendee data is purged at its retention deadline", () => {
+  const DAY = 86_400;
+  /** Re-attach h's event at gen 2: a newer 31600 naming this coordinator, then a fresh grant. */
+  async function reattach(h: Harness, extraTags: string[][] = []): Promise<void> {
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 200, id: "cfg-reattach", sig: "", content: "",
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "2"], ["matching", "on"], ...extraTags],
+    } as any);
+    const grant = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: { v: 2, a: h.coordinate, gen: 2, inbox_nsec: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"] },
+    });
+    await h.coordinator.handleCoordinatorWrap(grant as any);
+  }
+  const pairCount = (h: Harness) =>
+    ((h.store as any)["db"].prepare("SELECT COUNT(*) AS n FROM pairs WHERE coordinate = ?").get(h.coordinate) as { n: number }).n;
+
+  it("future deadline: the data survives the detach and every sweep until end + retention, then is purged", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const end = nowSec - 10 * DAY;
+    const h = await setup(0, { retentionDays: 30, eventEndSec: end }); // deadline = now + 20 days
+    const pkA = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const x = attendeeBlobX(h, pkA)!;
+    expect(h.store.getTranscript(x)).toBeDefined();
+    expect(pairCount(h)).toBeGreaterThan(0);
+
+    await admin(h, "detach", {});
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+    expect(h.store.getDetachedEvent(h.coordinate)?.purge_after_sec).toBe(end + 30 * DAY);
+
+    // 19 days on: still inside the window — nothing purged.
+    h.clock.t += 19 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pkA)?.profile_json).toBeTruthy();
+    expect(h.store.getTranscript(x)).toBeDefined();
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeDefined();
+
+    // Past the deadline: profiles, transcripts and pair reasoning go, and so does the ledger row.
+    h.clock.t += 2 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pkA)).toBeUndefined();
+    expect(h.store.getTranscript(x)).toBeUndefined();
+    expect(pairCount(h)).toBe(0);
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+    // The replay bar is kept: the detach tombstone outlives the purge.
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+  });
+
+  it("deadline already passed: purged at the very next sweep", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * DAY });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "detach", {});
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined();
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+  });
+
+  it("no retention policy / no end date: kept for the 7-day grace after the detach, then purged", async () => {
+    const h = await setup(); // no retention tag, no end tag: the installed sweep never touches it
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined(); // installed: kept
+    const detachedAt = Math.floor(h.clock.t / 1000);
+    await admin(h, "detach", {});
+    expect(h.store.getDetachedEvent(h.coordinate)?.purge_after_sec).toBe(detachedAt + DETACHED_NO_DEADLINE_GRACE_SEC);
+    // A mistaken detach is not punished within the hour: still there after six days.
+    await h.coordinator.retentionSweep();
+    h.clock.t += 6 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)?.profile_json).toBeTruthy();
+    // Past the week: gone.
+    h.clock.t += 2 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+  });
+
+  it("a re-attach before the deadline cancels the purge and keeps the data", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const end = nowSec - 10 * DAY;
+    const h = await setup(0, { retentionDays: 30, eventEndSec: end });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "detach", {});
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeDefined();
+
+    await reattach(h, [["retention", "30"]]);
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(false);
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+
+    // Still inside the window: neither the detach purge nor the installed sweep fires.
+    h.clock.t += 5 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)?.profile_json).toBeTruthy();
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(false);
+  });
+
+  it("a stale ledger row never purges an event that is installed again", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    // What an older binary's re-install would leave behind: a due row for a live event.
+    h.store.recordDetachedEvent(h.coordinate, 1, 1);
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined();
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+  });
+
+  it("detach drops WAITING jobs too: their payloads carry attendee pubkeys", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    h.coordinator.jobs.enqueue("process_attendee", `proc:${h.coordinate}:${pk}:parked`, { coordinate: h.coordinate, pubkey: pk });
+    (h.store as any)["db"].prepare("UPDATE jobs SET state = 'waiting' WHERE dedupe_key = ?").run(`proc:${h.coordinate}:${pk}:parked`);
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(1);
+    await admin(h, "detach", {});
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
+  it("a detach at startup revalidation (no live state) takes the deadline from the stored config + anchor", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const end = nowSec - 10 * DAY;
+    const h = await setup(0, { retentionDays: 30, eventEndSec: end });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    // The newest 31600 now names another coordinator; a restarted daemon finds out at boot.
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 100, id: "cfg-repoint-sb16", sig: "", content: "",
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(generateSecretKey()), "2"]],
+    } as any);
+    const restarted = new Coordinator({
+      store: h.store, transport: h.transport, coordSk: h.coordSk,
+      llm: new MockLlm(() => ({})), stt: new MockStt(), sttModel: "mock",
+      summaryModel: { provider: "mock", model: "mock-cheap" },
+      matchModel: { provider: "mock", model: "mock-strong" },
+      embedModel: { provider: "mock", model: "mock-embed" },
+      translateModel: { provider: "mock", model: "mock-cheap" },
+      defaultRelays: ["wss://test"], sleep: async () => {}, now: () => h.clock.t,
+    });
+    await restarted.start(); // revalidation detaches, then the boot sweep runs
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+    expect(h.store.getDetachedEvent(h.coordinate)?.purge_after_sec).toBe(end + 30 * DAY);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined(); // boot sweep: not yet due
+    restarted.stop();
+  });
+});
+
 // ── audit C3 — public inbox population / rate / concurrency bounds ────────────
 describe("audit C3 — public inbox is population-bounded", () => {
   it("drops profile submissions from identities with no enrollment row (no DB growth)", async () => {
@@ -7477,7 +7639,7 @@ describe("audit DS41-043 — a long talk transcript still publishes", () => {
  */
 describe("audit SB-124 — the approval policy is enforced", () => {
   /** Send a join carrying harness invite `idx` (or none), no submission. */
-  async function joinWith(h: Harness, sk: Uint8Array, idx: number | undefined, name = "x"): Promise<string> {
+  async function joinWith(h: Harness, sk: Uint8Array, idx: number | undefined, name = "x", createdAt?: number): Promise<string> {
     const pk = getPublicKey(sk);
     const tags: string[][] = [["a", h.coordinate]];
     if (idx !== undefined) {
@@ -7490,6 +7652,7 @@ describe("audit SB-124 — the approval policy is enforced", () => {
         kind: KIND_JOIN_REQUEST,
         content: { v: 2, name, message: "", rsvp_public: false },
         tags,
+        ...(createdAt !== undefined ? { created_at: createdAt } : {}),
       }) as any,
     );
     return pk;
@@ -7566,14 +7729,45 @@ describe("audit SB-124 — the approval policy is enforced", () => {
     expect(grantsTo(h, sk).length).toBeGreaterThan(0);
   });
 
-  it("manual+invite and open: a valid code auto-approves, no code waits in the queue", async () => {
-    for (const approval of ["manual+invite", "open"] as const) {
-      const h = await setup(0, { approval });
-      const withCode = await joinWith(h, generateSecretKey(), 0);
-      const without = await joinWith(h, generateSecretKey(), undefined);
-      expect(h.store.getAttendee(h.coordinate, withCode)?.status, approval).toBe("approved");
-      expect(h.store.getAttendee(h.coordinate, without)?.status, approval).toBe("pending");
-    }
+  it("manual+invite: a valid code auto-approves, no code waits in the queue", async () => {
+    const h = await setup(0, { approval: "manual+invite" });
+    const withCode = await joinWith(h, generateSecretKey(), 0);
+    const without = await joinWith(h, generateSecretKey(), undefined);
+    expect(h.store.getAttendee(h.coordinate, withCode)?.status).toBe("approved");
+    expect(h.store.getAttendee(h.coordinate, without)?.status).toBe("pending");
+  });
+
+  // Owner decision 2026-10-20: "open" means anyone holding the link is in.
+  it("open: a code-less join is approved, and a valid code still admits (and is claimed)", async () => {
+    const h = await setup(0, { approval: "open" });
+    const withoutSk = generateSecretKey();
+    const without = await joinWith(h, withoutSk, undefined);
+    expect(h.store.getAttendee(h.coordinate, without)?.status).toBe("approved");
+    expect(grantsTo(h, withoutSk).length).toBeGreaterThan(0);
+    const withCode = await joinWith(h, generateSecretKey(), 0);
+    expect(h.store.getAttendee(h.coordinate, withCode)?.status).toBe("approved");
+    // A spent single-use code does not lock anyone out of an open community.
+    const reuse = await joinWith(h, generateSecretKey(), 0);
+    expect(h.store.getAttendee(h.coordinate, reuse)?.status).toBe("approved");
+  });
+
+  it("open: a revoked member re-joining is queued for the organizer, not readmitted", async () => {
+    const h = await setup(0, { approval: "open" });
+    const sk = generateSecretKey();
+    const pk = await joinWith(h, sk, undefined);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    await admin(h, "revoke", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    const grantsBefore = grantsTo(h, sk).length;
+
+    h.clock.t += 60_000;
+    await joinWith(h, sk, undefined, "again", Math.floor(h.clock.t / 1000));
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
+
+    // The organizer can still let them back in by hand.
+    await admin(h, "approve", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
   });
 
   it("a 31600 without an approval tag is treated as the NIP default, manual", async () => {

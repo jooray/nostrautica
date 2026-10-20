@@ -224,6 +224,8 @@ export async function createEvent(
     talks: input.talks ?? "off",
     chat: input.chat ?? [],
     ...(input.parent ? { parent: input.parent } : {}),
+    // SB-09: the `a` tag names the space's real coordinate (31612 for a community).
+    ...(spaceKind === KIND_COMMUNITY ? { spaceKind } : {}),
   };
   const cfg = buildEventConfig(config);
   const event31600 = finalizeEvent(

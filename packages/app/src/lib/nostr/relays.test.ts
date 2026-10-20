@@ -80,8 +80,8 @@ describe("chat relays", () => {
     expect(chatInteropRelays(["wss://nostr.cypherpunk.today"])).toEqual(WHITENOISE_RELAYS);
   });
 
-  // Mirrors the coordinator's carve-out: a local e2e event must never make the
-  // test run dial public infrastructure.
+  // Mirrors the coordinator's carve-out: a local e2e event gets no interop
+  // relays, so its chat traffic stays on the local relay.
   it("attaches nothing when every event relay is loopback", () => {
     expect(chatInteropRelays(["ws://localhost:7777"])).toEqual([]);
     expect(chatInteropRelays(["ws://127.0.0.1:7777", "ws://localhost:7777"])).toEqual([]);

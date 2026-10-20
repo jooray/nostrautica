@@ -16,7 +16,7 @@ single product release.
 | Android `versionName` | `android/app/build.gradle.kts` | Every Android release. Must equal the root `version`: `assembleRelease` fails otherwise. |
 | Android `versionCode` | `android/app/build.gradle.kts` | Every Android release, above the last `android-v*` GitHub release's (Android and Zapstore refuse an equal or lower one). `android/tools/release-check.sh` enforces it. |
 | Wire protocol `v` | `PROTOCOL_VERSION` in `packages/protocol/src/schemas.ts` | The **on-the-wire payload contract** changes. This is deliberately separate: package versions can move without a wire change, and a wire change is a compatibility event for every peer. Currently `2`. |
-| Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the open-time and backup/restore downgrade guards). Bumped at every downgrade-incompatible boundary via a numbered migration (see below). Currently `5`. |
+| Store schema | `SCHEMA_VERSION` in `packages/coordinator/src/store/db.ts` | The coordinator's durable SQLite shape changes in a way a downgrade can't tolerate (drives the open-time and backup/restore downgrade guards). Bumped at every downgrade-incompatible boundary via a numbered migration (see below). Currently `6`. |
 
 Do **not** infer compatibility from equal or unequal package versions. Compatibility
 is defined by the wire protocol version (and the protocol registry,
@@ -46,6 +46,7 @@ code, because it is what an operator reads before deciding a rollback is safe:
 | `3` | `applyMembershipSubjectMerge` | Re-keys `command_watermarks`: the separate `pubkey:` and `withdraw:` subject namespaces merge into one membership subject, so an approve and a withdrawal for the same person are ordered against each other instead of in parallel. |
 | `4` | `applyArtifactLegacyQuarantine` | Adds `pipeline_artifacts.quarantined_at` and stamps every artifact that no `artifact_refs` row owns, so pre-ownership artifacts can be garbage-collected after a grace window instead of growing forever. |
 | `5` | `applyInviteUsagePerRedeemer` | Re-keys `invite_usage` on `(coordinate, invite_pubkey, used_by)` so a reusable invite code records one row per redeemer. Required by the `uses`/`exp` invite fields. |
+| `6` | `applyDetachedEventsLedger` | Adds `detached_events`, the purge ledger for detached events (audit SB-16): a detach records when the event's attendee data falls due (its retention deadline, the next sweep if that has passed, or 7 days out if it has none), and the retention sweep purges it then. A version boundary although it only adds a table: an older binary would re-install an event without clearing its row. The migration also backfills a row, due 7 days after it runs, for every coordinate that still holds attendee data but has no `events` row (events detached before v6). |
 
 Adding a migration means: append to `MIGRATIONS`, bump `SCHEMA_VERSION`, and add a
 row above. A migration is **one-way**: once applied, no older binary will open the

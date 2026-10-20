@@ -18,7 +18,7 @@ describe("hierarchy re-issue ledger (§15.3)", () => {
       expect(b.hierarchyReissued("31923:c:x", "31612:p:y", 1)).toBe(true);
       expect(b.hierarchyReissued("31923:c:x", "31612:p:y", 2)).toBe(false); // new coordinator gen
       expect(b.hierarchyReissued("31923:c:x", "31612:other:y", 1)).toBe(false);
-      expect(SCHEMA_VERSION).toBe(5); // additive table, no one-way migration
+      expect(SCHEMA_VERSION).toBe(6); // additive table, no one-way migration (v6 is SB-16's detach ledger)
       b.close();
     } finally {
       rmSync(dir, { recursive: true, force: true });

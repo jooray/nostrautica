@@ -128,3 +128,18 @@ describe("createEvent relay split", () => {
     expect(parsed.chat).toEqual(["marmot"]);
   });
 });
+
+describe("createEvent 31600 `a` tag (audit SB-09)", () => {
+  beforeEach(() => publishOrQueue.mockClear());
+
+  it("names the space's own coordinate: 31612 for a community, 31923 for an event", async () => {
+    const community = await createEvent(owner, input({ mode: "community", start: undefined, approval: "open" }), new Uint8Array(32));
+    expect(community.coordinate.startsWith("31612:")).toBe(true);
+    expect(tagValues("a")).toEqual([community.coordinate]);
+
+    publishOrQueue.mockClear();
+    const event = await createEvent(owner, input(), new Uint8Array(32));
+    expect(event.coordinate.startsWith("31923:")).toBe(true);
+    expect(tagValues("a")).toEqual([event.coordinate]);
+  });
+});

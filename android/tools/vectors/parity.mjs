@@ -149,7 +149,10 @@ const cfg = (label, extra) => {
   let parsed = null;
   try {
     const c = P.parseEventConfig(pk, tags);
-    parsed = { coordinator: c.coordinator ?? null, coordinatorGen: c.coordinatorGen ?? null, relays: c.relays, chatRelays: c.chatRelays };
+    let aBuilt = null;
+    try { aBuilt = P.buildEventConfig(c).tags.find((t) => t[0] === "a")[1]; } catch { /* unbuildable */ }
+    parsed = { coordinator: c.coordinator ?? null, coordinatorGen: c.coordinatorGen ?? null, relays: c.relays, chatRelays: c.chatRelays,
+      spaceKind: c.spaceKind ?? 31923, aBuilt };
   } catch {
     parsed = null;
   }
@@ -161,6 +164,10 @@ cfg("relay spellings", [["v", "2"],
   ["relay", "wss://nos.lol"], ["relay", "WSS://Relay.Example.com"], ["relay", "wss:foo"], ["relay", "ws://plain"],
   ["relay", "https://not-a-relay"], ["relay", "wss://"], ["relay", "nonsense"], ["relay", "WSS://RELAY.EU.WHITENOISE.CHAT"],
   ["chat_relay", "Wss://chat.example"], ["chat_relay", "wss:chat2"]]);
+// SB-09: the `a` tag's kind survives a parse + rebuild only for a community's own coordinate.
+cfg("a = own community coordinate", [["v", "2"], ["a", `31612:${pk}:x`]]);
+cfg("a = calendar alias (pre-SB-09 community)", [["v", "2"], ["a", `31923:${pk}:x`]]);
+cfg("a = someone else's community", [["v", "2"], ["a", `31612:${hex("cd")}:x`]]);
 
 // ── Coordinates ───────────────────────────────────────────────────────────
 const coordinates = [`31923:${pk}:d`, `031923:${pk}:d`, `+31923:${pk}:d`, `31923.0:${pk}:d`, ` 31923:${pk}:d`, `:${pk}:d`,

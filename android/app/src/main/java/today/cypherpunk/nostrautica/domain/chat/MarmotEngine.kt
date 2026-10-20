@@ -160,7 +160,7 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
     override suspend fun refreshIfStale(): Boolean = withContext(Dispatchers.IO) {
         lock.withLock {
             if (marmot == null || !freshness.shouldRestart(refs)) return@withLock false
-            Log.i(TAG, "restarting the chat runtime so its group subscriptions cover a new group or relay list")
+            Log.i(TAG, "restarting the chat runtime (${freshness.reason()})")
             close()
             marmot = open()
             true
@@ -242,7 +242,6 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
     override suspend fun acceptInvite(account: String, groupIdHex: String) {
         io {
             runCatching { acceptGroupInvite(account, groupIdHex) }
-                .onSuccess { freshness.joinedGroup(groupIdHex) }
                 .onFailure { Log.w(TAG, "accept: ${it.javaClass.simpleName}") }
         }
     }
@@ -251,7 +250,7 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         val status = runCatching { groupRecoveryStatus(account, groupIdHex) }.getOrNull() ?: return@io false
         val offer = status.rejoinInvitations.filter { hexOf(it.welcomerAccountIdHex) == coordinator }.maxByOrNull { it.epoch } ?: return@io false
         runCatching { confirmGroupRejoin(account, offer.welcomeIdHex, offer.localStateToken) }.isSuccess
-            .also { if (it) freshness.joinedGroup(groupIdHex) }
+            .also { if (it) freshness.rejoined(groupIdHex) }
     }
 
     override suspend fun rotateKeyPackage(account: String) { io { rotateKeyPackage(account) } }

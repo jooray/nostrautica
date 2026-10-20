@@ -39,7 +39,10 @@ pnpm e2e:full          # everything, all specs
 
 The orchestrator builds the app itself (relay tiers get
 `VITE_NOSTRAUTICA_RELAYS`/`VITE_NOSTRAUTICA_BLOSSOM` pointed at the local stack),
-so you never manage that by hand. Pass extra Playwright args after `--`:
+so you never manage that by hand. The override replaces only the app's own
+default relays and Blossom servers. Relays named in other users' data, such as
+NIP-17 kind-10050 DM inboxes and relay hints, are still contacted, so a test run
+is not sealed off from public relays. Pass extra Playwright args after `--`:
 
 ```sh
 pnpm e2e:integration -- tests/integration/walking-skeleton.spec.ts --headed

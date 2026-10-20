@@ -168,7 +168,15 @@ class Organizer(
     /** [linkFailed]: the event exists but the community did not list it back (Settings can finish the link). */
     data class CreateResult(val created: OrganizerEvents.Created, val naddr: String, val published: Boolean, val linkFailed: Boolean = false)
 
-    suspend fun createEvent(input: CreateEventInput): CreateResult {
+    // The organizer's actions are main-safe: Admin and Create launch them from screen
+    // coroutines on the main thread, and an approval, a rotation (re-encrypt and
+    // re-grant every attendee), a key check or 100 invite codes is a loop of
+    // signatures, NIP-44 and gift wraps. Each public entry point runs its body
+    // (`…OffMain`, same locks and returns) on Dispatchers.Default.
+    suspend fun createEvent(input: CreateEventInput): CreateResult =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { createEventOffMain(input) }
+
+    private suspend fun createEventOffMain(input: CreateEventInput): CreateResult {
         val signer = accounts.signer
         val me = signer.pubkey
         val bk = accounts.blindingKey()
@@ -200,7 +208,10 @@ class Organizer(
      * coordinator backfill auto-approves it) plus an immediate self-approval signed by
      * E_id, roster role "organizer".
      */
-    suspend fun enrollSelf(ctx: EventContext) {
+    suspend fun enrollSelf(ctx: EventContext) =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { enrollSelfOffMain(ctx) }
+
+    private suspend fun enrollSelfOffMain(ctx: EventContext) {
         val signer = accounts.signer
         val me = signer.pubkey
         runCatching { profiles.refresh(listOf(me)) }
@@ -274,8 +285,13 @@ class Organizer(
             listOf(Filter(kinds = listOf(Kinds.GIFT_WRAP), tags = mapOf("p" to sks.map(Secp::pubkeyHex)), since = GiftWrap.since())),
             timeoutMs = 10_000, graceMs = 2_000,
         )
-        val rumors = r.events.mapNotNull { unwrapInbox(it, sks) }
-        val pending = InboxFold.fold(rumors, ctx.coordinate)
+        // Every wrap is unwrapped locally (two NIP-44 decrypts and a signature check per
+        // inbox key tried), hundreds of them for a busy event, and Admin calls this from
+        // the main thread: off it, or the screen froze for seconds on a slow phone.
+        val (rumors, pending) = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) {
+            val rumors = r.events.mapNotNull { unwrapInbox(it, sks) }
+            rumors to InboxFold.fold(rumors, ctx.coordinate)
+        }
         cache.put(owner, "pending:${ctx.coordinate}", ListSerializer(PendingRequest.serializer()), pending, pending.maxOfOrNull { it.rumorCreatedAt } ?: 0)
         val cfg = ctx.cfg
         val talks = if (cfg.talks != "off" && cfg.coordinator != null) {
@@ -328,7 +344,10 @@ class Organizer(
      * The current roster, or why it can't be established. "Nothing came back" is a
      * first roster only if no relay answered nothing AND this device never saw one.
      */
-    suspend fun loadRoster(ctx: EventContext, keys: EventKeys): OrganizerEvents.RosterRead {
+    suspend fun loadRoster(ctx: EventContext, keys: EventKeys): OrganizerEvents.RosterRead =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { loadRosterOffMain(ctx, keys) }
+
+    private suspend fun loadRosterOffMain(ctx: EventContext, keys: EventKeys): OrganizerEvents.RosterRead {
         val cfg = ctx.cfg
         val publisher = cfg.coordinator ?: cfg.eidPubkey
         val accepted = listOfNotNull(cfg.coordinator, cfg.eidPubkey)
@@ -388,7 +407,10 @@ class Organizer(
 
     // ── Approve (organizer.ts approveAttendee) ──────────────────────────────
 
-    suspend fun approve(ctx: EventContext, req: PendingRequest, role: String = "attendee") = lock("roster:${ctx.coordinate}").withLock {
+    suspend fun approve(ctx: EventContext, req: PendingRequest, role: String = "attendee") =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { approveOffMain(ctx, req, role) }
+
+    private suspend fun approveOffMain(ctx: EventContext, req: PendingRequest, role: String) = lock("roster:${ctx.coordinate}").withLock {
         // One roster author (SB-91): with a coordinator attached this is a 21604.
         assertNoCoordinatorAuthority(ctx)
         val keys0 = orgKeys(ctx)
@@ -434,7 +456,8 @@ class Organizer(
 
     // ── Space hierarchy (events/hierarchy.ts, §15) ──────────────────────────
 
-    private fun cfgOf(ctx: EventContext, cfg: EventConfig) = ctx.copy(config = SerializableConfig(cfg.eidPubkey, OrganizerEvents.configTags(cfg)))
+    private fun cfgOf(ctx: EventContext, cfg: EventConfig) =
+        ctx.copy(config = SerializableConfig(cfg.eidPubkey, OrganizerEvents.configTags(cfg.forSpace(Coordinate.parse(ctx.coordinate)))))
 
     /**
      * Republish a space's own 31600 with [mutate] applied to the NEWEST config. The read is
@@ -445,7 +468,8 @@ class Organizer(
         val keys = keysFor(coordinate)
         if (keys == null || keys.role != "organizer" || keys.eidNsecHex == null) throw NotOrganizer()
         val current = contexts.fetchConfig(coordinate, relays) ?: throw IllegalStateException("Event config (31600) not found")
-        val next = mutate(current)
+        // forSpace: the a tag names the space's own kind (SB-09), repairing a community saved before the fix.
+        val next = mutate(current).forSpace(Coordinate.parse(coordinate))
         if (next.children == current.children && next.parent == current.parent) return null
         val publishRelays = (OrganizerEvents.unionRelays(relays, current.relays) + Relays.DEFAULT).distinct()
         publishMonotonic(eidSk(keys), Kinds.EVENT_CONFIG, next.d, publishRelays, "config") { at ->
@@ -511,7 +535,10 @@ class Organizer(
      * they already hold (receivers union-merge, §6.3), plus the proof. 0 when the roster cannot be
      * read or the event is not linked.
      */
-    suspend fun reissueGrantsWithProof(ctx: EventContext): Int {
+    suspend fun reissueGrantsWithProof(ctx: EventContext): Int =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { reissueGrantsWithProofOffMain(ctx) }
+
+    private suspend fun reissueGrantsWithProofOffMain(ctx: EventContext): Int {
         val keys = keysFor(ctx.coordinate)
         if (keys == null || keys.role != "organizer" || keys.eidNsecHex == null || keys.current == null) return 0
         val eidSk = eidSk(keys)
@@ -577,7 +604,10 @@ class Organizer(
     private fun newEckVersion(k: EventKeys) = OrganizerEvents.nextEck(k.eck + (k.pendingEck ?: emptyList()), ProtocolCrypto.generateEck())
 
     /** Revoke without a coordinator: forward-only ECK rotation, everyone else re-granted. */
-    suspend fun revokeClient(ctx: EventContext, removed: String) = lock("roster:${ctx.coordinate}").withLock {
+    suspend fun revokeClient(ctx: EventContext, removed: String) =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { revokeClientOffMain(ctx, removed) }
+
+    private suspend fun revokeClientOffMain(ctx: EventContext, removed: String) = lock("roster:${ctx.coordinate}").withLock {
         // One roster author (SB-91): with a coordinator attached the coordinator rotates.
         assertNoCoordinatorAuthority(ctx)
         val keys0 = orgKeys(ctx)
@@ -738,7 +768,10 @@ class Organizer(
      * open) the account's backup is folded in and the union republished if this
      * device holds more (SB-89).
      */
-    suspend fun checkKeys(ctx: EventContext, reconcile: Boolean = false): KeyStatus? {
+    suspend fun checkKeys(ctx: EventContext, reconcile: Boolean = false): KeyStatus? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { checkKeysOffMain(ctx, reconcile) }
+
+    private suspend fun checkKeysOffMain(ctx: EventContext, reconcile: Boolean): KeyStatus? {
         val cfg = runCatching { contexts.fetchConfig(ctx.coordinate, ctx.relays) }.getOrNull() ?: return null
         noteFreshConfig(ctx.coordinate, cfg)
         if (reconcile) runCatching { reconcileBackup(ctx.coordinate, cfg.inbox) }
@@ -794,7 +827,10 @@ class Organizer(
      * directory under it, re-grant the full list (both colliding keys) to everyone
      * on the roster, re-issue to co-organizers. Refuses with a coordinator attached.
      */
-    suspend fun repairKeys(ctx: EventContext) = lock("roster:${ctx.coordinate}").withLock {
+    suspend fun repairKeys(ctx: EventContext) =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { repairKeysOffMain(ctx) }
+
+    private suspend fun repairKeysOffMain(ctx: EventContext) = lock("roster:${ctx.coordinate}").withLock {
         val cfg = contexts.fetchConfig(ctx.coordinate, ctx.relays) ?: throw IllegalStateException("Event config (31600) not found")
         noteFreshConfig(ctx.coordinate, cfg)
         if (cfg.coordinator != null) throw CoordinatorAttached()
@@ -862,7 +898,8 @@ class Organizer(
         // The space hierarchy (§15) is edited from other screens and devices: a settings change built
         // on a cached context must not roll back a link made since. Carry the newest parent/children.
         val fresh = runCatching { contexts.fetchConfig(ctx.coordinate, ctx.cfg.relays) }.getOrNull()
-        val cfg = if (fresh != null) base.copy(parent = fresh.parent, children = fresh.children) else base
+        val cfg = (if (fresh != null) base.copy(parent = fresh.parent, children = fresh.children) else base)
+            .forSpace(Coordinate.parse(ctx.coordinate))
         val tags = OrganizerEvents.configTags(cfg)
         val all = (relays + Relays.DEFAULT).distinct()
         val (_, ok) = publishMonotonic(eidSk, Kinds.EVENT_CONFIG, cfg.d, all, "config") { at -> UnsignedEvent(cfg.eidPubkey, at, Kinds.EVENT_CONFIG, tags, "") }
@@ -988,6 +1025,9 @@ class Organizer(
     }
 
     suspend fun generateInvites(ctx: EventContext, count: Int, labelPrefix: String = "invite", uses: Int? = null, exp: Long? = null): List<GeneratedInvite> =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { generateInvitesOffMain(ctx, count, labelPrefix, uses, exp) }
+
+    private suspend fun generateInvitesOffMain(ctx: EventContext, count: Int, labelPrefix: String, uses: Int?, exp: Long?): List<GeneratedInvite> =
         lock("invites:${ctx.coordinate}").withLock {
             val keys = orgKeys(ctx)
             val eidSk = eidSk(keys)
@@ -1036,7 +1076,10 @@ class Organizer(
      * first (EV-10), merging so a fresher local ECK set is never clobbered. A
      * remote signer is asked for at most [maxDecrypts] decrypts per pass.
      */
-    suspend fun recoverEventKeys(force: Boolean = false, maxDecrypts: Int = 40): List<String> = lock("recover").withLock {
+    suspend fun recoverEventKeys(force: Boolean = false, maxDecrypts: Int = 40): List<String> =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { recoverEventKeysOffMain(force, maxDecrypts) }
+
+    private suspend fun recoverEventKeysOffMain(force: Boolean, maxDecrypts: Int): List<String> = lock("recover").withLock {
         val signer = accounts.signer
         val me = signer.pubkey
         if (!force && me in recovered) return@withLock emptyList()
@@ -1218,7 +1261,10 @@ class Organizer(
     suspend fun cachedPosts(coordinate: String) = cache.get(owner, "orgposts:$coordinate", ListSerializer(Post.serializer())) ?: emptyList()
 
     /** This event's own posts (30023 + 31607 by E_id), latest per `d`, newest first. */
-    suspend fun fetchPosts(ctx: EventContext): List<Post> {
+    suspend fun fetchPosts(ctx: EventContext): List<Post> =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { fetchPostsOffMain(ctx) }
+
+    private suspend fun fetchPostsOffMain(ctx: EventContext): List<Post> {
         val eid = ctx.coord.pubkey
         val f = Filter(kinds = listOf(Kinds.LONGFORM, Kinds.MEMBERS_POST), authors = listOf(eid))
         runCatching { nostr.fetch(ctx.relays, f) }
