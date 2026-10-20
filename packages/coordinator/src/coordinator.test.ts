@@ -7057,6 +7057,25 @@ describe("audit SB-99 — a join in flight across a detach publishes nothing", (
   });
 });
 
+/** Audit DS41-042 / SB-98: a forward and a reverse batch for one directed pair both paid. */
+describe("audit SB-98 — one directed pair is scored once, however many batches hold it", () => {
+  it("concurrent forward + reverse batches make one provider call", async () => {
+    const h = await setup();
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const db = (h.store as any).db;
+    const row = db.prepare("SELECT a, b, inputs_hash FROM pairs WHERE coordinate = ?").get(h.coordinate);
+    db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(h.coordinate);
+    const pair = { a: row.a, b: row.b, inputsHash: row.inputs_hash };
+    const before = h.counters.batchCalls.length + h.counters.reverseCalls.length;
+    const c = h.coordinator as any;
+    await Promise.all([c.scoreBatchJob(h.coordinate, [pair]), c.scoreReverseBatchJob(h.coordinate, [pair])]);
+    expect(h.counters.batchCalls.length + h.counters.reverseCalls.length - before).toBe(1);
+    expect(c.pairsInFlight.size).toBe(0);
+  });
+});
+
 /** Audit SB-31: a store throw between the in-flight claim and dispatch leaked the claim. */
 describe("audit SB-31 — a store error before dispatch releases the rumor claim", () => {
   it("the same join is processed on redelivery after bumpInboxRate threw", async () => {

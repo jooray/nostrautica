@@ -4108,6 +4108,40 @@ export class Coordinator {
   }
 
   /**
+   * Directed pairs (at an inputs_hash) a score batch is paying for right now.
+   *
+   * A's recompute queues the reverse batch {a: B, b: A}; B's recompute queues a
+   * forward batch for the same directed row. Different dedupe keys, so both jobs
+   * exist, and the score lane runs two wide: each re-checked "already scored"
+   * before its call, both saw the row pending, and the provider was paid twice
+   * for one pair (audit DS41-042 / SB-98). A batch now claims its pending pairs
+   * synchronously (no await between check and claim) and skips any another batch
+   * holds. Skipped, not counted as missing: the holder retries on its own failure.
+   */
+  private readonly pairsInFlight = new Set<string>();
+
+  private pairFlightKey(coordinate: string, p: CandidatePair): string {
+    return `${coordinate}|${p.a}|${p.b}|${p.inputsHash}`;
+  }
+
+  private claimPendingPairs(coordinate: string, pairs: CandidatePair[]): CandidatePair[] {
+    const claimed: CandidatePair[] = [];
+    for (const p of pairs) {
+      const dir = this.deps.store.getPairDirection(coordinate, p.a, p.b);
+      if (dir && dir.inputs_hash === p.inputsHash && dir.scored) continue;
+      const key = this.pairFlightKey(coordinate, p);
+      if (this.pairsInFlight.has(key)) continue;
+      this.pairsInFlight.add(key);
+      claimed.push(p);
+    }
+    return claimed;
+  }
+
+  private releasePairs(coordinate: string, pairs: CandidatePair[]): void {
+    for (const p of pairs) this.pairsInFlight.delete(this.pairFlightKey(coordinate, p));
+  }
+
+  /**
    * Score one batch (one target + ≤K candidates) in a single LLM call, writing each
    * directed result per-pair. Returns the pairs actually scored this attempt plus
    * how many candidates the model failed to return (missing/malformed entries).
@@ -4127,12 +4161,24 @@ export class Coordinator {
     const targetProfile = this.loadAiProfile(coordinate, target);
     if (!targetProfile) return { scored: [], missing: 0 };
 
-    // Score only pairs still pending for their current inputs_hash.
-    const todo = pairs.filter((p) => {
-      const dir = this.deps.store.getPairDirection(coordinate, p.a, p.b);
-      return !dir || dir.inputs_hash !== p.inputsHash || !dir.scored;
-    });
+    // Score only pairs still pending for their current inputs_hash, and not being
+    // scored right now by another batch (audit DS41-042 / SB-98).
+    const todo = this.claimPendingPairs(coordinate, pairs);
+    try {
+      return await this.scoreClaimedBatch(coordinate, state, target, targetProfile, todo, signal);
+    } finally {
+      this.releasePairs(coordinate, todo);
+    }
+  }
 
+  private async scoreClaimedBatch(
+    coordinate: string,
+    state: EventState,
+    target: string,
+    targetProfile: NonNullable<ReturnType<Coordinator["loadAiProfile"]>>,
+    todo: CandidatePair[],
+    signal?: AbortSignal,
+  ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const candidates: BatchCandidate[] = [];
     const pairById = new Map<string, CandidatePair>();
     for (const p of todo) {
@@ -4229,12 +4275,24 @@ export class Coordinator {
     const sharedProfile = this.loadAiProfile(coordinate, shared);
     if (!sharedProfile) return { scored: [], missing: 0 };
 
-    // Score only pairs still pending for their current inputs_hash.
-    const todo = pairs.filter((p) => {
-      const dir = this.deps.store.getPairDirection(coordinate, p.a, p.b);
-      return !dir || dir.inputs_hash !== p.inputsHash || !dir.scored;
-    });
+    // Score only pairs still pending for their current inputs_hash, and not being
+    // scored right now by another batch (audit DS41-042 / SB-98).
+    const todo = this.claimPendingPairs(coordinate, pairs);
+    try {
+      return await this.scoreClaimedReverseBatch(coordinate, state, shared, sharedProfile, todo, signal);
+    } finally {
+      this.releasePairs(coordinate, todo);
+    }
+  }
 
+  private async scoreClaimedReverseBatch(
+    coordinate: string,
+    state: EventState,
+    shared: string,
+    sharedProfile: NonNullable<ReturnType<Coordinator["loadAiProfile"]>>,
+    todo: CandidatePair[],
+    signal?: AbortSignal,
+  ): Promise<{ scored: CandidatePair[]; missing: number }> {
     const targets: BatchCandidate[] = [];
     const pairByTarget = new Map<string, CandidatePair>();
     for (const p of todo) {
