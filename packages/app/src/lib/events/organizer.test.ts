@@ -77,6 +77,7 @@ import {
   sharedInviteExp,
   updateEventConfig,
   attachCoordinator,
+  loadRoster,
   type PendingRequest,
   fetchPending,} from "./organizer.js";
 import {
@@ -536,6 +537,25 @@ describe("roster read-modify-write safety", () => {
       /couldn't read/i,
     );
     expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  // Audit SB-91: the fetch named only the current publisher (the coordinator)
+  // while the accept filter also takes E_id, so an E_id-authored roster was
+  // invisible to the organizer's own read.
+  it("reads an E_id-authored roster while a coordinator is attached", async () => {
+    const coordinator = getPublicKey(generateSecretKey());
+    const withCoord = { ...ctx, config: { ...ctx.config, coordinator } } as EventContext;
+    // A relay that honours the `authors` filter.
+    fetchEventsRelayOnly.mockImplementation(async (filter: { authors?: string[] }) =>
+      filter.authors?.includes(EID_PUBKEY)
+        ? [rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]
+        : [],
+    );
+
+    const read = await loadRoster(withCoord, ECK_BYTES);
+
+    expect(read.state).toBe("ok");
+    expect(read.state === "ok" && read.roster.attendees.map((a) => a.pubkey)).toEqual([ALICE]);
   });
 
   it("still publishes the first roster on an event that has never had one", async () => {

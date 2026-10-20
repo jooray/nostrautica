@@ -568,10 +568,15 @@ export async function loadRoster(
   ctx: EventContext,
   eckBytes: Uint8Array,
 ): Promise<RosterRead> {
-  const publisher = directoryPublisher(ctx);
   const { identifier } = splitCoordinate(ctx.coordinate);
+  // Ask for every author we would ACCEPT, not only the current publisher (SB-91),
+  // matching attendee.ts `fetchRoster`. With a coordinator attached the request
+  // named only the coordinator, so an E_id-authored roster (one this organizer
+  // published from a page that had not yet seen the attach) was invisible to its
+  // own next read: "absent" on a device that has seen a roster, i.e. every later
+  // approve/revoke refused, while attendees were reading that very roster.
   const events = await fetchEventsRelayOnly(
-    { kinds: [KIND_ROSTER], authors: [publisher], "#d": [identifier] },
+    { kinds: [KIND_ROSTER], authors: acceptedRecordAuthors(ctx), "#d": [identifier] },
     ctx.config.relays,
   );
   // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7):
