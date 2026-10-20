@@ -284,7 +284,7 @@
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f3">Public updates or members-only posts, encrypted to your attendees alone</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f4">A custom event page and your own theme CSS</span></li>
           <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f5">Live talks or prerecorded, including the no-stage format</span></li>
-          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f6">End-to-end encrypted group chat, built on the open Marmot (MLS) standard</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M20 6 9 17l-5-5"/></svg><span data-i18n="organizers.f6">End-to-end encrypted group chat on the open Marmot (MLS) standard. The coordinator runs the room as a member, so it can read it too.</span></li>
         </ul>
         <a class="btn btn-ghost" href="/docs/ORGANIZER-GUIDE.html" data-i18n="organizers.cta" data-i18n-href="organizers.cta_href">Read the organizer guide</a>
       </div>
@@ -312,7 +312,7 @@
       <div class="sov-copy">
         <p class="eyebrow" data-i18n="sovereignty.eyebrow">Own the aftermath</p>
         <h2 data-i18n="sovereignty.title">Registering isn't a sign-up. It's an identity.</h2>
-        <p data-i18n="sovereignty.body1">The first time you join, Nostrautica sets up a real Nostr keypair for you, or you sign in with the Nostr key you already have. It's the same kind Primal, Amethyst, Damus, and Yakihonne use, and the same identity every time: this event, the next, any Nostr app, never a fresh login per event. Your profile, your follows, the people you met: none of it lives in a database Nostrautica controls, because there isn't one.</p>
+        <p data-i18n="sovereignty.body1">The first time you join, Nostrautica sets up a real Nostr keypair for you, or you sign in with the Nostr key you already have. It's the same kind Primal, Amethyst, Damus, and Yakihonne use, and the same identity every time: this event, the next, any Nostr app, never a fresh login per event. Your profile, your follows, the people you met: none of it lives in a database Nostrautica controls, because there isn't one. The exception is the coordinator an organizer picks for matching: it keeps its own copy of that event's content, as the privacy section below explains.</p>
         <p data-i18n="sovereignty.body2">Paste your key into any of those apps afterward and you're already there: already following the people you met, already posting to the same network.</p>
       </div>
 
@@ -373,7 +373,7 @@
         </div>
       </div>
 
-      <p class="privacy-note" data-i18n="privacy.note">The coordinator can read event-tier content and, because it computes your matches, it also knows your match reasoning, because it has to in order to transcribe intros and pair people. It's infrastructure the organizer chose, the app names it plainly before you record a word, and none of it is ever made public.</p>
+      <p class="privacy-note" data-i18n="privacy.note">The coordinator can read event-tier content and, because it computes your matches, it also knows your match reasoning, because it has to in order to transcribe intros and pair people. It also runs the event's group chat as a member of the room, so it can read that too. It's infrastructure the organizer chose, the app names it plainly before you record a word, and none of it is ever made public.</p>
     </div>
   </section>
 
@@ -468,12 +468,12 @@
     <div class="footer-bottom">
       <span data-i18n="footer.rights">Free and open source, MIT licensed.</span>
       <a href="https://github.com/jooray/nostrautica" data-i18n="footer.source" target="_blank" rel="noopener">Source on GitHub</a>
-      <span data-i18n="footer.made">Built on Nostr. No backend, no data silo, no permission required.</span>
+      <span data-i18n="footer.made">Built on Nostr. No accounts to create, no permission required.</span>
     </div>
   </div>
 </footer>
 
-<script src="assets/i18n.js?v=b5c4aa98"></script>
+<script src="assets/i18n.js?v=9e91f77f"></script>
 <script src="assets/app.js?v=3845cfa8"></script>
 </body>
 </html>

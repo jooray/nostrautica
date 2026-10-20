@@ -72,7 +72,7 @@
       "organizers.f3": "Public updates or members-only posts, encrypted to your attendees alone",
       "organizers.f4": "A custom event page and your own theme CSS",
       "organizers.f5": "Live talks or prerecorded, including the no-stage format",
-      "organizers.f6": "End-to-end encrypted group chat, built on the open Marmot (MLS) standard",
+      "organizers.f6": "End-to-end encrypted group chat on the open Marmot (MLS) standard. The coordinator runs the room as a member, so it can read it too.",
       "organizers.cta": "Read the organizer guide",
       "organizers.cta_href": "/docs/ORGANIZER-GUIDE.html",
 
@@ -90,7 +90,7 @@
 
       "sovereignty.eyebrow": "Own the aftermath",
       "sovereignty.title": "Registering isn't a sign-up. It's an identity.",
-      "sovereignty.body1": "The first time you join, Nostrautica sets up a real Nostr keypair for you, or you sign in with the Nostr key you already have. It's the same kind Primal, Amethyst, Damus, and Yakihonne use, and the same identity every time: this event, the next, any Nostr app, never a fresh login per event. Your profile, your follows, the people you met: none of it lives in a database Nostrautica controls, because there isn't one.",
+      "sovereignty.body1": "The first time you join, Nostrautica sets up a real Nostr keypair for you, or you sign in with the Nostr key you already have. It's the same kind Primal, Amethyst, Damus, and Yakihonne use, and the same identity every time: this event, the next, any Nostr app, never a fresh login per event. Your profile, your follows, the people you met: none of it lives in a database Nostrautica controls, because there isn't one. The exception is the coordinator an organizer picks for matching: it keeps its own copy of that event's content, as the privacy section below explains.",
       "sovereignty.body2": "Paste your key into any of those apps afterward and you're already there: already following the people you met, already posting to the same network.",
       "sovereignty.p1_title": "Nostr-native",
       "sovereignty.p1_body": "Your shared data lives in Nostr events. Only device-local operational state stays on your phone. Nothing proprietary underneath.",
@@ -116,7 +116,7 @@
       "privacy.row4_tier": "Private",
       "privacy.row4_desc": "Favorites, notes, your “want to meet” tags",
       "privacy.row4_who": "Only you, always",
-      "privacy.note": "The coordinator can read event-tier content and, because it computes your matches, it also knows your match reasoning, because it has to in order to transcribe intros and pair people. It's infrastructure the organizer chose, the app names it plainly before you record a word, and none of it is ever made public.",
+      "privacy.note": "The coordinator can read event-tier content and, because it computes your matches, it also knows your match reasoning, because it has to in order to transcribe intros and pair people. It also runs the event's group chat as a member of the room, so it can read that too. It's infrastructure the organizer chose, the app names it plainly before you record a word, and none of it is ever made public.",
 
       "cta.title": "Set a course.",
       "cta.subtitle": "Whether you're running the event or walking into one, the next conversation that matters is one intro video away.",
@@ -158,7 +158,7 @@
       "footer.spec": "Technical specification",
       "footer.rights": "Free and open source, MIT licensed.",
       "footer.source": "Source on GitHub",
-      "footer.made": "Built on Nostr. No backend, no data silo, no permission required.",
+      "footer.made": "Built on Nostr. No accounts to create, no permission required.",
 
       "a11y.toggle_theme_to_dark": "Switch to dark mode",
       "a11y.toggle_theme_to_light": "Switch to light mode",
@@ -229,7 +229,7 @@
       "organizers.f3": "Verejné novinky alebo príspevky len pre členov, šifrované výhradne pre vašich účastníkov",
       "organizers.f4": "Vlastná stránka podujatia a vlastné CSS na tému",
       "organizers.f5": "Živé prednášky aj vopred nahraté, vrátane formátu úplne bez pódia",
-      "organizers.f6": "Skupinový chat so šifrovaním end-to-end, postavený na otvorenom štandarde Marmot (MLS)",
+      "organizers.f6": "Skupinový chat so šifrovaním end-to-end na otvorenom štandarde Marmot (MLS). Spravuje ho koordinátor ako člen miestnosti, takže ho môže aj čítať.",
       "organizers.cta": "Príručka pre organizátorov",
       "organizers.cta_href": "/docs/ORGANIZER-GUIDE-sk.html",
 
@@ -247,7 +247,7 @@
 
       "sovereignty.eyebrow": "Čo vám ostane",
       "sovereignty.title": "Registrácia nie je len prihlásenie. Je to identita.",
-      "sovereignty.body1": "Keď vstupujete prvýkrát, Nostrautica vám vytvorí naozajstný Nostr kľúčový pár, alebo sa prihlásite Nostr kľúčom, ktorý už máte. Je to presne taký, aký používa Primal, Amethyst, Damus či Yakihonne, a je to tá istá identita zakaždým: toto podujatie, ďalšie, ktorákoľvek Nostr appka, nikdy nie nové prihlásenie pre každé podujatie. Váš profil, vaši sledovaní ani ľudia, ktorých ste stretli: nič z toho neleží v databáze, ktorú ovláda Nostrautica. Pretože žiadna taká neexistuje.",
+      "sovereignty.body1": "Keď vstupujete prvýkrát, Nostrautica vám vytvorí naozajstný Nostr kľúčový pár, alebo sa prihlásite Nostr kľúčom, ktorý už máte. Je to presne taký, aký používa Primal, Amethyst, Damus či Yakihonne, a je to tá istá identita zakaždým: toto podujatie, ďalšie, ktorákoľvek Nostr appka, nikdy nie nové prihlásenie pre každé podujatie. Váš profil, vaši sledovaní ani ľudia, ktorých ste stretli: nič z toho neleží v databáze, ktorú ovláda Nostrautica. Pretože žiadna taká neexistuje. Výnimkou je koordinátor, ktorého si organizátor vyberie na párovanie: ten si ukladá vlastnú kópiu obsahu podujatia, ako vysvetľuje časť o súkromí nižšie.",
       "sovereignty.body2": "Potom stačí vložiť kľúč do ktorejkoľvek z týchto appiek a ste tam: už sledujete ľudí, ktorých ste stretli, už publikujete do tej istej siete.",
       "sovereignty.p1_title": "Nostr-natívna",
       "sovereignty.p1_body": "Vaše zdieľané dáta žijú v Nostr eventoch. Na zariadení ostáva len lokálny prevádzkový stav. Pod kapotou nič proprietárne.",
@@ -273,7 +273,7 @@
       "privacy.row4_tier": "Súkromné",
       "privacy.row4_desc": "Obľúbení, poznámky, vaše značky „chcem stretnúť“",
       "privacy.row4_who": "Vždy len vy",
-      "privacy.note": "Koordinátor vie čítať obsah na úrovni podujatia a keďže počíta vaše zhody, pozná aj ich odôvodnenie, pretože musí, aby zvládol prepis a párovanie. Je to infraštruktúra, ktorú si vybral organizátor, appka ju otvorene menuje skôr, než nahráte čo i len slovo, a nič z toho sa nikdy nezverejní.",
+      "privacy.note": "Koordinátor vie čítať obsah na úrovni podujatia a keďže počíta vaše zhody, pozná aj ich odôvodnenie, pretože musí, aby zvládol prepis a párovanie. Spravuje aj skupinový chat podujatia ako jeho člen, takže môže čítať aj ten. Je to infraštruktúra, ktorú si vybral organizátor, appka ju otvorene menuje skôr, než nahráte čo i len slovo, a nič z toho sa nikdy nezverejní.",
 
       "cta.title": "Vydajte sa na cestu.",
       "cta.subtitle": "Či už podujatie organizujete, alebo naň idete, ďalší rozhovor, na ktorom naozaj záleží, začína jedným krátkym videom.",
@@ -315,7 +315,7 @@
       "footer.spec": "Technická špecifikácia",
       "footer.rights": "Slobodný a otvorený softvér, licencia MIT.",
       "footer.source": "Zdrojový kód na GitHube",
-      "footer.made": "Postavené na Nostri. Žiadny backend, žiadne úložisko dát, netreba dovolenie.",
+      "footer.made": "Postavené na Nostri. Žiadne účty na zakladanie, netreba dovolenie.",
 
       "a11y.toggle_theme_to_dark": "Prepnúť na tmavý režim",
       "a11y.toggle_theme_to_light": "Prepnúť na svetlý režim",
@@ -386,7 +386,7 @@
       "organizers.f3": "Veřejné novinky nebo příspěvky jen pro členy, šifrované výhradně pro vaše účastníky",
       "organizers.f4": "Vlastní stránka akce a vlastní CSS na motiv",
       "organizers.f5": "Živé přednášky i nahrané předem, včetně formátu úplně bez pódia",
-      "organizers.f6": "Skupinový chat se šifrováním end-to-end, postavený na otevřeném standardu Marmot (MLS)",
+      "organizers.f6": "Skupinový chat se šifrováním end-to-end na otevřeném standardu Marmot (MLS). Spravuje ho koordinátor jako člen místnosti, takže ho může i číst.",
       "organizers.cta": "Příručka pro organizátory",
       "organizers.cta_href": "/docs/ORGANIZER-GUIDE-cs.html",
 
@@ -404,7 +404,7 @@
 
       "sovereignty.eyebrow": "Co vám zůstane",
       "sovereignty.title": "Registrace není jen přihlášení. Je to identita.",
-      "sovereignty.body1": "Když vstupujete poprvé, Nostrautica vám vytvoří opravdový Nostr klíčový pár, nebo se přihlásíte Nostr klíčem, který už máte. Je to přesně takový, jaký používá Primal, Amethyst, Damus či Yakihonne, a je to tatáž identita pokaždé: tahle akce, další, kterákoli Nostr apka, nikdy ne nové přihlášení pro každou akci. Váš profil, vaši sledovaní ani lidé, které jste potkali: nic z toho neleží v databázi, kterou ovládá Nostrautica. Protože žádná taková neexistuje.",
+      "sovereignty.body1": "Když vstupujete poprvé, Nostrautica vám vytvoří opravdový Nostr klíčový pár, nebo se přihlásíte Nostr klíčem, který už máte. Je to přesně takový, jaký používá Primal, Amethyst, Damus či Yakihonne, a je to tatáž identita pokaždé: tahle akce, další, kterákoli Nostr apka, nikdy ne nové přihlášení pro každou akci. Váš profil, vaši sledovaní ani lidé, které jste potkali: nic z toho neleží v databázi, kterou ovládá Nostrautica. Protože žádná taková neexistuje. Výjimkou je koordinátor, kterého si organizátor vybere pro párování: ten si ukládá vlastní kopii obsahu akce, jak vysvětluje část o soukromí níže.",
       "sovereignty.body2": "Pak stačí vložit klíč do kterékoli z těchto appek a jste tam: už sledujete lidi, které jste potkali, už publikujete do stejné sítě.",
       "sovereignty.p1_title": "Nostr-nativní",
       "sovereignty.p1_body": "Vaše sdílená data žijí v Nostr eventech. Na zařízení zůstává jen lokální provozní stav. Pod kapotou nic proprietárního.",
@@ -430,7 +430,7 @@
       "privacy.row4_tier": "Soukromé",
       "privacy.row4_desc": "Oblíbení, poznámky, vaše značky „chci potkat“",
       "privacy.row4_who": "Vždy jen vy",
-      "privacy.note": "Koordinátor umí číst obsah na úrovni akce a protože počítá vaše shody, zná i jejich odůvodnění, protože musí, aby zvládl přepis a párování. Je to infrastruktura, kterou si vybral organizátor, appka ji otevřeně jmenuje dřív, než nahrajete jediné slovo, a nic z toho se nikdy nezveřejní.",
+      "privacy.note": "Koordinátor umí číst obsah na úrovni akce a protože počítá vaše shody, zná i jejich odůvodnění, protože musí, aby zvládl přepis a párování. Spravuje i skupinový chat akce jako jeho člen, takže může číst i ten. Je to infrastruktura, kterou si vybral organizátor, appka ji otevřeně jmenuje dřív, než nahrajete jediné slovo, a nic z toho se nikdy nezveřejní.",
 
       "cta.title": "Vydejte se na cestu.",
       "cta.subtitle": "Ať už akci organizujete, nebo na ni jdete, další rozhovor, na kterém opravdu záleží, začíná jedním krátkým videem.",
@@ -472,7 +472,7 @@
       "footer.spec": "Technická specifikace",
       "footer.rights": "Svobodný a otevřený software, licence MIT.",
       "footer.source": "Zdrojový kód na GitHubu",
-      "footer.made": "Postaveno na Nostru. Žádný backend, žádné úložiště dat, není třeba svolení.",
+      "footer.made": "Postaveno na Nostru. Žádné účty k zakládání, není třeba svolení.",
 
       "a11y.toggle_theme_to_dark": "Přepnout na tmavý režim",
       "a11y.toggle_theme_to_light": "Přepnout na světlý režim",
@@ -542,7 +542,7 @@
       "organizers.f3": "Öffentliche Updates oder Beiträge nur für Mitglieder, verschlüsselt ausschließlich für deine Teilnehmenden",
       "organizers.f4": "Eine individuelle Event-Seite und dein eigenes Theme-CSS",
       "organizers.f5": "Live-Talks oder vorab aufgezeichnet, inklusive des Formats ganz ohne Bühne",
-      "organizers.f6": "Ende-zu-Ende-verschlüsselter Gruppenchat, aufgebaut auf dem offenen Marmot-Standard (MLS)",
+      "organizers.f6": "Ende-zu-Ende-verschlüsselter Gruppenchat auf dem offenen Marmot-Standard (MLS). Der Coordinator verwaltet ihn als Mitglied des Raums und kann ihn deshalb auch lesen.",
       "organizers.cta": "Lies den Guide für Veranstaltende",
       "organizers.cta_href": "/docs/ORGANIZER-GUIDE-de.html",
 
@@ -560,7 +560,7 @@
 
       "sovereignty.eyebrow": "Was bleibt, gehört dir",
       "sovereignty.title": "Registrieren ist keine Anmeldung. Es ist eine Identität.",
-      "sovereignty.body1": "Wenn du zum ersten Mal dabei bist, richtet Nostrautica ein echtes Nostr-Schlüsselpaar für dich ein, oder du meldest dich mit dem Nostr-Schlüssel an, den du schon hast. Es ist genau die Art, die auch Primal, Amethyst, Damus und Yakihonne verwenden, und es ist jedes Mal dieselbe Identität: dieses Event, das nächste, jede beliebige Nostr-App, nie ein neuer Login pro Event. Dein Profil, wem du folgst, die Leute, die du getroffen hast: nichts davon liegt in einer Datenbank, die Nostrautica kontrolliert, weil es keine gibt.",
+      "sovereignty.body1": "Wenn du zum ersten Mal dabei bist, richtet Nostrautica ein echtes Nostr-Schlüsselpaar für dich ein, oder du meldest dich mit dem Nostr-Schlüssel an, den du schon hast. Es ist genau die Art, die auch Primal, Amethyst, Damus und Yakihonne verwenden, und es ist jedes Mal dieselbe Identität: dieses Event, das nächste, jede beliebige Nostr-App, nie ein neuer Login pro Event. Dein Profil, wem du folgst, die Leute, die du getroffen hast: nichts davon liegt in einer Datenbank, die Nostrautica kontrolliert, weil es keine gibt. Die Ausnahme ist der Coordinator, den die Veranstaltenden fürs Matching wählen: Er speichert eine eigene Kopie der Event-Inhalte, wie der Abschnitt zum Datenschutz unten erklärt.",
       "sovereignty.body2": "Füg deinen Schlüssel danach in eine dieser Apps ein, und du bist schon da: folgst schon den Leuten, die du getroffen hast, postest schon ins selbe Netzwerk.",
       "sovereignty.p1_title": "Nostr-nativ",
       "sovereignty.p1_body": "Deine geteilten Daten liegen in Nostr-Events. Nur der lokale Betriebszustand bleibt auf deinem Handy. Darunter steckt nichts Proprietäres.",
@@ -586,7 +586,7 @@
       "privacy.row4_tier": "Privat",
       "privacy.row4_desc": "Favoriten, Notizen, deine „Will ich treffen“-Markierungen",
       "privacy.row4_who": "Nur du, immer",
-      "privacy.note": "Der Coordinator kann Inhalte auf Event-Ebene lesen, und weil er deine Matches berechnet, kennt er auch deren Begründung, denn genau das braucht er, um Vorstellungen zu transkribieren und Leute zu verkuppeln. Es ist Infrastruktur, die für dieses Event gewählt wurde, die App nennt sie klar, bevor du auch nur ein Wort aufnimmst, und nichts davon wird jemals öffentlich.",
+      "privacy.note": "Der Coordinator kann Inhalte auf Event-Ebene lesen, und weil er deine Matches berechnet, kennt er auch deren Begründung, denn genau das braucht er, um Vorstellungen zu transkribieren und Leute zu verkuppeln. Er verwaltet außerdem den Gruppenchat des Events als Mitglied des Raums und kann ihn deshalb ebenfalls lesen. Es ist Infrastruktur, die für dieses Event gewählt wurde, die App nennt sie klar, bevor du auch nur ein Wort aufnimmst, und nichts davon wird jemals öffentlich.",
 
       "cta.title": "Leg den Kurs fest.",
       "cta.subtitle": "Ob du das Event veranstaltest oder einfach reinspazierst: Das nächste Gespräch, auf das es ankommt, ist nur ein Vorstellungsvideo entfernt.",
@@ -628,7 +628,7 @@
       "footer.spec": "Technische Spezifikation",
       "footer.rights": "Frei und quelloffen, MIT-lizenziert.",
       "footer.source": "Quellcode auf GitHub",
-      "footer.made": "Gebaut auf Nostr. Kein Backend, kein Datensilo, keine Erlaubnis nötig.",
+      "footer.made": "Gebaut auf Nostr. Keine Konten anzulegen, keine Erlaubnis nötig.",
 
       "a11y.toggle_theme_to_dark": "Zum dunklen Modus wechseln",
       "a11y.toggle_theme_to_light": "Zum hellen Modus wechseln",
@@ -698,7 +698,7 @@
       "organizers.f3": "Actualizaciones públicas o publicaciones solo para miembros, cifradas exclusivamente para tus asistentes",
       "organizers.f4": "Una página de evento personalizada y tu propio CSS de tema",
       "organizers.f5": "Charlas en vivo o grabadas de antemano, incluido el formato sin escenario",
-      "organizers.f6": "Chat grupal cifrado de extremo a extremo, construido sobre el estándar abierto Marmot (MLS)",
+      "organizers.f6": "Chat grupal cifrado de extremo a extremo sobre el estándar abierto Marmot (MLS). Lo administra el coordinador como miembro de la sala, así que también puede leerlo.",
       "organizers.cta": "Lee la guía para organizadores",
       "organizers.cta_href": "/docs/ORGANIZER-GUIDE-es.html",
 
@@ -716,7 +716,7 @@
 
       "sovereignty.eyebrow": "Lo que queda es tuyo",
       "sovereignty.title": "Registrarte no es darte de alta. Es una identidad.",
-      "sovereignty.body1": "La primera vez que te unes, Nostrautica crea un par de claves Nostr real para ti, o inicias sesión con la clave Nostr que ya tienes. Es del mismo tipo que usan Primal, Amethyst, Damus y Yakihonne, y es la misma identidad cada vez: este evento, el siguiente, cualquier app de Nostr, nunca un inicio de sesión nuevo por evento. Tu perfil, a quién sigues, las personas que conociste: nada de eso vive en una base de datos que controle Nostrautica, porque no existe ninguna.",
+      "sovereignty.body1": "La primera vez que te unes, Nostrautica crea un par de claves Nostr real para ti, o inicias sesión con la clave Nostr que ya tienes. Es del mismo tipo que usan Primal, Amethyst, Damus y Yakihonne, y es la misma identidad cada vez: este evento, el siguiente, cualquier app de Nostr, nunca un inicio de sesión nuevo por evento. Tu perfil, a quién sigues, las personas que conociste: nada de eso vive en una base de datos que controle Nostrautica, porque no existe ninguna. La excepción es el coordinador que elige quien organiza para el emparejamiento: guarda su propia copia del contenido del evento, como explica la sección de privacidad más abajo.",
       "sovereignty.body2": "Pega tu clave después en cualquiera de esas apps y ya estás ahí: ya sigues a las personas que conociste, ya publicas en la misma red.",
       "sovereignty.p1_title": "Nativo de Nostr",
       "sovereignty.p1_body": "Tus datos compartidos viven en eventos de Nostr. Solo el estado operativo local del dispositivo se queda en tu teléfono. Por debajo no hay nada propietario.",
@@ -742,7 +742,7 @@
       "privacy.row4_tier": "Privado",
       "privacy.row4_desc": "Favoritos, notas, tus etiquetas \"quiero conocer\"",
       "privacy.row4_who": "Solo tú, siempre",
-      "privacy.note": "El coordinador puede leer el contenido de nivel evento y, como calcula tus coincidencias, también conoce su razonamiento, porque lo necesita para transcribir presentaciones y emparejar a la gente. Es infraestructura que eligió quien organiza el evento, la app la nombra con claridad antes de que grabes una sola palabra, y nada de eso se hace público jamás.",
+      "privacy.note": "El coordinador puede leer el contenido de nivel evento y, como calcula tus coincidencias, también conoce su razonamiento, porque lo necesita para transcribir presentaciones y emparejar a la gente. También administra el chat grupal del evento como miembro de la sala, así que también puede leerlo. Es infraestructura que eligió quien organiza el evento, la app la nombra con claridad antes de que grabes una sola palabra, y nada de eso se hace público jamás.",
 
       "cta.title": "Traza el rumbo.",
       "cta.subtitle": "Ya sea que organices el evento o que entres a uno, la próxima conversación que de verdad importa está a un solo video de presentación de distancia.",
@@ -784,7 +784,7 @@
       "footer.spec": "Especificación técnica",
       "footer.rights": "Libre y de código abierto, con licencia MIT.",
       "footer.source": "Código fuente en GitHub",
-      "footer.made": "Construido sobre Nostr. Sin backend, sin silo de datos, sin necesidad de permiso.",
+      "footer.made": "Construido sobre Nostr. Sin cuentas que crear, sin necesidad de permiso.",
 
       "a11y.toggle_theme_to_dark": "Cambiar a modo oscuro",
       "a11y.toggle_theme_to_light": "Cambiar a modo claro",
