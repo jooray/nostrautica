@@ -764,3 +764,40 @@ describe("JobRunner — a deterministic failure must not buy the full paid tail"
     expect(calls).toBe(2);
   });
 });
+
+/**
+ * Audit SB-13. A throw inside a setInterval callback is an uncaughtException, and
+ * lifecycle.ts turns that into exit(1). The lease heartbeat and the queue reporter
+ * both write/read the store from a timer, so one SQLITE_BUSY killed the daemon.
+ */
+describe("JobRunner timers never throw out of a store error", () => {
+  it("a failing heartbeat and a failing queue report are logged, and the job still completes", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store, { leaseMs: 30 });
+    (store as any).heartbeatJob = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+    (store as any).jobStateCounts = () => {
+      throw new Error("SQLITE_BUSY: database is locked");
+    };
+    const warned: string[] = [];
+    const warn = vi.spyOn(console, "warn").mockImplementation((m: unknown) => void warned.push(String(m)));
+    const uncaught: unknown[] = [];
+    const onUncaught = (e: unknown) => void uncaught.push(e);
+    process.on("uncaughtException", onUncaught);
+    const stopReporter = runner.startQueueReporter(5);
+    try {
+      runner.register("slow", () => new Promise((r) => setTimeout(r, 60)));
+      runner.enqueue("slow", "k", {});
+      await runner.drain();
+    } finally {
+      stopReporter();
+      process.off("uncaughtException", onUncaught);
+      warn.mockRestore();
+    }
+    expect(uncaught).toEqual([]);
+    expect(store.pendingJobCount()).toBe(0);
+    expect(warned.join("\n")).toMatch(/lease heartbeat failed/);
+    expect(warned.join("\n")).toMatch(/queue report failed/);
+  });
+});

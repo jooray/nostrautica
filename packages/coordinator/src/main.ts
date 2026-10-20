@@ -108,7 +108,14 @@ async function runDaemon(): Promise<void> {
 
   // TTL-prune the dedupe ledgers at boot + daily (audit COORD-24).
   store.pruneOldData(Date.now());
-  const pruneTimer = setInterval(() => store.pruneOldData(Date.now()), 24 * 60 * 60 * 1000);
+  // Guarded: a throw inside a timer is an uncaughtException, i.e. exit(1) (SB-13).
+  const pruneTimer = setInterval(() => {
+    try {
+      store.pruneOldData(Date.now());
+    } catch (e) {
+      console.warn(`[coordinator] daily prune failed (will retry tomorrow): ${e instanceof Error ? e.message : e}`);
+    }
+  }, 24 * 60 * 60 * 1000);
   pruneTimer.unref();
 
   // STT stays on Venice/local — Routstr has no STT today (spec §9.4).
@@ -379,7 +386,16 @@ async function runDaemon(): Promise<void> {
 
   while (!stopped) {
     drainPromise = coordinator.jobs.drain();
-    await drainPromise;
+    // A drain that throws is a failed tick, not a dead daemon (audit SB-14).
+    // Handler errors are caught inside JobRunner.execute, but a store error in
+    // claimNextJob (BEGIN IMMEDIATE past busy_timeout, SQLITE_FULL) or in the
+    // completion bookkeeping escapes the worker, and from here it used to reach
+    // main().catch and exit(1) with a job's lease stranded.
+    try {
+      await drainPromise;
+    } catch (e) {
+      console.error(`[coordinator] job drain failed, retrying: ${e instanceof Error ? e.stack ?? e.message : e}`);
+    }
     if (stopped) break;
     await new Promise((r) => setTimeout(r, 1000));
   }

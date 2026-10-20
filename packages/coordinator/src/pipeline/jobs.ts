@@ -395,7 +395,16 @@ export class JobRunner {
 
   /** Start the periodic queue report (unref'd). Returns a stop function. */
   startQueueReporter(intervalMs = 60_000): () => void {
-    const timer = setInterval(() => this.reportQueueDepth(), intervalMs);
+    // Diagnostics only: a store error here (SQLITE_BUSY during a backup, say) is
+    // logged, never thrown. A throw inside a timer is an uncaughtException, which
+    // lifecycle.ts turns into exit(1) (audit SB-13).
+    const timer = setInterval(() => {
+      try {
+        this.reportQueueDepth();
+      } catch (e) {
+        console.warn(`[${stamp()}] [jobs] queue report failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    }, intervalMs);
     (timer as { unref?: () => void }).unref?.();
     return () => clearInterval(timer);
   }
@@ -422,7 +431,17 @@ export class JobRunner {
     // the process alive on its own.
     const heartbeatMs = Math.max(1, Math.floor(this.leaseMs / 3));
     const heartbeat = setInterval(() => {
-      this.store.heartbeatJob(job.id, token, this.now() + this.leaseMs);
+      // A failed heartbeat is logged and skipped, not fatal (audit SB-13): a throw
+      // here is an uncaughtException and would exit the daemon mid-job. One missed
+      // beat costs nothing (the next one is a third of a lease later), and a lease
+      // that does lapse is exactly what the expiry path is built to handle.
+      try {
+        this.store.heartbeatJob(job.id, token, this.now() + this.leaseMs);
+      } catch (e) {
+        console.warn(
+          `[${stamp()}] [job] ${job.type} #${job.id} lease heartbeat failed: ${e instanceof Error ? e.message : String(e)}`,
+        );
+      }
     }, heartbeatMs);
     (heartbeat as { unref?: () => void }).unref?.();
     try {
