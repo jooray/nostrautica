@@ -4068,6 +4068,36 @@ export class Coordinator {
    * profile_hash + the embedding model id in the artifact table, so a recompute
    * only embeds attendees whose profile CHANGED — not the full roster every time.
    */
+  /**
+   * Roster embeddings already read this process, by their content hash (audit
+   * SB-15). getArtifact is an at-rest decrypt plus a brotli decompress, and every
+   * match_recompute re-read the whole roster's: R attendees' recomputes cost R²
+   * decrypts of R identical vectors (about 91 s of CPU for a 200-person recompute,
+   * hours at the 2,000 cap). The key is the provider/model plus the profile hash,
+   * so an entry can never go stale. LRU-bounded to a full roster plus headroom.
+   */
+  private readonly embeddingCache = new Map<string, number[]>();
+  private static readonly EMBEDDING_CACHE_MAX = 2500;
+
+  private cachedEmbedding(hash: string): number[] | undefined {
+    const hit = this.embeddingCache.get(hash);
+    if (hit) {
+      this.embeddingCache.delete(hash);
+      this.embeddingCache.set(hash, hit);
+      return hit;
+    }
+    const stored = this.deps.store.getArtifact("roster_embedding", hash) as number[] | undefined;
+    if (stored) this.rememberEmbedding(hash, stored);
+    return stored;
+  }
+
+  private rememberEmbedding(hash: string, embedding: number[]): void {
+    this.embeddingCache.set(hash, embedding);
+    if (this.embeddingCache.size > Coordinator.EMBEDDING_CACHE_MAX) {
+      this.embeddingCache.delete(this.embeddingCache.keys().next().value!);
+    }
+  }
+
   private async attachEmbeddings(coordinate: string, roster: AttendeeForMatching[], signal?: AbortSignal): Promise<void> {
     const provider = this.roles.embed.llm;
     if (!provider.embed) return;
@@ -4082,7 +4112,7 @@ export class Coordinator {
     const missing: { index: number; pubkey: string; hash: string; text: string }[] = [];
     roster.forEach((a, index) => {
       const hash = sha256Hex(utf8ToBytes(`${modelKey}:${a.profileHash}`));
-      const cached = this.deps.store.getArtifact("roster_embedding", hash) as number[] | undefined;
+      const cached = this.cachedEmbedding(hash);
       if (cached) a.embedding = cached;
       else missing.push({ index, pubkey: a.pubkey, hash, text: textFor(a.pubkey) });
     });
@@ -4095,6 +4125,7 @@ export class Coordinator {
     missing.forEach((m, i) => {
       const embedding = embeddings[i]!;
       roster[m.index]!.embedding = embedding;
+      this.rememberEmbedding(m.hash, embedding);
       this.deps.store.putArtifact({
         stage: "roster_embedding",
         inputsHash: m.hash,

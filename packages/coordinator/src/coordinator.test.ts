@@ -3839,6 +3839,18 @@ describe("audit COORD-13 — roster embeddings are cached by profile hash + mode
     await h.coordinator.jobs.drain();
     expect(h.llm.embedCalls).toBe(callsAfterFirst); // all embeddings came from the cache
   });
+
+  it("…and re-reads (decrypts) none of them from the store either (audit SB-15)", async () => {
+    const h = await setup(0, { prefilter: { threshold: 1, topM: 5, randomN: 1 } });
+    const aPk = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const spy = vi.spyOn(h.store, "getArtifact");
+    h.coordinator.jobs.enqueue("match_recompute", "re-read-check", { coordinate: h.coordinate, pubkey: aPk });
+    await h.coordinator.jobs.drain();
+    expect(spy.mock.calls.filter((c) => c[0] === "roster_embedding")).toHaveLength(0);
+    spy.mockRestore();
+  });
 });
 
 describe("H-1 — per-role provider routing (§12 item 7)", () => {
