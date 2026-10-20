@@ -200,10 +200,11 @@ class ChatSession internal constructor(
                     binding = GroupBinding.select(groups, rosterGid, coord)
                 }
             }
-            // A group joined (or rejoined) in a running runtime gets no live subscription
-            // from MDK: its messages arrived only after a force-stop (e2e BUG-4). Restart
-            // the runtime once so its start registers the group like any other. A no-op
-            // unless the engine recorded such a join or a relay-list change.
+            // A confirmed rejoin restarts the runtime once so its start registers the
+            // group afresh. A plain join does not: MDK subscribes a joined group itself,
+            // and a restart here left the room with no live subscription while MDK
+            // closed and reopened its store (see RuntimeFreshness). A no-op unless the
+            // engine recorded a rejoin or a relay-list change.
             if (engine.refreshIfStale()) {
                 unbindTimeline()
                 groups = engine.groups(ref)
