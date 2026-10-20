@@ -949,6 +949,17 @@ relay-visible event on its own.
   set), or both. A rumor sent to an affected attendee is scoped to that attendee's own
   submission/talk pipeline failures; billing status is sent only to organizers.
 
+  **Advisory: recompute suggested.** When a live edit of the space record (31923/31612)
+  changes its `title`, `summary` or `t` tags after pair scores exist, the coordinator
+  sends the organizer `{ stage: "event_context", error_category: "recompute_suggested",
+  at }` with no `state` and no `pubkey`. Every scoring prompt embeds those fields, but
+  stored scores are keyed on the two profiles only, so they keep the old framing until
+  the organizer sends a `21604 recompute`. The coordinator **MUST NOT** recompute on its
+  own, because a recompute is paid work on every pair. Clients **SHOULD** offer a
+  Recompute action and dismiss per notice (`at` included), so that a later edit raises
+  a fresh notice. A client that renders only `state: "poison"` ignores the advisory,
+  which is the intended fallback. This is additive and needs no `v` bump.
+
 #### `21607`: Chat Device Attestation
 
 - **Seal author → recipient:** the attendee's **account** key → coordinator.

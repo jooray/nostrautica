@@ -189,6 +189,17 @@ class InvitesAndAdminTest {
         assertEquals("admin.coord.minAgo" to 5, AdminModel.sinceLabel(1000, 1300))
     }
 
+    @Test fun contextNoticeIsTheNewestAdvisoryAndALaterEditIsNotPreDismissed() {
+        // DS41-041, mirrors coordinator-status.test.ts.
+        val first = CoordinatorStatusContent(a = coord, stage = "event_context", errorCategory = "recompute_suggested", at = 10)
+        val later = first.copy(at = 20)
+        val poison = CoordinatorStatusContent(a = coord, stage = "event_context", state = "poison", errorCategory = "other", at = 30)
+        assertEquals(later, AdminModel.contextNotice(listOf(first, later, poison), emptySet()))
+        assertNull(AdminModel.contextNotice(listOf(first, later), setOf(AdminModel.contextNoticeId(later))))
+        // Dismissing the first notice does not hide the one a later edit raised.
+        assertEquals(later, AdminModel.contextNotice(listOf(first, later), setOf(AdminModel.contextNoticeId(first))))
+    }
+
     @Test fun receiptAndCoordinatorHelpers() {
         val r = CreationReceipt.build(enrollAttempted = true, enrollFailed = true, coordinatorPicked = false, attachFailed = false, freshLocalKey = true, backupConfirmed = false)
         assertEquals(CreationReceipt.State.FAILED, r.enrolled)

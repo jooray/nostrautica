@@ -89,6 +89,7 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     val visibleTalks get() = talks.filter { "${it.pubkey}:${it.talkD}" !in moderated }
     val approvedPeople get() = AdminModel.buildApprovedPeople(roster, approvedSet, revokedSet, pending, directory, statuses)
     val poison get() = statuses.filter { it.state == "poison" && AdminModel.statusId(it) !in dismissed }
+    val contextNotice get() = AdminModel.contextNotice(statuses, dismissed)
     val billing get() = statuses.filter { it.billing != null && it.billing!!.state != "ok" }.maxByOrNull { it.at }?.billing
 
     fun overview() = AdminModel.buildOverview(AdminModel.OverviewInput(
@@ -265,6 +266,20 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     fun recompute() = scope.launch {
         recomputing = true
         runCatching { org.sendAdminCommand(ctx, "recompute") }.onFailure { error = msg(it) }
+        recomputing = false
+    }
+
+    fun dismissContextNotice(s: CoordinatorStatusContent) {
+        dismissed = dismissed + AdminModel.contextNoticeId(s)
+        scope.launch { org.saveDismissed(coordinate, dismissed) }
+    }
+
+    /** Recompute in answer to the event-context advisory (DS41-041), then retire it. */
+    fun recomputeForContext(s: CoordinatorStatusContent) = scope.launch {
+        recomputing = true
+        runCatching { org.sendAdminCommand(ctx, "recompute") }
+            .onSuccess { dismissContextNotice(s) }
+            .onFailure { error = msg(it) }
         recomputing = false
     }
 

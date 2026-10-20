@@ -48,6 +48,8 @@ import {
   type Approval,
   type InviteProof,
   inviteHash,
+  EVENT_CONTEXT_STAGE,
+  RECOMPUTE_SUGGESTED,
   ORGANIZER_SELF_INVITE_LABEL,
   joinRequestContentSchema,
   profileSubmissionContentSchema,
@@ -6547,6 +6549,8 @@ export class Coordinator {
       return;
     }
     state.eventEndSec = this.retentionAnchorFor(coordinate, event);
+    const before = state.scoringCtx;
+    const hadMeta = !!state.metaEventId;
     state.scoringCtx = {
       ...state.scoringCtx,
       title: event.tags.find((t) => t[0] === "title")?.[1] ?? state.scoringCtx.title,
@@ -6556,6 +6560,34 @@ export class Coordinator {
     state.metaEventId = event.id;
     state.metaCreatedAt = event.created_at;
     log(`[config] applied live kind-${event.kind} metadata update for "${state.scoringCtx.title}" — event_end=${state.eventEndSec}`);
+    // DS41-041: every scoring prompt embeds the title, summary and topics, but the
+    // pair cache is keyed on the two profiles only, so existing scores keep the old
+    // framing. Re-scoring is paid and the organizer may be fixing a typo, so this
+    // does not recompute — and does not fold the context into pairInputsHash, which
+    // would re-score every pair of every event on the deploy that shipped it. It
+    // tells the organizer, who can press Recompute.
+    const ctxChanged =
+      before.title !== state.scoringCtx.title ||
+      before.summary !== state.scoringCtx.summary ||
+      before.hashtags.join("\u0000") !== state.scoringCtx.hashtags.join("\u0000");
+    if (hadMeta && ctxChanged && state.matching === "on" && !state.retentionExpired && this.deps.store.hasPairs(coordinate)) {
+      void this.emitContextChangedStatus(state).catch((e) =>
+        log(`[config] ${coordinate}: could not send the recompute suggestion: ${e instanceof Error ? e.message : e}`),
+      );
+    }
+  }
+
+  /** Suggest a recompute to the organizer after an event-context edit (DS41-041). */
+  private async emitContextChangedStatus(state: EventState): Promise<void> {
+    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
+      v: 2,
+      a: state.coordinate,
+      stage: EVENT_CONTEXT_STAGE,
+      error_category: RECOMPUTE_SUGGESTED,
+      at: Math.floor(this.now() / 1000),
+    });
+    await this.deps.transport.publish(status, this.accountRelays(state));
+    log(`[config] ${state.coordinate}: event title/summary/topics changed — suggested a recompute to the organizer (21606)`);
   }
 
   /**

@@ -202,6 +202,7 @@ private fun AdminBody(p: androidx.compose.foundation.layout.PaddingValues, naddr
             }
         }
         item { CoordinatorOpsCard(st, naddr) }
+        st.contextNotice?.let { cn -> item(key = "context" + AdminModel.contextNoticeId(cn)) { ContextChangedCard(st, cn) } }
         st.poison.forEach { ps -> item(key = "poison" + AdminModel.statusId(ps)) { PoisonCard(st, ps) } }
         item {
             Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -325,6 +326,20 @@ private fun CoordinatorOpsCard(st: AdminState, naddr: String) {
             }
         }
         SmallButton(if (st.recomputing) s.t("admin.coordinator.recomputing") else s.t("admin.coordinator.recompute"), { st.recompute() }, enabled = !st.recomputing)
+    }
+}
+
+/** Admin.svelte's event-context advisory (audit DS41-041): details changed, scores are stale. */
+@Composable
+private fun ContextChangedCard(st: AdminState, cn: today.cypherpunk.nostrautica.protocol.CoordinatorStatusContent) {
+    val s = LocalStrings.current
+    Card {
+        Text(s.t("admin.contextChanged.title"), fontWeight = FontWeight.SemiBold)
+        Dim(s.t("admin.contextChanged.body"))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            SmallButton(if (st.recomputing) s.t("admin.coordinator.recomputing") else s.t("admin.coordinator.recompute"), { st.recomputeForContext(cn) }, enabled = !st.recomputing, selected = true)
+            SmallButton(s.t("admin.poison.dismiss"), { st.dismissContextNotice(cn) })
+        }
     }
 }
 

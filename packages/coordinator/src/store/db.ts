@@ -2596,6 +2596,11 @@ export class Store {
     }
   }
   /** Drop all cached pair scores for an event (forces a full re-score). */
+  /** Whether any pair score is stored for this event (DS41-041: is a recompute worth suggesting?). */
+  hasPairs(coordinate: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM pairs WHERE coordinate = ? LIMIT 1").get(coordinate);
+  }
+
   clearPairs(coordinate: string): void {
     this.db.prepare("DELETE FROM pairs WHERE coordinate = ?").run(coordinate);
   }

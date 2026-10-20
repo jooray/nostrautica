@@ -1334,6 +1334,17 @@ export const coordinatorStatusContentSchema = z.object({
 });
 export type CoordinatorStatusContent = z.infer<typeof coordinatorStatusContentSchema>;
 
+/**
+ * A 21606 advisory, not a failure (audit DS41-041): the event's title, summary or
+ * topics changed after matches were scored, and every pair score still reflects
+ * the old framing. Sent with `stage: EVENT_CONTEXT_STAGE`, `error_category:
+ * RECOMPUTE_SUGGESTED` and NO `state`, so a client that only renders
+ * `state: "poison"` ignores it. The organizer decides whether the paid recompute
+ * is worth it; nothing re-scores on its own.
+ */
+export const EVENT_CONTEXT_STAGE = "event_context";
+export const RECOMPUTE_SUGGESTED = "recompute_suggested";
+
 // ── 31611 Coordinator Announcement (discovery) ───────────────────────────────
 export const coordinatorPricingSchema = z.object({
   // How billing works — NOT necessarily the amount (may be negotiated off-band).

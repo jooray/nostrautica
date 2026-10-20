@@ -7421,3 +7421,64 @@ describe("audit SB-124 — the approval policy is enforced", () => {
     expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
   });
 });
+
+/**
+ * Audit DS41-041 — an event-context edit tells the organizer the scores are stale.
+ *
+ * Every scoring prompt embeds the title, summary and topics, but the pair cache is
+ * keyed on the profiles only, so a rewritten description left every score on the
+ * old framing with nothing said. The coordinator now sends a 21606 advisory
+ * suggesting a recompute (and deliberately does not recompute on its own).
+ */
+describe("audit DS41-041 — an event-context edit suggests a recompute", () => {
+  function contextNotices(h: Harness) {
+    return h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, h.eidSk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)))
+      .filter((s) => s.stage === "event_context");
+  }
+  function metaSub(h: Harness) {
+    return h.transport.subs.find((s) => s.filter.kinds?.includes(31923) && s.filter.kinds?.includes(31600))!;
+  }
+  const meta = (h: Harness, createdAt: number, tags: string[][]) =>
+    ({
+      kind: 31923, pubkey: getPublicKey(h.eidSk), created_at: createdAt, id: `ev-${createdAt}`,
+      tags: [["d", "cypherpunk"], ...tags], content: "", sig: "",
+    }) as any;
+
+  it("sends one advisory (no poison state) when the summary changes after matches exist, and re-scores nothing", async () => {
+    const h = await setup();
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const pairsBefore = countPairs(h.store, h.coordinate);
+    expect(pairsBefore).toBeGreaterThan(0);
+    const scoringCalls = h.counters.batchCalls.length;
+
+    metaSub(h).onEvent(meta(h, 20, [["title", "Cypherpunk Assembly"], ["summary", "Now about privacy research"], ["t", "cypherpunk"]]));
+    await vi.waitFor(() => expect(contextNotices(h)).toHaveLength(1));
+    const notice = contextNotices(h)[0]!;
+    expect(notice.error_category).toBe("recompute_suggested");
+    expect(notice.state).toBeUndefined(); // an advisory, not a stuck job
+    expect(notice.pubkey).toBeUndefined();
+
+    await h.coordinator.jobs.drain();
+    expect(countPairs(h.store, h.coordinate)).toBe(pairsBefore); // scores kept
+    expect(h.counters.batchCalls.length).toBe(scoringCalls); // nothing re-scored
+  });
+
+  it("stays quiet when nothing the prompt reads changed, or when there is nothing scored yet", async () => {
+    const h = await setup();
+    // No pairs yet: a title change has nothing to invalidate.
+    metaSub(h).onEvent(meta(h, 20, [["title", "Renamed early"], ["t", "cypherpunk"]]));
+    await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    // Only the end date moves: not part of the scoring context.
+    metaSub(h).onEvent(meta(h, 30, [["title", "Renamed early"], ["t", "cypherpunk"], ["end", "9000"]]));
+    await new Promise((r) => setTimeout(r, 10));
+    expect(contextNotices(h)).toHaveLength(0);
+  });
+});
