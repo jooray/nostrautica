@@ -241,11 +241,26 @@ export function __setOutboxLocks(l: OutboxLockManager | null | undefined): void 
  */
 async function withFlushLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
   const mgr = locks === undefined ? defaultLocks() : locks;
-  if (!mgr) return fn();
+  if (!mgr) {
+    // No Web Locks (audit SB-101): cross-tab exclusion is out of reach, but two
+    // flushes in THIS tab — an `online` event landing on the interval sweep, or a
+    // Retry tap mid-flush — must still not walk the same snapshot twice and race
+    // each other's deletes. Same contract as the lock's `ifAvailable`: skip.
+    if (flushingInTab) return undefined;
+    flushingInTab = true;
+    try {
+      return await fn();
+    } finally {
+      flushingInTab = false;
+    }
+  }
   return (await mgr.request("nostrautica-outbox-flush", { ifAvailable: true }, async (lock) =>
     lock === null ? undefined : fn(),
   )) as T | undefined;
 }
+
+/** In-tab single-flusher latch for engines without Web Locks (SB-101). */
+let flushingInTab = false;
 
 // ── Queue operations ─────────────────────────────────────────────────────────
 

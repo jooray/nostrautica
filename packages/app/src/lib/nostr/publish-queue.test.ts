@@ -164,6 +164,19 @@ describe("publish-queue (App-8)", () => {
     expect(store.has("c")).toBe(false);
   });
 
+  it("without Web Locks, a second flush in the same tab is skipped, not run twice (SB-101)", async () => {
+    seed(store, "x", { queuedAt: 100 });
+    let release!: () => void;
+    publishSigned.mockImplementation(() => new Promise<void>((r) => (release = r)));
+    const first = flushQueue();
+    await new Promise((r) => setTimeout(r, 0));
+    const second = await flushQueue();
+    expect(second.skipped).toBe(true);
+    release();
+    expect((await first).sent).toBe(1);
+    expect(publishSigned).toHaveBeenCalledTimes(1);
+  });
+
   it("runs under a single-flusher lock: a contended flush is skipped", async () => {
     // Lock manager that reports the lock as already held (callback gets null).
     __setOutboxLocks({
