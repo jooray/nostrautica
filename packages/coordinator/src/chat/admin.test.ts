@@ -1034,6 +1034,45 @@ describe("MarmotAdmin — a failed Add asks for a durable retry (audit B-5)", ()
   });
 });
 
+describe("a revoke while chat is off still removes the leaf (DS41-047)", () => {
+  // Freezing keeps the group and every leaf; re-enabling chat re-activates it as it
+  // was. A remove that skipped the frozen group put the ex-attendee back in the room.
+  it("handleRevoke removes from a FROZEN group, and re-activation does not bring them back", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+
+    admin.freeze(COORD);
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "revoked", now: 2 });
+    await admin.handleRevoke(COORD, ACCOUNT);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
+
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.backfillApproved(COORD);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
+  });
+
+  it("a device's own 21607 revoke while chat is off removes its leaf", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+
+    admin.freeze(COORD);
+    await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
+  });
+});
+
 describe("MarmotAdmin — remove on revoke (§4.2) & ingest", () => {
   it("handleRevoke MLS-removes every attested chat key (and defensively the account key)", async () => {
     const store = freshStore();
@@ -1240,6 +1279,117 @@ describe("the startup backfill takes the same per-member lock the live paths do"
   });
 });
 
+describe("a revoke that lands while a sync is in flight is not undone (DS41-048 / SB-97)", () => {
+  // The sync reads the device as active, then awaits the relay fetch. A 21607
+  // revoke landing in that window marks the key revoked and drops the leaf (there
+  // is none yet). Pre-fix the sync then invited the revoked device anyway.
+  it("re-checks authorization right before the Add", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin: MarmotAdmin = makeAdmin(store, mls, [], undefined, {
+      fetchKeyPackages: async () => {
+        await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
+        return [kpEvent(CHATKEY, "kp1")];
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    expect(await admin.syncMember(COORD, ACCOUNT)).toBe(true);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
+    expect(mls.invited).toEqual([]);
+    expect(mls.members.get("mls-1")?.has(CHATKEY) ?? false).toBe(false);
+  });
+
+  it("an attendee revoked mid-sync is not added either", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [], undefined, {
+      fetchKeyPackages: async () => {
+        store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "revoked", now: 2 });
+        return [kpEvent(CHATKEY, "kp1")];
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([]);
+  });
+});
+
+describe("one member's throwing sync does not abort the backfill (DS41-053)", () => {
+  it("logs, queues a retry for that member, and still adds the next one", async () => {
+    class ThrowingMls extends FakeMls {
+      override async isMember(group: string, pubkey: string): Promise<boolean> {
+        if (pubkey === CHATKEY) throw new Error("simulated MLS read failure");
+        return super.isMember(group, pubkey);
+      }
+    }
+    const ACCOUNT2 = "b".repeat(64);
+    const store = freshStore();
+    const mls = new ThrowingMls();
+    const queued: string[] = [];
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1"), kpEvent(CHATKEY2, "kp2")], undefined, {
+      enqueueSync: (_c, pubkey) => queued.push(pubkey),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT2, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT2, chatPubkey: CHATKEY2, now: 1 });
+
+    await expect(admin.backfillApproved(COORD)).resolves.toBeUndefined();
+    expect(queued).toEqual([ACCOUNT]);
+    expect(mls.invited).toEqual([CHATKEY2]);
+  });
+});
+
+describe("21607 add/revoke for one device are ordered by created_at (DS41-049)", () => {
+  // Rejoin = revoke, then add. Delivered (or replayed at boot) add-first, the
+  // revoke used to remove the leaf the add had just created.
+  const addAt = (t: number) => {
+    const proof = makeChatDeviceProof(DEVICE_SK, COORD, ACCOUNT, t);
+    return { v: 2 as const, a: COORD, op: "add" as const, chat_pubkey: CHATKEY, label: "Test device", proof };
+  };
+  const setupAdmin = () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    // A wall clock well past every created_at used here, so no value is clamped.
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, { now: () => 10_000_000 });
+    return { store, mls, admin };
+  };
+
+  it("an OLDER revoke processed after the add is ignored — the rejoin sticks", async () => {
+    const { store, mls, admin } = setupAdmin();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    expect(await admin.handleAttestation(COORD, ACCOUNT, addAt(2000), 2000)).toBe(true);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), 1999)).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("active");
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+  });
+
+  it("an OLDER add processed after a revoke does not re-activate the device", async () => {
+    const { store, mls, admin } = setupAdmin();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(COORD, ACCOUNT, addAt(1000), 1000);
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), 3000)).toBe(true);
+
+    expect(await admin.handleAttestation(COORD, ACCOUNT, addAt(2000), 2000)).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
+    // …while a NEWER add (a later rejoin) is accepted as before.
+    expect(await admin.handleAttestation(COORD, ACCOUNT, addAt(3001), 3001)).toBe(true);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("active");
+  });
+});
+
 describe("a failed attestation sync is retried, not just logged", () => {
   it("queues durable work when the inline sync throws", async () => {
     const logs: string[] = [];
@@ -1355,6 +1505,22 @@ describe("MarmotAdmin — roster republish on every chat_keys change", () => {
     published.length = 0;
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     expect(published).toEqual([]);
+  });
+
+  it("republishes when a FROZEN group is re-activated — the frozen roster carried no group id (DS41-051)", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const changed: string[] = [];
+    const admin = makeAdmin(store, mls, [], undefined, { onRosterChanged: (c) => changed.push(c) });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    admin.freeze(COORD);
+    changed.length = 0;
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    expect(changed).toEqual([COORD]);
+    // …but an already-active group's re-ensure (every restart) does not.
+    changed.length = 0;
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    expect(changed).toEqual([]);
   });
 
   it("republishes when a device binds (op:add)", async () => {

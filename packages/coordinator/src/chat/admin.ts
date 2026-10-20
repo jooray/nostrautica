@@ -10,14 +10,17 @@
  *  - remove members on revoke (real MLS Remove → forward secrecy);
  *  - ingest kind-445 traffic so the coordinator stays converged.
  *
- * A chat-off event never reaches here: the coordinator only constructs the admin's
- * group and subscriptions when `isMarmotChatEnabled` holds.
+ * A chat-off event never reaches the add paths: the coordinator only constructs the
+ * admin's group and subscriptions when `isMarmotChatEnabled` holds. The REMOVE paths
+ * do run for an event whose chat was turned off after its group existed (a frozen
+ * group, DS41-047), because re-enabling chat brings that group back as it was.
  */
 import type { Store, MarmotChatLinkRow } from "../store/db.js";
 import { keyPackageProfile, type ChatMls } from "./mls.js";
 import { normalizeAvatarUrl } from "./avatar.js";
 import {
   verifyChatDeviceProof,
+  rumorEffectiveCreatedAt,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   type ChatKeyAttestationContent,
   type CoordinatorStatusContent,
@@ -229,7 +232,14 @@ export class MarmotAdmin {
     const existing = this.store.getMarmotGroup(opts.coordinate);
     if (existing) {
       // A frozen group re-activates when chat is toggled back on (§9 Q4).
-      if (existing.status === "frozen") this.store.setMarmotGroupStatus(opts.coordinate, "active");
+      if (existing.status === "frozen") {
+        this.store.setMarmotGroupStatus(opts.coordinate, "active");
+        // Republish (audit DS41-051): a roster published while frozen carries no
+        // nostr_group_id, and clients fail closed without it. Nothing else on this
+        // path republishes — the backfill adds nobody when every member still holds
+        // a leaf — so the room stayed "Setting up" until some unrelated roster change.
+        this.rosterChanged(opts.coordinate);
+      }
       // Reconcile the admin set on every ensureGroup: organizers approved (or
       // whose chat devices changed) while chat was frozen/offline are promoted
       // now, and a coordinator that lost its admin state re-asserts it.
@@ -273,6 +283,20 @@ export class MarmotAdmin {
   private activeGroup(coordinate: string): { mls_group_id: string } | undefined {
     const g = this.store.getMarmotGroup(coordinate);
     return g && g.status === "active" ? g : undefined;
+  }
+
+  /**
+   * The group a REMOVE acts on: active OR frozen (audit DS41-047).
+   *
+   * Freezing stops adds and welcomes; it does not end the group. Its members keep
+   * their state, and re-enabling chat re-activates the same group and leaves. The
+   * remove paths used {@link activeGroup}, so a revoke or withdrawal while chat was
+   * off completed having removed nothing — and the ex-attendee was back in the room,
+   * able to read and send, the moment chat was turned on again. A Remove is the one
+   * post-compromise part of a revoke; it goes through whatever the group's status.
+   */
+  private removableGroup(coordinate: string): { mls_group_id: string } | undefined {
+    return this.store.getMarmotGroup(coordinate);
   }
 
   /**
@@ -680,6 +704,13 @@ export class MarmotAdmin {
     await this.tryAddKeyPackage(coordinate, group.mls_group_id, event);
   }
 
+  /** Fresh (uncached) read: `chatPubkey` is an ACTIVE device of an APPROVED attendee. */
+  private isAuthorizedNow(coordinate: string, chatPubkey: string): boolean {
+    const key = this.store.getChatKey(coordinate, chatPubkey);
+    if (!key || key.status !== "active") return false;
+    return this.store.getAttendee(coordinate, key.account_pubkey)?.status === "approved";
+  }
+
   /**
    * Idempotent add of one authorized key package; records consumption.
    *
@@ -844,6 +875,21 @@ export class MarmotAdmin {
       );
       await this.mls.removePubkeys(mlsGroupId, [kp.pubkey]);
     }
+    // Re-check authorization at the last synchronous point before the Add (audit
+    // DS41-048). Everything above awaited — the relay fetch in syncMember, the
+    // membership and eligibility reads — and a revoke or withdrawal may have landed
+    // in between: it sets the binding/attendee status FIRST and only then queues its
+    // MLS Remove. Checking here means either we see that status and stop, or the
+    // revoke's Remove is queued after our Add on the group's commit chain
+    // (MarmotClientMls.serialize is FIFO) and removes what we just added. Without it
+    // the revoked device was invited back and nothing was left to remove it. The
+    // passive watcher needs this too: it takes no member lock at all.
+    if (!this.isAuthorizedNow(coordinate, kp.pubkey)) {
+      this.log(
+        `[chat] not adding ${kp.pubkey.slice(0, 8)} to ${coordinate}: no longer an approved attendee's active device`,
+      );
+      return true; // nothing to retry — the member or device is gone
+    }
     try {
       await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
       this.store.markKpConsumed(coordinate, kp.id);
@@ -908,8 +954,21 @@ export class MarmotAdmin {
       const sync = async () => {
         synced = await this.syncMember(coordinate, a.pubkey, { prefetched });
       };
-      if (this.withMemberLock) await this.withMemberLock(coordinate, a.pubkey, sync);
-      else await sync();
+      // One member's failure is that member's, not the walk's (audit DS41-053).
+      // `syncMember` contains a failed Add, but not its trailing admin promotion
+      // (`maybeSyncAdmins` commits and can throw on a relay with no ack) nor a
+      // failed membership read; a throw here used to abort the backfill for every
+      // member after this one AND, through ensureChat, the event's chat
+      // subscriptions. It becomes a durable retry for this member instead.
+      try {
+        if (this.withMemberLock) await this.withMemberLock(coordinate, a.pubkey, sync);
+        else await sync();
+      } catch (e) {
+        this.log(
+          `[chat] backfill sync for ${a.pubkey.slice(0, 8)} in ${coordinate} threw: ${e instanceof Error ? e.message : String(e)}`,
+        );
+        synced = false;
+      }
       // A member the walk could not add gets a durable retry of their own (audit
       // B-5), rather than being silently left out until the next restart — which,
       // for chat being turned on mid-event, means until the event is over.
@@ -921,6 +980,36 @@ export class MarmotAdmin {
   }
 
   // ── attestations (21607) ───────────────────────────────────────────────────
+  /**
+   * Per-device ordering of 21607 add/revoke (audit DS41-049).
+   *
+   * Rejoin sends a `revoke` and then an `add` for the same chat key as two
+   * independent gift wraps, and nothing delivers them in order: relays page
+   * newest-first, and the boot backfill replays whatever it fetched. Processed
+   * add-then-revoke, the revoke removed the leaf the add had just created, and
+   * the device was left revoked while its user was told the rejoin worked.
+   *
+   * So each op records the newest `created_at` it was accepted at, under its own
+   * watermark subject per chat key, and an op STRICTLY older than the opposite
+   * op's watermark is refused. Ties are let through (today's behaviour): seconds
+   * are coarse, and the app waits for the next second between the two sends so a
+   * rejoin never produces one. The value is clamped like every other ordering
+   * timestamp, so a device with a clock far in the future cannot make its key
+   * unrevocable.
+   */
+  private attestationOrderKey(createdAt: number): number {
+    return rumorEffectiveCreatedAt(createdAt, Math.floor(this.now() / 1000));
+  }
+
+  private attestationWatermark(coordinate: string, op: "add" | "revoke", chatPubkey: string): number | undefined {
+    return this.store.getCommandWatermark(coordinate, `chatkey-${op}:${chatPubkey}`)?.created_at;
+  }
+
+  private recordAttestation(coordinate: string, op: "add" | "revoke", chatPubkey: string, at: number): void {
+    const prev = this.attestationWatermark(coordinate, op, chatPubkey);
+    if (prev === undefined || at > prev) this.store.setCommandWatermark(coordinate, `chatkey-${op}:${chatPubkey}`, at, "");
+  }
+
   /**
    * Record an authenticated chat-key attestation. `accountPubkey` is the SEAL
    * AUTHOR the coordinator already bound via `unwrapRumor`, so the binding is
@@ -973,6 +1062,14 @@ export class MarmotAdmin {
         this.notifyRefusal(coordinate, accountPubkey, "chat_proof_invalid");
         return false;
       }
+      const orderAt = this.attestationOrderKey(createdAt);
+      const revokedAt = this.attestationWatermark(coordinate, "revoke", content.chat_pubkey);
+      if (revokedAt !== undefined && orderAt < revokedAt) {
+        this.log(
+          `[chat] IGNORED 21607 add from ${accountPubkey.slice(0, 8)} for ${content.chat_pubkey.slice(0, 8)}: older than the revoke already applied (${orderAt} < ${revokedAt})`,
+        );
+        return false;
+      }
       // Per-account device cap (NIP §10.1): at most MAX_CHAT_KEYS_PER_ACCOUNT active
       // keys per account per event. A refresh of an already-active key doesn't count
       // against the cap; activating a NEW (or previously-revoked) key beyond it does.
@@ -1003,6 +1100,7 @@ export class MarmotAdmin {
         this.notifyRefusal(coordinate, accountPubkey, "chat_key_bound_to_other_account");
         return false;
       }
+      this.recordAttestation(coordinate, "add", content.chat_pubkey, orderAt);
       this.log(`[chat] bound chat key ${content.chat_pubkey.slice(0, 8)} → ${accountPubkey.slice(0, 8)}`);
       // Republish: this add is what puts the device (and its label) in the roster's
       // `chat_keys`, which is the only thing the device-management UI can read.
@@ -1067,12 +1165,21 @@ export class MarmotAdmin {
       );
       return false;
     }
+    const orderAt = this.attestationOrderKey(createdAt);
+    const addedAt = this.attestationWatermark(coordinate, "add", content.chat_pubkey);
+    if (addedAt !== undefined && orderAt < addedAt) {
+      this.log(
+        `[chat] IGNORED 21607 revoke from ${accountPubkey.slice(0, 8)} for ${content.chat_pubkey.slice(0, 8)}: older than the add already applied (${orderAt} < ${addedAt})`,
+      );
+      return false;
+    }
+    this.recordAttestation(coordinate, "revoke", content.chat_pubkey, orderAt);
     this.store.setChatKeyStatus(coordinate, content.chat_pubkey, "revoked", this.now());
     // Republish BEFORE the MLS remove: dropping the leaf can take a relay round
     // trip, and the roster is what the user is staring at. Without this the
     // revoked device reappeared in their device list about four seconds later.
     this.rosterChanged(coordinate);
-    const group = this.activeGroup(coordinate);
+    const group = this.removableGroup(coordinate);
     if (group) await this.mls.removePubkeys(group.mls_group_id, [content.chat_pubkey]);
     // A revoked organizer device must also lose its co-admin standing.
     await this.maybeSyncAdmins(coordinate, accountPubkey);
@@ -1434,7 +1541,7 @@ export class MarmotAdmin {
      */
     opts?: { chatPubkeys?: string[] },
   ): Promise<void> {
-    const group = this.activeGroup(coordinate);
+    const group = this.removableGroup(coordinate);
     if (!group) return;
     const chatKeys = this.store.chatKeysForAccount(coordinate, accountPubkey);
     const pubkeys = [

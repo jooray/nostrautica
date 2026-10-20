@@ -3501,6 +3501,31 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     expect(statusWraps.length).toBeGreaterThan(0);
   });
 
+  // DS41-048 / SB-97: the durable chat jobs are the same operations the live
+  // attestation / revoke paths run, so they must wait on the same member lock.
+  it("chat_sync_member waits for the member lock a live path holds", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto"); // auto-approved → job enqueued
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+
+    let release!: () => void;
+    const held = (h.coordinator as any).withSubjectLock(
+      h.coordinate,
+      `member:${pk}`,
+      () => new Promise<void>((r) => (release = r)),
+    );
+    const drained = h.coordinator.jobs.drain();
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(mls.invited).toEqual([]); // still waiting on the lock
+    release();
+    await held;
+    await drained;
+    expect(mls.invited).toEqual([devicePk]);
+  });
+
   it("revoke enqueues chat_revoke_member; the member's keys are MLS-removed on drain", async () => {
     const mls = new StubMls();
     const h = await setup(0, { chat: true, chatMls: mls });
@@ -3510,6 +3535,41 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     await admin(h, "revoke", { pubkey: pk });
     await h.coordinator.jobs.drain();
     expect(mls.removed).toEqual([[pk]]);
+  });
+
+  // DS41-047: chat turned off freezes the group but keeps every leaf, and turning it
+  // back on re-activates the same group. A revoke in between must still remove.
+  it("a revoke while chat is OFF still enqueues and performs the MLS remove", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    (h.coordinator as any).marmot.freeze(h.coordinate);
+    (h.coordinator as any).events.get(h.coordinate).chat = false;
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+    expect(mls.removed).toEqual([[pk]]);
+  });
+
+  // DS41-053: subscribeChat was the last line of ensureChat, so any throw in the
+  // chat setup left a live event with no 30443 watcher and no 445 ingest.
+  it("a throwing chat setup still opens the 30443 + 445 subscriptions", async () => {
+    class FailingRelaysMls extends StubMls {
+      override async ensureRelays(): Promise<void> {
+        throw new Error("simulated: routing-relay commit got no relay ack");
+      }
+    }
+    const h = await setup(0, { chat: true, chatMls: new FailingRelaysMls(), skipAutoInstall: true });
+    await expect(
+      h.coordinator.installEvent({
+        coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+        gen: 1, source: "grant", backfill: "full",
+      }),
+    ).rejects.toThrow(/no relay ack/);
+    const open = h.transport.subs.filter((s: any) => !s.closed);
+    expect(open.some((s: any) => s.filter?.kinds?.includes(30443))).toBe(true);
+    expect(open.some((s: any) => s.filter?.kinds?.includes(445))).toBe(true);
   });
 
   it("detach freezes the group and emits a chat-orphaned 21606 (reliability tail 6e)", async () => {
