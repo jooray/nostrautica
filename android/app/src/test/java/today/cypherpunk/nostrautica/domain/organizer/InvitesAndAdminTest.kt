@@ -118,6 +118,14 @@ class InvitesAndAdminTest {
         return Rumor(u.id, pk, at, kind, tags, content)
     }
 
+    // Audit SB-82: same-second joins are ordered by the lowest rumor id, whatever order they arrived in.
+    @Test fun sameSecondJoinsOrderByLowestId() {
+        val joins = (1..12).map { i -> rumor("%064x".format(i), Kinds.JOIN_REQUEST, """{"v":2,"name":"P$i","message":"","rsvp_public":false}""", 100) }
+        val want = joins.sortedBy { it.id }.map { it.pubkey }
+        assertEquals(want, InboxFold.fold(joins, coord).map { it.attendeePubkey })
+        assertEquals(want, InboxFold.fold(joins.reversed(), coord).map { it.attendeePubkey })
+    }
+
     @Test fun inboxFoldsLatestJoinRevisionAndWithdrawal() {
         val a = "a".repeat(64); val b = "b".repeat(64); val c = "c".repeat(64)
         val rumors = listOf(
