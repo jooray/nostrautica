@@ -45,6 +45,7 @@
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { validate, hasError, describedBy } from "$lib/stores/form-validation.js";
   import { recoverFromStaleChunk } from "$lib/stale-chunk.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let { naddr, code: codeParam }: { naddr: string; code?: string } = $props();
 
@@ -720,8 +721,8 @@
       {:else}
         {#if profileState === "loaded"}
           <div class="row" style="gap:0.75rem;align-items:center">
-            {#if existingPicture}
-              <img src={existingPicture} alt="" width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
+            {#if safeImageSrc(existingPicture)}
+              <img src={safeImageSrc(existingPicture)} alt="" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} width="56" height="56" style="border-radius:50%;object-fit:cover;flex:none" />
             {/if}
             {#if existingAbout}
               <div>

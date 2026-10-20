@@ -24,6 +24,7 @@
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { cachedEventContext } from "$lib/events/event-context.js";
   import { defaultEventIcon } from "$lib/media/image.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
   import { perfMark } from "$lib/perf.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
@@ -142,8 +143,9 @@
           onclick={() => router.go({ name: "chat", naddr: e.naddr })}
         >
           <img
-            src={e.icon || defaultEventIcon(e.title, e.title)}
+            src={safeImageSrc(e.icon) ?? defaultEventIcon(e.title, e.title)}
             alt=""
+            referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY}
             width="44"
             height="44"
             style="border-radius:11px;flex:none"

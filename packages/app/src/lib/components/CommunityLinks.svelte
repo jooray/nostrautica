@@ -31,6 +31,7 @@
   import { cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { coordinateToNaddr } from "@nostrautica/protocol";
   import { defaultEventIcon } from "$lib/media/image.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let {
     ctx,
@@ -202,7 +203,7 @@
           aria-label={t("hierarchy.overview.event.open", { title: c.title })}
           onclick={() => router.go({ name: "event", naddr: c.naddr })}
         >
-          <img src={c.icon || defaultEventIcon(c.title, c.title)} alt="" width="36" height="36" style="border-radius:9px;flex:none" />
+          <img src={safeImageSrc(c.icon) ?? defaultEventIcon(c.title, c.title)} alt="" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} width="36" height="36" style="border-radius:9px;flex:none" />
           <span style="flex:1;min-width:0">
             <strong class="child-title">{c.title}</strong>
             {#if c.start}<span class="muted child-when">{when(c.start)}</span>{/if}

@@ -64,6 +64,7 @@
   import AdminTabs from "$lib/components/AdminTabs.svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
 
   let { naddr }: { naddr: string } = $props();
 
@@ -1414,8 +1415,8 @@
           {#each coordinators.filter((c) => c.pubkey !== ctx?.config.coordinator) as c (c.pubkey)}
             <div class="card coord-card">
               <div class="row" style="gap:0.6rem;align-items:flex-start">
-                {#if c.announce.picture}
-                  <img src={c.announce.picture} alt="" class="coord-logo" />
+                {#if safeImageSrc(c.announce.picture)}
+                  <img src={safeImageSrc(c.announce.picture)} alt="" class="coord-logo" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />
                 {/if}
                 <div style="flex:1;min-width:0">
                   <strong>{c.announce.name}</strong>
@@ -1469,7 +1470,7 @@
         <span class="mono">{ctx.config.coordinator.slice(0, 16)}…</span></p>
       {#if coordAnnounce}
         <div class="row" style="gap:0.6rem;align-items:center;margin:0.35rem 0">
-          {#if coordAnnounce.announce.picture}<img src={coordAnnounce.announce.picture} alt="" class="coord-logo" />{/if}
+          {#if safeImageSrc(coordAnnounce.announce.picture)}<img src={safeImageSrc(coordAnnounce.announce.picture)} alt="" class="coord-logo" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />{/if}
           <div>
             <strong>{coordAnnounce.announce.name}</strong>
             <span class="badge">{pricingLabel(coordAnnounce.announce)}</span>

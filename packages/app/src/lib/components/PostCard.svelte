@@ -9,6 +9,7 @@
   import { router } from "$lib/router/router.svelte.js";
   import { t } from "$lib/i18n/i18n.svelte.js";
   import Icon from "$lib/components/icons/Icon.svelte";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
   import { npubEncode } from "nostr-tools/nip19";
 
   let {
@@ -25,6 +26,8 @@
      *  page itself (a self-link would be pointless). */
     openable?: boolean;
   } = $props();
+
+  const headerSrc = $derived(safeImageSrc(post.image));
 
   function open() {
     router.go({ name: "post", naddr, d: post.d });
@@ -66,8 +69,8 @@
         <span class="badge">{t("post.fromFeed", { name: feedName })}</span>
       {/if}
     </div>
-    {#if post.image && full}
-      <img class="header-img" src={post.image} alt="" loading="lazy" />
+    {#if headerSrc && full}
+      <img class="header-img" src={headerSrc} alt="" loading="lazy" referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY} />
     {/if}
     {#if full}
       <!-- Safe: renderMarkdown escapes the source before emitting its own tags. -->

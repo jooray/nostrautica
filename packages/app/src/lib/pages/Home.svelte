@@ -27,6 +27,7 @@
   } from "$lib/events/scan-budget.js";
   import { connectivity } from "$lib/stores/connectivity.svelte.js";
   import { defaultEventIcon } from "$lib/media/image.js";
+  import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
   import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
   import { prefetchEventContext } from "$lib/nostr/prefetch.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -447,8 +448,9 @@
         onfocus={() => prefetchEventContext(e.naddr)}
       >
         <img
-          src={e.icon || defaultEventIcon(e.title, e.title)}
+          src={safeImageSrc(e.icon) ?? defaultEventIcon(e.title, e.title)}
           alt=""
+          referrerpolicy={EXTERNAL_IMG_REFERRER_POLICY}
           width="44"
           height="44"
           style="border-radius:11px;flex:none"
