@@ -308,6 +308,16 @@ function applyBaselineDDL(db: DatabaseSync): void {
   } catch {
     /* column already exists */
   }
+  // Migration (audit DS41-040): how many times STT came back empty for a blob that
+  // plainly held audio. A new table only this binary touches, so no SCHEMA_VERSION
+  // bump: an older binary ignores it, and a rollback only forgets the counts.
+  db.exec(
+    `CREATE TABLE IF NOT EXISTS stt_empty_attempts (
+      blob_sha256 TEXT PRIMARY KEY,
+      attempts INTEGER NOT NULL,
+      last_at INTEGER NOT NULL
+    )`,
+  );
 }
 
 /**
@@ -2147,6 +2157,8 @@ export class Store {
     this.db
       .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at) VALUES (?, ?, ?, ?)")
       .run(blobSha256, text, lang ?? null, now);
+    // A cached answer settles the blob; any empty-STT count before it is history.
+    this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?").run(blobSha256);
     if (owner) {
       this.db
         .prepare(
@@ -2154,6 +2166,40 @@ export class Store {
         )
         .run(blobSha256, owner.coordinate, owner.pubkey, now);
     }
+  }
+
+  /**
+   * Empty-STT attempts for a blob (audit DS41-040): how many times the provider
+   * returned no text for audio long enough to hold speech. Bounded by the caller,
+   * which turns the last one into a media-policy rejection.
+   */
+  emptySttAttempts(blobSha256: string): number {
+    const row = this.db
+      .prepare("SELECT attempts FROM stt_empty_attempts WHERE blob_sha256 = ?")
+      .get(blobSha256) as { attempts: number } | undefined;
+    return row?.attempts ?? 0;
+  }
+  /** Count one more empty STT answer for a blob; returns the new total. */
+  recordEmptyStt(blobSha256: string, now: number): number {
+    this.db
+      .prepare(
+        `INSERT INTO stt_empty_attempts (blob_sha256, attempts, last_at) VALUES (?, 1, ?)
+         ON CONFLICT(blob_sha256) DO UPDATE SET attempts = attempts + 1, last_at = excluded.last_at`,
+      )
+      .run(blobSha256, now);
+    return this.emptySttAttempts(blobSha256);
+  }
+  /**
+   * Forget the empty-STT counts for every media blob this attendee submitted —
+   * the organizer's `reprocess` is a deliberate request to try their media again,
+   * so a recording given up on during a provider outage gets a fresh budget.
+   * Returns how many counters were cleared.
+   */
+  clearEmptySttForSubject(coordinate: string, pubkey: string): number {
+    let n = 0;
+    const del = this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?");
+    for (const x of this.subjectMediaBlobs(coordinate, pubkey)) n += Number(del.run(x).changes);
+    return n;
   }
 
   /** Record an ownership reference to a content-addressed transcript (audit C5)
@@ -2562,22 +2608,11 @@ export class Store {
   }
 
   /**
-   * Full purge of an attendee's stored derived artifacts (NIP §6.3 21610,
-   * `delete_data: true`). Removes the coordinator's private DB copies of everything
-   * derived from the attendee's submission — the attendee row (profile, ai_profile,
-   * transcripts_json, correction), their submissions, their per-account nostr
-   * summary, their talks, and the content-addressed STT transcripts for every media
-   * blob they submitted (intro + talk media). Cached pair scores are already dropped
-   * by `clearPairsInvolving` on the revoke path. Idempotent.
-   *
-   * `delete_data: false` withdrawals do NOT call this — those artifacts are retained
-   * so a later re-approval avoids reprocessing spend (chiefly re-running STT).
+   * Every media ciphertext hash (`x`) a subject submitted: their stored profile
+   * media (`profile_json.__media`), their talk media (`talks.media_json`), and the
+   * transcript ownership refs the pipeline recorded for them.
    */
-  purgeAttendeeArtifacts(coordinate: string, pubkey: string): void {
-    // Collect every media ciphertext hash (`x`) this attendee submitted, so LEGACY
-    // transcript rows (written before ownership refs existed, audit C5) can still be
-    // attributed and dropped. Sources: the attendee's stored profile media
-    // (`profile_json.__media`) and their talk media (`talks.media_json`).
+  private subjectMediaBlobs(coordinate: string, pubkey: string): Set<string> {
     const blobHashes = new Set<string>();
     const att = this.db
       .prepare("SELECT profile_json FROM attendees WHERE coordinate = ? AND pubkey = ?")
@@ -2601,6 +2636,31 @@ export class Store {
         /* ignore */
       }
     }
+    for (const r of this.db
+      .prepare("SELECT blob_sha256 FROM transcript_refs WHERE coordinate = ? AND pubkey = ?")
+      .all(coordinate, pubkey) as { blob_sha256: string }[]) {
+      blobHashes.add(r.blob_sha256);
+    }
+    return blobHashes;
+  }
+
+  /**
+   * Full purge of an attendee's stored derived artifacts (NIP §6.3 21610,
+   * `delete_data: true`). Removes the coordinator's private DB copies of everything
+   * derived from the attendee's submission — the attendee row (profile, ai_profile,
+   * transcripts_json, correction), their submissions, their per-account nostr
+   * summary, their talks, and the content-addressed STT transcripts for every media
+   * blob they submitted (intro + talk media). Cached pair scores are already dropped
+   * by `clearPairsInvolving` on the revoke path. Idempotent.
+   *
+   * `delete_data: false` withdrawals do NOT call this — those artifacts are retained
+   * so a later re-approval avoids reprocessing spend (chiefly re-running STT).
+   */
+  purgeAttendeeArtifacts(coordinate: string, pubkey: string): void {
+    // Collect every media ciphertext hash (`x`) this attendee submitted, so LEGACY
+    // transcript rows (written before ownership refs existed, audit C5) can still be
+    // attributed and dropped.
+    const blobHashes = this.subjectMediaBlobs(coordinate, pubkey);
     this.db.exec("BEGIN IMMEDIATE");
     try {
       this.purgeSubjectInTxn(coordinate, pubkey, blobHashes);
@@ -2777,8 +2837,12 @@ export class Store {
       "SELECT COUNT(*) AS n FROM transcript_refs WHERE blob_sha256 = ?",
     );
     const delTranscript = this.db.prepare("DELETE FROM transcripts WHERE blob_sha256 = ?");
+    const delEmptyStt = this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?");
     for (const x of ownedBlobs) {
-      if ((transcriptRefCount.get(x) as { n: number }).n === 0) delTranscript.run(x);
+      if ((transcriptRefCount.get(x) as { n: number }).n === 0) {
+        delTranscript.run(x);
+        delEmptyStt.run(x);
+      }
     }
     // ── pipeline artifacts ──
     const ownedArtifacts = this.db

@@ -4855,6 +4855,10 @@ export class Coordinator {
         // exactly how two attendees sat without profiles for two weeks after a
         // translation bug that had already been fixed.
         const forgotten = this.deps.store.clearAttendeeJobMemo(coordinate, pubkey);
+        // A recording given up on after repeated empty STT answers (DS41-040) gets
+        // a fresh budget: a reprocess is the organizer asking for exactly that.
+        const sttReset = this.deps.store.clearEmptySttForSubject(coordinate, pubkey);
+        if (sttReset > 0) log(`[admin] reprocess ${short(pubkey)}: reset ${sttReset} empty-transcript counter(s)`);
         const outcome = this.jobs.enqueue("process_attendee", `proc:${coordinate}:${pubkey}:manual`, {
           coordinate,
           pubkey,
