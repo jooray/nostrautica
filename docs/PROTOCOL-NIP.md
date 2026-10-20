@@ -653,7 +653,7 @@ payload keeps the strict literal-2 parse of §2.
   ```
   {
     v: 2,
-    sections: EventPageSection[] (default []),   // PUBLIC layout
+    sections: EventPageSection[] ≤50 (default []), // PUBLIC layout
     sources: ExternalFeed[] (default []),        // PUBLIC curated feeds
     private?: string                             // ECK ciphertext (below)
   }
@@ -695,8 +695,8 @@ payload keeps the strict literal-2 parse of §2.
   ```
   {
     v: 2,
-    menu: (MenuItem & { pos: int ≥0 })[] (default []),
-    sections: (EventPageSection & { pos: int ≥0 })[] (default [])
+    menu: (MenuItem & { pos: int ≥0 })[] ≤50 (default []),
+    sections: (EventPageSection & { pos: int ≥0 })[] ≤50 (default [])
   }
   ```
   `MenuItem = { label: string ≤200, target: string ≤2048 }` (an https URL or a
@@ -727,7 +727,7 @@ payload keeps the strict literal-2 parse of §2.
     talk_d: string 1..64,
     title: string 1..200,
     description: string ≤2000 (default ""),
-    speakers: hex32[] (default []),   // co-speakers; the submitter is implicit
+    speakers: hex32[] ≤50 (default []), // co-speakers; the submitter is implicit
     media?: MediaDescriptor,          // kind MUST be "talk"; present for recording/upload
     external_url?: https URL ≤2048,   // XOR with media: a YouTube or direct-mp4 URL
     external_kind?: "youtube" | "video",  // required when external_url is set
@@ -768,7 +768,7 @@ payload keeps the strict literal-2 parse of §2.
       talks: bool (default false),
       chat: string[] ≤30 (default [])     // Marmot chat-relay URLs, when offered
     } (default {}),
-    privacy?: { [role: string]: string },  // per-role disclosure tier, e.g. "private"
+    privacy?: { [role: string ≤64]: string ≤200 } ≤32 entries, // per-role tier, e.g. "private"
     terms_url?: https-string ≤2048,
     pricing?: {
       model: "free"|"per_user"|"per_event"|"negotiated"|"external",
@@ -828,7 +828,7 @@ relay-visible event on its own.
     v: 2,
     a: <coordinate>,
     role: "attendee" | "organizer",
-    eck: [{ id: int >0, key: base64(32 bytes) }],
+    eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
     granted_by: hex32,
     parent?: { a: <31612-coordinate>, by: hex32, sig: hex64 }
   }
@@ -849,7 +849,7 @@ relay-visible event on its own.
     a: <coordinate>,
     gen: int >0,
     inbox_nsec: hex32,
-    eck: [{ id: int >0, key: base64(32 bytes) }],
+    eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
     config_relays: string[] ≤30
   }
   ```
@@ -884,7 +884,7 @@ relay-visible event on its own.
     a: <coordinate>,
     eid_nsec: hex32,
     einbox_nsec: hex32,
-    eck: [{ id: int >0, key: base64(32 bytes) }],
+    eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
     config_relays: string[] ≤30,
     granted_by: hex32
   }
@@ -965,7 +965,7 @@ relay-visible event on its own.
       seeks?: string[≤200] ≤50
     },
     hidden?: bool,                 // publish the directory entry with NO ai_profile
-    hidden_fields?: ("summary"|"skills"|"interests"|"offers"|"seeks")[],
+    hidden_fields?: ("summary"|"skills"|"interests"|"offers"|"seeks")[] ≤5,
     report?: string ≤2000          // free-text "this is inaccurate" note to the organizer
   }
   ```
@@ -987,7 +987,7 @@ relay-visible event on its own.
     talk_d: string 1..64,          // stable per-speaker id; editing resubmits the same id
     title: string 1..200,
     description: string ≤2000 (default ""),
-    speakers: hex32[] (default []),  // co-speakers; the submitter is implicit
+    speakers: hex32[] ≤50 (default []), // co-speakers; the submitter is implicit
     media?: MediaDescriptor,         // XOR external_url (exactly one required)
     external_url?: https URL ≤2048,  // YouTube or direct-mp4 URL hosted off-Blossom
     external_kind?: "youtube" | "video",   // required when external_url is set

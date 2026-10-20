@@ -356,6 +356,22 @@ export const MAX_TRANSCRIPTS = 20;
 export const MAX_PAGE_SECTIONS = 50;
 /** Pinned naddr refs per event page; each one costs the client a fetch. */
 export const MAX_PINNED_REFS = 50;
+/**
+ * ECK versions in one grant/backup `eck` array (audit SB-26). One version per
+ * revocation or withdrawal, so a long-lived community can accumulate many — the
+ * cap is set at the NIP-44 plaintext ceiling instead: a `{"id":N,"key":"<44>"}`
+ * entry is ≥ 60 bytes, so even the leanest carrier (an unescaped 30078 backup)
+ * fits at most ~1 020 of them in 65 535 bytes, and the gift-wrapped grants fewer.
+ * It can therefore reject nothing deliverable; it makes the bound explicit rather
+ * than incidental, like every other array here.
+ */
+export const MAX_ECK_VERSIONS = 1024;
+/** Co-speakers on a talk (21609/31610, audit SB-27). The app sends none today. */
+export const MAX_TALK_SPEAKERS = 50;
+/** 31611 `privacy` map (audit SB-12): role names, tier strings, and entries. */
+export const MAX_PRIVACY_ROLES = 32;
+export const MAX_PRIVACY_ROLE = 64;
+export const MAX_PRIVACY_TIER = 200;
 
 // ── Profile (used inside submissions & directory) ────────────────────────────
 export const attendeeProfileSchema = z.object({
@@ -533,8 +549,9 @@ export const profileCorrectionContentSchema = z.object({
   overrides: aiProfileOverrideSchema.optional(),
   // true = publish the directory entry with NO ai_profile (self-authored fallback).
   hidden: z.boolean().optional(),
-  // Blank specific generated fields (rather than override them).
-  hidden_fields: z.array(z.enum(AI_PROFILE_FIELDS)).optional(),
+  // Blank specific generated fields (rather than override them). At most one entry
+  // per field (audit SB-27): like `overrides`, a correction is stored durably.
+  hidden_fields: z.array(z.enum(AI_PROFILE_FIELDS)).max(AI_PROFILE_FIELDS.length).optional(),
   // Optional "this is inaccurate" note to the organizer. Minimally carried — the
   // owner deferred a full report-to-organizer flow (audit U10), so it is just a
   // free-text string with no elaborate handling here.
@@ -556,7 +573,7 @@ export const keyGrantContentSchema = z.object({
   v: version,
   a: eventCoordinate, // 31923 event coordinate (audit R18)
   role: z.enum(["attendee", "organizer"]),
-  eck: z.array(eckVersionSchema),
+  eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   granted_by: hex32,
   /**
    * §15: when this event belongs to a community, a proof the recipient may present
@@ -581,7 +598,7 @@ export const coordinatorGrantContentSchema = z.object({
   // detached for the coordinate — a replayed historical grant can never re-install.
   gen: z.number().int().positive(),
   inbox_nsec: secretKeyHex, // hex privkey of E_inbox
-  eck: z.array(eckVersionSchema),
+  eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   config_relays: z.array(z.string()).max(MAX_RELAYS),
 });
 export type CoordinatorGrantContent = z.infer<
@@ -691,7 +708,7 @@ export const talkSubmissionContentSchema = z
     talk_d: z.string().min(1).max(64), // stable per-speaker talk id (edit = same id)
     title: z.string().min(1).max(MAX_TALK_TITLE),
     description: z.string().max(MAX_TALK_DESC).default(""),
-    speakers: z.array(hex32).default([]), // co-speakers; the submitter is implicit
+    speakers: z.array(hex32).max(MAX_TALK_SPEAKERS).default([]), // co-speakers; the submitter is implicit
     media: mediaDescriptorSchema.optional(),
     external_url: httpsUrl(2048).optional(),
     external_kind: talkExternalKindSchema.optional(),
@@ -716,7 +733,7 @@ export const talkContentSchema = z
     talk_d: z.string().min(1).max(64),
     title: z.string().min(1).max(MAX_TALK_TITLE),
     description: z.string().max(MAX_TALK_DESC).default(""),
-    speakers: z.array(hex32).default([]),
+    speakers: z.array(hex32).max(MAX_TALK_SPEAKERS).default([]),
     // Recording/upload → a Blossom `media` descriptor; external → `external_url`
     // (+ `external_kind`). Exactly one, as on the submission (§8/§15).
     media: mediaDescriptorSchema.optional(),
@@ -768,7 +785,7 @@ export const organizerGrantContentSchema = z.object({
   a: eventCoordinate,
   eid_nsec: secretKeyHex, // E_id secret (hex) — lets a co-organizer edit the event
   einbox_nsec: secretKeyHex, // E_inbox secret (hex) — read submissions + approve
-  eck: z.array(eckVersionSchema),
+  eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   config_relays: z.array(z.string()).max(MAX_RELAYS),
   granted_by: hex32,
 });
@@ -1175,7 +1192,9 @@ export type EventPagePrivate = z.infer<typeof eventPagePrivateSchema>;
 
 export const eventPageContentSchema = z.object({
   v: version,
-  sections: z.array(eventPageSectionSchema).default([]),
+  // Capped like the encrypted half (audit SB-11): this public half is exactly the
+  // payload that does NOT ride inside a NIP-44 ciphertext, so nothing else bounds it.
+  sections: z.array(eventPageSectionSchema).max(MAX_PAGE_SECTIONS).default([]),
   // Additive and defaulted: every 31608 published before external feeds existed
   // parses unchanged, and a writer that doesn't know the field omits it. Not
   // mirrored into the ECK `private` payload — see externalFeedSchema on why the
@@ -1249,7 +1268,7 @@ export const eventKeysBackupSchema = z.object({
   a: z.string().optional(),
   eid_nsec: secretKeyHex,
   einbox_nsec: secretKeyHex,
-  eck: z.array(eckVersionSchema),
+  eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS),
   // Last coordinator install generation the organizer used (NIP §3.5). Absent = 0
   // (never attached, or a backup written before generations); a re-attach reads it
   // back and uses lastGen + 1, so generations strictly increase across devices.
@@ -1324,7 +1343,14 @@ export const coordinatorAnnounceSchema = z.object({
     })
     .default({}),
   // Per-role privacy disclosure (role → tier string, e.g. "private"/"non-private").
-  privacy: z.record(z.string(), z.string()).optional(),
+  // Bounded (audit SB-12): the one record in a public kind, read before its author is
+  // trusted. A real coordinator lists a handful of model roles with one-word tiers.
+  privacy: z
+    .record(z.string().max(MAX_PRIVACY_ROLE), z.string().max(MAX_PRIVACY_TIER))
+    .refine((r) => Object.keys(r).length <= MAX_PRIVACY_ROLES, {
+      message: `too many privacy roles (max ${MAX_PRIVACY_ROLES})`,
+    })
+    .optional(),
   terms_url: httpsUrl(2048).optional(),
   pricing: coordinatorPricingSchema.optional(),
 });
