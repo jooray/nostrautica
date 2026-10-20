@@ -65,7 +65,8 @@ backup (operator guide §7) so a rollback restores a schema the old binary accep
 
 ```json
 {
-  "releaseId": "<git describe --tags --always --dirty, or v<root pkg>>",
+  "releaseId": "<see the fallback chain below>",
+  "swRevision": "<releaseId>+<12-char sha>",
   "gitSha": "<full commit sha>",
   "appVersion": "…", "protocolVersion": "…", "coordinatorVersion": "…",
   "wireProtocolVersion": 2,
@@ -73,6 +74,18 @@ backup (operator guide §7) so a rollback restores a schema the old binary accep
   "buildTimestamp": "<git commit time ISO, or build time>"
 }
 ```
+
+`releaseId` is the first of these that is non-empty:
+
+1. `NOSTRAUTICA_RELEASE_ID`, an explicit override.
+2. `git describe --tags --always --dirty`, or without `--dirty` when there is no
+   work tree. On a tagged commit this is the bare tag name (`v0.12.0`).
+3. The first 12 characters of the commit SHA. This rung matters: the production
+   build runs in the deploy hook with `GIT_DIR` pointing at a bare repo, where the
+   `--dirty` form fails. Before this rung existed the chain fell straight to the
+   package version, every deploy got the same id, and installed PWAs stayed on a
+   four-day-old shell (2026-07-28). Do not remove it.
+4. `v<root package version>`, when there is no git at all.
 
 - **PWA:** `packages/app/vite.config.ts` embeds it via a `__RELEASE_MANIFEST__`
   define (read through `src/lib/release.ts`). It is shown in **Settings → About** and
@@ -90,15 +103,33 @@ logged/announced id is the real release rather than the `v<pkg>` fallback.
 
 ## Reproducible service-worker revision
 
-The PWA's service-worker precache revision for the shell is `releaseManifest.releaseId`
-(a git identity), **not** `Date.now()`. The same commit + `BASE_PATH` therefore builds
-the **same** revision (a rebuild no longer looks like a new release), while every
-real release changes it, which is what drives the auto-update + refresh mechanism.
+The PWA's service-worker precache revision for the shell is `releaseManifest.swRevision`,
+**not** `Date.now()` and **not** `releaseId` on its own. It is `releaseId` followed by
+`+` and the 12-character commit SHA (just the SHA when `releaseId` already is one).
+The same commit + `BASE_PATH` therefore builds the **same** revision (a rebuild no
+longer looks like a new release), while every commit changes it, which is what
+drives the auto-update + refresh mechanism.
+
+The SHA suffix is what makes it per-commit. `releaseId` on a tagged commit is the
+bare tag name, so a release re-cut under the same version (`git tag -f vX.Y.Z` onto
+a fixed commit) would otherwise produce a byte-identical `sw.js`, and installed PWAs
+would never pick up the fix. With no git at all, `swRevision` falls back to
+`v<pkg>+build-<build time>`: not reproducible, but never constant, and the build log
+warns. `scripts/release-manifest.test.mjs` pins all of this and runs in `pnpm test`.
 
 ## Where to find the deployed revision
 
 - **App:** open Settings → About, or read the startup console line, or inspect the
-  service worker's precache entry for `index.html` (`revision` = release id).
+  service worker's precache entry for `index.html` (`revision` = `swRevision`). The
+  last one works from outside, and names the exact commit that is live:
+
+  ```sh
+  curl -s https://<host>/app/sw.js | grep -oE 'index.html",revision:"[^"]*"'
+  ```
+
+  `/_app/version.json` is SvelteKit's own build timestamp, not the release. It
+  changes when *a* build lands (and on a no-op rebuild), but it cannot tell you
+  which one.
 - **Coordinator:** the startup log line, `doctor`'s header line, or the `about` field
   of its kind-31611 announcement.
 

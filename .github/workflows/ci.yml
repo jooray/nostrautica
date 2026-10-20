@@ -7,8 +7,9 @@ on:
 
 # CI is exactly the release gate (audit R15): guardrails, unit suite, the supported
 # e2e orchestrator path, docs build + tests, and the clean-context coordinator Docker
-# build. Reusing one workflow means a PR is checked against the same bar a tagged
-# release must clear — no CI-vs-release drift.
+# build. Reusing one workflow means a PR is checked against the same bar the nsite
+# deploy must clear — no CI-vs-release drift. It runs on the GitHub mirror only, so
+# it does not stand between a commit and the production deploy (audit DS41-068).
 jobs:
   gate:
     uses: ./.github/workflows/release-gate.yml

@@ -47,7 +47,10 @@ pnpm e2e:integration -- tests/integration/walking-skeleton.spec.ts --headed
 
 Knobs (env): `E2E_SKIP_BUILD=1` reuses an existing build (must already point at
 the local stack); `E2E_RELAY_IMPL=local|nak` forces the relay implementation
-(default: `nak` if on PATH (CLAUDE.md gotcha #3) else the in-repo relay).
+(default: `nak` if on PATH (CLAUDE.md gotcha #3) else the in-repo relay; CI pins
+`local`, so use `E2E_RELAY_IMPL=local` to reproduce a CI result);
+`E2E_NO_REUSE=1` fails instead of reusing a relay/Blossom/proxy that is already
+listening, whose state would predate the run.
 
 **A selected tier FAILS its setup loudly if its infrastructure can't start**, 
 it never silently skips (audit D-11). The exit code is non-zero on any setup or

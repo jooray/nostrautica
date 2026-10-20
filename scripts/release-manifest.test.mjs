@@ -11,9 +11,12 @@
  * update check saw no change, and the precached shell froze forever — while
  * `rsync --delete` removed the content-hashed chunks it referenced. The
  * invariant these tests pin is simply: **two different commits must never
- * produce the same releaseId.**
+ * produce the same releaseId.** And since releaseId is the bare tag name on a
+ * tagged commit, the stronger one the service worker actually depends on (audit
+ * SB-52): **two different commits must never produce the same swRevision**, even
+ * when they carry the same tag name.
  *
- * Run: node --test scripts/release-manifest.test.mjs
+ * Run: node --test scripts/release-manifest.test.mjs (part of `pnpm test`)
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -21,7 +24,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { computeReleaseManifest, gitInfo } from "./release-manifest.mjs";
+import { computeReleaseManifest, gitInfo, serviceWorkerRevision } from "./release-manifest.mjs";
 
 /** A throwaway repo with two commits and no tags — the production shape. */
 function makeRepo() {
@@ -91,6 +94,52 @@ test("releaseId still varies when --dirty is unavailable (bare GIT_DIR deploy ho
   }
 });
 
+test("swRevision differs between two commits that carry the same tag name (re-cut release)", () => {
+  const { dir, git } = makeRepo();
+  try {
+    // The release ritual's annotated tag, then a broken release re-cut onto a
+    // fixed commit under the SAME version: `git tag -f`.
+    git("tag", "-a", "v0.7.0", "-m", "r", "HEAD~1");
+    git("checkout", "-q", "v0.7.0");
+    const first = computeReleaseManifest({ repoRoot: dir });
+    git("checkout", "-q", "main");
+    git("tag", "-f", "-a", "v0.7.0", "-m", "r", "HEAD");
+    const recut = computeReleaseManifest({ repoRoot: dir });
+    // The human-facing id is the tag either way; that is what the About screen
+    // should say. It is exactly why it cannot be the service-worker revision.
+    assert.equal(first.releaseId, "v0.7.0");
+    assert.equal(recut.releaseId, "v0.7.0");
+    assert.notEqual(first.gitSha, recut.gitSha);
+    assert.notEqual(first.swRevision, recut.swRevision, "a re-cut release must change sw.js");
+    assert.ok(recut.swRevision.startsWith("v0.7.0+"), recut.swRevision);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("swRevision is reproducible for one commit", () => {
+  const { dir } = makeRepo();
+  try {
+    assert.equal(
+      computeReleaseManifest({ repoRoot: dir }).swRevision,
+      computeReleaseManifest({ repoRoot: dir }).swRevision,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("serviceWorkerRevision never repeats the SHA and never goes constant without git", () => {
+  const sha = "0123456789abcdef0123456789abcdef01234567";
+  assert.equal(serviceWorkerRevision("0123456789ab", sha), "0123456789ab");
+  assert.equal(serviceWorkerRevision("v1.2.3", sha), "v1.2.3+0123456789ab");
+  // No commit identity: two builds must still differ, or installed PWAs freeze.
+  assert.notEqual(
+    serviceWorkerRevision("v1.2.3", "unknown", () => 1),
+    serviceWorkerRevision("v1.2.3", "unknown", () => 2),
+  );
+});
+
 test("NOSTRAUTICA_RELEASE_ID overrides everything", () => {
   const { dir } = makeRepo();
   const prev = process.env.NOSTRAUTICA_RELEASE_ID;
@@ -114,6 +163,8 @@ test("no git at all still yields a releaseId (rsync'd source)", () => {
     const m = computeReleaseManifest({ repoRoot: dir });
     assert.equal(m.releaseId, "v0.7.0");
     assert.equal(m.gitSha, "unknown");
+    // ...but the service-worker revision must not be that constant (SB-59).
+    assert.match(m.swRevision, /^v0\.7\.0\+build-\d+$/);
   } finally {
     if (prev === undefined) delete process.env.GIT_DIR;
     else process.env.GIT_DIR = prev;

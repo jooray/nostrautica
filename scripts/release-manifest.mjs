@@ -70,7 +70,8 @@ function wireProtocolVersion(repoRoot) {
 
 /**
  * @typedef {Object} ReleaseManifest
- * @property {string} releaseId       Product release id (git describe/SHA or v<pkg>).
+ * @property {string} releaseId       Product release id (git describe/SHA or v<pkg>). Human-facing.
+ * @property {string} swRevision      Service-worker precache revision: unique per commit (see below).
  * @property {string} gitSha          Full commit SHA, or "unknown".
  * @property {string} appVersion
  * @property {string} protocolVersion  Protocol package version.
@@ -88,8 +89,8 @@ function wireProtocolVersion(repoRoot) {
 export function computeReleaseManifest({ repoRoot, basePath = "" }) {
   const { gitSha, describe, commitIso } = gitInfo(repoRoot);
   const appVersion = pkgVersion(repoRoot, "packages/app/package.json");
-  // The releaseId is the service-worker precache revision for the shell
-  // index.html (vite.config.ts), so it MUST change on every commit. The old
+  // The releaseId used to be the service-worker precache revision for the shell
+  // index.html directly (it is now the prefix of `swRevision`, below). The old
   // chain fell straight from `describe` to `v<version>` — and because
   // `describe` returns "" under the deploy hook's bare GIT_DIR (see gitInfo),
   // production shipped `revision:"v0.7.0"` for every build. Nothing else in the
@@ -108,6 +109,7 @@ export function computeReleaseManifest({ repoRoot, basePath = "" }) {
     `v${pkgVersion(repoRoot, "package.json")}`;
   return {
     releaseId,
+    swRevision: serviceWorkerRevision(releaseId, gitSha),
     gitSha,
     appVersion,
     protocolVersion: pkgVersion(repoRoot, "packages/protocol/package.json"),
@@ -116,4 +118,31 @@ export function computeReleaseManifest({ repoRoot, basePath = "" }) {
     basePath,
     buildTimestamp: process.env.NOSTRAUTICA_BUILD_TIMESTAMP || commitIso || new Date().toISOString(),
   };
+}
+
+/**
+ * The service-worker precache revision for the shell `index.html`
+ * (vite.config.ts). It is the ONLY per-commit input to `sw.js`, so it must differ
+ * between any two commits, or the browser's update check sees a byte-identical
+ * worker and the installed PWA never refreshes.
+ *
+ * `releaseId` alone is not enough (audit SB-52): on a commit that carries a tag,
+ * `git describe` returns the bare tag name, so a re-cut release under the same
+ * version (`git tag -f vX.Y.Z` onto a fixed commit) produced the same id, the same
+ * `sw.js`, and a frozen shell whose hashed chunks `rsync --delete` had removed.
+ * Appending the commit SHA makes it commit-unique while keeping the readable
+ * release in front.
+ *
+ * With no git at all there is no commit identity to append, and `releaseId` is
+ * then the constant `v<pkg>` (or a hand-set override) — the exact 2026-07-28
+ * frozen-shell state (audit SB-59). Fall back to the build time: it loses
+ * byte-reproducibility, which a build with no commit identity cannot have
+ * anyway, and in exchange every such build still reaches installed clients.
+ *
+ * @param {string} releaseId @param {string} gitSha
+ */
+export function serviceWorkerRevision(releaseId, gitSha, now = Date.now) {
+  if (gitSha === "unknown" || !gitSha) return `${releaseId}+build-${now()}`;
+  const short = gitSha.slice(0, 12);
+  return releaseId === short ? short : `${releaseId}+${short}`;
 }

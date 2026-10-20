@@ -1,7 +1,14 @@
 name: Deploy PWA (nsite)
 
-# Publishes the static PWA as an nsite on tagged releases (spec §11). Signs with a
-# NIP-46 bunker key stored in the NSYTE_BUNKER_URI secret.
+# Publishes the static PWA as an nsite (spec §11). Signs with a NIP-46 bunker key
+# stored in the NSYTE_BUNKER_URI secret.
+#
+# Manual dispatch only (audit DS41-073). This runs on the public GitHub mirror,
+# and release tags never reach it: they live on the private origin, and pushing
+# them to the mirror would upload the private history the curated sync exists to
+# keep out. A `push: tags: ["v*"]` trigger here could therefore never fire, while
+# reading as if every tagged release published the nsite. Run it from the
+# Actions tab after a mirror sync when the nsite should follow production.
 #
 # Publication is gated (audit R15): the FULL release gate — guardrails, unit suite,
 # supported e2e orchestrator, docs build/tests, clean-context Docker build — must be
@@ -9,12 +16,10 @@ name: Deploy PWA (nsite)
 # instead of silently skipping the only real step. Every third-party action is pinned
 # to a commit SHA and the deploy CLI to an exact version.
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
-  # Run the identical gate a PR clears — no tag ships without passing it.
+  # Run the identical gate a PR clears — nothing is published without passing it.
   gate:
     uses: ./.github/workflows/release-gate.yml
 
@@ -51,11 +56,16 @@ jobs:
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
           deno-version: v2.x
+      # `--sec`, not `--bunker` (audit DS41-067): nsyte 0.27.2 has no `--bunker`
+      # option and exits "Unknown option" after the whole gate has passed. `--sec`
+      # auto-detects a bunker:// URL (or nbunksec/nsec). `--non-interactive` because
+      # there is nobody to answer a prompt on a runner.
       - name: Deploy to nsite
         env:
           NSYTE_BUNKER_URI: ${{ secrets.NSYTE_BUNKER_URI }}
         run: |
           deno run -A jsr:@nsyte/cli@0.27.2 deploy packages/app/build \
             --fallback /index.html \
-            --bunker "$NSYTE_BUNKER_URI" \
+            --sec "$NSYTE_BUNKER_URI" \
+            --non-interactive \
             --relays wss://relay.primal.net,wss://relay.damus.io,wss://nos.lol

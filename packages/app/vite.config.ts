@@ -7,9 +7,19 @@ import { computeReleaseManifest } from "../../scripts/release-manifest.mjs";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 // The release manifest (§13.9): git identity + package/wire versions + BASE_PATH,
-// computed once at build. `releaseId` is deterministic per commit, so it drives a
-// reproducible service-worker revision (below) instead of the old Date.now().
+// computed once at build. `swRevision` is deterministic and unique per commit, so
+// it drives a reproducible service-worker revision (below) instead of the old
+// Date.now().
 const releaseManifest = computeReleaseManifest({ repoRoot, basePath: process.env.BASE_PATH || "" });
+if (releaseManifest.gitSha === "unknown") {
+  // Not fatal: swRevision falls back to the build time, so installed PWAs still
+  // update. But the artifact cannot be tied to a commit, and the same source
+  // rebuilt will look like a new release. Say so in the build log (audit SB-59).
+  console.warn(
+    `[release] no git commit identity for this build; release ${releaseManifest.releaseId}, ` +
+      `service-worker revision ${releaseManifest.swRevision} (build-time fallback)`,
+  );
+}
 
 export default defineConfig({
   define: {
@@ -70,9 +80,11 @@ export default defineConfig({
           {
             url: (process.env.BASE_PATH || "") + "/index.html",
             // Reproducible per commit (§13.9): the same commit + BASE_PATH builds
-            // the same revision, and every release changes it. Replaces the old
+            // the same revision, and every commit changes it. Replaces the old
             // `${pkg.version}-${Date.now()}`, which changed on every rebuild.
-            revision: releaseManifest.releaseId,
+            // `swRevision`, not `releaseId`: on a tagged commit the latter is
+            // the bare tag name, which a re-cut release would share (SB-52).
+            revision: releaseManifest.swRevision,
           },
         ],
       },
