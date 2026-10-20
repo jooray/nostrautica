@@ -14,6 +14,9 @@ import { eckEncrypt, eckDecrypt } from "./crypto.js";
 import {
   membersPostContentSchema,
   eventPagePrivateSchema,
+  MAX_NAME,
+  MAX_PAGE_SECTIONS,
+  MAX_URL,
   type MembersPostContent,
   type EventPagePrivate,
   type EventPageSection,
@@ -160,9 +163,19 @@ export function menuToRTags(items: MenuItem[]): string[][] {
   return items.map((m) => ["r", m.target, m.label]);
 }
 
-/** Parse the public menu back out of a 31608 tag array (display order kept). */
+/**
+ * Parse the public menu back out of a 31608 tag array (display order kept).
+ *
+ * Held to the same bounds as the encrypted menu (audit SB-43), since these tags
+ * are public and nothing else limits them: an item whose target exceeds
+ * `MAX_URL` is dropped, a label is cut to `MAX_NAME`, and at most
+ * `MAX_PAGE_SECTIONS` items are read. The target's SCHEME is deliberately not
+ * checked here: the NIP leaves it unvalidated beyond length, and the render
+ * boundary (the app's `resolveTarget`) links only `https:` and `nostr:naddr`.
+ */
 export function rTagsToMenu(tags: string[][]): MenuItem[] {
   return tags
-    .filter((t) => t[0] === "r" && typeof t[1] === "string")
-    .map((t) => ({ target: t[1]!, label: t[2] ?? t[1]! }));
+    .filter((t) => t[0] === "r" && typeof t[1] === "string" && t[1].length <= MAX_URL)
+    .slice(0, MAX_PAGE_SECTIONS)
+    .map((t) => ({ target: t[1]!, label: (t[2] ?? t[1]!).slice(0, MAX_NAME) }));
 }

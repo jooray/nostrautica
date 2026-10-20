@@ -1168,7 +1168,10 @@ export type EventPageSection = z.infer<typeof eventPageSectionSchema>;
 
 export const menuItemSchema = z.object({
   label: z.string().max(MAX_NAME),
-  target: z.string().max(MAX_URL), // https: URL or nostr:naddr…
+  // Meant to be an https: URL or nostr:naddr…, but only length-checked, as the NIP
+  // says: a bad scheme here must not void the whole page. Renderers link nothing
+  // else (the app's resolveTarget drops every other scheme).
+  target: z.string().max(MAX_URL),
 });
 export type MenuItem = z.infer<typeof menuItemSchema>;
 
