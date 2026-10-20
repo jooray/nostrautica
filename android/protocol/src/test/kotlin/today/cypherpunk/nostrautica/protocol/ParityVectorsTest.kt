@@ -33,6 +33,7 @@ class ParityVectorsTest {
         "coordinatorAnnounce" to CoordinatorAnnounce.serializer(),
         "myProfileContent" to MyProfileContent.serializer(),
         "eventKeysBackup" to EventKeysBackup.serializer(),
+        "coordinatorGrantContent" to CoordinatorGrantContent.serializer(),
         "talkSubmissionContent" to TalkSubmissionContent.serializer(),
     )
 

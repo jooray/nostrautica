@@ -14059,6 +14059,100 @@
    "ok": false
   },
   {
+   "schema": "coordinatorGrantContent",
+   "label": "base (no prev_coordinator)",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "gen": 2,
+    "inbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": []
+   },
+   "ok": true
+  },
+  {
+   "schema": "coordinatorGrantContent",
+   "label": "prev_coordinator hex",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "gen": 2,
+    "inbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "prev_coordinator": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+   },
+   "ok": true
+  },
+  {
+   "schema": "coordinatorGrantContent",
+   "label": "prev_coordinator uppercase",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "gen": 2,
+    "inbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "prev_coordinator": "E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0E0"
+   },
+   "ok": false
+  },
+  {
+   "schema": "coordinatorGrantContent",
+   "label": "prev_coordinator short",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "gen": 2,
+    "inbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "prev_coordinator": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+   },
+   "ok": false
+  },
+  {
+   "schema": "coordinatorGrantContent",
+   "label": "prev_coordinator npub",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "gen": 2,
+    "inbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "prev_coordinator": "npub1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+   },
+   "ok": false
+  },
+  {
    "schema": "talkSubmissionContent",
    "label": "base",
    "payload": {

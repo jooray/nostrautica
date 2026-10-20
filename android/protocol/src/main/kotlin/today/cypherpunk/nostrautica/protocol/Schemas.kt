@@ -424,10 +424,15 @@ data class CoordinatorGrantContent(
     @SerialName("inbox_nsec") val inboxNsec: String,
     val eck: List<EckVersion>,
     @SerialName("config_relays") val configRelays: List<String>,
+    /** The coordinator this install takes over from (NIP §3.7, audit SB-122). The
+     *  incoming coordinator adopts a roster only from E_id or this key; omitted on a
+     *  first attach or a re-attach of the same coordinator. */
+    @SerialName("prev_coordinator") val prevCoordinator: String? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v); check(Coordinate.isSpace(a)) { "a" }; check(gen > 0) { "gen" }
         checkHex32(inboxNsec, "inbox_nsec"); checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }; checkList(configRelays, Limits.MAX_RELAYS, "config_relays")
+        prevCoordinator?.let { checkHex32(it, "prev_coordinator") }
     }
 }
 

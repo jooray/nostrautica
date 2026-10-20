@@ -110,6 +110,14 @@ add("eventKeysBackup", "base", backup({ coordinator_gen: 0 }));
 add("eventKeysBackup", "coordinator_gen -1", backup({ coordinator_gen: -1 }));
 add("eventKeysBackup", "eck 1025", backup({ eck: n(1025, (i) => ({ id: i + 1, key: eckKey })) }));
 
+// 21603 prev_coordinator (NIP §3.7, audit SB-122): optional, a lowercase hex pubkey when present.
+const install = (over) => ({ v: 2, a: coord, gen: 2, inbox_nsec: hex("03"), eck: [{ id: 1, key: eckKey }], config_relays: [], ...over });
+add("coordinatorGrantContent", "base (no prev_coordinator)", install({}));
+add("coordinatorGrantContent", "prev_coordinator hex", install({ prev_coordinator: pk }));
+add("coordinatorGrantContent", "prev_coordinator uppercase", install({ prev_coordinator: pk.toUpperCase() }));
+add("coordinatorGrantContent", "prev_coordinator short", install({ prev_coordinator: pk.slice(2) }));
+add("coordinatorGrantContent", "prev_coordinator npub", install({ prev_coordinator: "npub1" + "q".repeat(58) }));
+
 const talk = (over) => ({ v: 2, a: coord, talk_d: "t1", title: "T", external_url: "https://youtu.be/x", external_kind: "youtube", ...over });
 add("talkSubmissionContent", "base", talk({}));
 add("talkSubmissionContent", "50 speakers", talk({ speakers: n(50, () => pk) }));

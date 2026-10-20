@@ -669,6 +669,7 @@ class Organizer(
         val gen = (keys.coordinatorGen ?: 0) + 1
         val cfg = ctx.cfg
         val previous = cfg.coordinator
+        val replacing = previous != null && previous != coordinator
         var inboxPub = cfg.inbox
         if (previous != null && previous != coordinator) {
             sendCommandTo(ctx, eidSk, previous, "detach", emptyMap())
@@ -677,7 +678,9 @@ class Organizer(
         }
         val currentEck = maxOf(keys.eck.maxOfOrNull { it.id } ?: 0, cfg.eck)
         val next = cfg.copy(inbox = inboxPub, coordinator = coordinator, coordinatorGen = gen, eck = currentEck)
-        val grant = CoordinatorGrantContent(a = ctx.coordinate, gen = gen, inboxNsec = keys.einboxNsecHex!!, eck = keys.eck, configRelays = cfg.relays)
+        val grant = CoordinatorGrantContent(a = ctx.coordinate, gen = gen, inboxNsec = keys.einboxNsecHex!!, eck = keys.eck, configRelays = cfg.relays,
+            // NIP §3.7 / SB-122: the incoming coordinator adopts a roster only from E_id or the one named here.
+            prevCoordinator = if (replacing) previous else null)
         val wrap = wrapFromEid(eidSk, coordinator, Kinds.COORDINATOR_GRANT, Wire.encode(CoordinatorGrantContent.serializer(), grant))
         coroutineScope {
             listOf(async { publishConfig(ctx, eidSk, next, cfg.relays) }, async { sendWrap(wrap, coordinator, ctx, "install") }).awaitAll()
