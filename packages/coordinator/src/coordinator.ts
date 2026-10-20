@@ -825,7 +825,7 @@ export class Coordinator {
    * so the redelivered grant still resumes.
    */
   private readonly completedInstallGen = new Map<string, number>();
-  private closers: Array<() => void> = [];
+  private readonly closers = new Set<() => void>();
   /**
    * Rumor ids whose handler is currently in flight (audit P0-3). Subscription
    * callbacks are dispatched fire-and-forget and two gift wraps can legitimately
@@ -4867,6 +4867,8 @@ export class Coordinator {
     // Drop live state and DELETE key custody (D6).
     this.events.delete(coordinate);
     this.completedInstallGen.delete(coordinate);
+    // A later re-install that hits a budget must notify again (audit SB-32).
+    this.budgetNotified.delete(coordinate);
     this.deps.store.deleteEvent(coordinate);
     // A rotation's resume progress holds an ECK: custody, so it goes too (SB-125).
     this.deps.store.clearCommandProgressForEvent(coordinate);
@@ -5600,7 +5602,7 @@ export class Coordinator {
     });
 
     const coordCloser = this.subscribeCoordInbox();
-    this.closers.push(coordCloser);
+    this.closers.add(coordCloser);
     // Periodically revalidate suspended events (NIP §3.5, P0-5): one whose config was
     // unfetchable at startup resumes once it's fetchable, or detaches if it now names
     // another coordinator/gen.
@@ -5615,7 +5617,7 @@ export class Coordinator {
     // unref'd 60 s interval that iterates an empty Map.
     const suspendTimer = setInterval(() => void this.retrySuspendedEvents().catch(() => {}), 60_000);
     if (typeof (suspendTimer as any).unref === "function") (suspendTimer as any).unref();
-    this.closers.push(() => clearInterval(suspendTimer));
+    this.closers.add(() => clearInterval(suspendTimer));
     // Retention sweep (NIP §6.2): run once at boot (catches events whose window
     // elapsed while the daemon was down) and then hourly. Cheap — it only touches
     // events that carry a retention policy and are past their deadline.
@@ -5624,7 +5626,7 @@ export class Coordinator {
     );
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
-    this.closers.push(() => clearInterval(retentionTimer));
+    this.closers.add(() => clearInterval(retentionTimer));
     // Profile-refresh sweep: pick up kind-0 bios edited outside Nostrautica (see
     // {@link profileRefreshSweep} for the user report this fixes).
     //
@@ -5648,7 +5650,7 @@ export class Coordinator {
         });
     }, PROFILE_REFRESH_INTERVAL_MS);
     if (typeof (profileTimer as any).unref === "function") (profileTimer as any).unref();
-    this.closers.push(() => clearInterval(profileTimer));
+    this.closers.add(() => clearInterval(profileTimer));
     // Daemon-wide ceiling release (audit SEC-7): work parked because the whole
     // daemon was over its rolling budget has no other way back — the per-event
     // resume paths are driven by billing and by organizer action, and neither
@@ -5668,7 +5670,7 @@ export class Coordinator {
       }
     }, 600_000);
     if (typeof (daemonBudgetTimer as any).unref === "function") (daemonBudgetTimer as any).unref();
-    this.closers.push(() => clearInterval(daemonBudgetTimer));
+    this.closers.add(() => clearInterval(daemonBudgetTimer));
     // Resume any relay handover left pending by a transient outage or a restart
     // (audit C9): probe the stored candidate and promote it once reachable. Run once
     // at boot, then periodically.
@@ -5683,19 +5685,19 @@ export class Coordinator {
       const marmot = this.marmot;
       const linkTimer = setInterval(() => void marmot.sweepExpiredLinks().catch(() => {}), 600_000);
       if (typeof (linkTimer as any).unref === "function") (linkTimer as any).unref();
-      this.closers.push(() => clearInterval(linkTimer));
+      this.closers.add(() => clearInterval(linkTimer));
     }
     // §15: events naming a parent community. Not awaited at boot, so the daemon's
     // readiness never waits on a relay round trip per linked event.
     const hierarchyTimer = setInterval(() => void this.hierarchySweep().catch(() => {}), 300_000);
     if (typeof (hierarchyTimer as any).unref === "function") (hierarchyTimer as any).unref();
-    this.closers.push(() => clearInterval(hierarchyTimer));
+    this.closers.add(() => clearInterval(hierarchyTimer));
     const hierarchyBoot = setTimeout(() => void this.hierarchySweep().catch(() => {}), 30_000);
     if (typeof (hierarchyBoot as any).unref === "function") (hierarchyBoot as any).unref();
-    this.closers.push(() => clearTimeout(hierarchyBoot));
+    this.closers.add(() => clearTimeout(hierarchyBoot));
     const relayTimer = setInterval(() => void this.retryRelayHandovers().catch(() => {}), 60_000);
     if (typeof (relayTimer as any).unref === "function") (relayTimer as any).unref();
-    this.closers.push(() => clearInterval(relayTimer));
+    this.closers.add(() => clearInterval(relayTimer));
     // Periodic inbox rescan (P1 #14). Every "left unseen for a later backfill
     // rescan" comment in this file — the rate gate, the inbound queue cap, the
     // give-up arm of processRumorWithRetry — was writing a cheque only a RESTART
@@ -5711,7 +5713,7 @@ export class Coordinator {
         });
     }, INBOX_RESCAN_INTERVAL_MS);
     if (typeof (rescanTimer as any).unref === "function") (rescanTimer as any).unref();
-    this.closers.push(() => clearInterval(rescanTimer));
+    this.closers.add(() => clearInterval(rescanTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
 
@@ -5835,10 +5837,13 @@ export class Coordinator {
     const close = () => {
       if (closed) return;
       closed = true;
+      // A superseded or detached subscription leaves the stop() list with it, so
+      // the list does not grow with every relay handover (audit SB-32).
+      this.closers.delete(close);
       raw?.();
     };
     map.set(coordinate, { key, close });
-    this.closers.push(close);
+    this.closers.add(close);
     existing?.close();
   }
 
@@ -6828,8 +6833,8 @@ export class Coordinator {
   }
 
   stop(): void {
-    for (const c of this.closers) c();
-    this.closers = [];
+    for (const c of [...this.closers]) c();
+    this.closers.clear();
   }
 
   // expose for grant version bumping

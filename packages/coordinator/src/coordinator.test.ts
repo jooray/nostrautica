@@ -3331,6 +3331,16 @@ describe("audit COORD-8 — relay handover re-creates subscriptions", () => {
     expect(inboxSubs[1]!.closed).toBe(false);
     expect(inboxSubs[1]!.relays).toEqual(["wss://new.relay"]);
   });
+
+  it("repeated handovers do not grow the stop() list (audit SB-32)", async () => {
+    const h = await setup();
+    const closers = (h.coordinator as any).closers as Set<unknown>;
+    const before = closers.size;
+    for (let i = 0; i < 5; i++) {
+      await h.coordinator.handleConfigUpdate(h.coordinate, configUpdate(h, [["relay", `wss://r${i}.relay`]], 10 + i));
+    }
+    expect(closers.size).toBe(before);
+  });
 });
 
 /** A minimal ChatMls stub (COORD-9 tests). */
