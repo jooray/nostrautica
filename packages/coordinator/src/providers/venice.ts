@@ -323,7 +323,14 @@ export class VeniceLlm implements LlmProvider {
     // error — it just means this deployment has no decision models.
     const [text, decision] = await Promise.all([
       this.modelPage(),
-      this.modelPage("decision").catch(() => [] as any[]),
+      this.modelPage("decision").catch((e: unknown) => {
+        // A 404 is an older gateway without decision models. Anything else is a
+        // real failure, and saying nothing made it look the same (DS41-045).
+        if (!(e instanceof ProviderHttpError && e.status === 404)) {
+          console.warn(`[coordinator] Venice decision model page unavailable: ${e instanceof Error ? e.message : e}`);
+        }
+        return [] as any[];
+      }),
     ]);
     const seen = new Set<string>();
     const raw = [...text, ...decision].filter((m) => {
