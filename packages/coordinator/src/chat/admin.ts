@@ -680,6 +680,13 @@ export class MarmotAdmin {
     await this.tryAddKeyPackage(coordinate, group.mls_group_id, event);
   }
 
+  /** Fresh (uncached) read: `chatPubkey` is an ACTIVE device of an APPROVED attendee. */
+  private isAuthorizedNow(coordinate: string, chatPubkey: string): boolean {
+    const key = this.store.getChatKey(coordinate, chatPubkey);
+    if (!key || key.status !== "active") return false;
+    return this.store.getAttendee(coordinate, key.account_pubkey)?.status === "approved";
+  }
+
   /**
    * Idempotent add of one authorized key package; records consumption.
    *
@@ -843,6 +850,21 @@ export class MarmotAdmin {
         `[chat] re-enrolling ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} from a device we still hold a leaf for — removing it first`,
       );
       await this.mls.removePubkeys(mlsGroupId, [kp.pubkey]);
+    }
+    // Re-check authorization at the last synchronous point before the Add (audit
+    // DS41-048). Everything above awaited — the relay fetch in syncMember, the
+    // membership and eligibility reads — and a revoke or withdrawal may have landed
+    // in between: it sets the binding/attendee status FIRST and only then queues its
+    // MLS Remove. Checking here means either we see that status and stop, or the
+    // revoke's Remove is queued after our Add on the group's commit chain
+    // (MarmotClientMls.serialize is FIFO) and removes what we just added. Without it
+    // the revoked device was invited back and nothing was left to remove it. The
+    // passive watcher needs this too: it takes no member lock at all.
+    if (!this.isAuthorizedNow(coordinate, kp.pubkey)) {
+      this.log(
+        `[chat] not adding ${kp.pubkey.slice(0, 8)} to ${coordinate}: no longer an approved attendee's active device`,
+      );
+      return true; // nothing to retry — the member or device is gone
     }
     try {
       await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)

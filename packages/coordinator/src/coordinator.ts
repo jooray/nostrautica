@@ -1141,11 +1141,19 @@ export class Coordinator {
     this.jobs.register("chat_sync_member", async (p, { signal }) => {
       if (!this.marmot) return;
       await this.runEventJob(p.coordinate, signal, async () => {
-        // `reenrolling` is absent on the approval path and on rows enqueued before
-        // it was carried; both are plain adds, which is correct for them.
-        const synced = await this.marmot!.syncMember(p.coordinate, p.pubkey, {
-          ...(typeof p.reenrolling === "string" ? { reenrolling: p.reenrolling } : {}),
-        });
+        // Under the same `member:<pubkey>` mutex as every live approve / revoke /
+        // attestation path and the startup backfill (audit DS41-048, SB-97). This is
+        // the SAME operation retried, and without the lock it could interleave with
+        // a live 21607 revoke for the member: the sync read the device as active,
+        // awaited the relay fetch, the revoke dropped the leaf, and the sync then
+        // added the revoked device back with nothing left to remove it.
+        const synced = await this.withSubjectLock(p.coordinate, `member:${p.pubkey}`, () =>
+          // `reenrolling` is absent on the approval path and on rows enqueued before
+          // it was carried; both are plain adds, which is correct for them.
+          this.marmot!.syncMember(p.coordinate, p.pubkey, {
+            ...(typeof p.reenrolling === "string" ? { reenrolling: p.reenrolling } : {}),
+          }),
+        );
         // THROW on an incomplete sync (audit B-5), so this job is what its comment
         // says it is: a durable retry. `syncMember` deliberately does not throw for
         // one failed Add — one undecodable key package must not abort a whole
@@ -1176,9 +1184,12 @@ export class Coordinator {
         // delete_data withdrawal. Absent on rows enqueued before this field
         // existed, and on paths that don't purge — handleRevoke unions it with
         // whatever is still stored, so both shapes behave.
-        await this.marmot!.handleRevoke(p.coordinate, p.pubkey, {
-          chatPubkeys: Array.isArray(p.chatPubkeys) ? (p.chatPubkeys as string[]) : undefined,
-        });
+        // Same member lock as chat_sync_member and the live paths (DS41-048).
+        await this.withSubjectLock(p.coordinate, `member:${p.pubkey}`, () =>
+          this.marmot!.handleRevoke(p.coordinate, p.pubkey, {
+            chatPubkeys: Array.isArray(p.chatPubkeys) ? (p.chatPubkeys as string[]) : undefined,
+          }),
+        );
       });
     });
   }

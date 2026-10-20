@@ -3501,6 +3501,31 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     expect(statusWraps.length).toBeGreaterThan(0);
   });
 
+  // DS41-048 / SB-97: the durable chat jobs are the same operations the live
+  // attestation / revoke paths run, so they must wait on the same member lock.
+  it("chat_sync_member waits for the member lock a live path holds", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto"); // auto-approved → job enqueued
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+
+    let release!: () => void;
+    const held = (h.coordinator as any).withSubjectLock(
+      h.coordinate,
+      `member:${pk}`,
+      () => new Promise<void>((r) => (release = r)),
+    );
+    const drained = h.coordinator.jobs.drain();
+    for (let i = 0; i < 20; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(mls.invited).toEqual([]); // still waiting on the lock
+    release();
+    await held;
+    await drained;
+    expect(mls.invited).toEqual([devicePk]);
+  });
+
   it("revoke enqueues chat_revoke_member; the member's keys are MLS-removed on drain", async () => {
     const mls = new StubMls();
     const h = await setup(0, { chat: true, chatMls: mls });

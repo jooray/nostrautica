@@ -1240,6 +1240,48 @@ describe("the startup backfill takes the same per-member lock the live paths do"
   });
 });
 
+describe("a revoke that lands while a sync is in flight is not undone (DS41-048 / SB-97)", () => {
+  // The sync reads the device as active, then awaits the relay fetch. A 21607
+  // revoke landing in that window marks the key revoked and drops the leaf (there
+  // is none yet). Pre-fix the sync then invited the revoked device anyway.
+  it("re-checks authorization right before the Add", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    let admin!: MarmotAdmin;
+    admin = makeAdmin(store, mls, [], undefined, {
+      fetchKeyPackages: async () => {
+        await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
+        return [kpEvent(CHATKEY, "kp1")];
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    expect(await admin.syncMember(COORD, ACCOUNT)).toBe(true);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
+    expect(mls.invited).toEqual([]);
+    expect(mls.members.get("mls-1")?.has(CHATKEY) ?? false).toBe(false);
+  });
+
+  it("an attendee revoked mid-sync is not added either", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [], undefined, {
+      fetchKeyPackages: async () => {
+        store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "revoked", now: 2 });
+        return [kpEvent(CHATKEY, "kp1")];
+      },
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([]);
+  });
+});
+
 describe("a failed attestation sync is retried, not just logged", () => {
   it("queues durable work when the inline sync throws", async () => {
     const logs: string[] = [];
