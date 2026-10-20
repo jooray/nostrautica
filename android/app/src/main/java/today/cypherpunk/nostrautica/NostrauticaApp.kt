@@ -15,6 +15,9 @@ class NostrauticaApp : Application() {
         if (BuildConfig.DEBUG) enableStrictMode()
         container = AppContainer(this)
         container.session.restore()
+        // Every other secret (event keys, chat device keys) into memory, off the main
+        // thread, before screens start reading them while they compose.
+        Thread({ container.secure.warm() }, "secure-warm").start()
         // Relays are used only while the app is on screen: sockets close shortly
         // after it goes to the background, and nothing polls while it is there.
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
