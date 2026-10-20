@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -92,7 +93,7 @@ fun Card(modifier: Modifier = Modifier, padding: Dp = 18.dp, onClick: (() -> Uni
             .clip(RoundedCornerShape(14.dp))
             .background(t.bgElev)
             .border(1.dp, t.cardBorder, RoundedCornerShape(14.dp))
-            .let { if (onClick != null) it.clickable(onClick = onClick) else it }
+            .let { if (onClick != null) it.clickable(role = Role.Button, onClick = onClick) else it }
             .padding(padding),
         verticalArrangement = Arrangement.spacedBy(10.dp),
         content = content,
