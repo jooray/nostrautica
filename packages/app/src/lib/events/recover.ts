@@ -163,6 +163,14 @@ async function restore(coordinate: string, backup: EventKeysBackup, owner: strin
     // record and the backup so a re-attach on a fresh device still increments past
     // the last-used gen instead of colliding at gen 1.
     coordinatorGen: Math.max(existing?.coordinatorGen ?? 0, backup.coordinator_gen ?? 0) || undefined,
+    // Staged versions stay staged (DS41-002); loadRoster promotes the one in use.
+    ...(() => {
+      const eck = unionEck(existing?.eck ?? [], backup.eck);
+      const pending = unionEck(existing?.pendingEck ?? [], backup.pending_eck ?? []).filter(
+        (p) => !eck.some((v) => v.id === p.id && v.key === p.key),
+      );
+      return pending.length > 0 ? { pendingEck: pending } : {};
+    })(),
   }, owner);
 }
 

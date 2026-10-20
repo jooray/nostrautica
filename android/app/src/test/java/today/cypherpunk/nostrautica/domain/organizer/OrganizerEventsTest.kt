@@ -115,6 +115,26 @@ class OrganizerEventsTest {
         assertTrue(empty.attendees.isEmpty()); assertEquals(3, empty.eckCurrent); assertEquals(0L, at)
     }
 
+    @Test fun aRosterUnderAForeignKeySaysKeysChangedElsewhere() {
+        // SB-90 / NIP §4.1: not "couldn't read", the roster is fine; this device is stale.
+        try { OrganizerEvents.rosterForRewrite(OrganizerEvents.RosterRead.Foreign(5), 1); fail("must refuse") } catch (_: OrganizerEvents.KeysChangedElsewhere) {}
+    }
+
+    @Test fun keysKeepBothCollidingVersionsAndStagedOnes() {
+        // SB-86: two devices' v2 both survive a merge; DS41-002: a staged version stays staged.
+        val v1 = today.cypherpunk.nostrautica.protocol.EckVersion(1, Bytes.toBase64(ByteArray(32) { 1 }))
+        val v2a = today.cypherpunk.nostrautica.protocol.EckVersion(2, Bytes.toBase64(ByteArray(32) { 2 }))
+        val v2b = today.cypherpunk.nostrautica.protocol.EckVersion(2, Bytes.toBase64(ByteArray(32) { 3 }))
+        val v3 = today.cypherpunk.nostrautica.protocol.EckVersion(3, Bytes.toBase64(ByteArray(32) { 4 }))
+        val a = today.cypherpunk.nostrautica.domain.EventKeys("c", "organizer", listOf(v1, v2a), pendingEck = listOf(v3))
+        val b = today.cypherpunk.nostrautica.domain.EventKeys("c", "organizer", listOf(v1, v2b))
+        val m = today.cypherpunk.nostrautica.domain.EventKeys.merge(a, b)
+        assertEquals(3, m.eck.size)
+        assertEquals(m.current, today.cypherpunk.nostrautica.domain.EventKeys.merge(b, a).current)
+        assertEquals(listOf(v3), m.pendingEck)
+        assertEquals(2, m.current!!.id) // the staged v3 is not current
+    }
+
     @Test fun rosterEventsAreNewerThanTheirBaseAndSkipUnchangedPages() {
         val coord = "31923:${Secp.pubkeyHex(eidSk)}:d1"
         val r = RosterContent(2, 1, null, null, listOf(RosterAttendee("a".repeat(64), "x", "attendee")))

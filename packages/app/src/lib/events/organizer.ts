@@ -74,6 +74,12 @@ import {
   supersedes,
   parseMemberOfTags,
   eckFingerprint,
+  readEckTag,
+  eckCandidates,
+  canonicalEck,
+  unionEck,
+  eckCollisionIds,
+  type EckRef,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -500,12 +506,24 @@ export async function approveAttendee(
   req: PendingRequest,
   role: "attendee" | "organizer" = "attendee",
 ): Promise<void> {
-  const keys = await loadEventKeys(ctx.coordinate);
+  const owner = activeKeystoreOwner() ?? undefined;
+  const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer") throw new Error("not the organizer");
-  const eck = currentEck(keys);
-  if (!eck) throw new Error("no ECK available");
+  if (!currentEck(keys)) throw new Error("no ECK available");
   if (!keys.eidNsecHex) throw new Error("missing E_id key");
   const eidSk = hexToBytes(keys.eidNsecHex);
+
+  // Read the roster FIRST, with every version held (DS41-002): it decides which
+  // key is actually current on the relays — a staged rotation whose roster did go
+  // out is promoted here — and a roster under a key this device lacks refuses the
+  // whole approval before anything is built on stale custody (SB-90).
+  const rosterRead = await loadRoster(ctx, keys, owner);
+  assertNoEckCollision(keys);
+  // Write under the key the live roster is under, so the entry, its blinded `d`
+  // and the republished roster agree with every other entry on it. That is the
+  // current version except when this device holds a newer one whose roster never
+  // landed; re-keying everyone onto that is a rotation's job, not an approval's.
+  const eck = (rosterRead.state === "ok" && rosterRead.eck) || currentEck(keys)!;
   const eckBytes = base64ToBytes(eck.key);
 
   // 1. Key grant (21602) → attendee, sealed by E_id — the grant comes from the
@@ -563,10 +581,7 @@ export async function approveAttendee(
   //    index — so if the read didn't establish who else is on it, this must not
   //    publish at all (rosterForRewrite throws). Approving one person is never a
   //    reason to remove the rest.
-  const { roster, at: rosterAt } = rosterForRewrite(
-    await loadRoster(ctx, eckBytes),
-    eck.id,
-  );
+  const { roster, at: rosterAt } = rosterForRewrite(rosterRead, eck.id);
   // Snapshot BEFORE the append: a paginated roster republishes only the pages
   // whose bytes changed, and this is what "changed" is measured against.
   const previous: RosterContent = { ...roster, attendees: [...roster.attendees] };
@@ -598,10 +613,9 @@ export async function approveAttendee(
 export async function reissueGrantsWithProof(ctx: EventContext): Promise<number> {
   const keys = await loadEventKeys(ctx.coordinate);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) return 0;
-  const eck = currentEck(keys);
-  if (!eck) return 0;
+  if (!currentEck(keys)) return 0;
   const eidSk = hexToBytes(keys.eidNsecHex);
-  const read = await loadRoster(ctx, base64ToBytes(eck.key));
+  const read = await loadRoster(ctx, keys);
   if (read.state !== "ok") return 0;
   let sent = 0;
   for (const a of read.roster.attendees) {
@@ -631,8 +645,19 @@ export async function reissueGrantsWithProof(ctx: EventContext): Promise<number>
  * every caller here republishes what it is handed.
  */
 export type RosterRead =
-  /** A 31604 came back and decrypted. `at` is its created_at, always > 0. */
-  | { state: "ok"; roster: RosterContent; at: number }
+  /**
+   * A 31604 came back and decrypted. `at` is its created_at, always > 0; `eck` is
+   * the held version its `eck` tag named and that decrypted it (undefined only
+   * when the caller passed raw key bytes).
+   */
+  | { state: "ok"; roster: RosterContent; at: number; eck?: EckVersion }
+  /**
+   * A 31604 came back written under a key this device does not hold: its `eck`
+   * tag names a newer id, or an `(id, fingerprint)` pair that is not ours (another
+   * device rotated, NIP §4.1). Distinct from `unreadable`: the roster is fine, this
+   * device's custody is stale.
+   */
+  | { state: "foreign"; at: number; ref: EckRef }
   /**
    * No 31604 came back at all. `suspect` is true when this device has seen one
    * for this event before, i.e. the empty answer is a lost read and not the
@@ -672,7 +697,16 @@ export type RosterRead =
  */
 export async function loadRoster(
   ctx: EventContext,
-  eckBytes: Uint8Array,
+  /**
+   * The custody to read with. With `EventKeys` the key is picked by the roster's
+   * own `eck` tag from EVERY version held, pending ones included (audit DS41-002):
+   * a device that saved a rotated version but never got as far as publishing it
+   * must still read the roster that IS on the relays, and one whose publish did go
+   * out adopts the pending version as current here. Raw bytes keep the old
+   * single-key read.
+   */
+  held: Uint8Array | EventKeys,
+  owner?: string,
 ): Promise<RosterRead> {
   const { identifier } = splitCoordinate(ctx.coordinate);
   // Ask for every author we would ACCEPT, not only the current publisher (SB-91),
@@ -693,8 +727,29 @@ export async function loadRoster(
     return { state: "absent", suspect: hasSeenPublished(ctx.coordinate, "roster") };
   }
   let at = latest.created_at ?? 0;
+  let eckBytes: Uint8Array;
+  let used: EckVersion | undefined;
+  if (held instanceof Uint8Array) {
+    eckBytes = held;
+  } else {
+    const ref = readEckTag(latest.tags);
+    const all = unionEck(held.eck, held.pendingEck ?? []);
+    const maxHeld = all.reduce((m, v) => Math.max(m, v.id), 0);
+    // No tag at all (a writer that predates it): the current key, as before.
+    const candidates = ref ? eckCandidates(all, ref) : [canonicalEck(held.eck)].filter((v): v is EckVersion => !!v);
+    if (ref && (candidates.length === 0 || ref.id > maxHeld)) return { state: "foreign", at, ref };
+    used = candidates.find((v) => {
+      try {
+        eckDecrypt(base64ToBytes(v.key), latest.content);
+        return true;
+      } catch {
+        return false;
+      }
+    });
+    if (!used) return { state: "unreadable", at };
+    eckBytes = base64ToBytes(used.key);
+  }
   try {
-    const { eckDecrypt } = await import("@nostrautica/protocol");
     const page0 = JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent;
     let roster = page0;
     // A paginated roster (PROTOCOL-NIP.md §6.2) keeps the rest of its membership
@@ -711,10 +766,27 @@ export async function loadRoster(
       at = Math.max(at, rest.at);
     }
     markPublished(ctx.coordinate, "roster", at);
-    return { state: "ok", roster, at };
+    if (used && !(held instanceof Uint8Array)) await promotePending(held, used, owner);
+    return { state: "ok", roster, at, ...(used ? { eck: used } : {}) };
   } catch {
     return { state: "unreadable", at };
   }
+}
+
+/**
+ * The roster on the relays is written under a version this device minted but
+ * had only STAGED (`pendingEck`): the rotation's publishes did go out, so that
+ * version is current now. Promote it, and everything below it that is still
+ * pending, into `eck` and persist (DS41-002).
+ */
+async function promotePending(keys: EventKeys, used: EckVersion, owner: string | undefined): Promise<void> {
+  const pending = keys.pendingEck ?? [];
+  if (!pending.some((v) => v.id === used.id && v.key === used.key)) return;
+  const promote = pending.filter((v) => v.id <= used.id);
+  keys.eck = unionEck(keys.eck, promote);
+  const rest = pending.filter((v) => v.id > used.id);
+  keys.pendingEck = rest.length > 0 ? rest : undefined;
+  await saveEventKeys(keys, owner);
 }
 
 /**
@@ -767,6 +839,22 @@ const ROSTER_UNREADABLE =
   "Check your connection and try again.";
 
 /**
+ * This device's event keys are behind what the relays show: another organizer
+ * device or a co-organizer rotated the ECK / E_inbox (audit SB-90, SB-86). Every
+ * write that would build on the stale keys refuses with this, and Admin shows it
+ * on open (`organizerKeyStatus`).
+ */
+export class KeysChangedElsewhereError extends Error {
+  constructor() {
+    super(
+      "This event's keys were changed on another device, and this device still holds the old ones. " +
+        "Open the event on the device that changed them, or have it send this account a fresh organizer grant.",
+    );
+    this.name = "KeysChangedElsewhereError";
+  }
+}
+
+/**
  * Unwrap a {@link RosterRead} for a caller that is about to REPUBLISH the roster.
  * Aborts unless we know what is on it; only a genuine first roster (nothing came
  * back AND this device has never seen one) is allowed through as empty.
@@ -776,6 +864,7 @@ function rosterForRewrite(
   eckCurrent: number,
 ): { roster: RosterContent; at: number } {
   if (read.state === "ok") return { roster: read.roster, at: read.at };
+  if (read.state === "foreign") throw new KeysChangedElsewhereError();
   if (read.state === "unreadable" || read.suspect) throw new Error(ROSTER_UNREADABLE);
   return { roster: { v: 2, eck_current: eckCurrent, attendees: [] }, at: 0 };
 }
@@ -1292,13 +1381,20 @@ export async function revokeAttendeeClient(
   }
   const eidSk = hexToBytes(keys.eidNsecHex);
   const eidPubkey = ctx.config.eidPubkey;
-  const prevEck = currentEck(keys);
-  if (!prevEck) throw new Error("no ECK available");
+  if (!currentEck(keys)) throw new Error("no ECK available");
+
+  // 1. Read the current roster — BEFORE minting anything — with every version
+  //    held, so the roster's own `eck` tag picks the key (DS41-002). See step 2.
+  const rosterRead = await loadRoster(ctx, keys, owner);
+  const prevEck = (rosterRead.state === "ok" && rosterRead.eck) || currentEck(keys)!;
   const prevEckBytes = base64ToBytes(prevEck.key);
 
-  // 1. Delete the removed attendee's directory entry (NIP-09), addressed by its
-  //    blinded d under the current ECK.
-  const removedD = blindedD(prevEckBytes, ctx.coordinate, removedPubkey);
+  // Delete the removed attendee's directory entry (NIP-09), addressed by the
+  // blinded d the roster lists for them (that is the address it was published
+  // at), falling back to the d under the roster's key.
+  const listedD =
+    rosterRead.state === "ok" ? rosterRead.roster.attendees.find((a) => a.pubkey === removedPubkey)?.d : undefined;
+  const removedD = listedD ?? blindedD(prevEckBytes, ctx.coordinate, removedPubkey);
   const deletion = finalizeEvent(
     {
       kind: KIND_DELETION,
@@ -1312,22 +1408,20 @@ export async function revokeAttendeeClient(
     eidSk,
   );
 
-  // 2. Read the current roster — BEFORE minting anything. This is the step that
-  //    decides who keeps access: `remaining` is the complete list of people who
-  //    get re-granted the rotated ECK and get their entry re-encrypted under it,
-  //    and everyone missing from it is, in effect, revoked too. On a lost read
-  //    `remaining` came out empty and one revoke click locked every attendee out
-  //    of the directory and all future members-only content, with the roster
-  //    republished as empty so the damage propagated to every other client.
+  // 2. The roster read above decides who keeps access: `remaining` is the
+  //    complete list of people who get re-granted the rotated ECK and get their
+  //    entry re-encrypted under it, and everyone missing from it is, in effect,
+  //    revoked too. On a lost read `remaining` came out empty and one revoke
+  //    click locked every attendee out of the directory and all future
+  //    members-only content, with the roster republished as empty so the damage
+  //    propagated to every other client. A roster under a key this device lacks
+  //    (another device rotated, SB-90/SB-86) refuses here too.
   //
   //    The ECK mint deliberately happens AFTER this: a throw here must leave the
   //    keystore untouched, or the aborted revoke would still have made a new ECK
   //    version current locally, and this organizer's next post would be encrypted
   //    under a key no attendee was ever granted.
-  const { roster, at: rosterAt } = rosterForRewrite(
-    await loadRoster(ctx, prevEckBytes),
-    prevEck.id,
-  );
+  const { roster, at: rosterAt } = rosterForRewrite(rosterRead, prevEck.id);
   if (!roster.attendees.some((a) => a.pubkey === removedPubkey)) {
     // The person being revoked is not on the roster we just read, so it is not
     // the roster this revoke was decided against — a stale or partial answer,
@@ -1350,19 +1444,19 @@ export async function revokeAttendeeClient(
   //    key while the relays still held the v(n) roster: every later loadRoster
   //    decrypted with the new key, failed, and refused approve/revoke/post with
   //    "Couldn't read this event's current roster" (audit DS41-002). Building is
-  //    now one batched read and local crypto; only then is the key saved, and
-  //    then everything is published.
-  const newId = keys.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
-  const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
-  const eckAll = [...keys.eck, newEck];
+  //    now one batched read and local crypto; then the key is STAGED (persisted,
+  //    not current), published, and only then made current.
+  const newEck = mintEck(keys);
+  const newId = newEck.id;
+  const eckAll = unionEck(keys.eck, [newEck]);
   const newEckBytes = base64ToBytes(newEck.key);
-  const rekeyed = await rekeyRoster(ctx, eidSk, prevEckBytes, remaining, newEckBytes, newId, eckAll, {
+  const rekeyed = await rekeyRoster(ctx, eidSk, prevEck, remaining, newEckBytes, newId, eckAll, {
     keepChatKeys: false,
+    held: unionEck(keys.eck, keys.pendingEck ?? []),
   });
   const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
 
-  keys.eck = eckAll;
-  await saveEventKeys(keys, owner);
+  await stageEck(keys, newEck, owner);
   // The new ECK must reach the DURABLE backup, not just this device.
   //
   // Every other path that mints an ECK writes the 30078 backup;  this one never
@@ -1371,7 +1465,9 @@ export async function revokeAttendeeClient(
   // browser. Clear site data, or move to a new phone, and `recoverEventKeys`
   // restores a backup still holding only ECK v1 — leaving the event's own owner
   // permanently unable to read their own roster and directory. Forward-only
-  // rotation means there is no way back from that.
+  // rotation means there is no way back from that. Written while the version is
+  // still staged (as `pending_eck`), so a recovered device holds it but does not
+  // treat it as current until it finds the roster that uses it.
   if (blindingKey) {
     await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(
       (e) => {
@@ -1384,6 +1480,39 @@ export async function revokeAttendeeClient(
     );
   }
   await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
+  await promotePending(keys, newEck, owner);
+}
+
+/**
+ * The next ECK version: one past every id this device holds, staged ones
+ * included, so a version minted by an interrupted rotation is never reused for a
+ * different key.
+ */
+function mintEck(keys: EventKeys): EckVersion {
+  const id = unionEck(keys.eck, keys.pendingEck ?? []).reduce((m, v) => Math.max(m, v.id), 0) + 1;
+  return { id, key: bytesToBase64(generateEck()) };
+}
+
+/** Persist a freshly minted version as staged, not current (DS41-002). */
+async function stageEck(keys: EventKeys, v: EckVersion, owner: string | undefined): Promise<void> {
+  keys.pendingEck = unionEck(keys.pendingEck ?? [], [v]);
+  await saveEventKeys(keys, owner);
+}
+
+/** Refuse a write while two keys share the current id (NIP §4.1): repair first. */
+export class EckCollisionError extends Error {
+  constructor() {
+    super(
+      "This event's member key was changed on two devices at the same time. " +
+        "Use \"Repair keys\" on the Admin page, then try again.",
+    );
+    this.name = "EckCollisionError";
+  }
+}
+
+function assertNoEckCollision(keys: EventKeys): void {
+  const cur = currentEck(keys);
+  if (cur && eckCollisionIds(keys.eck).includes(cur.id)) throw new EckCollisionError();
 }
 
 interface Rekeyed {
@@ -1406,12 +1535,14 @@ interface Rekeyed {
 async function rekeyRoster(
   ctx: EventContext,
   eidSk: Uint8Array,
-  prevEckBytes: Uint8Array,
+  prevEck: EckVersion,
   attendees: RosterContent["attendees"],
   newEckBytes: Uint8Array,
   newId: number,
   eckAll: EckVersion[],
-  opts: { keepChatKeys: boolean },
+  /** `held`: every version this device holds; an entry is decrypted with the one
+   *  its own `eck` tag names, falling back to the roster's key (`prevEck`). */
+  opts: { keepChatKeys: boolean; held: EckVersion[] },
 ): Promise<Rekeyed> {
   const authors = acceptedRecordAuthors(ctx);
   const ds = attendees.map((a) => a.d);
@@ -1437,10 +1568,17 @@ async function rekeyRoster(
   for (const a of attendees) {
     const latest = pickLatest(byD.get(a.d) ?? []);
     let content: unknown;
-    try {
-      content = latest ? JSON.parse(eckDecrypt(prevEckBytes, latest.content)) : undefined;
-    } catch {
-      content = undefined;
+    if (latest) {
+      const ref = readEckTag(latest.tags);
+      const tryKeys = unionEck(ref ? eckCandidates(opts.held, ref) : [], [prevEck]);
+      for (const k of tryKeys) {
+        try {
+          content = JSON.parse(eckDecrypt(base64ToBytes(k.key), latest.content));
+          break;
+        } catch {
+          /* not this one */
+        }
+      }
     }
     const newD = blindedD(newEckBytes, ctx.coordinate, a.pubkey);
     roster.attendees.push({
@@ -1524,22 +1662,22 @@ async function rotateEckAndInbox(
   owner: string | undefined,
 ): Promise<{ newInboxNsecHex: string; newInboxPubkey: string; eck: EckVersion[] }> {
   const eidSk = hexToBytes(keys.eidNsecHex!);
-  const prevEck = currentEck(keys);
-  if (!prevEck) throw new Error("no ECK available");
-  const prevEckBytes = base64ToBytes(prevEck.key);
+  if (!currentEck(keys)) throw new Error("no ECK available");
 
   // Read the roster FIRST. Everything below is driven by it: only the people it
   // lists get the new ECK, and the roster is republished as exactly that list. A
   // lost read therefore doesn't produce a smaller rotation, it produces a
   // coordinator swap that quietly locks the whole event out — nobody re-granted,
   // an empty roster published over the real one. Same class as the revoke path.
-  const rosterRead = await loadRoster(ctx, prevEckBytes);
+  // Read with every held version, keyed by the roster's own tag (DS41-002).
+  const rosterRead = await loadRoster(ctx, keys, owner);
+  const prevEck = (rosterRead.state === "ok" && rosterRead.eck) || currentEck(keys)!;
 
   // Mint the new ECK version and a fresh E_inbox keypair.
-  const newId = keys.eck.reduce((m, v) => Math.max(m, v.id), 0) + 1;
-  const newEck: EckVersion = { id: newId, key: bytesToBase64(generateEck()) };
+  const newEck = mintEck(keys);
+  const newId = newEck.id;
   const newEckBytes = base64ToBytes(newEck.key);
-  const eckAll = [...keys.eck, newEck];
+  const eckAll = unionEck(keys.eck, [newEck]);
   const newInboxSk = generateSecretKey();
   const newInboxNsecHex = bytesToHex(newInboxSk);
   const newInboxPubkey = getPublicKey(newInboxSk);
@@ -1550,18 +1688,20 @@ async function rotateEckAndInbox(
   // never be on the relays without also being in this device's keystore, and
   // never current here while the slow per-attendee work is still pending.
   const { roster, at: rosterAt } = rosterForRewrite(rosterRead, prevEck.id);
-  const rekeyed = await rekeyRoster(ctx, eidSk, prevEckBytes, roster.attendees, newEckBytes, newId, eckAll, {
+  const rekeyed = await rekeyRoster(ctx, eidSk, prevEck, roster.attendees, newEckBytes, newId, eckAll, {
     keepChatKeys: true,
+    held: unionEck(keys.eck, keys.pendingEck ?? []),
   });
   const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
 
-  // Persist: append the new ECK, retain the old inbox secret for history reading,
-  // and adopt the new inbox as primary.
-  keys.eck = eckAll;
+  // Persist: stage the new ECK (DS41-002: persisted before anything under it is
+  // published, current only once it is), retain the old inbox secret for history
+  // reading, and adopt the new inbox as primary.
   if (keys.einboxNsecHex) keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []), keys.einboxNsecHex];
   keys.einboxNsecHex = newInboxNsecHex;
-  await saveEventKeys(keys, owner);
+  await stageEck(keys, newEck, owner);
   await publishRekeyed(ctx, [], rekeyed, rosterEvents);
+  await promotePending(keys, newEck, owner);
   // Never silent (audit EV-11). The rotation has already happened locally; if the
   // backup does not publish, the durable record of the new ECK and the new inbox
   // simply is not there, and a later recovery on a fresh device restores an event
@@ -1630,10 +1770,7 @@ function assertCurrentCustody(cfg: EventConfig, keys: EventKeys): void {
     .map((h) => getPublicKey(hexToBytes(h)));
   const heldEck = keys.eck.reduce((m, v) => Math.max(m, v.id), 0);
   if ((heldInboxes.length > 0 && !heldInboxes.includes(cfg.inbox)) || cfg.eck > heldEck) {
-    throw new Error(
-      "This event's keys were changed on another device, and this device still holds the old ones. " +
-        "Open the event on the device that changed them, or have it send this account a fresh organizer grant.",
-    );
+    throw new KeysChangedElsewhereError();
   }
 }
 
@@ -1836,6 +1973,7 @@ async function writeEventKeysBackup(
     einbox_nsec: keys.einboxNsecHex,
     eck: keys.eck,
     coordinator_gen: coordinatorGen,
+    ...(keys.pendingEck?.length ? { pending_eck: keys.pendingEck } : {}),
   };
   const ownPubkey = await organizer.getPublicKey();
   const content = await organizer.nip44Encrypt(ownPubkey, JSON.stringify(backup));

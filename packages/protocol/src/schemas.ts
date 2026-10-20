@@ -1305,6 +1305,11 @@ export const eventKeysBackupSchema = z.object({
   // (never attached, or a backup written before generations); a re-attach reads it
   // back and uses lastGen + 1, so generations strictly increase across devices.
   coordinator_gen: z.number().int().nonnegative().optional(),
+  // ECK versions minted by a rotation whose publishes were not yet confirmed when
+  // this backup was written (audit DS41-002): custody, but not current. Recovery
+  // restores them as staged and a client promotes one once it finds the 31604
+  // written under it. Additive: older readers ignore it.
+  pending_eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS).optional(),
 });
 export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 

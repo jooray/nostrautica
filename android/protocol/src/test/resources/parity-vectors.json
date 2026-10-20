@@ -14059,6 +14059,52 @@
    "ok": false
   },
   {
+   "schema": "eventKeysBackup",
+   "label": "pending_eck",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "pending_eck": [
+     {
+      "id": 2,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ]
+   },
+   "ok": true
+  },
+  {
+   "schema": "eventKeysBackup",
+   "label": "pending_eck bad key",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "pending_eck": [
+     {
+      "id": 2,
+      "key": "AAAA"
+     }
+    ]
+   },
+   "ok": false
+  },
+  {
    "schema": "talkSubmissionContent",
    "label": "base",
    "payload": {

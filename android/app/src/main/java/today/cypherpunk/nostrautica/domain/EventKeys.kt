@@ -21,6 +21,12 @@ data class EventKeys(
     val einboxNsecHex: String? = null,
     val priorEinboxNsecs: List<String>? = null,
     val coordinatorGen: Int? = null,
+    /**
+     * Versions minted by a rotation whose publishes are not confirmed (DS41-002):
+     * persisted before anything under them goes out, current only once the roster
+     * under them is found ([Organizer.loadRoster]) or the rotation finishes.
+     */
+    val pendingEck: List<EckVersion>? = null,
 ) {
     val isOrganizer: Boolean get() = role == "organizer" && eidNsecHex != null && einboxNsecHex != null
 
@@ -45,8 +51,13 @@ data class EventKeys(
                 einboxNsecHex = primary.einboxNsecHex ?: fallback.einboxNsecHex,
                 priorEinboxNsecs = prior.ifEmpty { null },
                 coordinatorGen = maxOf(primary.coordinatorGen ?: 0, fallback.coordinatorGen ?: 0).takeIf { it > 0 },
+                pendingEck = pendingMinus(EckIdentity.union(primary.pendingEck ?: emptyList(), fallback.pendingEck ?: emptyList()), EckIdentity.union(primary.eck, fallback.eck)),
             )
         }
+
+        /** Staged versions that are not (yet) in [eck]; null when none. */
+        fun pendingMinus(pending: List<EckVersion>, eck: List<EckVersion>): List<EckVersion>? =
+            pending.filter { p -> eck.none { it.id == p.id && it.key == p.key } }.ifEmpty { null }
     }
 }
 

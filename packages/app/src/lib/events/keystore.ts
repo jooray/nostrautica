@@ -34,6 +34,15 @@ export interface EventKeys {
   /** Last coordinator install generation this organizer used (NIP §3.5). A
    *  re-attach uses lastGen + 1; absent = never attached (0). Organizer only. */
   coordinatorGen?: number;
+  /**
+   * ECK versions this device minted for a rotation whose publishes have not been
+   * confirmed yet (audit DS41-002). Persisted BEFORE anything encrypted under them
+   * goes out, so a crash can never leave relays holding ciphertext under a key no
+   * device has, but NOT current: posts, grants and approvals keep using `eck`
+   * until the rotation's roster is on the relays (organizer.ts promotes them when
+   * `loadRoster` finds it, or when the rotation finishes). Organizer only.
+   */
+  pendingEck?: EckVersion[];
 }
 
 /** On-disk shape: an EventKeys record scoped to the identity that owns it. */
@@ -109,6 +118,7 @@ function toPublic(r: StoredEventKeys): EventKeys {
     einboxNsecHex: r.einboxNsecHex,
     ...(r.priorEinboxNsecs ? { priorEinboxNsecs: r.priorEinboxNsecs } : {}),
     coordinatorGen: r.coordinatorGen,
+    ...(r.pendingEck?.length ? { pendingEck: r.pendingEck } : {}),
   };
 }
 
@@ -470,6 +480,14 @@ function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
     // The install generation only grows, so keep the higher of the two views —
     // never let a stale snapshot regress a re-attach's newer generation.
     coordinatorGen: Math.max(primary.coordinatorGen ?? 0, fallback.coordinatorGen ?? 0) || undefined,
+    // A staged version is still custody: keep it unless it was promoted meanwhile.
+    ...(() => {
+      const current = unionEck(primary.eck, fallback.eck);
+      const pending = unionEck(primary.pendingEck ?? [], fallback.pendingEck ?? []).filter(
+        (p) => !current.some((v) => v.id === p.id && v.key === p.key),
+      );
+      return pending.length > 0 ? { pendingEck: pending } : {};
+    })(),
   };
 }
 

@@ -47,6 +47,7 @@ import {
   KIND_COMMUNITY,
   KIND_EVENT_CONFIG,
   buildEventConfig,
+  eckTag,
 } from "@nostrautica/protocol";
 import { WHITENOISE_RELAYS } from "$lib/nostr/relays.js";
 
@@ -843,6 +844,110 @@ describe("roster read-modify-write safety", () => {
     const newEck = keys!.eck.find((v) => v.id === 2)!;
     // The backup payload carries the NEW key, not just the old one.
     expect(encrypted.join(" ")).toContain(newEck.key);
+  });
+
+  // ── Audit DS41-002 residual + SB-86/SB-90: the roster's own `eck` tag picks the key ──
+  describe("roster key selection by the roster's eck tag", () => {
+    const V1 = { id: 1, key: bytesToBase64(ECK_BYTES) };
+    const V2_BYTES = generateEck();
+    const V2 = { id: 2, key: bytesToBase64(V2_BYTES) };
+    const taggedRoster = (eck: { id: number; key: string }, attendees: RosterContent["attendees"]) => ({
+      ...rosterEvent(attendees),
+      tags: [["d", IDENTIFIER], ["a", COORD], eckTag(eck), ["v", "2"]],
+      content: eckEncrypt(base64ToBytes(eck.key), JSON.stringify({ v: 2, eck_current: eck.id, attendees })),
+    });
+    const publishedRosterEvent = () =>
+      publishSigned.mock.calls.map((c) => c[0] as { kind: number; content: string; tags: string[][] }).find((e) => e.kind === KIND_ROSTER)!;
+
+    it("reads the v1 roster on a device that saved v2 but never published it", async () => {
+      // The pre-staging crash window: v2 is current here, the relays only ever saw v1.
+      await saveEventKeys({ ...organizerKeys(), eck: [V1, V2] }, OWNER);
+      fetchEventsRelayOnly.mockResolvedValue([taggedRoster(V1, [{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]);
+
+      await approveAttendee({} as AppSigner, ctx, request(BOB));
+
+      // Written under the key the live roster is under, so every entry on it agrees.
+      const ev = publishedRosterEvent();
+      expect(ev.tags.find((t) => t[0] === "eck")?.[1]).toBe("1");
+      const content = JSON.parse(eckDecrypt(ECK_BYTES, ev.content)) as RosterContent;
+      expect(content.attendees.map((a) => a.pubkey)).toEqual([ALICE, BOB]);
+    });
+
+    it("keeps a staged version staged while the roster is still under the old one", async () => {
+      await saveEventKeys({ ...organizerKeys(), eck: [V1], pendingEck: [V2] }, OWNER);
+      fetchEventsRelayOnly.mockResolvedValue([taggedRoster(V1, [{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]);
+
+      const read = await loadRoster(ctx, (await loadEventKeys(COORD))!, OWNER);
+
+      expect(read.state).toBe("ok");
+      const keys = await loadEventKeys(COORD);
+      expect(keys?.eck).toEqual([V1]);
+      expect(keys?.pendingEck).toEqual([V2]);
+    });
+
+    it("promotes a staged version once the roster under it is on the relays", async () => {
+      await saveEventKeys({ ...organizerKeys(), eck: [V1], pendingEck: [V2] }, OWNER);
+      fetchEventsRelayOnly.mockResolvedValue([taggedRoster(V2, [{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]);
+
+      const read = await loadRoster(ctx, (await loadEventKeys(COORD))!, OWNER);
+
+      expect(read.state === "ok" && read.eck).toEqual(V2);
+      const keys = await loadEventKeys(COORD);
+      expect(keys?.eck.map((v) => v.id)).toEqual([1, 2]);
+      expect(keys?.pendingEck).toBeUndefined();
+    });
+
+    it("a revoke stages its new version and makes it current only after publishing", async () => {
+      fetchEventsRelayOnly.mockResolvedValue([
+        taggedRoster(V1, [
+          { pubkey: ALICE, d: "d-alice", role: "attendee" },
+          { pubkey: BOB, d: "d-bob", role: "attendee" },
+        ]),
+      ]);
+      let stagedDuringPublish: EventKeys | undefined;
+      publishSigned.mockImplementation(async () => {
+        stagedDuringPublish ??= await loadEventKeys(COORD);
+        return { ok: true };
+      });
+
+      await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+
+      expect(stagedDuringPublish?.eck.map((v) => v.id)).toEqual([1]);
+      expect(stagedDuringPublish?.pendingEck?.map((v) => v.id)).toEqual([2]);
+      const after = await loadEventKeys(COORD);
+      expect(after?.eck.map((v) => v.id)).toEqual([1, 2]);
+      expect(after?.pendingEck).toBeUndefined();
+    });
+
+    it("refuses to approve over a roster written under a key this device lacks", async () => {
+      // Another organizer device rotated to ITS v2; this one holds v1 only.
+      fetchEventsRelayOnly.mockResolvedValue([taggedRoster(V2, [{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]);
+
+      await expect(approveAttendee({} as AppSigner, ctx, request(BOB))).rejects.toThrow(
+        /changed on another device/i,
+      );
+      expect(publishSigned).not.toHaveBeenCalled();
+    });
+
+    it("tells a same-id collision apart from a key it holds", async () => {
+      // This device holds ITS v2; the roster is under the OTHER device's v2.
+      const otherV2 = { id: 2, key: bytesToBase64(generateEck()) };
+      await saveEventKeys({ ...organizerKeys(), eck: [V1, V2] }, OWNER);
+      fetchEventsRelayOnly.mockResolvedValue([taggedRoster(otherV2, [])]);
+
+      const read = await loadRoster(ctx, (await loadEventKeys(COORD))!, OWNER);
+
+      expect(read.state).toBe("foreign");
+    });
+
+    it("refuses to approve while two keys share the current id", async () => {
+      const otherV2 = { id: 2, key: bytesToBase64(generateEck()) };
+      await saveEventKeys({ ...organizerKeys(), eck: [V1, V2, otherV2] }, OWNER);
+      fetchEventsRelayOnly.mockResolvedValue([taggedRoster(V2, [{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]);
+
+      await expect(approveAttendee({} as AppSigner, ctx, request(BOB))).rejects.toThrow(/Repair keys/);
+      expect(publishSigned).not.toHaveBeenCalled();
+    });
   });
 
   it("still revokes, loudly, when no blinding key is available", async () => {

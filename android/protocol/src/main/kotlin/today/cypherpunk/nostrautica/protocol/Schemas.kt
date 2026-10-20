@@ -842,11 +842,14 @@ data class EventKeysBackup(
     @SerialName("einbox_nsec") val einboxNsec: String,
     val eck: List<EckVersion>,
     @SerialName("coordinator_gen") val coordinatorGen: Int? = null,
+    /** Staged ECK versions (DS41-002): custody, not current. */
+    @SerialName("pending_eck") val pendingEck: List<EckVersion>? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v); checkHex32(eidNsec, "eid_nsec"); checkHex32(einboxNsec, "einbox_nsec")
         checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }
         check(coordinatorGen == null || coordinatorGen >= 0) { "coordinator_gen" }
+        checkList(pendingEck, Limits.MAX_ECK_VERSIONS, "pending_eck"); pendingEck?.forEach { it.validate() }
     }
 }
 

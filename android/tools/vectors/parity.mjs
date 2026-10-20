@@ -109,6 +109,8 @@ const backup = (over) => ({ v: 2, a: coord, eid_nsec: hex("01"), einbox_nsec: he
 add("eventKeysBackup", "base", backup({ coordinator_gen: 0 }));
 add("eventKeysBackup", "coordinator_gen -1", backup({ coordinator_gen: -1 }));
 add("eventKeysBackup", "eck 1025", backup({ eck: n(1025, (i) => ({ id: i + 1, key: eckKey })) }));
+add("eventKeysBackup", "pending_eck", backup({ pending_eck: [{ id: 2, key: eckKey }] }));
+add("eventKeysBackup", "pending_eck bad key", backup({ pending_eck: [{ id: 2, key: "AAAA" }] }));
 
 const talk = (over) => ({ v: 2, a: coord, talk_d: "t1", title: "T", external_url: "https://youtu.be/x", external_kind: "youtube", ...over });
 add("talkSubmissionContent", "base", talk({}));

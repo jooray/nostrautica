@@ -333,11 +333,19 @@ class Organizer(
         val latest = nostr.store.latest(Kinds.ROSTER, publisher, id)?.takeIf { it.pubkey in accepted }
         if (latest == null) return OrganizerEvents.RosterRead.Absent(suspect = seen("roster", ctx.coordinate))
         var at = latest.createdAt
-        fun dec(e: NostrEvent): RosterContent? {
-            val eck = keys.eckFor(e.tag("eck")?.toIntOrNull()) ?: keys.current?.bytes() ?: return null
-            return (runCatching { Wire.parseSafe(RosterContent.serializer(), Nip44.eckDecrypt(eck, e.content)) }.getOrNull() as? Wire.Result.Ok)?.value
-        }
-        val page0 = dec(latest) ?: return OrganizerEvents.RosterRead.Unreadable(at)
+        // The key the roster's own `eck` tag names, from EVERY version held, staged
+        // ones included (DS41-002, NIP §4.1).
+        val all = EckIdentity.union(keys.eck, keys.pendingEck ?: emptyList())
+        val ref = EckIdentity.readTag(latest.tags)
+        val candidates = if (ref != null) EckIdentity.candidates(all, ref) else listOfNotNull(keys.current)
+        if (ref != null && (candidates.isEmpty() || ref.id > (all.maxOfOrNull { it.id } ?: 0))) return OrganizerEvents.RosterRead.Foreign(at)
+        fun decWith(v: EckVersion, e: NostrEvent): RosterContent? =
+            (runCatching { Wire.parseSafe(RosterContent.serializer(), Nip44.eckDecrypt(v.bytes(), e.content)) }.getOrNull() as? Wire.Result.Ok)?.value
+        var used: EckVersion? = null
+        var page0: RosterContent? = null
+        for (v in candidates) { page0 = decWith(v, latest); if (page0 != null) { used = v; break } }
+        if (page0 == null || used == null) return OrganizerEvents.RosterRead.Unreadable(at)
+        fun dec(e: NostrEvent): RosterContent? = decWith(used, e)
         var roster = page0
         val pages = Roster.pageCountOf(page0)
         if (pages > 1) {
@@ -351,14 +359,40 @@ class Organizer(
             roster = Roster.merge(listOf(page0) + rest)
         }
         markSeen("roster", ctx.coordinate)
-        return OrganizerEvents.RosterRead.Ok(roster, at)
+        promotePending(ctx.coordinate, used)
+        return OrganizerEvents.RosterRead.Ok(roster, at, used)
+    }
+
+    /** The roster is under a staged version: its rotation did publish, so it is current now (DS41-002). */
+    private suspend fun promotePending(coordinate: String, used: EckVersion) {
+        val k = keysFor(coordinate) ?: return
+        val pending = k.pendingEck ?: return
+        if (pending.none { it.id == used.id && it.key == used.key }) return
+        val eck = EckIdentity.union(k.eck, pending.filter { it.id <= used.id })
+        saveKeys(k.copy(eck = eck, pendingEck = EventKeys.pendingMinus(pending, eck)))
+    }
+
+    /** Persist a freshly minted version as staged, not current (DS41-002). */
+    private suspend fun stageEck(keys: EventKeys, v: EckVersion): EventKeys =
+        keys.copy(pendingEck = EckIdentity.union(keys.pendingEck ?: emptyList(), listOf(v))).also { saveKeys(it) }
+
+    private fun assertNoEckCollision(keys: EventKeys) {
+        val cur = keys.current ?: return
+        if (cur.id in EckIdentity.collisionIds(keys.eck)) throw OrganizerEvents.EckCollision()
     }
 
     // ── Approve (organizer.ts approveAttendee) ──────────────────────────────
 
     suspend fun approve(ctx: EventContext, req: PendingRequest, role: String = "attendee") = lock("roster:${ctx.coordinate}").withLock {
-        val keys = orgKeys(ctx)
-        val eck = keys.current ?: throw IllegalStateException("no ECK available")
+        val keys0 = orgKeys(ctx)
+        keys0.current ?: throw IllegalStateException("no ECK available")
+        // Roster first, with every version held (DS41-002): it may promote a staged
+        // version, and a roster under a key this device lacks refuses here (SB-90).
+        val read = loadRoster(ctx, keys0)
+        val keys = keysFor(ctx.coordinate) ?: keys0
+        assertNoEckCollision(keys)
+        // Written under the key the live roster is under, so every entry on it agrees.
+        val eck = (read as? OrganizerEvents.RosterRead.Ok)?.eck ?: keys.current!!
         val eidSk = eidSk(keys)
         val eid = Secp.pubkeyHex(eidSk)
         val eckBytes = eck.bytes()
@@ -375,7 +409,7 @@ class Organizer(
             listOf(listOf("d", entryD), listOf("a", ctx.coordinate), EckIdentity.tag(eck), listOf("v", "2")),
             Nip44.eckEncrypt(eckBytes, Wire.encode(DirectoryEntryContent.serializer(), entry)),
         ).signWith(eidSk)
-        val (roster, at) = OrganizerEvents.rosterForRewrite(loadRoster(ctx, keys), eck.id)
+        val (roster, at) = OrganizerEvents.rosterForRewrite(read, eck.id)
         val previous = roster
         val next = if (roster.attendees.any { it.pubkey == req.attendeePubkey }) roster
         else roster.copy(attendees = roster.attendees + RosterAttendee(req.attendeePubkey, entryD, role))
@@ -488,7 +522,7 @@ class Organizer(
 
     // ── Revoke and rotation (organizer.ts revokeAttendeeClient / rotateEckAndInbox) ──
 
-    private suspend fun directoryContents(ctx: EventContext, ds: List<String>, eck: ByteArray): Map<String, String> {
+    private suspend fun directoryContents(ctx: EventContext, ds: List<String>, prev: EckVersion, held: List<EckVersion>): Map<String, String> {
         val cfg = ctx.cfg
         val publisher = cfg.coordinator ?: cfg.eidPubkey
         ds.chunked(Members.D_CHUNK).forEach { chunk ->
@@ -496,17 +530,19 @@ class Organizer(
         }
         return ds.mapNotNull { d ->
             val e = nostr.store.latest(Kinds.DIRECTORY_ENTRY, publisher, d) ?: return@mapNotNull null
-            runCatching { Nip44.eckDecrypt(eck, e.content) }.getOrNull()?.let { d to it }
+            // The key the entry's own tag names, then the roster's (NIP §4.1).
+            val keys = (EckIdentity.readTag(e.tags)?.let { EckIdentity.candidates(held, it) } ?: emptyList()) + prev
+            keys.firstNotNullOfOrNull { k -> runCatching { Nip44.eckDecrypt(k.bytes(), e.content) }.getOrNull() }?.let { d to it }
         }.toMap()
     }
 
     private data class Rotation(val events: List<NostrEvent>, val grants: List<Pair<String, NostrEvent>>)
 
     /** Re-encrypt [remaining]'s entries under the new ECK, re-grant everyone, rebuild the roster. */
-    private suspend fun rotateFor(ctx: EventContext, eidSk: ByteArray, prev: EckVersion, next: EckVersion, eckAll: List<EckVersion>, remaining: List<RosterAttendee>, rosterAt: Long, nostrGroupId: String?): Rotation {
+    private suspend fun rotateFor(ctx: EventContext, eidSk: ByteArray, prev: EckVersion, next: EckVersion, eckAll: List<EckVersion>, remaining: List<RosterAttendee>, rosterAt: Long, nostrGroupId: String?, held: List<EckVersion>): Rotation {
         val eid = Secp.pubkeyHex(eidSk)
         val newBytes = next.bytes()
-        val plain = directoryContents(ctx, remaining.map { it.d }, prev.bytes())
+        val plain = directoryContents(ctx, remaining.map { it.d }, prev, held)
         val events = mutableListOf<NostrEvent>()
         val grantWraps = mutableListOf<Pair<String, NostrEvent>>()
         val newRoster = OrganizerEvents.rederive(ctx.coordinate, remaining, newBytes)
@@ -530,47 +566,58 @@ class Organizer(
             rot.grants.map { (pk, w) -> async { sendWrap(w, pk, ctx, "grant") } }).awaitAll()
     }
 
-    private fun newEckVersion(k: EventKeys) = OrganizerEvents.nextEck(k.eck, ProtocolCrypto.generateEck())
+    /** One past every id held, staged ones included, so an interrupted rotation's id is never reused. */
+    private fun newEckVersion(k: EventKeys) = OrganizerEvents.nextEck(k.eck + (k.pendingEck ?: emptyList()), ProtocolCrypto.generateEck())
 
     /** Revoke without a coordinator: forward-only ECK rotation, everyone else re-granted. */
     suspend fun revokeClient(ctx: EventContext, removed: String) = lock("roster:${ctx.coordinate}").withLock {
-        val keys = orgKeys(ctx)
-        val eidSk = eidSk(keys)
-        val prev = keys.current ?: throw IllegalStateException("no ECK available")
+        val keys0 = orgKeys(ctx)
+        val eidSk = eidSk(keys0)
+        keys0.current ?: throw IllegalStateException("no ECK available")
         // Read BEFORE minting: an aborted revoke must leave custody untouched.
-        val (roster, at) = OrganizerEvents.rosterForRewrite(loadRoster(ctx, keys), prev.id)
+        val read = loadRoster(ctx, keys0)
+        val keys = keysFor(ctx.coordinate) ?: keys0
+        val prev = (read as? OrganizerEvents.RosterRead.Ok)?.eck ?: keys.current!!
+        val (roster, at) = OrganizerEvents.rosterForRewrite(read, prev.id)
         if (roster.attendees.none { it.pubkey == removed }) {
             throw IllegalStateException("That attendee isn't on the roster we just read, so nothing was published. Reload the People list and try again.")
         }
-        val removedD = ProtocolCrypto.blindedD(prev.bytes(), ctx.coordinate, removed)
+        val removedD = roster.attendees.first { it.pubkey == removed }.d
         val deletion = UnsignedEvent(Secp.pubkeyHex(eidSk), nowSec(), Kinds.DELETION,
             listOf(listOf("a", "${Kinds.DIRECTORY_ENTRY}:${ctx.cfg.eidPubkey}:$removedD"), listOf("k", Kinds.DIRECTORY_ENTRY.toString())), "revoked").signWith(eidSk)
         val next = newEckVersion(keys)
-        val updated = keys.copy(eck = keys.eck + next)
-        saveKeys(updated)
+        val eckAll = EckIdentity.union(keys.eck, listOf(next))
+        // Build everything first, then stage the key (persisted, not current), back
+        // it up, publish, and only then make it current (DS41-002).
+        val rot = rotateFor(ctx, eidSk, prev, next, eckAll, roster.attendees.filter { it.pubkey != removed }, at, roster.nostrGroupId,
+            EckIdentity.union(keys.eck, keys.pendingEck ?: emptyList()))
+        val staged = stageEck(keys, next)
         // The rotated ECK must reach the durable backup, or a fresh device restores v1 only.
-        runCatching { writeBackup(ctx.coordinate, updated, updated.coordinatorGen ?: 0) }
-        val rot = rotateFor(ctx, eidSk, prev, next, updated.eck, roster.attendees.filter { it.pubkey != removed }, at, roster.nostrGroupId)
+        runCatching { writeBackup(ctx.coordinate, staged, staged.coordinatorGen ?: 0) }
         publishRotation(ctx, rot, listOf(deletion))
+        promotePending(ctx.coordinate, next)
     }
 
     /** Detach/replace (NIP §3.7): rotate the ECK AND E_inbox; the old inbox is kept for history. */
-    private suspend fun rotateEckAndInbox(ctx: EventContext, keys: EventKeys): EventKeys {
-        val eidSk = eidSk(keys)
-        val prev = keys.current ?: throw IllegalStateException("no ECK available")
-        val read = loadRoster(ctx, keys)
+    private suspend fun rotateEckAndInbox(ctx: EventContext, keys0: EventKeys): EventKeys {
+        val eidSk = eidSk(keys0)
+        keys0.current ?: throw IllegalStateException("no ECK available")
+        val read = loadRoster(ctx, keys0)
+        val keys = keysFor(ctx.coordinate) ?: keys0
+        val prev = (read as? OrganizerEvents.RosterRead.Ok)?.eck ?: keys.current!!
         val (roster, at) = OrganizerEvents.rosterForRewrite(read, prev.id)
         val next = newEckVersion(keys)
-        val eckAll = keys.eck + next
+        val eckAll = EckIdentity.union(keys.eck, listOf(next))
         val newInbox = Secp.generateSecret()
-        val rot = rotateFor(ctx, eidSk, prev, next, eckAll, roster.attendees, at, roster.nostrGroupId)
-        publishRotation(ctx, rot)
-        val updated = keys.copy(
-            eck = eckAll,
+        val rot = rotateFor(ctx, eidSk, prev, next, eckAll, roster.attendees, at, roster.nostrGroupId,
+            EckIdentity.union(keys.eck, keys.pendingEck ?: emptyList()))
+        stageEck(keys.copy(
             priorEinboxNsecs = ((keys.priorEinboxNsecs ?: emptyList()) + listOfNotNull(keys.einboxNsecHex)).distinct(),
             einboxNsecHex = Bytes.toHex(newInbox),
-        )
-        saveKeys(updated)
+        ), next)
+        publishRotation(ctx, rot)
+        promotePending(ctx.coordinate, next)
+        val updated = keysFor(ctx.coordinate)!!
         runCatching { writeBackup(ctx.coordinate, updated, updated.coordinatorGen ?: 0) }
         return updated
     }
@@ -580,7 +627,7 @@ class Organizer(
         if (keys.eidNsecHex == null || keys.einboxNsecHex == null) return
         val signer = accounts.signer
         val me = signer.pubkey
-        val backup = EventKeysBackup(a = coordinate, eidNsec = keys.eidNsecHex, einboxNsec = keys.einboxNsecHex, eck = keys.eck, coordinatorGen = gen)
+        val backup = EventKeysBackup(a = coordinate, eidNsec = keys.eidNsecHex, einboxNsec = keys.einboxNsecHex, eck = keys.eck, coordinatorGen = gen, pendingEck = keys.pendingEck)
         val d = "nostrautica:eventkeys:" + ProtocolCrypto.blindedD(accounts.blindingKey(), coordinate, me)
         accounts.signAndPublish(Kinds.APP_DATA, signer.nip44Encrypt(me, Wire.encode(EventKeysBackup.serializer(), backup)), listOf(listOf("d", d)), Relays.DEFAULT, "eventkeys")
     }
@@ -861,11 +908,13 @@ class Organizer(
 
     private suspend fun restore(me: String, coordinate: String, b: EventKeysBackup) {
         val existing = keyStore.get(me, coordinate)
+        val eck = EckIdentity.union(existing?.eck ?: emptyList(), b.eck)
         keyStore.save(me, EventKeys(
-            coordinate = coordinate, role = "organizer", eck = EckIdentity.union(existing?.eck ?: emptyList(), b.eck),
+            coordinate = coordinate, role = "organizer", eck = eck,
             eidNsecHex = existing?.eidNsecHex ?: b.eidNsec, einboxNsecHex = existing?.einboxNsecHex ?: b.einboxNsec,
             priorEinboxNsecs = existing?.priorEinboxNsecs,
             coordinatorGen = maxOf(existing?.coordinatorGen ?: 0, b.coordinatorGen ?: 0).takeIf { it > 0 },
+            pendingEck = EventKeys.pendingMinus(EckIdentity.union(existing?.pendingEck ?: emptyList(), b.pendingEck ?: emptyList()), eck),
         ))
     }
 
