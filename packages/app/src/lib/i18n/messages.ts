@@ -1100,7 +1100,7 @@ export const messages = {
     "admin.coordinator.detaching": "Detaching…",
     "admin.coordinator.detach.confirm": "Detach",
     "admin.coordinator.detach.consequence":
-      "Detaching rotates the event keys (past content stays as-is) and orphans coordinator-run chat administration. Matching stops until you attach another. This can't be undone for the current coordinator.",
+      "Detaching rotates the event keys (past content stays as-is) and orphans coordinator-run chat administration. Matching stops until you attach another. This can't be undone for the current coordinator. It deletes the attendee data it holds (profiles, intro transcripts, match results) at the event's retention deadline, or 7 days after the detach if there is none. Attach it again before then to keep that data.",
     "admin.coordinator.paste": "Or paste a coordinator npub (advanced)",
     "admin.coordinator.terms": "Terms",
     "admin.coordinator.unverified":
@@ -2858,7 +2858,7 @@ export const messages = {
     "admin.coordinator.detaching": "Odpája sa…",
     "admin.coordinator.detach.confirm": "Odpojiť",
     "admin.coordinator.detach.consequence":
-      "Odpojenie rotuje kľúče podujatia (doterajší obsah zostáva) a osirotí správu chatu vedenú koordinátorom. Párovanie sa zastaví, kým nepripojíte iného. Pre aktuálneho koordinátora sa to nedá vrátiť.",
+      "Odpojenie rotuje kľúče podujatia (doterajší obsah zostáva) a osirotí správu chatu vedenú koordinátorom. Párovanie sa zastaví, kým nepripojíte iného. Pre aktuálneho koordinátora sa to nedá vrátiť. Údaje účastníkov, ktoré drží (profily, prepisy predstavení, výsledky párovania), zmaže v termíne uchovávania podujatia, alebo 7 dní po odpojení, ak podujatie žiadny nemá. Ak ho dovtedy znova pripojíte, údaje zostanú.",
     "admin.coordinator.paste": "Alebo vložte npub koordinátora (pokročilé)",
     "admin.coordinator.terms": "Podmienky",
     "admin.coordinator.unverified":
@@ -4606,7 +4606,7 @@ export const messages = {
     "admin.coordinator.detaching": "Odpojuje se…",
     "admin.coordinator.detach.confirm": "Odpojit",
     "admin.coordinator.detach.consequence":
-      "Odpojení rotuje klíče akce (dosavadní obsah zůstává) a osiří správu chatu vedenou koordinátorem. Párování se zastaví, dokud nepřipojíte jiného. Pro aktuálního koordinátora to nelze vrátit.",
+      "Odpojení rotuje klíče akce (dosavadní obsah zůstává) a osiří správu chatu vedenou koordinátorem. Párování se zastaví, dokud nepřipojíte jiného. Pro aktuálního koordinátora to nelze vrátit. Údaje účastníků, které drží (profily, přepisy představení, výsledky párování), smaže v termínu uchovávání akce, nebo 7 dní po odpojení, pokud akce žádný nemá. Pokud ho do té doby znovu připojíte, údaje zůstanou.",
     "admin.coordinator.paste": "Nebo vložte npub koordinátora (pokročilé)",
     "admin.coordinator.terms": "Podmínky",
     "admin.coordinator.unverified":
@@ -6351,7 +6351,7 @@ export const messages = {
     "admin.coordinator.detaching": "Trennt…",
     "admin.coordinator.detach.confirm": "Trennen",
     "admin.coordinator.detach.consequence":
-      "Das Trennen rotiert die Event-Schlüssel (bisherige Inhalte bleiben unverändert) und lässt die vom Coordinator geführte Chat-Verwaltung verwaisen. Das Matching stoppt, bis du einen neuen anhängst. Das lässt sich für den aktuellen Coordinator nicht rückgängig machen.",
+      "Das Trennen rotiert die Event-Schlüssel (bisherige Inhalte bleiben unverändert) und lässt die vom Coordinator geführte Chat-Verwaltung verwaisen. Das Matching stoppt, bis du einen neuen anhängst. Das lässt sich für den aktuellen Coordinator nicht rückgängig machen. Die Teilnehmerdaten, die er hält (Profile, Transkripte der Vorstellungen, Matching-Ergebnisse), löscht er zum Aufbewahrungsende des Events, oder 7 Tage nach dem Trennen, wenn es keines gibt. Hängst du ihn vorher wieder an, bleiben sie erhalten.",
     "admin.coordinator.paste": "Oder füge einen Coordinator-npub ein (erweitert)",
     "admin.coordinator.terms": "Bedingungen",
     "admin.coordinator.unverified":
@@ -8132,7 +8132,7 @@ export const messages = {
     "admin.coordinator.detaching": "Desconectando…",
     "admin.coordinator.detach.confirm": "Desconectar",
     "admin.coordinator.detach.consequence":
-      "Desconectarlo rota las claves del evento (el contenido anterior no cambia) y deja huérfana la administración del chat que gestionaba el coordinador. Las coincidencias se detienen hasta que conectes otro. Esto no se puede deshacer para el coordinador actual.",
+      "Desconectarlo rota las claves del evento (el contenido anterior no cambia) y deja huérfana la administración del chat que gestionaba el coordinador. Las coincidencias se detienen hasta que conectes otro. Esto no se puede deshacer para el coordinador actual. Borra los datos de los asistentes que guarda (perfiles, transcripciones de presentaciones, resultados de coincidencias) en la fecha de retención del evento, o 7 días después de desconectarlo si no tiene ninguna. Si lo vuelves a conectar antes, se conservan.",
     "admin.coordinator.paste": "O pega el npub de un coordinador (avanzado)",
     "admin.coordinator.terms": "Términos",
     "admin.coordinator.unverified":
