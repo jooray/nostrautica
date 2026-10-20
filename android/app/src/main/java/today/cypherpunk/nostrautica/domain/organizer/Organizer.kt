@@ -209,7 +209,11 @@ class Organizer(
         val profile = AttendeeProfile(about = p?.about ?: "")
         val invite = generateInvites(ctx, 1, "organizer-self").firstOrNull()
         sendJoinRequest(ctx, name, profile, invite?.nsec)
-        approve(ctx, PendingRequest(me, name, profile = profile, rumorCreatedAt = nowSec()), "organizer")
+        // With a coordinator attached it approves the join via the invite; a client
+        // self-approval would be a second roster author (SB-91).
+        try {
+            approve(ctx, PendingRequest(me, name, profile = profile, rumorCreatedAt = nowSec()), "organizer")
+        } catch (_: CoordinatorAttached) {}
     }
 
     /** join.ts sendJoinRequest, as the organizer's own account (21600 + 21601 + 31602 self-copy). */
@@ -385,6 +389,8 @@ class Organizer(
     // ── Approve (organizer.ts approveAttendee) ──────────────────────────────
 
     suspend fun approve(ctx: EventContext, req: PendingRequest, role: String = "attendee") = lock("roster:${ctx.coordinate}").withLock {
+        // One roster author (SB-91): with a coordinator attached this is a 21604.
+        assertNoCoordinatorAuthority(ctx)
         val keys0 = orgKeys(ctx)
         keys0.current ?: throw IllegalStateException("no ECK available")
         // Roster first, with every version held (DS41-002): it may promote a staged
@@ -572,6 +578,8 @@ class Organizer(
 
     /** Revoke without a coordinator: forward-only ECK rotation, everyone else re-granted. */
     suspend fun revokeClient(ctx: EventContext, removed: String) = lock("roster:${ctx.coordinate}").withLock {
+        // One roster author (SB-91): with a coordinator attached the coordinator rotates.
+        assertNoCoordinatorAuthority(ctx)
         val keys0 = orgKeys(ctx)
         val eidSk = eidSk(keys0)
         keys0.current ?: throw IllegalStateException("no ECK available")
@@ -597,6 +605,7 @@ class Organizer(
         runCatching { writeBackup(ctx.coordinate, staged, staged.coordinatorGen ?: 0) }
         publishRotation(ctx, rot, listOf(deletion))
         promotePending(ctx.coordinate, next)
+        reissueOrganizerGrants(ctx, ctx.coordinate)
     }
 
     /** Detach/replace (NIP §3.7): rotate the ECK AND E_inbox; the old inbox is kept for history. */
@@ -618,6 +627,7 @@ class Organizer(
         ), next)
         publishRotation(ctx, rot)
         promotePending(ctx.coordinate, next)
+        reissueOrganizerGrants(ctx, ctx.coordinate)
         val updated = keysFor(ctx.coordinate)!!
         runCatching { writeBackup(ctx.coordinate, updated, updated.coordinatorGen ?: 0) }
         return updated
@@ -628,7 +638,7 @@ class Organizer(
         val eid = keys.eidNsecHex ?: return null
         val inbox = keys.einboxNsecHex ?: return null
         return EventKeysBackup(a = coordinate, eidNsec = eid, einboxNsec = inbox, eck = keys.eck,
-            coordinatorGen = maxOf(gen, keys.coordinatorGen ?: 0), pendingEck = keys.pendingEck, priorEinboxNsecs = keys.priorEinboxNsecs)
+            coordinatorGen = maxOf(gen, keys.coordinatorGen ?: 0), pendingEck = keys.pendingEck, priorEinboxNsecs = keys.priorEinboxNsecs, coOrganizers = keys.coOrganizers)
     }
 
     class BackupUnreadable : Exception("Couldn't read this event's key backup, so it was not rewritten (that would drop keys saved by your other devices).")
@@ -649,14 +659,7 @@ class Organizer(
         val remoteEv = nostr.store.latest(Kinds.APP_DATA, me, d)
         val backup = if (remoteEv != null) {
             val remote = runCatching { Wire.parse(EventKeysBackup.serializer(), signer.nip44Decrypt(me, remoteEv.content)) }.getOrNull() ?: throw BackupUnreadable()
-            KeysBackup.merge(local, remote, configInbox).also { m ->
-                val cur = keysFor(coordinate) ?: keys
-                val eck = EckIdentity.union(cur.eck, m.eck)
-                val folded = cur.copy(eck = eck, pendingEck = EventKeys.pendingMinus(EckIdentity.union(cur.pendingEck ?: emptyList(), m.pendingEck ?: emptyList()), eck),
-                    einboxNsecHex = m.einboxNsec, priorEinboxNsecs = ((cur.priorEinboxNsecs ?: emptyList()) + (m.priorEinboxNsecs ?: emptyList()) + listOfNotNull(cur.einboxNsecHex)).distinct().filter { it != m.einboxNsec }.ifEmpty { null },
-                    coordinatorGen = maxOf(cur.coordinatorGen ?: 0, m.coordinatorGen ?: 0).takeIf { it > 0 })
-                if (folded != cur) saveKeys(folded)
-            }
+            KeysBackup.merge(local, remote, configInbox).also { m -> foldBackup(coordinate, keys, m) }
         } else local
         accounts.signAndPublish(Kinds.APP_DATA, signer.nip44Encrypt(me, Wire.encode(EventKeysBackup.serializer(), backup)), listOf(listOf("d", d)), Relays.DEFAULT, "eventkeys")
         Unit
@@ -681,13 +684,145 @@ class Organizer(
 
     /** 21605: full organizer custody to another account. Returns whether it reached a relay. */
     suspend fun addCoOrganizer(ctx: EventContext, pubkey: String): Boolean {
-        val keys = orgKeys(ctx, needInbox = true)
+        var keys = orgKeys(ctx, needInbox = true)
+        // Remember who holds custody (SB-90): every rotation re-issues the grant to them.
+        if (pubkey != owner) {
+            keys = keys.copy(coOrganizers = ((keys.coOrganizers ?: emptyList()) + pubkey).distinct())
+            saveKeys(keys)
+        }
+        return sendOrganizerGrant(ctx, keys, pubkey)
+    }
+
+    /** organizer.ts sendOrganizerGrant: full custody, the organizer set, and the retired inboxes. */
+    private suspend fun sendOrganizerGrant(ctx: EventContext, keys: EventKeys, to: String): Boolean {
         val eidSk = eidSk(keys)
+        val organizers = (listOf(owner) + (keys.coOrganizers ?: emptyList())).distinct().take(Limits.MAX_ORGANIZERS)
         val g = OrganizerGrantContent(
             a = ctx.coordinate, eidNsec = keys.eidNsecHex!!, einboxNsec = keys.einboxNsecHex!!, eck = keys.eck,
             configRelays = ctx.cfg.relays, grantedBy = Secp.pubkeyHex(eidSk),
+            organizers = organizers, priorEinboxNsecs = keys.priorEinboxNsecs?.takeLast(Limits.MAX_PRIOR_INBOXES),
         )
-        return sendWrap(wrapFromEid(eidSk, pubkey, Kinds.ORGANIZER_GRANT, Wire.encode(OrganizerGrantContent.serializer(), g)), pubkey, ctx, "cohost")
+        return sendWrap(wrapFromEid(eidSk, to, Kinds.ORGANIZER_GRANT, Wire.encode(OrganizerGrantContent.serializer(), g)), to, ctx, "cohost")
+    }
+
+    // ── Custody across devices (organizer.ts checkOrganizerKeys / repairEventKeys / SB-91 guard) ──
+
+    class CoordinatorAttached : Exception(
+        "A coordinator is attached to this event, so approvals and removals go through it. Refresh this page and try again.",
+    )
+
+    private val freshConfigs = java.util.concurrent.ConcurrentHashMap<String, Pair<EventConfig, Long>>()
+    private fun noteFreshConfig(coordinate: String, cfg: EventConfig) { freshConfigs[coordinate] = cfg to System.currentTimeMillis() }
+
+    /**
+     * SB-91: never author a 31604 while the newest config names a coordinator. A
+     * config noted in the last 90 s (Admin's [checkKeys]) wins over the screen's;
+     * otherwise one is read, and a failed read falls back to the screen's.
+     */
+    private suspend fun assertNoCoordinatorAuthority(ctx: EventContext) {
+        var memo = freshConfigs[ctx.coordinate]?.takeIf { System.currentTimeMillis() - it.second <= 90_000 }
+        if (memo == null && ctx.cfg.coordinator == null) {
+            runCatching { contexts.fetchConfig(ctx.coordinate, ctx.relays) }.getOrNull()?.let { noteFreshConfig(ctx.coordinate, it) }
+            memo = freshConfigs[ctx.coordinate]
+        }
+        val coordinator = if (memo != null) memo.first.coordinator else ctx.cfg.coordinator
+        if (coordinator != null) throw CoordinatorAttached()
+    }
+
+    data class KeyStatus(val config: EventConfig, val changedElsewhere: Boolean, val collision: Boolean)
+
+    /**
+     * Admin's custody check: the newest 31600 (noted for the SB-91 guard), the inbox
+     * it names made current when held as a retired one, and whether this device is
+     * behind (SB-90) or holds a same-id collision (SB-86). With [reconcile] (once per
+     * open) the account's backup is folded in and the union republished if this
+     * device holds more (SB-89).
+     */
+    suspend fun checkKeys(ctx: EventContext, reconcile: Boolean = false): KeyStatus? {
+        val cfg = runCatching { contexts.fetchConfig(ctx.coordinate, ctx.relays) }.getOrNull() ?: return null
+        noteFreshConfig(ctx.coordinate, cfg)
+        if (reconcile) runCatching { reconcileBackup(ctx.coordinate, cfg.inbox) }
+        var keys = keysFor(ctx.coordinate) ?: return KeyStatus(cfg, false, false)
+        if (keys.role != "organizer") return KeyStatus(cfg, false, false)
+        fun pub(s: String) = runCatching { Secp.pubkeyHex(Bytes.fromHex(s)) }.getOrNull()
+        val cur = keys.einboxNsecHex
+        if (cur != null && pub(cur) != cfg.inbox) {
+            val match = keys.priorEinboxNsecs?.firstOrNull { pub(it) == cfg.inbox }
+            if (match != null) {
+                keys = keys.copy(einboxNsecHex = match, priorEinboxNsecs = (keys.priorEinboxNsecs!!.filter { it != match } + cur).distinct())
+                saveKeys(keys)
+            }
+        }
+        val heldInboxes = (listOfNotNull(keys.einboxNsecHex) + (keys.priorEinboxNsecs ?: emptyList())).mapNotNull(::pub)
+        val heldEck = (keys.eck + (keys.pendingEck ?: emptyList())).maxOfOrNull { it.id } ?: 0
+        val stale = (heldInboxes.isNotEmpty() && cfg.inbox !in heldInboxes) || cfg.eck > heldEck
+        val current = keys.current
+        return KeyStatus(cfg, stale, current != null && current.id in EckIdentity.collisionIds(keys.eck))
+    }
+
+    /** Fold the account's backup in; republish the union only when this device adds something. */
+    private suspend fun reconcileBackup(coordinate: String, configInbox: String?) = lock("eventkeys:$coordinate").withLock {
+        val keys = keysFor(coordinate) ?: return@withLock
+        val local = asBackup(coordinate, keys, keys.coordinatorGen ?: 0) ?: return@withLock
+        val signer = accounts.signer
+        val me = signer.pubkey
+        val d = "nostrautica:eventkeys:" + ProtocolCrypto.blindedD(accounts.blindingKey(), coordinate, me)
+        runCatching { nostr.fetch(Relays.DEFAULT, Filter(kinds = listOf(Kinds.APP_DATA), authors = listOf(me), tags = mapOf("d" to listOf(d)))) }
+        val remoteEv = nostr.store.latest(Kinds.APP_DATA, me, d) ?: return@withLock
+        val remote = runCatching { Wire.parse(EventKeysBackup.serializer(), signer.nip44Decrypt(me, remoteEv.content)) }.getOrNull() ?: return@withLock
+        val m = KeysBackup.merge(local, remote, configInbox)
+        foldBackup(coordinate, keys, m)
+        fun norm(b: EventKeysBackup) = listOf(EckIdentity.union(b.eck).map { "${it.id}|${it.key}" }, EckIdentity.union(b.pendingEck ?: emptyList()).map { "${it.id}|${it.key}" },
+            listOf(b.einboxNsec), (b.priorEinboxNsecs ?: emptyList()).sorted(), listOf("${b.coordinatorGen ?: 0}"), (b.coOrganizers ?: emptyList()).sorted())
+        if (norm(m) != norm(remote)) accounts.signAndPublish(Kinds.APP_DATA, signer.nip44Encrypt(me, Wire.encode(EventKeysBackup.serializer(), m)), listOf(listOf("d", d)), Relays.DEFAULT, "eventkeys")
+        Unit
+    }
+
+    /** Fold a merged backup into the local record (writeBackup / reconcileBackup). */
+    private suspend fun foldBackup(coordinate: String, keys: EventKeys, m: EventKeysBackup) {
+        val cur = keysFor(coordinate) ?: keys
+        val eck = EckIdentity.union(cur.eck, m.eck)
+        val folded = cur.copy(eck = eck, pendingEck = EventKeys.pendingMinus(EckIdentity.union(cur.pendingEck ?: emptyList(), m.pendingEck ?: emptyList()), eck),
+            einboxNsecHex = m.einboxNsec, priorEinboxNsecs = ((cur.priorEinboxNsecs ?: emptyList()) + (m.priorEinboxNsecs ?: emptyList()) + listOfNotNull(cur.einboxNsecHex)).distinct().filter { it != m.einboxNsec }.ifEmpty { null },
+            coordinatorGen = maxOf(cur.coordinatorGen ?: 0, m.coordinatorGen ?: 0).takeIf { it > 0 },
+            coOrganizers = ((cur.coOrganizers ?: emptyList()) + (m.coOrganizers ?: emptyList())).distinct().ifEmpty { null })
+        if (folded != cur) saveKeys(folded)
+    }
+
+    /**
+     * Heal a same-id ECK collision (NIP §4.1): mint max id + 1, re-key roster and
+     * directory under it, re-grant the full list (both colliding keys) to everyone
+     * on the roster, re-issue to co-organizers. Refuses with a coordinator attached.
+     */
+    suspend fun repairKeys(ctx: EventContext) = lock("roster:${ctx.coordinate}").withLock {
+        val cfg = contexts.fetchConfig(ctx.coordinate, ctx.relays) ?: throw IllegalStateException("Event config (31600) not found")
+        noteFreshConfig(ctx.coordinate, cfg)
+        if (cfg.coordinator != null) throw CoordinatorAttached()
+        val keys0 = orgKeys(ctx)
+        val eidSk = eidSk(keys0)
+        val read = loadRoster(ctx, keys0)
+        val keys = keysFor(ctx.coordinate) ?: keys0
+        val prev = (read as? OrganizerEvents.RosterRead.Ok)?.eck ?: keys.current ?: throw IllegalStateException("no ECK available")
+        val (roster, at) = OrganizerEvents.rosterForRewrite(read, prev.id)
+        val next = newEckVersion(keys)
+        val eckAll = EckIdentity.union(keys.eck, listOf(next))
+        val rot = rotateFor(ctx, eidSk, prev, next, eckAll, roster.attendees, at, roster.nostrGroupId, EckIdentity.union(keys.eck, keys.pendingEck ?: emptyList()))
+        val staged = stageEck(keys, next)
+        runCatching { writeBackup(ctx.coordinate, staged, staged.coordinatorGen ?: 0, cfg.inbox) }
+        publishRotation(ctx, rot)
+        promotePending(ctx.coordinate, next)
+        reissueOrganizerGrants(ctx, ctx.coordinate)
+    }
+
+    /** sendAdminCommand to an explicit coordinator: the one the NEWEST config names (SB-91). */
+    suspend fun sendAdminCommandTo(ctx: EventContext, coordinator: String, cmd: String, args: Map<String, String> = emptyMap()): Boolean =
+        sendCommandTo(ctx, eidSk(orgKeys(ctx)), coordinator, cmd, args)
+
+    /** After a rotation, every known co-organizer gets the new keys (SB-90); best effort per recipient. */
+    private suspend fun reissueOrganizerGrants(ctx: EventContext, coordinate: String) {
+        val keys = keysFor(coordinate) ?: return
+        if (keys.eidNsecHex == null || keys.einboxNsecHex == null) return
+        for (to in keys.coOrganizers ?: emptyList()) if (to != owner) runCatching { sendOrganizerGrant(ctx, keys, to) }
     }
 
     /** One pass of the organizer-grant wait: pull new grants, re-read custody. */
@@ -948,6 +1083,7 @@ class Organizer(
             priorEinboxNsecs = m.priorEinboxNsecs,
             coordinatorGen = (m.coordinatorGen ?: 0).takeIf { it > 0 },
             pendingEck = m.pendingEck,
+            coOrganizers = m.coOrganizers,
         ))
     }
 

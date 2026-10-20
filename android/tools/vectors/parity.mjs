@@ -111,6 +111,13 @@ add("eventKeysBackup", "coordinator_gen -1", backup({ coordinator_gen: -1 }));
 add("eventKeysBackup", "eck 1025", backup({ eck: n(1025, (i) => ({ id: i + 1, key: eckKey })) }));
 add("eventKeysBackup", "pending_eck", backup({ pending_eck: [{ id: 2, key: eckKey }] }));
 add("eventKeysBackup", "pending_eck bad key", backup({ pending_eck: [{ id: 2, key: "AAAA" }] }));
+add("eventKeysBackup", "prior inboxes + co-organizers", backup({ prior_einbox_nsecs: [hex("03")], co_organizers: [hex("cc")] }));
+add("eventKeysBackup", "33 co-organizers", backup({ co_organizers: n(33, () => hex("cc")) }));
+const og = (over) => ({ v: 2, a: coord, eid_nsec: hex("01"), einbox_nsec: hex("02"), eck: [{ id: 1, key: eckKey }], config_relays: [], granted_by: pk, ...over });
+add("organizerGrantContent", "base", og({}));
+add("organizerGrantContent", "organizers + prior inboxes", og({ organizers: [pk, hex("cc")], prior_einbox_nsecs: [hex("03")] }));
+add("organizerGrantContent", "organizer not hex", og({ organizers: ["zz"] }));
+add("organizerGrantContent", "65 prior inboxes", og({ prior_einbox_nsecs: n(65, () => hex("03")) }));
 
 const talk = (over) => ({ v: 2, a: coord, talk_d: "t1", title: "T", external_url: "https://youtu.be/x", external_kind: "youtube", ...over });
 add("talkSubmissionContent", "base", talk({}));
@@ -222,6 +229,7 @@ const backupMerges = [];
     inboxPk(hex("04")));
   mb("staged then promoted", bk({ pending_eck: [{ id: 2, key: eckKeyOf(2) }] }), bk({ eck: [{ id: 1, key: eckKeyOf(1) }, { id: 2, key: eckKeyOf(2) }] }));
   mb("old backup without a", { v: 2, eid_nsec: hex("01"), einbox_nsec: hex("02"), eck: [{ id: 1, key: eckKeyOf(1) }] }, bk({ coordinator_gen: 3 }));
+  mb("co-organizers union", bk({ co_organizers: [hex("cc"), hex("aa")] }), bk({ co_organizers: [hex("bb"), hex("aa")] }));
 }
 
 writeFileSync(new URL("../../protocol/src/test/resources/parity-vectors.json", import.meta.url),

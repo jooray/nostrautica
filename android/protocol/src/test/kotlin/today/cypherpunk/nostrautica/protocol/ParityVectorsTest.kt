@@ -35,6 +35,7 @@ class ParityVectorsTest {
         "eventKeysBackup" to EventKeysBackup.serializer(),
         "talkSubmissionContent" to TalkSubmissionContent.serializer(),
         "perEventSettings" to PerEventSettings.serializer(),
+        "organizerGrantContent" to OrganizerGrantContent.serializer(),
     )
 
     private fun tags(e: kotlinx.serialization.json.JsonElement) = e.jsonArray.map { t -> t.jsonArray.map { it.jsonPrimitive.content } }

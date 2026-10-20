@@ -14105,6 +14105,234 @@
    "ok": false
   },
   {
+   "schema": "eventKeysBackup",
+   "label": "prior inboxes + co-organizers",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "prior_einbox_nsecs": [
+     "0303030303030303030303030303030303030303030303030303030303030303"
+    ],
+    "co_organizers": [
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
+   },
+   "ok": true
+  },
+  {
+   "schema": "eventKeysBackup",
+   "label": "33 co-organizers",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "co_organizers": [
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
+   },
+   "ok": false
+  },
+  {
+   "schema": "organizerGrantContent",
+   "label": "base",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "granted_by": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0"
+   },
+   "ok": true
+  },
+  {
+   "schema": "organizerGrantContent",
+   "label": "organizers + prior inboxes",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "granted_by": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+    "organizers": [
+     "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ],
+    "prior_einbox_nsecs": [
+     "0303030303030303030303030303030303030303030303030303030303030303"
+    ]
+   },
+   "ok": true
+  },
+  {
+   "schema": "organizerGrantContent",
+   "label": "organizer not hex",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "granted_by": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+    "organizers": [
+     "zz"
+    ]
+   },
+   "ok": false
+  },
+  {
+   "schema": "organizerGrantContent",
+   "label": "65 prior inboxes",
+   "payload": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc="
+     }
+    ],
+    "config_relays": [],
+    "granted_by": "e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+    "prior_einbox_nsecs": [
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303",
+     "0303030303030303030303030303030303030303030303030303030303030303"
+    ]
+   },
+   "ok": false
+  },
+  {
    "schema": "talkSubmissionContent",
    "label": "base",
    "payload": {
@@ -16839,6 +17067,60 @@
      }
     ],
     "coordinator_gen": 3
+   }
+  },
+  {
+   "label": "co-organizers union",
+   "a": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "co_organizers": [
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "co_organizers": [
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ]
+   },
+   "configInbox": null,
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "coordinator_gen": 0,
+    "co_organizers": [
+     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+     "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+     "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    ]
    }
   }
  ]

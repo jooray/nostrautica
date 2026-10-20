@@ -27,6 +27,8 @@ data class EventKeys(
      * under them is found ([Organizer.loadRoster]) or the rotation finishes.
      */
     val pendingEck: List<EckVersion>? = null,
+    /** Other accounts holding organizer custody; every rotation re-issues to them (SB-90). */
+    val coOrganizers: List<String>? = null,
 ) {
     val isOrganizer: Boolean get() = role == "organizer" && eidNsecHex != null && einboxNsecHex != null
 
@@ -52,6 +54,7 @@ data class EventKeys(
                 priorEinboxNsecs = prior.ifEmpty { null },
                 coordinatorGen = maxOf(primary.coordinatorGen ?: 0, fallback.coordinatorGen ?: 0).takeIf { it > 0 },
                 pendingEck = pendingMinus(EckIdentity.union(primary.pendingEck ?: emptyList(), fallback.pendingEck ?: emptyList()), EckIdentity.union(primary.eck, fallback.eck)),
+                coOrganizers = ((primary.coOrganizers ?: emptyList()) + (fallback.coOrganizers ?: emptyList())).distinct().ifEmpty { null },
             )
         }
 
@@ -103,13 +106,26 @@ class EventKeysStore(private val secure: SecureStore) {
         return updated
     }
 
-    suspend fun applyOrganizerGrant(owner: String, coordinate: String, eck: List<EckVersion>, eidNsecHex: String, einboxNsecHex: String): EventKeys {
+    /**
+     * keystore.ts applyOrganizerGrant: ECK union, custody secrets from the grant, an
+     * inbox already held kept as RETIRED (never dropped), and the grant's organizer
+     * set recorded minus this account (SB-90).
+     */
+    suspend fun applyOrganizerGrant(
+        owner: String, coordinate: String, eck: List<EckVersion>, eidNsecHex: String, einboxNsecHex: String,
+        priorEinboxNsecs: List<String>? = null, organizers: List<String>? = null,
+    ): EventKeys {
         val existing = get(owner, coordinate) ?: EventKeys(coordinate, "organizer")
+        val prior = ((existing.priorEinboxNsecs ?: emptyList()) + (priorEinboxNsecs ?: emptyList()) + listOfNotNull(existing.einboxNsecHex))
+            .distinct().filter { it != einboxNsecHex }
+        val co = ((existing.coOrganizers ?: emptyList()) + (organizers ?: emptyList())).distinct().filter { it != owner }
         val updated = existing.copy(
             role = "organizer",
             eck = EckIdentity.union(existing.eck, eck),
             eidNsecHex = eidNsecHex,
             einboxNsecHex = einboxNsecHex,
+            priorEinboxNsecs = prior.ifEmpty { null },
+            coOrganizers = co.ifEmpty { null },
         )
         save(owner, updated)
         return updated

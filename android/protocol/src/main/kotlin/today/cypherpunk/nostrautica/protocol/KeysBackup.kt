@@ -25,6 +25,7 @@ object KeysBackup {
             coordinatorGen = maxOf(a.coordinatorGen ?: 0, b.coordinatorGen ?: 0),
             pendingEck = pending.ifEmpty { null },
             priorEinboxNsecs = prior.ifEmpty { null },
+            coOrganizers = ((a.coOrganizers ?: emptyList()) + (b.coOrganizers ?: emptyList())).distinct().sorted().take(Limits.MAX_ORGANIZERS).ifEmpty { null },
         )
     }
 }
