@@ -36,7 +36,8 @@
  *         SHOT_LOCALES=de,es node e2e/orchestrator.mjs shots
  */
 import { spawn, execFileSync, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { createConnection } from "node:net";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
@@ -44,7 +45,7 @@ import { WebSocket } from "ws";
 import { getPublicKey } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = resolve(HERE, "..");
@@ -93,6 +94,13 @@ const projectArgs = PROJECTS.flatMap((p) => ["--project", p]);
 
 const PORTS = { preview: 4173, relay: 7777, blossom: 3000, proxy: 8443, wssRelay: 7778 };
 const TLS_DIR = "/tmp/nostrautica-tls";
+// The coordinator double's database and log: per RUN, not per tier (audit SB-64).
+// A fixed /tmp path let two runs of the same tier share one database and one log,
+// and the specs assert on that log. A fresh directory also makes "wipe the
+// previous run's DB" unnecessary. Removed at teardown when the run passed; kept,
+// with its path logged, when it failed, because the log is the first thing to read.
+const RUN_DIR = NEEDS.coordinator ? mkdtempSync(join(tmpdir(), `nostrautica-e2e-${tier}-`)) : "";
+const COORD_LOG = NEEDS.coordinator ? join(RUN_DIR, "coordinator.log") : "";
 // The coordinator tiers need a `wss://` relay: the protocol keeps only wss relay
 // tags in the 31600 config (SSRF hardening), and Marmot chat publishes its key
 // package to `ctx.config.relays` ONLY. So chat/full front the nak relay with a
@@ -165,7 +173,15 @@ function killGroup(child, signal) {
  */
 async function ensureComponent(name, isUp, start) {
   if (await isUp()) {
-    log(`reusing existing ${name}`);
+    // Reusing is deliberate (no double-bind), but a reused relay keeps whatever
+    // events an earlier run or experiment left in it, and the persona names are
+    // constants across runs, so a stale instance can satisfy a roster assertion.
+    // Make it visible, and refusable (audit SB-63).
+    if (process.env.E2E_NO_REUSE === "1") {
+      fail(`${name} is already running and E2E_NO_REUSE=1: stop it (or unset E2E_NO_REUSE) and re-run`);
+      return false;
+    }
+    log(`reusing an ALREADY-RUNNING ${name}, not one this run started; its state may predate this run (E2E_NO_REUSE=1 refuses)`);
     return false;
   }
   start();
@@ -182,6 +198,10 @@ function anyChildDied() {
 function teardown(code) {
   if (tearingDown) return;
   tearingDown = true;
+  if (RUN_DIR) {
+    if (code === 0) rmSync(RUN_DIR, { recursive: true, force: true });
+    else log(`kept the coordinator double's db + log for inspection: ${RUN_DIR}`);
+  }
   const alive = children.filter((c) => c.child.exitCode === null && c.child.signalCode === null);
   for (const { name, child } of alive.reverse()) {
     killGroup(child, "SIGTERM");
@@ -245,7 +265,10 @@ function httpOk(url, { https = false } = {}) {
       { method: "GET", rejectUnauthorized: false, timeout: 3000 },
       (r) => {
         r.resume();
-        res(r.statusCode !== undefined); // any response means the server is up
+        // Any non-5xx answer means the server is up (Blossom answers 404 at "/").
+        // A 5xx does not: the https proxy answers 502 when its backend is down,
+        // which is precisely the "not healthy" this probe exists to catch.
+        res(r.statusCode !== undefined && r.statusCode < 500);
       },
     );
     req.on("error", () => res(false));
@@ -316,10 +339,27 @@ function build() {
 }
 
 // ── infra ─────────────────────────────────────────────────────────────────────
+/**
+ * True when the shared cert exists and stays valid for at least another day.
+ * The cert is made with `-days 7` and reused across runs, and /tmp can outlive
+ * that: an expired cert still "works" only because the browser ignores HTTPS
+ * errors and the coordinator double runs with NODE_TLS_REJECT_UNAUTHORIZED=0,
+ * so tightening either would fail the whole chat tier with a TLS error that
+ * names no cause (audit SB-64). `openssl x509 -checkend` exits non-zero when the
+ * cert expires within the window.
+ */
+function tlsCertUsable() {
+  if (!existsSync(`${TLS_DIR}/key.pem`) || !existsSync(`${TLS_DIR}/cert.pem`)) return false;
+  const r = spawnSync("openssl", ["x509", "-checkend", "86400", "-noout", "-in", `${TLS_DIR}/cert.pem`], {
+    stdio: "ignore",
+  });
+  return r.status === 0;
+}
+
 function ensureTlsCert() {
-  if (existsSync(`${TLS_DIR}/key.pem`) && existsSync(`${TLS_DIR}/cert.pem`)) return;
+  if (tlsCertUsable()) return;
   mkdirSync(TLS_DIR, { recursive: true });
-  log("generating a throwaway self-signed TLS cert for the Blossom proxy…");
+  log("generating a throwaway self-signed TLS cert for the Blossom proxy (none, or expiring within 24h)…");
   execFileSync(
     "openssl",
     [
@@ -355,7 +395,7 @@ function startBlossom() {
 
 function startProxy() {
   spawnTracked("https-proxy", "node", [resolve(HERE, "local-infra/https-proxy.mjs")], {
-    env: { ...process.env, PROXY_TARGET_PORT: String(PORTS.blossom), PROXY_LISTEN_PORT: String(PORTS.proxy) },
+    env: { ...process.env, PROXY_TARGET_PORT: String(PORTS.blossom), PROXY_LISTEN_PORT: String(PORTS.proxy), TLS_DIR },
   });
 }
 
@@ -365,18 +405,9 @@ function startWssRelayProxy() {
   });
 }
 
-const COORD_LOG = `/tmp/nostrautica-e2e-coord-${tier}.log`;
-
 function startCoordinator() {
-  const db = `/tmp/nostrautica-e2e-coord-${tier}.sqlite`;
-  // Wipe any prior run's DB so the double starts clean.
-  for (const suffix of ["", "-wal", "-shm", "-journal", ".lock"]) {
-    try {
-      spawnSync("rm", ["-f", db + suffix]);
-    } catch {
-      /* ignore */
-    }
-  }
+  const db = join(RUN_DIR, "coordinator.sqlite");
+  log(`coordinator double: db + log in ${RUN_DIR}`);
   // Both coordinator tiers use the chat double: it wires the REAL Marmot admin bot
   // AND implements every matching schema (ai_profile/pair/batch), so it's a superset
   // of the matching-only double. tests/chat runs on chat AND full, and needs MLS on
