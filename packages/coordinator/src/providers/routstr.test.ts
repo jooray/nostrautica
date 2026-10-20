@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
-import { parseProviderAnnouncement, RoutstrLlm } from "./routstr.js";
+import { parseProviderAnnouncement, RoutstrLlm, estimateRequestTokens } from "./routstr.js";
 
 describe("Routstr provider discovery (kind 38421)", () => {
   it("extracts endpoint (u) and mint tags", () => {
@@ -93,5 +93,13 @@ describe("RoutstrLlm completion deadline scales with max_tokens", () => {
     expect(outcome).toMatch(/timeout/);
     vi.useRealTimers();
     vi.unstubAllGlobals();
+  });
+});
+
+/** Audit DS41-044: funding came from max_tokens alone, i.e. 1 sat for an unbudgeted call. */
+describe("estimateRequestTokens", () => {
+  it("counts the prompt as well as the output budget", () => {
+    expect(estimateRequestTokens({ system: "s".repeat(4000), user: "u".repeat(36000) })).toBe(10_000 + 4096);
+    expect(estimateRequestTokens({ system: "", user: "", maxTokens: 12_000 })).toBe(12_000);
   });
 });

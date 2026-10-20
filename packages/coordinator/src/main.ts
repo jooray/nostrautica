@@ -172,6 +172,7 @@ async function runDaemon(): Promise<void> {
     const payment = new CashuPayment({
       mintUrl: r.mint ?? "",
       walletDbPath: r.wallet_db ?? "cashu-wallet.json",
+      ...(r.amount_sats ? { defaultAmountSats: r.amount_sats } : {}),
       // Durable journal (audit H8): reservations survive a crash mid-request.
       journal: store,
     });

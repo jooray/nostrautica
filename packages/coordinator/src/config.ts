@@ -82,6 +82,8 @@ export const configSchema = z.object({
           discover: z.boolean().default(false),
           mint: z.string().optional(),
           wallet_db: z.string().optional(),
+          /** Fixed sats per request, overriding the token estimate (DS41-044). */
+          amount_sats: z.number().int().positive().optional(),
         })
         .strict()
         .optional(),

@@ -28,6 +28,18 @@ export interface RoutstrOptions {
   net?: ProviderNetPolicy;
 }
 
+/**
+ * Tokens a completion request may consume, for funding it (audit DS41-044): the
+ * prompt (about four characters a token) plus the output budget. This used to be
+ * `maxTokens` alone, the completion ceiling, which is undefined for the profile,
+ * summary and translation calls, so a request carrying thousands of prompt tokens
+ * was sent with exactly 1 sat and a node that enforces payment answered 402. Over-
+ * funding is safe: change comes back in the response headers.
+ */
+export function estimateRequestTokens(req: { system: string; user: string; maxTokens?: number }): number {
+  return Math.ceil((req.system.length + req.user.length) / 4) + (req.maxTokens ?? 4096);
+}
+
 export class RoutstrLlm implements LlmProvider {
   readonly id = "routstr";
   constructor(private readonly opts: RoutstrOptions) {}
@@ -85,7 +97,7 @@ export class RoutstrLlm implements LlmProvider {
     const headers = {
       "Content-Type": "application/json",
       ...(await withUncancellableDeadline("Routstr payment.prepare", PROVIDER_TIMEOUTS.payment, () =>
-        this.opts.payment.prepare({ estimateTokens: req.maxTokens }),
+        this.opts.payment.prepare({ estimateTokens: estimateRequestTokens(req) }),
       )),
     };
     let body: any;
