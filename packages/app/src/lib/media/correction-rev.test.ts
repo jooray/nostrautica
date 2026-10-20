@@ -154,7 +154,9 @@ describe("claimCorrectionRev (audit A-5)", () => {
     expect(rev).toBe(4);
     expect(cacheGet(`corrrev:${COORDINATE}`, other)).toBeUndefined();
     expect(cacheGet(`selfcopy:${COORDINATE}`, other)).toBeUndefined();
-    expect(cacheGet<number>(`corrrev:${COORDINATE}`, pubkey)?.data).toBe(4);
+    // The switch bumped the cache generation (DS41-003), so the late write is
+    // dropped rather than filed anywhere; the published self-copy carries rev 4.
+    expect(cacheGet(`corrrev:${COORDINATE}`, pubkey)).toBeUndefined();
   });
 
   it("starts at 0 for an event that has never been corrected", async () => {
