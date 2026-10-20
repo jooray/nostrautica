@@ -16,12 +16,14 @@ import {
   selfConversationKey,
   bytesToBase64,
   base64ToBytes,
+  pickLatest,
   KIND_APP_DATA,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { fetchEventsAnswered } from "$lib/nostr/ndk.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, cacheGeneration, whenCacheReady } from "$lib/cache/persist.js";
+import { withExclusiveLock } from "$lib/util/exclusive-lock.js";
 
 const BLINDSEED_D = "nostrautica:blindseed";
 // Persist the remote-signer blind seed owner-scoped (CACHING-PLAN §2.9). This is
@@ -100,22 +102,62 @@ async function getOrCreateBlindSeed(signer: AppSigner, pubkey: string): Promise<
   // Cross-session cache hit: no relay fetch, no signer prompt (§2.9). Behind the
   // real bulk read, or a cold miss here sends us on to mint a new seed.
   await whenCacheReady();
-  const cached = cacheGet<string>(BLINDSEED_CACHE_KEY, pubkey);
-  if (cached) {
-    const bytes = base64ToBytes(cached.data);
-    if (bytes.length === 32) return bytes;
-  }
-  const { events: existing, answered } = await fetchEventsAnswered({
-    kinds: [KIND_APP_DATA],
-    authors: [pubkey],
-    "#d": [BLINDSEED_D],
+  const fromCache = cachedSeed(pubkey);
+  if (fromCache) return fromCache;
+  // A logout while the relay read or signer decrypt is in flight must not write
+  // this identity's seed back over the wipe.
+  const gen = cacheGeneration();
+  // Read → mint → publish is ONE critical section per account, across tabs
+  // (audit DS41-012). Two tabs of a remote-signer account used to both read "no
+  // seed, relay answered", both mint, and both publish a replaceable 30078 —
+  // each then kept its own seed for the session, so every blinded address (reuse
+  // library, per-event settings, self-copies) differed between them. The second
+  // tab now waits, and its relay read inside the lock finds the first one's seed.
+  return withExclusiveLock(`nostrautica-blindseed:${pubkey}`, async () => {
+    const again = cachedSeed(pubkey);
+    if (again) return again;
+    return readOrMintBlindSeed(signer, pubkey, gen);
   });
-  if (existing[0]) {
-    const b64 = await signer.nip44Decrypt(pubkey, existing[0].content);
-    const bytes = base64ToBytes(b64);
-    if (bytes.length === 32) {
-      cacheSet(BLINDSEED_CACHE_KEY, b64, existing[0].created_at ?? 0, pubkey);
-      return bytes;
+}
+
+function cachedSeed(pubkey: string): Uint8Array | undefined {
+  const cached = cacheGet<string>(BLINDSEED_CACHE_KEY, pubkey);
+  if (!cached) return undefined;
+  const bytes = base64ToBytes(cached.data);
+  return bytes.length === 32 ? bytes : undefined;
+}
+
+/**
+ * Decrypt one stored seed event, or undefined when its content is not a seed.
+ * The signer's own failures propagate (a prompt the user dismissed is not
+ * evidence the seed is unreadable).
+ */
+async function decryptSeed(
+  signer: AppSigner,
+  pubkey: string,
+  event: { content: string },
+): Promise<{ bytes: Uint8Array; b64: string } | undefined> {
+  const b64 = await signer.nip44Decrypt(pubkey, event.content);
+  const bytes = base64ToBytes(b64);
+  return bytes.length === 32 ? { bytes, b64 } : undefined;
+}
+
+async function readOrMintBlindSeed(
+  signer: AppSigner,
+  pubkey: string,
+  gen: number,
+): Promise<Uint8Array> {
+  const filter = { kinds: [KIND_APP_DATA], authors: [pubkey], "#d": [BLINDSEED_D] };
+  const { events: existing, answered } = await fetchEventsAnswered(filter);
+  // The replaceable winner by the §3.1 rule (newest, then lowest id), not
+  // whichever copy a relay happened to list first: two copies are exactly the
+  // split this function exists to avoid, and every reader must pick the same one.
+  const latest = pickLatest(existing);
+  if (latest) {
+    const seed = await decryptSeed(signer, pubkey, latest);
+    if (seed) {
+      cacheSet(BLINDSEED_CACHE_KEY, seed.b64, latest.created_at ?? 0, pubkey, gen);
+      return seed.bytes;
     }
     // An event IS there and we could not make sense of it. That is the one case
     // where absence is definitely wrong, so it is the last case that should mint.
@@ -134,6 +176,20 @@ async function getOrCreateBlindSeed(signer: AppSigner, pubkey: string): Promise<
     content,
   });
   await publishOrQueue(event);
-  cacheSet(BLINDSEED_CACHE_KEY, seedB64, event.created_at, pubkey);
+  // Re-read the relay winner (DS41-012). The lock covers this browser profile;
+  // another DEVICE of the same account can have minted in the same window, and
+  // relays keep one of the two. Adopt whichever they kept so this device does not
+  // spend the session (and, through the cache, every later one) on a seed the
+  // account's other devices will never see. Best effort: no answer keeps ours.
+  const after = await fetchEventsAnswered(filter).catch(() => undefined);
+  const winner = after ? pickLatest([...after.events, event]) : undefined;
+  if (winner && winner.id !== event.id) {
+    const adopted = await decryptSeed(signer, pubkey, winner).catch(() => undefined);
+    if (adopted) {
+      cacheSet(BLINDSEED_CACHE_KEY, adopted.b64, winner.created_at ?? 0, pubkey, gen);
+      return adopted.bytes;
+    }
+  }
+  cacheSet(BLINDSEED_CACHE_KEY, seedB64, event.created_at, pubkey, gen);
   return seed;
 }
