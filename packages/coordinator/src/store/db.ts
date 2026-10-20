@@ -2390,7 +2390,13 @@ export class Store {
   /** Transcript texts of a speaker's talks (spec §9.2): fed into their ai_profile. */
   talkTranscriptsForSpeaker(coordinate: string, pubkey: string): string[] {
     const rows = this.db
-      .prepare("SELECT transcript_json FROM talks WHERE coordinate = ? AND pubkey = ? AND transcript_json IS NOT NULL")
+      // Only talks the speaker still offers for matching and the organizer has not
+      // rejected (audit DS41-039): a rejected talk, or one resubmitted with
+      // process_for_matching off (which keeps the stored transcript when the media
+      // is unchanged), kept feeding the profile and other people's match reasoning.
+      .prepare(
+        "SELECT transcript_json FROM talks WHERE coordinate = ? AND pubkey = ? AND transcript_json IS NOT NULL AND status != 'rejected' AND process_for_matching = 1",
+      )
       .all(coordinate, pubkey) as { transcript_json: string }[];
     const out: string[] = [];
     for (const r of rows) {

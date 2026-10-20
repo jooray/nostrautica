@@ -2522,7 +2522,24 @@ export class Coordinator {
         `[talk] "${content.title}" not processed for matching ` +
           `(${isExternal ? `external ${content.external_kind} URL` : "process_for_matching off"})`,
       );
+      // An earlier revision may have been folded into the profile; it no longer
+      // counts (talkTranscriptsForSpeaker filters it out), so re-derive (DS41-039).
+      this.rederiveAfterTalkWithdrawn(state, pubkey, content.talk_d, content.revision);
     }
+  }
+
+  /**
+   * Re-run the speaker's profile once a talk stops contributing to matching (it
+   * was rejected, or resubmitted without process_for_matching), so the derived
+   * ai_profile, their 31603 and other attendees' match reasoning drop its content
+   * (audit DS41-039). Keyed by the talk and its revision, so redelivery dedupes.
+   */
+  private rederiveAfterTalkWithdrawn(state: EventState, pubkey: string, talkD: string, revision: number): void {
+    if (state.matching !== "on" || !this.deps.store.getAttendee(state.coordinate, pubkey)?.profile_json) return;
+    this.jobs.enqueue("process_attendee", `proc:${state.coordinate}:${pubkey}:talk-out:${talkD}:${revision}`, {
+      coordinate: state.coordinate,
+      pubkey,
+    });
   }
 
   /**
@@ -4000,6 +4017,7 @@ export class Coordinator {
     }
     this.deps.store.setTalkStatus(state.coordinate, pubkey, talkD, "rejected", 0, this.now());
     log(`[talk] rejected "${talk.title}" for ${short(pubkey)}`);
+    if (talk.transcript_json) this.rederiveAfterTalkWithdrawn(state, pubkey, talkD, talk.revision);
   }
 
   /**

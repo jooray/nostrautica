@@ -2087,6 +2087,29 @@ describe("F2 — prerecorded talks journey (U11)", () => {
     const attendee = h.store.getAttendee(h.coordinate, pk)!;
     expect(attendee.ai_profile_json).toBeTruthy();
   });
+
+  /** Audit DS41-039: rejected / opted-out talks kept feeding the profile. */
+  it("a rejected or opted-out talk stops feeding the profile, and the profile is re-derived", async () => {
+    const h = await setup(0, { talks: "on", matching: "on" });
+    const speakerSk = generateSecretKey();
+    const pk = await join(h, speakerSk, "crypto");
+    await h.coordinator.jobs.drain();
+    h.stt.setTranscript("651", "A talk about zero-knowledge proofs.");
+    h.stt.setTranscript("652", "Another talk about mixnets.");
+    await submitTalk(h, speakerSk, { talkD: "t1", title: "ZK", media: talkMedia(651, "1b".repeat(32)), processForMatching: true });
+    await submitTalk(h, speakerSk, { talkD: "t2", title: "Mix", media: talkMedia(652, "1c".repeat(32)), processForMatching: true });
+    await h.coordinator.jobs.drain();
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toHaveLength(2);
+
+    await admin(h, "talk_reject", { pubkey: pk, talk_d: "t1" });
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toEqual(["Another talk about mixnets."]);
+    // Same media, now without process_for_matching: the stored transcript is kept
+    // on the row but no longer counts.
+    await submitTalk(h, speakerSk, { talkD: "t2", title: "Mix", media: talkMedia(652, "1c".repeat(32)), revision: 1 });
+    expect(h.store.talkTranscriptsForSpeaker(h.coordinate, pk)).toEqual([]);
+    const keys = (h.store as any).db.prepare("SELECT dedupe_key FROM jobs WHERE dedupe_key LIKE '%talk-out%'").all().map((r: any) => r.dedupe_key);
+    expect(keys).toHaveLength(2);
+  });
 });
 
 /** Decode every gift-wrapped kind-21602 key grant addressed to `recipientSk`. */
