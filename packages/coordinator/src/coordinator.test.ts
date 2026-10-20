@@ -6254,6 +6254,158 @@ describe("audit R12 — event-wide retention purge clears every personal identif
   });
 });
 
+/**
+ * Audit SB-16. A detach deleted the custody (the events row), which is the only
+ * thing the retention sweep iterates, so the attendee data of a detached event
+ * (profiles, ai_profiles, transcripts, pair reasoning, parked jobs) was never
+ * deleted by anything. Owner decision: it gets the retention cleanup it would
+ * have had as an installed event, at the same deadline, or at the next sweep when
+ * it has none; a re-attach before then keeps it.
+ */
+describe("audit SB-16 — a detached event's attendee data is purged at its retention deadline", () => {
+  const DAY = 86_400;
+  /** Re-attach h's event at gen 2: a newer 31600 naming this coordinator, then a fresh grant. */
+  async function reattach(h: Harness, extraTags: string[][] = []): Promise<void> {
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 200, id: "cfg-reattach", sig: "", content: "",
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(h.coordSk), "2"], ["matching", "on"], ...extraTags],
+    } as any);
+    const grant = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: { v: 2, a: h.coordinate, gen: 2, inbox_nsec: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }], config_relays: ["wss://test"] },
+    });
+    await h.coordinator.handleCoordinatorWrap(grant as any);
+  }
+  const pairCount = (h: Harness) =>
+    ((h.store as any)["db"].prepare("SELECT COUNT(*) AS n FROM pairs WHERE coordinate = ?").get(h.coordinate) as { n: number }).n;
+
+  it("future deadline: the data survives the detach and every sweep until end + retention, then is purged", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const end = nowSec - 10 * DAY;
+    const h = await setup(0, { retentionDays: 30, eventEndSec: end }); // deadline = now + 20 days
+    const pkA = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const x = attendeeBlobX(h, pkA)!;
+    expect(h.store.getTranscript(x)).toBeDefined();
+    expect(pairCount(h)).toBeGreaterThan(0);
+
+    await admin(h, "detach", {});
+    expect(h.store.getEvent(h.coordinate)).toBeUndefined();
+    expect(h.store.getDetachedEvent(h.coordinate)?.purge_after_sec).toBe(end + 30 * DAY);
+
+    // 19 days on: still inside the window — nothing purged.
+    h.clock.t += 19 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pkA)?.profile_json).toBeTruthy();
+    expect(h.store.getTranscript(x)).toBeDefined();
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeDefined();
+
+    // Past the deadline: profiles, transcripts and pair reasoning go, and so does the ledger row.
+    h.clock.t += 2 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pkA)).toBeUndefined();
+    expect(h.store.getTranscript(x)).toBeUndefined();
+    expect(pairCount(h)).toBe(0);
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+    // The replay bar is kept: the detach tombstone outlives the purge.
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+  });
+
+  it("deadline already passed: purged at the very next sweep", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec - 30 * DAY });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "detach", {});
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined();
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+  });
+
+  it("no retention policy / no end date: 'keep while served' does not survive the detach — purged at the next sweep", async () => {
+    const h = await setup(); // no retention tag, no end tag: the installed sweep never touches it
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined(); // installed: kept
+    await admin(h, "detach", {});
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+
+  it("a re-attach before the deadline cancels the purge and keeps the data", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const end = nowSec - 10 * DAY;
+    const h = await setup(0, { retentionDays: 30, eventEndSec: end });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    await admin(h, "detach", {});
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeDefined();
+
+    await reattach(h, [["retention", "30"]]);
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(false);
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+
+    // Still inside the window: neither the detach purge nor the installed sweep fires.
+    h.clock.t += 5 * DAY * 1000;
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)?.profile_json).toBeTruthy();
+    expect(h.store.isRetentionExpired(h.coordinate)).toBe(false);
+  });
+
+  it("a stale ledger row never purges an event that is installed again", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    // What an older binary's re-install would leave behind: a due row for a live event.
+    h.store.recordDetachedEvent(h.coordinate, 1, 1);
+    await h.coordinator.retentionSweep();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined();
+    expect(h.store.getDetachedEvent(h.coordinate)).toBeUndefined();
+  });
+
+  it("detach drops WAITING jobs too: their payloads carry attendee pubkeys", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    h.coordinator.jobs.enqueue("process_attendee", `proc:${h.coordinate}:${pk}:parked`, { coordinate: h.coordinate, pubkey: pk });
+    (h.store as any)["db"].prepare("UPDATE jobs SET state = 'waiting' WHERE dedupe_key = ?").run(`proc:${h.coordinate}:${pk}:parked`);
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(1);
+    await admin(h, "detach", {});
+    expect(h.store.waitingJobCount(h.coordinate)).toBe(0);
+  });
+
+  it("a detach at startup revalidation (no live state) takes the deadline from the stored config + anchor", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const end = nowSec - 10 * DAY;
+    const h = await setup(0, { retentionDays: 30, eventEndSec: end });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    // The newest 31600 now names another coordinator; a restarted daemon finds out at boot.
+    h.transport.seed.push({
+      kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 100, id: "cfg-repoint-sb16", sig: "", content: "",
+      tags: [["d", "cypherpunk"], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", getPublicKey(generateSecretKey()), "2"]],
+    } as any);
+    const restarted = new Coordinator({
+      store: h.store, transport: h.transport, coordSk: h.coordSk,
+      llm: new MockLlm(() => ({})), stt: new MockStt(), sttModel: "mock",
+      summaryModel: { provider: "mock", model: "mock-cheap" },
+      matchModel: { provider: "mock", model: "mock-strong" },
+      embedModel: { provider: "mock", model: "mock-embed" },
+      translateModel: { provider: "mock", model: "mock-cheap" },
+      defaultRelays: ["wss://test"], sleep: async () => {}, now: () => h.clock.t,
+    });
+    await restarted.start(); // revalidation detaches, then the boot sweep runs
+    expect(h.store.isInstallTombstoned(h.coordinate)).toBe(true);
+    expect(h.store.getDetachedEvent(h.coordinate)?.purge_after_sec).toBe(end + 30 * DAY);
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeDefined(); // boot sweep: not yet due
+    restarted.stop();
+  });
+});
+
 // ── audit C3 — public inbox population / rate / concurrency bounds ────────────
 describe("audit C3 — public inbox is population-bounded", () => {
   it("drops profile submissions from identities with no enrollment row (no DB growth)", async () => {

@@ -636,6 +636,35 @@ describe("schema migrations (audit O3)", () => {
     store.close();
   });
 
+  it("adds the detached_events purge ledger to a v5 database (v6, audit SB-16)", async () => {
+    const path = tmpDb();
+    // A v5 database as the previous binary left it: everything but the ledger.
+    new Store(path).close();
+    const { DatabaseSync } = await import("node:sqlite");
+    const raw = new DatabaseSync(path);
+    raw.exec("DROP TABLE detached_events");
+    raw.prepare("INSERT INTO install_state (coordinate, high_gen, tombstoned, detached_at) VALUES (?, ?, 1, ?)").run("31923:e:x", 3, 50);
+    raw.exec("PRAGMA user_version = 5");
+    raw.close();
+
+    const store = new Store(path);
+    expect(store.schemaVersion()).toBe(SCHEMA_VERSION);
+    expect(SCHEMA_VERSION).toBeGreaterThanOrEqual(6);
+    // Existing tombstones carry over untouched; the ledger starts empty (an event
+    // detached under v5 has no deadline on record, see VERSIONING.md).
+    expect(store.isInstallTombstoned("31923:e:x")).toBe(true);
+    expect(store.dueDetachedEvents(Number.MAX_SAFE_INTEGER)).toEqual([]);
+    // And works: first detach wins, due is inclusive, a re-install cancels.
+    store.recordDetachedEvent("31923:e:x", 100, 50);
+    store.recordDetachedEvent("31923:e:x", 10, 60);
+    expect(store.getDetachedEvent("31923:e:x")).toEqual({ coordinate: "31923:e:x", purge_after_sec: 100, detached_at: 50 });
+    expect(store.dueDetachedEvents(99)).toEqual([]);
+    expect(store.dueDetachedEvents(100).map((r) => r.coordinate)).toEqual(["31923:e:x"]);
+    store.recordInstalledGen("31923:e:x", 4);
+    expect(store.getDetachedEvent("31923:e:x")).toBeUndefined();
+    store.close();
+  });
+
   it("REFUSES to open a database written by a newer binary", async () => {
     const path = tmpDb();
     const store = new Store(path);

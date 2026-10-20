@@ -433,34 +433,56 @@ after an operational detach, verify subscriptions closed, stored event state, an
 the coordinator logs. Before decommissioning, define who retains group
 administration and confirm the handoff.
 
-**Detach deletes custody, not attendee data (audit SB-16).** A detach (a 31600
-that stops naming this coordinator or its `gen`, or a signed `21604 detach`)
-deletes the event row: the `E_inbox` key, every ECK, the stored config, and any
-rotation progress. It also closes the subscriptions and cancels queued and running
-jobs. It does **not** delete what the coordinator derived from attendees. Profiles,
+**Detach deletes custody now, and attendee data at the retention deadline (audit
+SB-16).** A detach (a 31600 that stops naming this coordinator or its `gen`, or a
+signed `21604 detach`) deletes the event row: the `E_inbox` key, every ECK, the
+stored config, and any rotation progress. It also closes the subscriptions and
+drops the event's pending, running and `waiting` jobs (a parked job's payload
+carries attendee pubkeys). What the coordinator derived from attendees (profiles,
 AI profiles, transcripts, display names, corrections, pair scores and reasoning,
 talks, Nostr summaries, pipeline status rows, usage counters, the frozen Marmot
-group state and chat-device bindings all stay in `coordinator.sqlite`, along with
-jobs parked as `waiting`. Keeping them is deliberate: a re-attach resumes from
-them instead of paying to re-process every attendee.
+group row and chat-device bindings) is kept **only until the event's retention
+deadline**, so that a re-attach in the meantime resumes from it instead of paying
+to re-process every attendee.
 
-What removes them:
+The deadline is the one retention would have applied had the event stayed
+installed: the event's end time plus the `["retention", <days>]` of the last 31600
+this coordinator saw. The detach writes it to the `detached_events` table (schema
+v6) and logs it (`attendee data purged after <date> unless re-attached`). The
+retention sweep, at boot and then hourly, runs the full local purge (the same
+reference-counted purge described in §6) for every row whose deadline has passed,
+then deletes the row. The deadline is "the next sweep", within the hour, when:
 
-- **The retention sweep**, but only for an event that is installed. It runs at boot
-  and then hourly. For an event whose 31600 carries `["retention", <days>]`, once
-  the event's end time plus `<days>` has passed, it runs the full local purge (the
-  same reference-counted purge described in §6) and deletes the relay records. A
-  detached event is no longer installed, so **the sweep never reaches it**. Its data
-  is swept only if the event is re-attached to this coordinator and its retention
-  window then elapses. An event without a `retention` tag is never swept.
-- **An attendee's `delete_data` withdrawal** purges that attendee, but only while the
-  event is installed. After a detach the coordinator no longer reads the inbox.
-- **The operator.** There is no built-in command for this. To honor an organizer's
-  request to forget a detached event, delete its rows by coordinate yourself, take
-  a backup first, and expire older backups (§6).
+- it has already passed at detach time, or
+- the event has none: no `retention` tag, or no end date (a 31612 community, or a
+  31923 without `end`/`start`). An installed event in that state is kept
+  indefinitely, because it is still being served. A detached one is not, so it
+  does not get that exception.
 
-Tell organizers this before they detach. Detaching moves custody away from this
-coordinator, but it does not erase what this coordinator already learned.
+A re-attach to this coordinator (a fresh grant at a higher `gen`) before the purge
+deletes the row and keeps the data; the event is then an installed event again,
+under its own retention window. The sweep also never purges an event that has an
+event row, whatever the ledger says.
+
+What the detach purge does **not** do:
+
+- **Relay records.** The installed sweep also NIP-09-deletes the event's 31603,
+  31604, 31605, 31606 and 31610 records. A detached coordinator no longer holds the
+  ECKs that address the blinded ones, so its purge is local only.
+- **Backups.** A snapshot taken before the purge still contains the data. Expire
+  old backups (§6).
+- **Events detached before schema v6** have no ledger row, so nothing purges them.
+  To forget one, delete its rows by coordinate yourself, take a backup first, and
+  expire older backups.
+- **The minimal security state** stays, as after a retention purge:
+  `install_state` (the detach tombstone and `gen` high-water mark that bar a
+  replayed grant), `billing_state`, the global `seen_rumors` ledger, and the
+  coordinator's own MLS key material in `marmot_kv`. None of it holds attendee
+  content.
+
+Tell organizers this before they detach: the old coordinator keeps what it learned
+until the event's retention deadline, or for at most an hour when the event has no
+deadline.
 
 **Periodic restore drill.** On a schedule, `verify-backup` the latest snapshot and
 `restore` it onto an isolated host with subscriptions and provider calls disabled;

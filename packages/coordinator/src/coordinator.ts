@@ -5160,6 +5160,9 @@ export class Coordinator {
    *  - cancel pending/running jobs for the event (stop pending paid work);
    *  - DELETE the stored E_inbox/ECK custody (decision D6 — re-attach requires a
    *    fresh grant with a new gen); the tombstone row survives for dedupe/replay bar;
+   *  - schedule the purge of the event's attendee-derived data (audit SB-16) for the
+   *    retention deadline it would have had, or the next sweep when it has none
+   *    ({@link detachPurgeAfter}); a re-install before then cancels it;
    *  - freeze the event's Marmot group (the existing freeze path) — full Marmot
    *    detach semantics (key rotation, member wipe) remain Phase 2/3.
    */
@@ -5206,6 +5209,12 @@ export class Coordinator {
       await this.deps.transport.publish(status, this.accountRelays(state)).catch(() => {});
       log(`[detach] ${coordinate}: Marmot group FROZEN — chat administration orphaned until a coordinator re-attaches`);
     }
+    // Schedule the purge of what the custody leaves behind (audit SB-16), computed
+    // BEFORE the events row and live state go, since both carry the deadline's inputs.
+    // No await between this and deleteEvent: the retention sweep reads "an events row
+    // exists" as "re-installed, cancel the purge", so the two must not interleave.
+    const purgeAfter = this.detachPurgeAfter(coordinate, state);
+    this.deps.store.recordDetachedEvent(coordinate, purgeAfter, Math.floor(this.now() / 1000));
     // Drop live state and DELETE key custody (D6).
     this.events.delete(coordinate);
     this.completedInstallGen.delete(coordinate);
@@ -5216,7 +5225,71 @@ export class Coordinator {
     this.deps.store.clearCommandProgressForEvent(coordinate);
     this.inviteHashCache.delete(coordinate);
     if (!already) {
-      log(`[detach] ${coordinate} — ${opts.reason} (gen ${gen}); custody deleted, ${cancelled} job(s) cancelled, subscriptions closed`);
+      const held = this.deps.store.getDetachedEvent(coordinate)?.purge_after_sec ?? purgeAfter;
+      log(
+        `[detach] ${coordinate} — ${opts.reason} (gen ${gen}); custody deleted, ${cancelled} job(s) cancelled, subscriptions closed; ` +
+          `attendee data purged ${held * 1000 > this.now() ? `after ${new Date(held * 1000).toISOString()} unless re-attached` : "at the next retention sweep"}`,
+      );
+    }
+  }
+
+  /**
+   * When a detached event's attendee-derived data is purged (audit SB-16): the
+   * retention deadline the event would have had as an installed event
+   * (`end + retention·86400`, from the live state, else from the stored config and
+   * anchor of an event detached before it was restored), or NOW when there is none.
+   *
+   * "None" covers two cases the installed-event sweep treats as "never": no
+   * `retention` tag (keep indefinitely) and no end date (a 31612 community, or a
+   * 31923 without dates). That rule is about an event this coordinator still serves,
+   * where the organizer's data is in use and the sweep cannot know when the window
+   * opened. After a detach nothing here uses it any more, and "never" would be
+   * exactly the leak SB-16 describes, so it does not carry over: such an event's
+   * data is purged at the first sweep after the detach (within the hour).
+   */
+  private detachPurgeAfter(coordinate: string, state: EventState | undefined): number {
+    const nowSec = Math.floor(this.now() / 1000);
+    let deadline: number | null = null;
+    if (state) {
+      deadline = this.retentionDeadline(state);
+    } else {
+      const row = this.deps.store.getEvent(coordinate);
+      if (row) {
+        let retentionDays: number | undefined;
+        try {
+          const v = (JSON.parse(row.config_json) as { retentionDays?: unknown }).retentionDays;
+          if (typeof v === "number" && Number.isInteger(v) && v > 0) retentionDays = v;
+        } catch {
+          /* unparseable stored config ⇒ no deadline */
+        }
+        const endSec = this.deps.store.getRetentionAnchor(coordinate);
+        if (retentionDays !== undefined && endSec > 0) deadline = endSec + retentionDays * 86_400;
+      }
+    }
+    return deadline === null ? nowSec : Math.max(deadline, nowSec);
+  }
+
+  /**
+   * The detach half of the retention sweep (audit SB-16): purge every detached
+   * event whose deadline has passed, then drop its ledger row. An event that is
+   * installed again (live state, or an events row from a re-install that a
+   * restart has not restored yet) is never purged; its stale row is dropped.
+   * A purge that throws keeps the row, so the next sweep retries it.
+   */
+  private purgeDueDetachedEvents(nowSec: number): void {
+    for (const t of this.deps.store.dueDetachedEvents(nowSec)) {
+      if (this.events.has(t.coordinate) || this.deps.store.getEvent(t.coordinate)) {
+        this.deps.store.clearDetachedEvent(t.coordinate);
+        log(`[retention] ${t.coordinate}: installed again — detach purge cancelled, data kept`);
+        continue;
+      }
+      try {
+        this.deps.store.purgeEventArtifacts(t.coordinate);
+        this.deps.store.clearDetachedEvent(t.coordinate);
+        log(`[retention] ${t.coordinate}: detached event's deadline passed — purged its local attendee data`);
+      } catch (e) {
+        log(`[retention] detach purge failed for ${t.coordinate}: ${e instanceof Error ? e.message : e} — will retry next sweep`);
+      }
     }
   }
 
@@ -5236,6 +5309,8 @@ export class Coordinator {
    * window has elapsed and which hasn't already been swept, delete the event's
    * member records (31603/31604/31605/31606/published 31610), stop paid processing
    * (a terminal park distinct from billing/budget), and emit a 21606 to organizers.
+   * Then purge the local data of every DETACHED event whose deadline has passed
+   * (audit SB-16, {@link purgeDueDetachedEvents}).
    * Idempotent — an event already expired is skipped.
    */
   async retentionSweep(): Promise<void> {
@@ -5259,6 +5334,9 @@ export class Coordinator {
         this.retentionInProgress.delete(state.coordinate);
       }
     }
+    // Detached events are not in `this.events`, so the loop above never sees them
+    // (audit SB-16). Their own ledger says when their data is due.
+    this.purgeDueDetachedEvents(nowSec);
   }
 
   /**

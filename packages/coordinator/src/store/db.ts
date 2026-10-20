@@ -73,7 +73,7 @@ const AT_REST_PACK_THRESHOLD = AT_REST_CHUNK;
  * boundary advances `user_version` through an ordered, transactional migration, and
  * an open refuses a database whose `user_version` exceeds this constant.
  */
-export const SCHEMA_VERSION = 5;
+export const SCHEMA_VERSION = 6;
 
 /** How many hourly `daemon_usage` buckets to keep (audit SEC-7). Comfortably more
  *  than the longest window a ceiling can ask for, so a rolling read never sees a
@@ -496,11 +496,40 @@ function applyInviteUsagePerRedeemer(db: DatabaseSync): void {
   `);
 }
 
+/**
+ * v6: the `detached_events` purge ledger (audit SB-16).
+ *
+ * A detach deletes an event's key custody (the `events` row), and with it the only
+ * thing the retention sweep iterates over, so every attendee-derived row of a
+ * detached event used to stay forever. A row here records when that data falls due:
+ * the retention deadline the event would have had (end + window from its last
+ * known 31600), or the detach time when no deadline can be computed. The sweep
+ * purges due rows through `purgeEventArtifacts` and then deletes the row; a
+ * re-install deletes it first, which cancels the purge.
+ *
+ * Why this is a version boundary although it is only a new table: an older binary
+ * would ignore the table AND re-install without clearing it, so after a roll-forward
+ * a stale row could name an event that is installed again. The sweep refuses to
+ * purge an installed event (it drops the row instead), but the rule stays: a table
+ * whose stale rows would DELETE data if an older binary left them behind is not an
+ * "older binary just ignores it" addition.
+ */
+function applyDetachedEventsLedger(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS detached_events (
+      coordinate TEXT PRIMARY KEY,
+      purge_after_sec INTEGER NOT NULL,   -- unix seconds; purge at the first sweep past it
+      detached_at INTEGER NOT NULL        -- unix seconds
+    )
+  `);
+}
+
 const MIGRATIONS: Migration[] = [
   { version: 2, up: applyRemediationDDL },
   { version: 3, up: applyMembershipSubjectMerge },
   { version: 4, up: applyArtifactLegacyQuarantine },
   { version: 5, up: applyInviteUsagePerRedeemer },
+  { version: 6, up: applyDetachedEventsLedger },
 ];
 
 /**
@@ -1945,7 +1974,9 @@ export class Store {
       .get(coordinate) as { tombstoned: number } | undefined;
     return !!row && row.tombstoned === 1;
   }
-  /** Record a (re)install at `gen`: bump the high-water mark and clear any tombstone. */
+  /** Record a (re)install at `gen`: bump the high-water mark and clear any tombstone.
+   *  Also cancels a pending detach purge (audit SB-16): the event is served again, so
+   *  its attendee data is live data, not leftovers of a detach. */
   recordInstalledGen(coordinate: string, gen: number): void {
     this.db
       .prepare(
@@ -1953,6 +1984,42 @@ export class Store {
          ON CONFLICT(coordinate) DO UPDATE SET high_gen = MAX(install_state.high_gen, excluded.high_gen), tombstoned = 0, detached_at = NULL`,
       )
       .run(coordinate, gen);
+    this.clearDetachedEvent(coordinate);
+  }
+
+  // ── detach purge ledger (audit SB-16) ─────────────────────────────────────
+  /**
+   * Schedule the local purge of a detached event's attendee-derived data at
+   * `purgeAfterSec`. The FIRST detach wins: a re-trigger (a replayed 21604, a
+   * second revalidation) runs after the custody is gone and so can no longer
+   * compute the deadline, and must not shorten or extend the one already set.
+   */
+  recordDetachedEvent(coordinate: string, purgeAfterSec: number, detachedAtSec: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO detached_events (coordinate, purge_after_sec, detached_at) VALUES (?, ?, ?)
+         ON CONFLICT(coordinate) DO NOTHING`,
+      )
+      .run(coordinate, purgeAfterSec, detachedAtSec);
+  }
+  /** The pending detach purge for a coordinate, if any. */
+  getDetachedEvent(coordinate: string): { coordinate: string; purge_after_sec: number; detached_at: number } | undefined {
+    return this.db.prepare("SELECT coordinate, purge_after_sec, detached_at FROM detached_events WHERE coordinate = ?").get(coordinate) as
+      | { coordinate: string; purge_after_sec: number; detached_at: number }
+      | undefined;
+  }
+  /** Detached events whose purge deadline has been reached (`purge_after_sec <= nowSec`).
+   *  Inclusive, unlike the installed sweep's `nowSec > deadline`, so that a row
+   *  scheduled for "now" (no deadline) is due at the very next sweep, even one that
+   *  runs within the same second. */
+  dueDetachedEvents(nowSec: number): { coordinate: string; purge_after_sec: number; detached_at: number }[] {
+    return this.db
+      .prepare("SELECT coordinate, purge_after_sec, detached_at FROM detached_events WHERE purge_after_sec <= ? ORDER BY purge_after_sec")
+      .all(nowSec) as { coordinate: string; purge_after_sec: number; detached_at: number }[];
+  }
+  /** Drop a pending detach purge (done, or cancelled by a re-install). */
+  clearDetachedEvent(coordinate: string): void {
+    this.db.prepare("DELETE FROM detached_events WHERE coordinate = ?").run(coordinate);
   }
   /** Durably tombstone a detached install: bump the high-water mark to `gen`. */
   tombstoneInstall(coordinate: string, gen: number, detachedAt: number): void {
@@ -1964,13 +2031,19 @@ export class Store {
       .run(coordinate, gen, detachedAt);
   }
 
-  /** Cancel every pending/running job for an event (detach: stop pending paid work). */
+  /** Cancel every pending/running/waiting job for an event (detach and retention:
+   *  stop pending paid work). */
   cancelJobsForEvent(coordinate: string): number {
     // Jobs carry the coordinate in their JSON payload; match on it and drop the
-    // non-terminal ones so a detached event's queued work never runs.
+    // non-terminal ones so a detached event's queued work never runs. `waiting`
+    // (parked on billing, a budget, or a not-live event) is non-terminal too, and
+    // its payload carries attendee pubkeys (audit SB-16): left behind, it would sit
+    // in the queue holding identities until the purge, for work that can never run
+    // again under this custody. A re-attach re-derives what it needs. Terminal rows
+    // (done/poison) stay until `purgeEventArtifacts` or `pruneOldData`.
     const info = this.db
       .prepare(
-        "DELETE FROM jobs WHERE state IN ('pending','running') AND json_extract(payload, '$.coordinate') = ?",
+        "DELETE FROM jobs WHERE state IN ('pending','running','waiting') AND json_extract(payload, '$.coordinate') = ?",
       )
       .run(coordinate);
     return Number(info.changes);
@@ -2703,7 +2776,9 @@ export class Store {
    * Full event-wide local purge (audit C5 + R12): remove EVERY coordinator-held
    * derived copy AND every event-scoped personal identifier for an event. Used by the
    * retention sweep (NIP §6.2) so "delete member data after the event" actually
-   * deletes the local plaintext, not just the relay records. Idempotent.
+   * deletes the local plaintext, not just the relay records, and by the detach purge
+   * (audit SB-16) for an event whose custody a detach already deleted: its data goes
+   * at the deadline retention would have given it. Idempotent.
    *
    * Explicit, TESTED retention table inventory (audit R12 — every event-scoped table
    * has a documented disposition; a new table MUST be classified here):
@@ -2720,7 +2795,11 @@ export class Store {
    *                                          ids (R12). Safe post-expiry: the event is
    *                                          terminal and retention_expired gates every
    *                                          future inbox rumor, so replay protection
-   *                                          no longer depends on these rows.
+   *                                          no longer depends on these rows. Safe
+   *                                          after a detach (SB-16): nothing is served
+   *                                          until a fresh higher-gen grant, a replayed
+   *                                          rumor is still caught by seen_rumors, and
+   *                                          admin commands carry their own expiry.
    *     - jobs (ALL states incl. terminal/waiting)   payloads carry attendee pubkeys
    *                                          (R12); cancelJobsForEvent only drops
    *                                          pending/running, so poison/waiting rows
@@ -2732,6 +2811,11 @@ export class Store {
    *     - marmot_groups                      the event's MLS group row (coordinate-keyed)
    *
    *   RETAINED (minimal security / replay state, justified — audit R12):
+   *     - detached_events                    NOT touched here: the caller owns it. The
+   *                                          detach purge deletes the row only after
+   *                                          this purge commits, so a failed purge is
+   *                                          retried at the next sweep (SB-16). It holds
+   *                                          a coordinate and two timestamps.
    *     - install_state                      detach tombstone + install generation
    *                                          high-water mark: a security replay bar
    *                                          (a replayed historical grant must never
