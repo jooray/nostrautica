@@ -77,6 +77,10 @@ Elige **Crear un evento** y completa el formulario:
   - *Códigos de invitación + manual*: los enlaces de invitación aprueban
     automáticamente (con un coordinador conectado); quienes no tengan código
     esperan tu aprobación. **Recomendado para la mayoría de los eventos.**
+  - *Abierta: entra cualquiera con el enlace* (solo para comunidades, donde es
+    la opción por defecto): con un coordinador conectado, quien tenga el enlace
+    se aprueba automáticamente, con código o sin él. A quien hayas quitado no
+    vuelve a entrar así; su nueva solicitud espera tu aprobación.
 - **Idioma del evento**: ver más abajo.
 - **Emparejamiento con IA**: ponlo en *Activado* si piensas conectar un
   coordinador (§5). Puedes conectar el coordinador más adelante; por ahora

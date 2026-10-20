@@ -18,6 +18,7 @@ import {
 import { nsecEncode } from "nostr-tools/nip19";
 
 import {
+  configForSpace,
   KIND_GIFT_WRAP,
   KIND_JOIN_REQUEST,
   KIND_PROFILE_SUBMISSION,
@@ -2081,7 +2082,7 @@ export async function updateEventConfig(
     ? unionRelays(chatRelaysOf(current), chatInteropRelays(relays))
     : chatRelaysOf(current);
   const next: EventConfig = { ...current, ...changes, relays, chatRelays };
-  const built = buildEventConfig(next);
+  const built = buildEventConfig(configForSpace(next, ctx.coordinate));
   // Monotonic republish (audit P3): a config change made in the same second as
   // the previous 31600 must win the §3.1 tie-break, or the stale config stays
   // authoritative and the setting silently doesn't take. Read + publish across the
@@ -2168,7 +2169,7 @@ export async function attachCoordinator(
     coordinatorGen: gen,
     eck: currentEckId,
   };
-  const built = buildEventConfig(cfg);
+  const built = buildEventConfig(configForSpace(cfg, ctx.coordinate));
 
   // 2. Gift-wrap the Coordinator Grant (21603) carrying the same gen, sealed by
   //    E_id so the coordinator can authenticate the install against the coordinate.
@@ -2402,7 +2403,7 @@ export async function detachCoordinator(
   void _c;
   void _g;
   const currentEckId = rotatedEck.reduce((m, v) => Math.max(m, v.id), ctx.config.eck);
-  const built = buildEventConfig({ ...rest, inbox: newInboxPubkey, eck: currentEckId });
+  const built = buildEventConfig(configForSpace({ ...rest, inbox: newInboxPubkey, eck: currentEckId }, ctx.coordinate));
   // Monotonic republish (audit P3): a detach in the same second as the previous
   // config must win the §3.1 tie-break, or the coordinator-bearing config can
   // stay authoritative and the detach silently doesn't take.

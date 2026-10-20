@@ -17,6 +17,7 @@ import { finalizeEvent } from "nostr-tools/pure";
 import {
   KIND_EVENT_CONFIG,
   buildEventConfig,
+  configForSpace,
   coordinateToNaddr,
   hexToBytes,
   isCommunityCoordinate,
@@ -230,7 +231,7 @@ async function republishConfig(
   const sameChildren = JSON.stringify(next.children ?? []) === JSON.stringify(current.children ?? []);
   if (sameChildren && next.parent === current.parent) return undefined; // nothing to change
   const eidSk = hexToBytes(keys.eidNsecHex);
-  const built = buildEventConfig(next);
+  const built = buildEventConfig(configForSpace(next, coordinate));
   const publishRelays = unionRelays(relays, current.relays);
   const { createdAt } = await publishMonotonic({
     kind: built.kind,

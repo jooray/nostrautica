@@ -67,6 +67,10 @@ Choose **Create an event** and fill in the form:
     approve someone by hand if you want to.
   - *Invite codes + manual*: invite links auto-approve (with a coordinator
     attached); people without a code wait for you. **Recommended for most events.**
+  - *Open: anyone with the link joins* (communities only, and their default):
+    with a coordinator attached, everyone who has the link is approved
+    automatically, with or without a code. Someone you removed is not let back
+    in that way; their new request waits for you.
 - **Event language**: see below.
 - **AI matchmaking**: set to *On* if you plan to attach a coordinator (§5).
   You can attach the coordinator later; leave the setting on now.

@@ -313,10 +313,11 @@ function build() {
   // The local preview build MUST NOT carry BASE_PATH=/app — the specs use "/#/".
   const env = { ...process.env };
   delete env.BASE_PATH;
-  // Point the whole app at the local relay + Blossom at BUILD time (relays.ts
-  // reads these VITE_* vars via import.meta.env), so create/join/upload traffic
-  // never touches public infrastructure. Only the relay tiers need it; the smoke
-  // build talks to nothing.
+  // Point the app's own default relays + Blossom at the local stack at BUILD
+  // time (relays.ts reads these VITE_* vars via import.meta.env), so the event
+  // the specs create lives there. Relays named in other users' data (10050 DM
+  // inboxes, relay hints) are still contacted; that is fine. Only the relay
+  // tiers need it; the smoke build talks to nothing.
   if (NEEDS.relay) {
     // On coordinator tiers this is the wss proxy (config-relay chat needs wss); on
     // integration it's the plain ws relay.

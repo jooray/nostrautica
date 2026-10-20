@@ -83,8 +83,9 @@ client that does not know `31612` does not see communities at all, which is the 
 degradation: it cannot misread one as an event, because it never resolves the coordinate.
 No `v` bump; the `31600` config inside a community still carries `v=2`.
 
-**Approval.** A community defaults to `approval: "open"` (§6.3): anyone holding the invite
-link is a member. An older client or coordinator meeting `"open"` falls back to `"manual"`
+**Approval.** A community defaults to `approval: "open"` (§6.3): anyone holding the
+link is admitted, with no invite code and no organizer action (§6.2). The roster cap
+still applies, and a member the organizer revoked is not readmitted automatically. An older client or coordinator meeting `"open"` falls back to `"manual"`
 per the tolerant-parse rule, which is stricter than intended rather than looser.
 
 ## 2. Wire version
@@ -445,13 +446,19 @@ silently drop them.
       free to approve the person by hand, and the coordinator honours that `21604
       approve` even for someone it rejected. A valid entitlement refused only because
       the roster is full stays pending, as everywhere else.
-    - `"manual+invite"` and `"open"`: a valid entitlement auto-approves, and everything
-      else waits for the organizer.
+    - `"manual+invite"`: a valid entitlement auto-approves, and everything else waits
+      for the organizer.
+    - `"open"`: every well-formed join auto-approves, with or without a code, and no
+      organizer action is needed. A code that is presented is still verified and
+      claimed, but none is required. Two limits remain: the roster cap (a join refused
+      for space stays pending, as everywhere else), and a member the organizer revoked,
+      whose re-join waits for the organizer instead of being readmitted.
 
     **Compatibility.** No wire change. A coordinator that predates enforcement treats
     every value as `"manual+invite"`. In a `"manual"` event it auto-approves valid
     invites, which is looser than declared, and in an `"invite"` event it queues
-    instead of rejecting. Organizer clients that predate the `organizer-self` label
+    instead of rejecting. In an `"open"` space it queues a code-less join, which is
+    stricter. Organizer clients that predate the `organizer-self` label
     get their self-join queued under `"manual"`. That is stricter than intended, and
     the organizer can approve themselves from the queue. An organizer client without
     a coordinator applies the policy itself.

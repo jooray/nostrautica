@@ -7477,7 +7477,7 @@ describe("audit DS41-043 — a long talk transcript still publishes", () => {
  */
 describe("audit SB-124 — the approval policy is enforced", () => {
   /** Send a join carrying harness invite `idx` (or none), no submission. */
-  async function joinWith(h: Harness, sk: Uint8Array, idx: number | undefined, name = "x"): Promise<string> {
+  async function joinWith(h: Harness, sk: Uint8Array, idx: number | undefined, name = "x", createdAt?: number): Promise<string> {
     const pk = getPublicKey(sk);
     const tags: string[][] = [["a", h.coordinate]];
     if (idx !== undefined) {
@@ -7490,6 +7490,7 @@ describe("audit SB-124 — the approval policy is enforced", () => {
         kind: KIND_JOIN_REQUEST,
         content: { v: 2, name, message: "", rsvp_public: false },
         tags,
+        ...(createdAt !== undefined ? { created_at: createdAt } : {}),
       }) as any,
     );
     return pk;
@@ -7566,14 +7567,45 @@ describe("audit SB-124 — the approval policy is enforced", () => {
     expect(grantsTo(h, sk).length).toBeGreaterThan(0);
   });
 
-  it("manual+invite and open: a valid code auto-approves, no code waits in the queue", async () => {
-    for (const approval of ["manual+invite", "open"] as const) {
-      const h = await setup(0, { approval });
-      const withCode = await joinWith(h, generateSecretKey(), 0);
-      const without = await joinWith(h, generateSecretKey(), undefined);
-      expect(h.store.getAttendee(h.coordinate, withCode)?.status, approval).toBe("approved");
-      expect(h.store.getAttendee(h.coordinate, without)?.status, approval).toBe("pending");
-    }
+  it("manual+invite: a valid code auto-approves, no code waits in the queue", async () => {
+    const h = await setup(0, { approval: "manual+invite" });
+    const withCode = await joinWith(h, generateSecretKey(), 0);
+    const without = await joinWith(h, generateSecretKey(), undefined);
+    expect(h.store.getAttendee(h.coordinate, withCode)?.status).toBe("approved");
+    expect(h.store.getAttendee(h.coordinate, without)?.status).toBe("pending");
+  });
+
+  // Owner decision 2026-10-20: "open" means anyone holding the link is in.
+  it("open: a code-less join is approved, and a valid code still admits (and is claimed)", async () => {
+    const h = await setup(0, { approval: "open" });
+    const withoutSk = generateSecretKey();
+    const without = await joinWith(h, withoutSk, undefined);
+    expect(h.store.getAttendee(h.coordinate, without)?.status).toBe("approved");
+    expect(grantsTo(h, withoutSk).length).toBeGreaterThan(0);
+    const withCode = await joinWith(h, generateSecretKey(), 0);
+    expect(h.store.getAttendee(h.coordinate, withCode)?.status).toBe("approved");
+    // A spent single-use code does not lock anyone out of an open community.
+    const reuse = await joinWith(h, generateSecretKey(), 0);
+    expect(h.store.getAttendee(h.coordinate, reuse)?.status).toBe("approved");
+  });
+
+  it("open: a revoked member re-joining is queued for the organizer, not readmitted", async () => {
+    const h = await setup(0, { approval: "open" });
+    const sk = generateSecretKey();
+    const pk = await joinWith(h, sk, undefined);
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    await admin(h, "revoke", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    const grantsBefore = grantsTo(h, sk).length;
+
+    h.clock.t += 60_000;
+    await joinWith(h, sk, undefined, "again", Math.floor(h.clock.t / 1000));
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
+
+    // The organizer can still let them back in by hand.
+    await admin(h, "approve", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
   });
 
   it("a 31600 without an approval tag is treated as the NIP default, manual", async () => {

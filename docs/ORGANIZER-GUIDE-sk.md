@@ -74,6 +74,10 @@ Zvoľte **Vytvoriť podujatie** a vyplňte formulár:
   - *Pozývacie kódy + manuálne*: pozývacie odkazy schvaľujú automaticky (keď je
     pripojený koordinátor); ostatní čakajú na vás. **Odporúčané pre väčšinu
     podujatí.**
+  - *Otvorené: pridá sa každý, kto má odkaz* (iba pre komunity, kde je
+    predvolené): keď je pripojený koordinátor, každý, kto má odkaz, je schválený
+    automaticky, s kódom aj bez neho. Koho ste odstránili, sa takto späť
+    nedostane; jeho nová žiadosť čaká na vás.
 - **Jazyk podujatia**: pozri nižšie.
 - **AI párovanie**: nastavte na *Zapnuté*, ak plánujete pripojiť koordinátora
   (§5). Koordinátora môžete pripojiť aj neskôr; toto nastavenie nechajte teraz

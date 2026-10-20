@@ -70,7 +70,7 @@ const meetup = P.makeCoordinate(pk, "meetup-12");
 out.hierarchy = {
   community, meetup,
   childTags: P.buildEventConfig({ ...cfg, d: "meetup-12", parent: community, chat: [], chatRelays: [] }).tags,
-  parentTags: P.buildEventConfig({ ...cfg, d: "meetups", children: [meetup], chat: [], chatRelays: [] }).tags,
+  parentTags: P.buildEventConfig({ ...cfg, d: "meetups", children: [meetup], chat: [], chatRelays: [], spaceKind: 31612 }).tags,
   proof: P.makeMembershipProof(hexToBytes("88".repeat(32)), community, meetup, pk),
 };
 

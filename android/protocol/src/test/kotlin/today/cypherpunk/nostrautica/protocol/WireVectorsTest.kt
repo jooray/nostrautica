@@ -139,7 +139,9 @@ class HierarchyVectorsTest {
         assertEquals(s("community"), child.parent)
         assertEquals(listOf(s("meetup")), parent.children)
         assertEquals(tags(h["childTags"]!!.jsonArray), child.toTags())
-        assertEquals(tags(h["parentTags"]!!.jsonArray), parent.toTags(Kinds.COMMUNITY).map { if (it[0] == "a") listOf("a", Coordinate.make(pk, "meetups").toString()) else it })
+        // SB-09: a community names its own 31612 coordinate, and the parse keeps that kind.
+        assertEquals(Kinds.COMMUNITY, parent.spaceKind)
+        assertEquals(tags(h["parentTags"]!!.jsonArray), parent.toTags())
         assertTrue(Hierarchy.isLinked(s("community"), parent, s("meetup"), child))
         assertTrue(!Hierarchy.isLinked(s("community"), parent.copy(children = emptyList()), s("meetup"), child))
     }

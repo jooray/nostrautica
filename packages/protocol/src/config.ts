@@ -3,8 +3,8 @@
  * config lives entirely in tags on a public event signed by `E_id`. This module
  * builds and parses those tags into a typed object.
  */
-import { KIND_EVENT_CONFIG } from "./kinds.js";
-import { makeCoordinate } from "./coordinate.js";
+import { KIND_CALENDAR_EVENT, KIND_COMMUNITY, KIND_EVENT_CONFIG } from "./kinds.js";
+import { SPACE_KINDS, isCommunityCoordinate, makeCoordinate } from "./coordinate.js";
 import {
   CHILD_TAG,
   MAX_CHILDREN,
@@ -35,11 +35,12 @@ export const UNLIMITED_SEC = 0;
  * `"open"` (2026-09-13) is for communities: the trust already exists wherever
  * the invite link was posted — a group chat whose members know each other — and
  * asking an admin to click eighty times to re-confirm it is work they will not
- * do. A coordinator decides it exactly like `"manual+invite"` (PROTOCOL-NIP
- * §6.2): a join carrying a valid entitlement (an invite code in the link, or a
- * `member_of` proof) auto-approves, and a code-less join waits in the
- * organizer's queue. The plain event link carries no code, so for the
- * link-holders-are-in behaviour share a link minted with a (reusable) invite.
+ * do. So anyone holding the link is in (PROTOCOL-NIP §6.2): a coordinator
+ * auto-approves every well-formed join, with or without an invite code, and
+ * the organizer does nothing. Two limits stay: the roster cap (a join refused
+ * for space waits in the queue), and a member the organizer revoked, whose
+ * re-join is queued rather than readmitted. A code in the link is still
+ * verified and claimed, but none is needed.
  *
  * Adding a value here is safe in both directions because `parseConfigTags`
  * falls back to `"manual"` on anything it does not recognise rather than
@@ -168,6 +169,17 @@ export interface EventConfig {
   parent?: string;
   /** The events that belong to this community (§15, `child` tags): 31923 coordinates. */
   children?: string[];
+  /**
+   * The kind of the space this config belongs to (audit SB-09): 31923 for a dated
+   * event, 31612 for a community. It names the kind in the `["a", …]` tag, which
+   * must be the space's real coordinate. Every community used to advertise
+   * `31923:<E_id>:<d>` because the builder only knew the default kind. Absent means
+   * a dated event, so existing events stay byte-identical; the parser sets it only
+   * for a community whose `a` tag already says 31612. Writers that republish a
+   * space's config should set it from the coordinate they hold, which also repairs
+   * a community published before the fix.
+   */
+  spaceKind?: number;
 }
 
 export interface EventConfigTags {
@@ -178,7 +190,10 @@ export interface EventConfigTags {
 
 /** Build the tag array for a kind 31600 event. */
 export function buildEventConfig(cfg: EventConfig): EventConfigTags {
-  const coordinate = makeCoordinate(cfg.eidPubkey, cfg.d);
+  if (cfg.spaceKind !== undefined && !SPACE_KINDS.includes(cfg.spaceKind)) {
+    throw new Error(`31600 config: spaceKind must be one of ${SPACE_KINDS.join(", ")}`);
+  }
+  const coordinate = makeCoordinate(cfg.eidPubkey, cfg.d, cfg.spaceKind ?? KIND_CALENDAR_EVENT);
   const tags: string[][] = [
     ["d", cfg.d],
     ["a", coordinate],
@@ -428,6 +443,9 @@ export function parseEventConfig(
       const c = [...new Set(all(tags, CHILD_TAG).filter(isValidChildCoordinate))].slice(0, MAX_CHILDREN);
       return c.length ? c : undefined;
     })(),
+    // SB-09: only a community's own coordinate sets it, so a dated event (and a
+    // community stamped 31923 before the fix) parses exactly as before.
+    ...(first(tags, "a") === makeCoordinate(eidPubkey, d, KIND_COMMUNITY) ? { spaceKind: KIND_COMMUNITY } : {}),
   };
 }
 
@@ -442,9 +460,21 @@ function retentionTag(tags: string[][]): number | undefined {
   return Number.isInteger(n) && n >= 1 ? n : undefined;
 }
 
-/** The event coordinate for a parsed config. */
+/**
+ * `cfg` with {@link EventConfig.spaceKind} set from the space's own `coordinate`
+ * (audit SB-09), for every path that republishes a config it read back. Reading
+ * a community stamped `31923` before the fix and saving it again thus repairs
+ * the `a` tag, and a dated event keeps no `spaceKind` at all (byte-identical).
+ */
+export function configForSpace(cfg: EventConfig, coordinate: string): EventConfig {
+  const { spaceKind: _spaceKind, ...rest } = cfg;
+  void _spaceKind;
+  return isCommunityCoordinate(coordinate) ? { ...rest, spaceKind: KIND_COMMUNITY } : rest;
+}
+
+/** The space coordinate for a parsed config (a dated event unless {@link EventConfig.spaceKind} says otherwise). */
 export function configCoordinate(cfg: EventConfig): string {
-  return makeCoordinate(cfg.eidPubkey, cfg.d);
+  return makeCoordinate(cfg.eidPubkey, cfg.d, cfg.spaceKind ?? KIND_CALENDAR_EVENT);
 }
 
 /**
