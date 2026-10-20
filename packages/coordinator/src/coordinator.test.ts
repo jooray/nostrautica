@@ -7,6 +7,7 @@ import {
   inviteHash,
   generateEck,
   bytesToBase64,
+  canonicalEck,
   base64ToBytes,
   bytesToHex,
   eckDecrypt,
@@ -5862,6 +5863,30 @@ describe("audit SB-121 — a same-gen grant never rolls back a revocation", () =
     expect(heldIds(h)).toEqual([1, 2]);
     const live = (h.coordinator as any).events.get(h.coordinate);
     expect(Math.max(...live.eck.map((v: EckVersion) => v.id))).toBe(2);
+  });
+
+  // Audit SB-86 (NIP §4.1): a second key under an id already held is another
+  // device's concurrent rotation, not a duplicate. Union-by-id dropped it, and
+  // everyone granted that key lost the event.
+  it("keeps a second key under an already-held id, and picks the canonical one as current", async () => {
+    const h = await setup();
+    await revokeOne(h);
+    (h.coordinator as any).completedInstallGen.clear();
+    const otherV2 = bytesToBase64(new Uint8Array(32).fill(0x5a));
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_COORDINATOR_GRANT,
+      content: {
+        v: 2, a: h.coordinate, gen: 1, inbox_nsec: bytesToHex(h.einboxSk),
+        eck: [{ id: 1, key: bytesToBase64(h.eck) }, { id: 2, key: otherV2 }], config_relays: ["wss://test"],
+      },
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap);
+    expect(heldIds(h)).toEqual([1, 2, 2]);
+    const held = JSON.parse(h.store.getEvent(h.coordinate)!.eck_json) as EckVersion[];
+    const want = canonicalEck(held)!;
+    const live = (h.coordinator as any).events.get(h.coordinate);
+    expect((h.coordinator as any).currentEck(live).id).toBe(2);
+    expect(bytesToBase64((h.coordinator as any).currentEck(live).bytes)).toBe(want.key);
   });
 });
 

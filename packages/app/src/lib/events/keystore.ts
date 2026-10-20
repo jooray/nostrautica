@@ -19,7 +19,7 @@
  * recover.ts; attendee/co-organizer: the 21602/21605 grants themselves). This
  * store is a fast local cache.
  */
-import type { EckVersion } from "@nostrautica/protocol";
+import { canonicalEck, unionEck, type EckVersion } from "@nostrautica/protocol";
 
 export interface EventKeys {
   coordinate: string;
@@ -342,7 +342,7 @@ export async function loadEventKeys(
   return undefined;
 }
 
-/** Merge new ECK versions into a stored record (dedupe by id), keeping the max. */
+/** Merge new ECK versions into a stored record (union by (id, key), NIP §4.1). */
 export async function addEckVersions(
   coordinate: string,
   versions: EckVersion[],
@@ -355,17 +355,14 @@ export async function addEckVersions(
     role,
     eck: [],
   };
-  const byId = new Map<number, EckVersion>();
-  for (const v of existing.eck) byId.set(v.id, v);
-  for (const v of versions) byId.set(v.id, v);
-  existing.eck = [...byId.values()].sort((a, b) => a.id - b.id);
+  existing.eck = unionEck(existing.eck, versions);
   await saveEventKeys(existing, o);
   return existing;
 }
 
 /**
  * Fold an authenticated 21605 organizer grant into the stored record (audit
- * APPK-4): UNION the ECK versions by id — never shrink the set — so an
+ * APPK-4): UNION the ECK versions (by id and key) — never shrink the set — so an
  * authentic-but-stale grant (ECK v1) processed after a fresher 21602 (v2) can't
  * clobber the record back to v1-only (wraps are memoized, so the loss used to
  * be permanent). Role + custody secrets update from the grant.
@@ -381,10 +378,7 @@ export async function applyOrganizerGrant(
     role: "organizer" as const,
     eck: [],
   };
-  const byId = new Map<number, EckVersion>();
-  for (const v of existing.eck) byId.set(v.id, v);
-  for (const v of grant.eck) byId.set(v.id, v);
-  existing.eck = [...byId.values()].sort((a, b) => a.id - b.id);
+  existing.eck = unionEck(existing.eck, grant.eck);
   existing.role = "organizer";
   existing.eidNsecHex = grant.eidNsecHex;
   existing.einboxNsecHex = grant.einboxNsecHex;
@@ -448,13 +442,11 @@ export async function lockEventKeysForLogout(
  * the one outcome this module exists to prevent.
  */
 function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
-  const byId = new Map<number, EckVersion>();
-  for (const v of fallback.eck) byId.set(v.id, v);
-  for (const v of primary.eck) byId.set(v.id, v); // current wins on conflict
   return {
     coordinate: primary.coordinate,
     role: primary.role === "organizer" || fallback.role === "organizer" ? "organizer" : primary.role,
-    eck: [...byId.values()].sort((a, b) => a.id - b.id),
+    // Both keys of a same-id collision survive (NIP §4.1, audit SB-86).
+    eck: unionEck(primary.eck, fallback.eck),
     eidNsecHex: primary.eidNsecHex ?? fallback.eidNsecHex,
     einboxNsecHex: primary.einboxNsecHex ?? fallback.einboxNsecHex,
     // UNION, not "primary wins". These are retired E_inbox secrets kept so the
@@ -520,8 +512,12 @@ export async function unlockEventKeysForLogin(
   return complete;
 }
 
-/** The highest-numbered ECK version the user holds, or undefined. */
+/**
+ * The current ECK version: the highest id, and of two keys under that id (an
+ * unhealed concurrent rotation, NIP §4.1 / audit SB-86) the one with the lowest
+ * fingerprint, so every holder of the same set agrees. Undefined when none.
+ */
 export function currentEck(keys: EventKeys | undefined): EckVersion | undefined {
   if (!keys || keys.eck.length === 0) return undefined;
-  return keys.eck.reduce((max, v) => (v.id > max.id ? v : max));
+  return canonicalEck(keys.eck);
 }

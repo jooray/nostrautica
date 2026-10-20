@@ -191,6 +191,22 @@ const settingsEdits = [];
   mg("odd note key carried", legacy({ notes: { "not-a-pubkey": "keep me" } }), 1, laptop, 8);
 }
 
+// ── ECK version identity (SB-86, NIP §4.1) ────────────────────────────────
+const eckKeyOf = (b) => Buffer.alloc(32, b).toString("base64");
+const eckSets = [
+  [{ id: 1, key: eckKeyOf(1) }, { id: 2, key: eckKeyOf(2) }, { id: 2, key: eckKeyOf(3) }],
+  [{ id: 2, key: eckKeyOf(3) }, { id: 1, key: eckKeyOf(1) }, { id: 2, key: eckKeyOf(2) }, { id: 2, key: eckKeyOf(2) }],
+  [{ id: 3, key: eckKeyOf(9) }, { id: 2, key: eckKeyOf(8) }, { id: 3, key: eckKeyOf(4) }, { id: 3, key: eckKeyOf(200) }],
+];
+const eckIdentity = {
+  fingerprints: [0, 1, 2, 7, 255].map((b) => ({ key: eckKeyOf(b), fp: P.eckFingerprint(eckKeyOf(b)) })),
+  sets: eckSets.map((set) => ({
+    set, union: P.unionEck(set), canonical: P.canonicalEck(set), collisions: P.eckCollisionIds(set),
+  })),
+  tags: [["eck", "2"], ["eck", "2", P.eckFingerprint(eckKeyOf(3))], ["eck", "2", "XYZ"], ["eck", "0"], ["eck", "2.0", "ABCDEF0123456789"]]
+    .map((t) => ({ tag: t, ref: P.readEckTag([t]) ?? null })),
+};
+
 writeFileSync(new URL("../../protocol/src/test/resources/parity-vectors.json", import.meta.url),
-  JSON.stringify({ payloads, configs, coordinates, menu, settingsMerges, settingsEdits }, null, 1) + "\n");
+  JSON.stringify({ payloads, configs, coordinates, menu, settingsMerges, settingsEdits, eckIdentity }, null, 1) + "\n");
 console.log(`wrote parity-vectors.json: ${payloads.length} payloads, ${configs.length} configs, ${coordinates.length} coordinates`);

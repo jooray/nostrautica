@@ -22,6 +22,7 @@ import {
   hexToBytes,
   blindedD,
   compareLatest,
+  unionEck,
   type EventKeysBackup,
 } from "@nostrautica/protocol";
 import { deriveBlindingKey } from "./blinding.js";
@@ -150,13 +151,12 @@ async function resolveCoordinate(
  */
 async function restore(coordinate: string, backup: EventKeysBackup, owner: string): Promise<void> {
   const existing = await loadEventKeys(coordinate, owner).catch(() => undefined);
-  const byId = new Map<number, { id: number; key: string }>();
-  for (const v of existing?.eck ?? []) byId.set(v.id, v);
-  for (const v of backup.eck) if (!byId.has(v.id)) byId.set(v.id, v);
   await saveEventKeys({
     coordinate,
     role: "organizer",
-    eck: [...byId.values()].sort((a, b) => a.id - b.id),
+    // By (id, key): a backup holding the other key of a same-id collision adds
+    // it rather than being skipped as "already held" (NIP §4.1, audit SB-86).
+    eck: unionEck(existing?.eck ?? [], backup.eck),
     eidNsecHex: existing?.eidNsecHex ?? backup.eid_nsec,
     einboxNsecHex: existing?.einboxNsecHex ?? backup.einbox_nsec,
     // The install generation (NIP §3.5) only grows — keep the higher of the local

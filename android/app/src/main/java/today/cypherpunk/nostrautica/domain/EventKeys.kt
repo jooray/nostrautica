@@ -6,6 +6,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import today.cypherpunk.nostrautica.protocol.EckIdentity
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.NostrSigner
 import today.cypherpunk.nostrautica.signer.SecureStore
@@ -23,22 +24,23 @@ data class EventKeys(
 ) {
     val isOrganizer: Boolean get() = role == "organizer" && eidNsecHex != null && einboxNsecHex != null
 
-    /** The highest ECK version held. */
-    val current: EckVersion? get() = eck.maxByOrNull { it.id }
+    /** The current ECK version: highest id, ties to the lowest fingerprint (NIP §4.1). */
+    val current: EckVersion? get() = EckIdentity.canonical(eck)
 
-    fun eckFor(id: Int?): ByteArray? = (if (id != null) eck.firstOrNull { it.id == id } else null)?.bytes()
+    fun eckFor(id: Int?): ByteArray? = (if (id != null) EckIdentity.candidates(eck, EckIdentity.Ref(id)).firstOrNull() else null)?.bytes()
+
+    /** The held key a record's `eck` tag names, by id and fingerprint (NIP §4.1). */
+    fun eckForTags(tags: List<List<String>>): ByteArray? =
+        EckIdentity.readTag(tags)?.let { EckIdentity.candidates(eck, it).firstOrNull() }?.bytes()
 
     companion object {
         /** keystore.ts mergeEventKeys: never drop a secret, a role or a retired inbox. */
         fun merge(primary: EventKeys, fallback: EventKeys): EventKeys {
-            val byId = LinkedHashMap<Int, EckVersion>()
-            fallback.eck.forEach { byId[it.id] = it }
-            primary.eck.forEach { byId[it.id] = it }
             val prior = ((primary.priorEinboxNsecs ?: emptyList()) + (fallback.priorEinboxNsecs ?: emptyList())).distinct()
             return EventKeys(
                 coordinate = primary.coordinate,
                 role = if (primary.role == "organizer" || fallback.role == "organizer") "organizer" else primary.role,
-                eck = byId.values.sortedBy { it.id },
+                eck = EckIdentity.union(primary.eck, fallback.eck),
                 eidNsecHex = primary.eidNsecHex ?: fallback.eidNsecHex,
                 einboxNsecHex = primary.einboxNsecHex ?: fallback.einboxNsecHex,
                 priorEinboxNsecs = prior.ifEmpty { null },
@@ -85,7 +87,7 @@ class EventKeysStore(private val secure: SecureStore) {
         // The role is set only when the record is new, as in keystore.ts: an
         // attendee-role grant never downgrades an organizer.
         val existing = get(owner, coordinate) ?: EventKeys(coordinate, role)
-        val updated = existing.copy(eck = (existing.eck + versions).associateBy { it.id }.values.sortedBy { it.id })
+        val updated = existing.copy(eck = EckIdentity.union(existing.eck, versions))
         save(owner, updated)
         return updated
     }
@@ -94,7 +96,7 @@ class EventKeysStore(private val secure: SecureStore) {
         val existing = get(owner, coordinate) ?: EventKeys(coordinate, "organizer")
         val updated = existing.copy(
             role = "organizer",
-            eck = (existing.eck + eck).associateBy { it.id }.values.sortedBy { it.id },
+            eck = EckIdentity.union(existing.eck, eck),
             eidNsecHex = eidNsecHex,
             einboxNsecHex = einboxNsecHex,
         )

@@ -105,6 +105,26 @@ class ParityVectorsTest {
         }
     }
 
+    @Test fun eckIdentityLikeTs() {
+        val e = v["eckIdentity"]!!.jsonObject
+        val versions = { el: kotlinx.serialization.json.JsonElement -> Wire.json.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(EckVersion.serializer()), el) }
+        for (f in e["fingerprints"]!!.jsonArray.map { it.jsonObject }) {
+            assertEquals(f["fp"]!!.jsonPrimitive.content, EckIdentity.fingerprint(f["key"]!!.jsonPrimitive.content))
+        }
+        for (s in e["sets"]!!.jsonArray.map { it.jsonObject }) {
+            val set = versions(s["set"]!!)
+            assertEquals(versions(s["union"]!!), EckIdentity.union(set))
+            assertEquals(Wire.json.decodeFromJsonElement(EckVersion.serializer(), s["canonical"]!!), EckIdentity.canonical(set))
+            assertEquals(s["collisions"]!!.jsonArray.map { it.jsonPrimitive.int }, EckIdentity.collisionIds(set))
+        }
+        for (t in e["tags"]!!.jsonArray.map { it.jsonObject }) {
+            val got = EckIdentity.readTag(listOf(t["tag"]!!.jsonArray.map { it.jsonPrimitive.content }))
+            val want = t["ref"]!!
+            if (want is JsonNull) assertEquals(null, got)
+            else assertEquals(EckIdentity.Ref(want.jsonObject["id"]!!.jsonPrimitive.int, want.jsonObject["fp"]?.jsonPrimitive?.content), got)
+        }
+    }
+
     @Test fun aLibraryEntryKeepsItsExplicitNullA() {
         // SB-85: the key must be present for TS readers; @Required makes this reader agree.
         val ok = Wire.parseSafe(MyProfileContent.serializer(), JsonObject(mapOf("v" to kotlinx.serialization.json.JsonPrimitive(2), "a" to JsonNull)))

@@ -1,6 +1,7 @@
 package today.cypherpunk.nostrautica.domain.content
 
 import kotlinx.serialization.Serializable
+import today.cypherpunk.nostrautica.protocol.EckIdentity
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.EventPage
 import today.cypherpunk.nostrautica.protocol.EventPageContent
@@ -57,8 +58,7 @@ object PageLogic {
         val publicMenu = EventPage.rTagsToMenu(latest.tags)
         var priv = EventPagePrivate()
         if (content.private != null) {
-            val versionId = latest.tag("eck")?.toIntOrNull()
-            val version = eck.firstOrNull { it.id == versionId }
+            val version = EckIdentity.readTag(latest.tags)?.let { EckIdentity.candidates(eck, it).firstOrNull() }
             if (version != null) {
                 runCatching { EventPage.decryptPrivate(version.bytes(), content.private!!) }.onSuccess { priv = it }
             }

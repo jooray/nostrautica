@@ -263,7 +263,42 @@ media) with no bespoke cryptography.
 - ECK versions are `{id, key}`; grants carry the full version list; receivers
   **union-merge** (a stale grant never downgrades custody). The current version is the
   highest `id`; rotation on revocation is forward-only and honest about it (old ciphertext
-  stays readable to whoever held the old key).
+  stays readable to whoever held the old key). See §4.1 for what identifies a version.
+
+### 4.1 ECK version identity across organizer devices
+
+A rotating party numbers the new version `max(held ids) + 1` and draws the key at
+random, so two organizer devices (or an organizer and a co-organizer) that rotate
+concurrently both mint the same `id` with **different keys**. A version is therefore
+identified by `(id, key)`, never by `id` alone:
+
+- **Fingerprint.** `fp(key) = hex(sha256(utf8("nostrautica:eck-fp:") ‖ key_bytes))[0..16]`
+  (8 bytes, 16 lowercase hex). One-way and domain-separated: it names a key without
+  revealing it.
+- **Tag.** A writer of an ECK-encrypted record SHOULD put the fingerprint of the key it
+  encrypted under as a third element of the `eck` tag: `["eck", "<id>", "<fp>"]`. Every
+  `["eck", <version>]` tag in §6 may carry it. A reader that does not know it reads
+  `t[1]` exactly as before. A reader that does decrypts with the held key matching
+  `(id, fp)`, and a record whose `(id, fp)` it does not hold is "written under a key this
+  device lacks", not a corrupt record. Without `fp`, a reader tries every held key with
+  that `id`.
+- **Union.** Every merge of version lists (grants 21602/21603/21605, the 30078
+  event-keys backup, local stores) MUST dedupe by `(id, key)` and keep **both** keys of
+  a same-`id` pair. Keeping one strands everyone who was granted the other.
+- **Current version.** The highest `id`; of two keys under that `id`, the one with the
+  **lowest fingerprint**. Every holder of the same set computes the same answer.
+- **Healing.** A collision is resolved by moving forward: the next rotation mints
+  `max id + 1` (unique again) and re-grants the full list, both colliding keys included,
+  so nothing already encrypted becomes unreadable to someone who held it. An organizer
+  client that detects a collision at its current `id` SHOULD offer that rotation.
+- **Guard.** A client MUST NOT rotate when the newest 31600 or the current 31604 shows a
+  version newer than (or a key different from) what it holds; it reports "keys changed
+  on another device" instead (§3.7). That closes the sequential case; the rules above
+  handle two rotations that genuinely overlap in time.
+
+Compatibility: an older reader keeps one key of a collided pair (union-by-id) and may
+fail to read records written under the other until the healing rotation, after which
+the current version is unique and it reads normally again.
 
 ## 5. Gift wraps
 

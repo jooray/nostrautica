@@ -6,6 +6,7 @@ import kotlinx.serialization.json.buildJsonObject
 import today.cypherpunk.nostrautica.nostr.Relays
 import today.cypherpunk.nostrautica.protocol.Bytes
 import today.cypherpunk.nostrautica.protocol.Coordinate
+import today.cypherpunk.nostrautica.protocol.EckIdentity
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.EventConfig
 import today.cypherpunk.nostrautica.protocol.EventKeysBackup
@@ -223,7 +224,7 @@ object OrganizerEvents {
             if (onRelay.getOrNull(page) == json) return@mapIndexedNotNull null
             UnsignedEvent(
                 eid, createdAt, Kinds.ROSTER,
-                listOf(listOf("d", Roster.pageD(identifier, page)), listOf("a", coordinate), listOf("eck", eckId.toString()), listOf("v", "2")),
+                listOf(listOf("d", Roster.pageD(identifier, page)), listOf("a", coordinate), EckIdentity.tag(eckId, eck), listOf("v", "2")),
                 Nip44.eckEncrypt(eck, json),
             ).signWith(eidSk)
         }

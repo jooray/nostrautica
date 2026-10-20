@@ -2,6 +2,7 @@ package today.cypherpunk.nostrautica.domain.content
 
 import kotlinx.serialization.Serializable
 import today.cypherpunk.nostrautica.nostr.Filter
+import today.cypherpunk.nostrautica.protocol.EckIdentity
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.ExternalFeed
 import today.cypherpunk.nostrautica.protocol.Kinds
@@ -112,8 +113,8 @@ object PostLogic {
             )
         }
         val version = e.tag("eck")?.toIntOrNull()?.takeIf { it > 0 }
-        // The key the POST names, never the current version.
-        val key = eck.firstOrNull { it.id == version }
+        // The key the POST names (id + fingerprint, NIP §4.1), never the current version.
+        val key = EckIdentity.readTag(e.tags)?.let { EckIdentity.candidates(eck, it).firstOrNull() }
         var newer = false
         if (key != null) {
             val parsed = runCatching {

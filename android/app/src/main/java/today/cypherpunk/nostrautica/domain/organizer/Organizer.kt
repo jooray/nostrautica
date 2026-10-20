@@ -40,6 +40,7 @@ import today.cypherpunk.nostrautica.protocol.CoordinatorAnnounce
 import today.cypherpunk.nostrautica.protocol.CoordinatorGrantContent
 import today.cypherpunk.nostrautica.protocol.CoordinatorStatusContent
 import today.cypherpunk.nostrautica.protocol.DirectoryEntryContent
+import today.cypherpunk.nostrautica.protocol.EckIdentity
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.EventConfig
 import today.cypherpunk.nostrautica.protocol.Hierarchy
@@ -371,7 +372,7 @@ class Organizer(
         )
         val entryEvent = UnsignedEvent(
             eid, now, Kinds.DIRECTORY_ENTRY,
-            listOf(listOf("d", entryD), listOf("a", ctx.coordinate), listOf("eck", eck.id.toString()), listOf("v", "2")),
+            listOf(listOf("d", entryD), listOf("a", ctx.coordinate), EckIdentity.tag(eck), listOf("v", "2")),
             Nip44.eckEncrypt(eckBytes, Wire.encode(DirectoryEntryContent.serializer(), entry)),
         ).signWith(eidSk)
         val (roster, at) = OrganizerEvents.rosterForRewrite(loadRoster(ctx, keys), eck.id)
@@ -513,7 +514,7 @@ class Organizer(
             val newD = re.d
             plain[a.d]?.let { json ->
                 events += UnsignedEvent(eid, nowSec(), Kinds.DIRECTORY_ENTRY,
-                    listOf(listOf("d", newD), listOf("a", ctx.coordinate), listOf("eck", next.id.toString()), listOf("v", "2")),
+                    listOf(listOf("d", newD), listOf("a", ctx.coordinate), EckIdentity.tag(next), listOf("v", "2")),
                     Nip44.eckEncrypt(newBytes, json)).signWith(eidSk)
             }
             val grant = Wire.encode(KeyGrantContent.serializer(), KeyGrantContent(a = ctx.coordinate, role = a.role, eck = eckAll, grantedBy = eid, parent = communities.grantParentField(ctx, eidSk, a.pubkey)))
@@ -860,11 +861,8 @@ class Organizer(
 
     private suspend fun restore(me: String, coordinate: String, b: EventKeysBackup) {
         val existing = keyStore.get(me, coordinate)
-        val byId = LinkedHashMap<Int, EckVersion>()
-        existing?.eck?.forEach { byId[it.id] = it }
-        b.eck.forEach { if (it.id !in byId) byId[it.id] = it }
         keyStore.save(me, EventKeys(
-            coordinate = coordinate, role = "organizer", eck = byId.values.sortedBy { it.id },
+            coordinate = coordinate, role = "organizer", eck = EckIdentity.union(existing?.eck ?: emptyList(), b.eck),
             eidNsecHex = existing?.eidNsecHex ?: b.eidNsec, einboxNsecHex = existing?.einboxNsecHex ?: b.einboxNsec,
             priorEinboxNsecs = existing?.priorEinboxNsecs,
             coordinatorGen = maxOf(existing?.coordinatorGen ?: 0, b.coordinatorGen ?: 0).takeIf { it > 0 },
@@ -953,7 +951,7 @@ class Organizer(
         var privateCipher: String? = null
         if (menuPriv.isNotEmpty() || secPriv.isNotEmpty()) {
             val eck = keys.current ?: throw IllegalStateException("event content key not available")
-            tags += listOf("eck", eck.id.toString())
+            tags += EckIdentity.tag(eck)
             privateCipher = ep.encryptPrivate(eck.bytes(), today.cypherpunk.nostrautica.protocol.EventPagePrivate(
                 menu = menuPriv.map { (m, pos) -> m.copy(pos = pos) },
                 sections = secPriv.map { (s, pos) -> s.withPos(pos) },
@@ -1043,7 +1041,7 @@ class Organizer(
             title = p.title, summary = p.summary, image = p.image, publishedAt = p.publishedAt ?: nowSec(), author = author, content = p.content,
         ))
         return publishMonotonic(eidSk(keys), Kinds.MEMBERS_POST, d, ctx.relays, "post") { at ->
-            UnsignedEvent(ctx.cfg.eidPubkey, at, Kinds.MEMBERS_POST, listOf(listOf("d", d), listOf("v", "2"), listOf("eck", eck.id.toString())), cipher)
+            UnsignedEvent(ctx.cfg.eidPubkey, at, Kinds.MEMBERS_POST, listOf(listOf("d", d), listOf("v", "2"), EckIdentity.tag(eck)), cipher)
         }.second
     }
 

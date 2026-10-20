@@ -73,6 +73,7 @@ import {
   revisionSupersedes,
   supersedes,
   parseMemberOfTags,
+  eckFingerprint,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -550,7 +551,7 @@ export async function approveAttendee(
       tags: [
         ["d", entryD],
         ["a", ctx.coordinate],
-        ["eck", String(eck.id)],
+        ["eck", String(eck.id), eckFingerprint(eckBytes)],
         ["v", "2"],
       ],
       content: eckEncrypt(eckBytes, JSON.stringify(entryContent)),
@@ -834,7 +835,7 @@ function buildRosterEvents(
           tags: [
             ["d", rosterPageD(identifier, page)],
             ["a", ctx.coordinate],
-            ["eck", String(eckId)],
+            ["eck", String(eckId), eckFingerprint(eckBytes)],
             // The event envelope is still wire v2 even when the PAYLOAD declares
             // v3 — see buildRoster in the coordinator's publisher for why an old
             // client must still be able to fetch page 0 in order to fail loudly.
@@ -1454,7 +1455,7 @@ async function rekeyRoster(
           {
             kind: KIND_DIRECTORY_ENTRY,
             created_at: Math.floor(Date.now() / 1000),
-            tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId)], ["v", "2"]],
+            tags: [["d", newD], ["a", ctx.coordinate], ["eck", String(newId), eckFingerprint(newEckBytes)], ["v", "2"]],
             content: eckEncrypt(newEckBytes, JSON.stringify(content)),
           },
           eidSk,
