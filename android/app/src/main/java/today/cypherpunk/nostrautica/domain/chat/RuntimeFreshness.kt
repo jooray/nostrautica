@@ -1,27 +1,32 @@
 package today.cypherpunk.nostrautica.domain.chat
 
 /**
- * Whether the running MLS runtime's live subscriptions still cover what it holds.
+ * Whether the running MLS runtime's live subscriptions may no longer cover what it
+ * holds, so a restart (close and reopen, what a force-stop did) is worth its cost.
  *
- * MDK registers its kind-445 group subscriptions when the runtime starts, and two
- * things done to a running one leave them short: a group joined mid-run (the
- * coordinator's Welcome accepted while the chat screen is open), and a change to
- * an account's relay lists while it already holds groups (the known MDK bug: a
- * relay-list change breaks the group subscription until the runtime restarts).
- * Either way the group's state is right, the member count is right, and nobody
- * else's messages arrive until the app is force-stopped and reopened, which is
- * exactly the restart this records the need for (manual e2e BUG-4, 2026-10-20).
+ * Two causes are recorded: a change to an account's relay lists while it already
+ * holds groups (the known MDK bug: a relay-list change breaks the group
+ * subscription until the runtime restarts), and a confirmed rejoin of a group the
+ * store already held.
  *
- * Each cause asks for one restart. Only an explicit, successful accept or rejoin
- * marks a group, and a restart clears every mark, so a restart cannot cause another.
+ * A group joined mid-run is NOT a cause. MarmotKit 0.13.0 installs the joined
+ * group's kind-445 subscription itself, about a second after the Welcome; the
+ * relay log of the 2026-10-20 freeze investigation shows the `marmot:group` REQ on
+ * the running runtime's socket every time, and the three test messages arrived
+ * live with no restart. Restarting for it only cost a window with no live
+ * subscription at all (3-5 s on an idle emulator, 30+ s on a starved one, while
+ * MDK closed its databases and reopened them).
+ *
+ * Each cause asks for one restart, and a restart clears every mark, so a restart
+ * cannot cause another.
  */
 class RuntimeFreshness {
-    private val joined = mutableSetOf<String>()
+    private val rejoinedGroups = mutableSetOf<String>()
     private var relaysChanged = false
 
-    /** This runtime accepted a Welcome into [groupIdHex]. */
+    /** This runtime confirmed a rejoin into [groupIdHex]. */
     @Synchronized
-    fun joinedGroup(groupIdHex: String) { joined += groupIdHex.lowercase() }
+    fun rejoined(groupIdHex: String) { rejoinedGroups += groupIdHex.lowercase() }
 
     /** An account's inbox or NIP-65 relays changed while it held at least one group. */
     @Synchronized
@@ -33,12 +38,19 @@ class RuntimeFreshness {
      * stale runtime with more holders stays stale until the next lone holder asks.
      */
     @Synchronized
-    fun shouldRestart(holders: Int): Boolean = holders == 1 && (relaysChanged || joined.isNotEmpty())
+    fun shouldRestart(holders: Int): Boolean = holders == 1 && (relaysChanged || rejoinedGroups.isNotEmpty())
+
+    /** Why [shouldRestart] is true, for the log. */
+    @Synchronized
+    fun reason(): String = listOfNotNull(
+        "relay lists changed".takeIf { relaysChanged },
+        "rejoined a group".takeIf { rejoinedGroups.isNotEmpty() },
+    ).joinToString(" and ")
 
     /** A fresh runtime registered every group it holds. */
     @Synchronized
     fun restarted() {
-        joined.clear()
+        rejoinedGroups.clear()
         relaysChanged = false
     }
 }
