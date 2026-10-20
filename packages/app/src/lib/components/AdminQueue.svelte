@@ -27,6 +27,7 @@
     onApprove,
     onApproveAll,
     memberOfVerified = new Map(),
+    inviteOnly = false,
     onApproveVerified,
     onReview,
     onRetryBulk,
@@ -50,6 +51,13 @@
     onApproveAll: () => void;
     /** Requests whose `member_of` proof verified (§15.4), by attendee pubkey. */
     memberOfVerified?: Map<string, { coordinate: string; title: string }>;
+    /**
+     * The space's approval is `invite`: a request with no invite and no
+     * `member_of` claim was REJECTED by the coordinator (NIP §6.2), not queued.
+     * It still shows here because the organizer may approve by hand; the badge
+     * says that this is what Approve would be doing.
+     */
+    inviteOnly?: boolean;
     onApproveVerified?: () => void;
     onReview: (pubkey: string, state: ReviewState | undefined) => void;
     onRetryBulk: (pubkey: string) => void;
@@ -101,7 +109,8 @@
     {@const deferred = deferredSet.has(req.attendeePubkey)}
     <div class="card">
       <PersonId pubkey={req.attendeePubkey} name={req.name} {relays} />
-      {#if req.invite}<span class="badge">{t("admin.requests.invite")}</span>{/if}
+      {#if req.invite}<span class="badge">{t("admin.requests.invite")}</span>
+      {:else if inviteOnly && !req.memberOf?.length}<span class="badge warn">{t("admin.requests.noInvite")}</span>{/if}
       {#if memberOfVerified.get(req.attendeePubkey)}
         {@const m = memberOfVerified.get(req.attendeePubkey)!}
         <span class="badge ok">{t("hierarchy.admin.memberOf", { title: m.title || t("hierarchy.admin.memberOf.unnamed") })}</span>

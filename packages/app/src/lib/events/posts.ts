@@ -500,18 +500,23 @@ export async function publishMembersPost(
   if (!keys?.eidNsecHex) throw new Error("organizer E_id key not available");
   const eck = currentEck(keys);
   if (!eck) throw new Error("event content key not available");
-  const now = Math.floor(Date.now() / 1000);
   const d = input.d ?? randomPostD();
-  const publishedAt = input.publishedAt ?? now;
-  const ciphertext = encryptMembersPost(base64ToBytes(eck.key), {
-    v: 2,
-    title: input.title,
-    summary: input.summary || undefined,
-    image: input.image || undefined,
-    published_at: publishedAt,
-    author: input.author,
-    content: input.content,
-  });
+  // A NEW post's published_at is the created_at it is signed with, not a clock
+  // read taken before publishMonotonic's relay round-trip: that read finished a
+  // second or more later, so every fresh post came out with created_at >
+  // published_at and rendered "(edited)" on first publish (manual e2e NOTE-5).
+  // An edit keeps the original published_at.
+  let publishedAt = input.publishedAt ?? 0;
+  const encryptAt = (at: number) =>
+    encryptMembersPost(base64ToBytes(eck.key), {
+      v: 2,
+      title: input.title,
+      summary: input.summary || undefined,
+      image: input.image || undefined,
+      published_at: at,
+      author: input.author,
+      content: input.content,
+    });
   // Monotonic republish (audit P3): an edit at the same second as the prior
   // revision of this `d` must win the §3.1 tie-break, or the edit silently
   // doesn't take (the post is addressable across 30023/31607 by its `d`).
@@ -520,8 +525,9 @@ export async function publishMembersPost(
     author: ctx.config.eidPubkey,
     identifier: d,
     relays: ctx.config.relays,
-    sign: (created_at) =>
-      finalizeEvent(
+    sign: (created_at) => {
+      publishedAt = input.publishedAt ?? created_at;
+      return finalizeEvent(
         {
           kind: KIND_MEMBERS_POST,
           created_at,
@@ -531,10 +537,11 @@ export async function publishMembersPost(
             ["v", "2"],
             eckTag(eck),
           ],
-          content: ciphertext,
+          content: encryptAt(publishedAt),
         },
         hexToBytes(keys.eidNsecHex!),
-      ),
+      );
+    },
   });
   return {
     post: {

@@ -1378,6 +1378,7 @@
 
   <AdminQueue
     requests={pendingRequests}
+    inviteOnly={ctx?.config.approval === "invite"}
     relays={ctx?.config.relays ?? []}
     filterActive={peopleFilterActive}
     {matchedPubkeys}

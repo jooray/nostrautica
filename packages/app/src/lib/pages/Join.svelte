@@ -8,7 +8,7 @@
     cachedEventContext,
     type EventContext,
   } from "$lib/events/event-context.js";
-  import { sendJoinRequest, joinPollGapMs, joinLanding } from "$lib/events/join.js";
+  import { sendJoinRequest, joinPollGapMs, joinLanding, joinNeedsInvite } from "$lib/events/join.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
   import { loadLinkedParent, type LinkedParent } from "$lib/events/hierarchy.js";
   import { communityStanding, recordParentConsent } from "$lib/events/community-join.js";
@@ -109,6 +109,8 @@
   const LOAD_GUARD_MS = 12_000;
   /** Monotonic pass token so a stalled load can't clobber the retry that replaced it. */
   let loadToken = 0;
+  /** An invite-only space and no code in hand: say so, don't send (BUG-3). */
+  const inviteRequired = $derived(joinNeedsInvite(ctx?.config.approval, !!code));
   let busy = $state(false);
   let sent = $state(false);
   let sentQueued = $state(false); // join request is in the offline outbox (UX-15)
@@ -405,7 +407,7 @@
 
   async function submit() {
     error = null;
-    if (!ctx) return;
+    if (!ctx || inviteRequired) return;
     busy = true;
     try {
       let displayName: string;
@@ -623,6 +625,11 @@
     <p>
       {#if code}
         {t("join.waiting.invite")}
+      {:else if inviteRequired}
+        <!-- A code-less request already out (sent before this check existed, or
+             from another client): the coordinator rejected it, and only a manual
+             approval can still let the person in. -->
+        {t("join.waiting.inviteOnly")}
       {:else}
         {t("join.waiting.manual")}
       {/if}
@@ -690,6 +697,12 @@
     </p>
   {/if}
 
+  {#if inviteRequired}
+    <div class="card warn" role="alert">
+      <strong>{t("join.inviteOnly.title")}</strong>
+      <p style="margin:0.25rem 0 0">{t("join.inviteOnly.body")}</p>
+    </div>
+  {:else}
   {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
   <!-- A real <form> (the card element itself), not a bare div + onclick: Enter in
        any field submits, and the browser gives the on-screen keyboard a "go" key
@@ -881,5 +894,6 @@
       {busy ? t("join.sending") : session.loggedIn ? t("join.send") : t("join.createAndJoin")}
     </button>
   </form>
+  {/if}
 
 {/if}

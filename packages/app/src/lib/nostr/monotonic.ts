@@ -156,7 +156,13 @@ export async function publishMonotonic(input: MonotonicInput): Promise<Monotonic
   // → bump must be atomic, or two concurrent callers reserve the same created_at.
   const { event, createdAt } = await withAddressLock(`mono:${owner}:${address}`, async () => {
     let relayAt = 0;
-    try {
+    // Known offline: skip the floor read. It could only time out (8 s per
+    // stream), and the publish below queues offline at once, so every offline
+    // save sat on "Publishing…" for that long before the outbox took it (manual
+    // e2e BUG-7). The persisted watermark still bounds created_at, as it does
+    // when the read fails.
+    const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+    if (!offline) try {
       const filter =
         input.identifier !== undefined
           ? { kinds: [input.kind], authors: [input.author], "#d": [input.identifier] }
