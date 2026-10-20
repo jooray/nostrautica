@@ -41,6 +41,7 @@ import today.cypherpunk.nostrautica.protocol.CoordinatorGrantContent
 import today.cypherpunk.nostrautica.protocol.CoordinatorStatusContent
 import today.cypherpunk.nostrautica.protocol.DirectoryEntryContent
 import today.cypherpunk.nostrautica.protocol.EckIdentity
+import today.cypherpunk.nostrautica.protocol.KeysBackup
 import today.cypherpunk.nostrautica.protocol.EckVersion
 import today.cypherpunk.nostrautica.protocol.EventConfig
 import today.cypherpunk.nostrautica.protocol.Hierarchy
@@ -622,14 +623,43 @@ class Organizer(
         return updated
     }
 
-    /** The self-encrypted 30078 backup, rewritten on every rotation/attach (monotonic). */
-    private suspend fun writeBackup(coordinate: String, keys: EventKeys, gen: Int) {
-        if (keys.eidNsecHex == null || keys.einboxNsecHex == null) return
+    /** This device's custody in the backup's shape. */
+    private fun asBackup(coordinate: String, keys: EventKeys, gen: Int): EventKeysBackup? {
+        val eid = keys.eidNsecHex ?: return null
+        val inbox = keys.einboxNsecHex ?: return null
+        return EventKeysBackup(a = coordinate, eidNsec = eid, einboxNsec = inbox, eck = keys.eck,
+            coordinatorGen = maxOf(gen, keys.coordinatorGen ?: 0), pendingEck = keys.pendingEck, priorEinboxNsecs = keys.priorEinboxNsecs)
+    }
+
+    class BackupUnreadable : Exception("Couldn't read this event's key backup, so it was not rewritten (that would drop keys saved by your other devices).")
+
+    /**
+     * The self-encrypted 30078 backup, rewritten on every rotation/attach as a
+     * READ-MERGE-WRITE (SB-89): every device of the account writes this one address,
+     * so the current backup is read, merged with this device's ([KeysBackup.merge]),
+     * folded into the local record, and the union published. One that exists but
+     * cannot be read is not overwritten. [configInbox] picks the current E_inbox.
+     */
+    private suspend fun writeBackup(coordinate: String, keys: EventKeys, gen: Int, configInbox: String? = null) = lock("eventkeys:$coordinate").withLock {
+        val local = asBackup(coordinate, keys, gen) ?: return@withLock
         val signer = accounts.signer
         val me = signer.pubkey
-        val backup = EventKeysBackup(a = coordinate, eidNsec = keys.eidNsecHex, einboxNsec = keys.einboxNsecHex, eck = keys.eck, coordinatorGen = gen, pendingEck = keys.pendingEck)
         val d = "nostrautica:eventkeys:" + ProtocolCrypto.blindedD(accounts.blindingKey(), coordinate, me)
+        runCatching { nostr.fetch(Relays.DEFAULT, Filter(kinds = listOf(Kinds.APP_DATA), authors = listOf(me), tags = mapOf("d" to listOf(d)))) }
+        val remoteEv = nostr.store.latest(Kinds.APP_DATA, me, d)
+        val backup = if (remoteEv != null) {
+            val remote = runCatching { Wire.parse(EventKeysBackup.serializer(), signer.nip44Decrypt(me, remoteEv.content)) }.getOrNull() ?: throw BackupUnreadable()
+            KeysBackup.merge(local, remote, configInbox).also { m ->
+                val cur = keysFor(coordinate) ?: keys
+                val eck = EckIdentity.union(cur.eck, m.eck)
+                val folded = cur.copy(eck = eck, pendingEck = EventKeys.pendingMinus(EckIdentity.union(cur.pendingEck ?: emptyList(), m.pendingEck ?: emptyList()), eck),
+                    einboxNsecHex = m.einboxNsec, priorEinboxNsecs = ((cur.priorEinboxNsecs ?: emptyList()) + (m.priorEinboxNsecs ?: emptyList()) + listOfNotNull(cur.einboxNsecHex)).distinct().filter { it != m.einboxNsec }.ifEmpty { null },
+                    coordinatorGen = maxOf(cur.coordinatorGen ?: 0, m.coordinatorGen ?: 0).takeIf { it > 0 })
+                if (folded != cur) saveKeys(folded)
+            }
+        } else local
         accounts.signAndPublish(Kinds.APP_DATA, signer.nip44Encrypt(me, Wire.encode(EventKeysBackup.serializer(), backup)), listOf(listOf("d", d)), Relays.DEFAULT, "eventkeys")
+        Unit
     }
 
     // ── Admin commands, co-organizers ───────────────────────────────────────
@@ -908,13 +938,16 @@ class Organizer(
 
     private suspend fun restore(me: String, coordinate: String, b: EventKeysBackup) {
         val existing = keyStore.get(me, coordinate)
-        val eck = EckIdentity.union(existing?.eck ?: emptyList(), b.eck)
-        keyStore.save(me, EventKeys(
-            coordinate = coordinate, role = "organizer", eck = eck,
-            eidNsecHex = existing?.eidNsecHex ?: b.eidNsec, einboxNsecHex = existing?.einboxNsecHex ?: b.einboxNsec,
-            priorEinboxNsecs = existing?.priorEinboxNsecs,
-            coordinatorGen = maxOf(existing?.coordinatorGen ?: 0, b.coordinatorGen ?: 0).takeIf { it > 0 },
-            pendingEck = EventKeys.pendingMinus(EckIdentity.union(existing?.pendingEck ?: emptyList(), b.pendingEck ?: emptyList()), eck),
+        // The same union a backup write does (keys-backup.ts, SB-89): every inbox kept,
+        // the local current one current; ECK by (id, key); staged stays staged.
+        val local = existing?.let { k -> asBackup(coordinate, k, k.coordinatorGen ?: 0) }
+        val m = if (local != null) KeysBackup.merge(local, b) else KeysBackup.merge(b.copy(eck = EckIdentity.union(existing?.eck ?: emptyList(), b.eck)), b)
+        keyStore.save(me, (existing ?: EventKeys(coordinate, "organizer")).copy(
+            coordinate = coordinate, role = "organizer", eck = m.eck,
+            eidNsecHex = existing?.eidNsecHex ?: m.eidNsec, einboxNsecHex = m.einboxNsec,
+            priorEinboxNsecs = m.priorEinboxNsecs,
+            coordinatorGen = (m.coordinatorGen ?: 0).takeIf { it > 0 },
+            pendingEck = m.pendingEck,
         ))
     }
 

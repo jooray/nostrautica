@@ -209,6 +209,21 @@ const eckIdentity = {
     .map((t) => ({ tag: t, ref: P.readEckTag([t]) ?? null })),
 };
 
+// ── Event-keys backup union (SB-89) ───────────────────────────────────────
+const backupMerges = [];
+{
+  const bk = (over) => ({ v: 2, a: coord, eid_nsec: hex("01"), einbox_nsec: hex("02"), eck: [{ id: 1, key: eckKeyOf(1) }], ...over });
+  const inboxPk = (h) => P.pubkeyOf(P.hexToBytes(h));
+  const mb = (label, a, b, configInbox) =>
+    backupMerges.push({ label, a, b, configInbox: configInbox ?? null, out: P.mergeEventKeysBackups(a, b, configInbox ? { configInbox } : {}) });
+  mb("two rotations", bk({ eck: [{ id: 1, key: eckKeyOf(1) }, { id: 2, key: eckKeyOf(2) }], coordinator_gen: 1, einbox_nsec: hex("03"), prior_einbox_nsecs: [hex("02")] }),
+    bk({ eck: [{ id: 1, key: eckKeyOf(1) }, { id: 2, key: eckKeyOf(3) }], coordinator_gen: 2, einbox_nsec: hex("04"), prior_einbox_nsecs: [hex("02")] }));
+  mb("config names the other inbox", bk({ einbox_nsec: hex("03") }), bk({ einbox_nsec: hex("04") }),
+    inboxPk(hex("04")));
+  mb("staged then promoted", bk({ pending_eck: [{ id: 2, key: eckKeyOf(2) }] }), bk({ eck: [{ id: 1, key: eckKeyOf(1) }, { id: 2, key: eckKeyOf(2) }] }));
+  mb("old backup without a", { v: 2, eid_nsec: hex("01"), einbox_nsec: hex("02"), eck: [{ id: 1, key: eckKeyOf(1) }] }, bk({ coordinator_gen: 3 }));
+}
+
 writeFileSync(new URL("../../protocol/src/test/resources/parity-vectors.json", import.meta.url),
-  JSON.stringify({ payloads, configs, coordinates, menu, settingsMerges, settingsEdits, eckIdentity }, null, 1) + "\n");
+  JSON.stringify({ payloads, configs, coordinates, menu, settingsMerges, settingsEdits, eckIdentity, backupMerges }, null, 1) + "\n");
 console.log(`wrote parity-vectors.json: ${payloads.length} payloads, ${configs.length} configs, ${coordinates.length} coordinates`);

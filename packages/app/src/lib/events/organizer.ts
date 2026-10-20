@@ -80,6 +80,8 @@ import {
   unionEck,
   eckCollisionIds,
   type EckRef,
+  mergeEventKeysBackups,
+  eventKeysBackupSchema,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -90,6 +92,7 @@ import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import { withMutationLock } from "$lib/nostr/mutation-lock.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
@@ -1469,7 +1472,7 @@ export async function revokeAttendeeClient(
   // still staged (as `pending_eck`), so a recovered device holds it but does not
   // treat it as current until it finds the roster that uses it.
   if (blindingKey) {
-    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0, { owner }).catch(
       (e) => {
         console.warn("[organizer] revoke rotated the ECK but its backup did not publish:", e);
       },
@@ -1707,7 +1710,7 @@ async function rotateEckAndInbox(
   // simply is not there, and a later recovery on a fresh device restores an event
   // whose roster and directory it cannot read.
   if (blindingKey) {
-    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0).catch(
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, keys.coordinatorGen ?? 0, { owner }).catch(
       (e: unknown) => {
         console.warn("[organizer] ECK/inbox rotated but its backup did not publish:", e);
       },
@@ -1950,49 +1953,125 @@ export async function attachCoordinator(
     // Never silent (audit EV-11): without this backup the last-used coordinator
     // generation is not durable, and the next attach reuses a colliding gen that
     // the coordinator refuses.
-    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, gen).catch((e: unknown) => {
+    await writeEventKeysBackup(organizer, ctx.coordinate, keys, blindingKey, gen, { owner }).catch((e: unknown) => {
       console.warn("[organizer] attach recorded gen", gen, "but its backup did not publish:", e);
     });
   }
 }
 
-/** Republish the organizer's self-encrypted 30078 event-keys backup with the given
- *  coordinator generation (NIP §3.5), so the last-used gen survives a device wipe. */
+/** This device's custody for one event, in the 30078 backup's shape. */
+function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: number): EventKeysBackup {
+  return {
+    v: 2,
+    a: coordinate,
+    eid_nsec: keys.eidNsecHex!,
+    einbox_nsec: keys.einboxNsecHex!,
+    eck: keys.eck,
+    coordinator_gen: Math.max(coordinatorGen, keys.coordinatorGen ?? 0),
+    ...(keys.pendingEck?.length ? { pending_eck: keys.pendingEck } : {}),
+    ...(keys.priorEinboxNsecs?.length ? { prior_einbox_nsecs: keys.priorEinboxNsecs } : {}),
+  };
+}
+
+/**
+ * Fold a merged backup into the local record (mutates `keys`). Returns whether
+ * anything changed, i.e. whether the other copy held custody this device lacked.
+ */
+function foldBackupIntoKeys(keys: EventKeys, merged: EventKeysBackup): boolean {
+  const before = JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0]);
+  keys.eck = unionEck(keys.eck, merged.eck);
+  const pending = unionEck(keys.pendingEck ?? [], merged.pending_eck ?? []).filter(
+    (p) => !keys.eck.some((v) => v.id === p.id && v.key === p.key),
+  );
+  keys.pendingEck = pending.length > 0 ? pending : undefined;
+  const inboxes = [...new Set([keys.einboxNsecHex, merged.einbox_nsec, ...(keys.priorEinboxNsecs ?? []), ...(merged.prior_einbox_nsecs ?? [])])].filter(
+    (s): s is string => !!s,
+  );
+  keys.einboxNsecHex = merged.einbox_nsec;
+  const prior = inboxes.filter((s) => s !== merged.einbox_nsec);
+  keys.priorEinboxNsecs = prior.length > 0 ? prior : undefined;
+  keys.coordinatorGen = Math.max(keys.coordinatorGen ?? 0, merged.coordinator_gen ?? 0) || undefined;
+  return before !== JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0]);
+}
+
+/** Thrown when the account's backup exists but cannot be read, so it is not rewritten blind. */
+export class EventKeysBackupUnreadableError extends Error {
+  constructor() {
+    super("Couldn't read this event's key backup, so it was not rewritten (that would drop keys saved by your other devices).");
+    this.name = "EventKeysBackupUnreadableError";
+  }
+}
+
+function eventKeysBackupD(blindingKey: Uint8Array, coordinate: string, ownPubkey: string): string {
+  return `nostrautica:eventkeys:${blindedD(blindingKey, coordinate, ownPubkey)}`;
+}
+
+/**
+ * The account's current backup for this event from the relays, decrypted.
+ * Undefined when there is none (or no relay answered); throws
+ * {@link EventKeysBackupUnreadableError} when one exists but will not decrypt or parse.
+ */
+async function readEventKeysBackup(organizer: AppSigner, ownPubkey: string, d: string): Promise<{ backup: EventKeysBackup; id: string } | undefined> {
+  const events = await fetchEventsRelayOnly({ kinds: [KIND_APP_DATA], authors: [ownPubkey], "#d": [d] }).catch(() => []);
+  const latest = pickLatest(
+    onlyByAuthors(onlyVerified(events), [ownPubkey]).filter((e) => e.tags?.some((t) => t[0] === "d" && t[1] === d)),
+  );
+  if (!latest) return undefined;
+  try {
+    const json = await organizer.nip44Decrypt(ownPubkey, latest.content);
+    return { backup: eventKeysBackupSchema.parse(JSON.parse(json)), id: latest.id! };
+  } catch {
+    throw new EventKeysBackupUnreadableError();
+  }
+}
+
+/**
+ * Republish the organizer's self-encrypted 30078 event-keys backup (with the given
+ * coordinator generation, NIP §3.5) as a READ-MERGE-WRITE (audit SB-89).
+ *
+ * Every device of the account writes the same address. Publishing this device's
+ * snapshot replaced whatever another device had backed up: its ECK version, its
+ * rotated inbox, its higher install generation, all gone from the only durable
+ * copy. So the current backup is read first and the union published
+ * (`mergeEventKeysBackups`), and anything the other copy held that this device
+ * lacked is folded into the local record too. A backup that exists but cannot be
+ * read is not overwritten (the caller warns; the next write or Admin's
+ * reconcile retries). `configInbox` (the inbox the newest 31600 names) decides
+ * which E_inbox is current when the two copies disagree.
+ */
 async function writeEventKeysBackup(
   organizer: AppSigner,
   coordinate: string,
   keys: EventKeys,
   blindingKey: Uint8Array,
   coordinatorGen: number,
+  opts: { owner?: string; configInbox?: string } = {},
 ): Promise<void> {
   if (!keys.eidNsecHex || !keys.einboxNsecHex) return;
-  const backup: EventKeysBackup = {
-    v: 2,
-    a: coordinate,
-    eid_nsec: keys.eidNsecHex,
-    einbox_nsec: keys.einboxNsecHex,
-    eck: keys.eck,
-    coordinator_gen: coordinatorGen,
-    ...(keys.pendingEck?.length ? { pending_eck: keys.pendingEck } : {}),
-  };
   const ownPubkey = await organizer.getPublicKey();
-  const content = await organizer.nip44Encrypt(ownPubkey, JSON.stringify(backup));
-  const d = `nostrautica:eventkeys:${blindedD(blindingKey, coordinate, ownPubkey)}`;
-  // Monotonic republish (audit P3): the 30078 backup is rewritten on every
-  // attach/detach/rotation. Two rotations in the same second must not let the
-  // §3.1 tie-break resurrect the older backup (stale coordinator gen / ECK set).
-  await publishMonotonic({
-    kind: KIND_APP_DATA,
-    author: ownPubkey,
-    identifier: d,
-    owner: ownPubkey,
-    sign: (created_at) =>
-      organizer.signEvent({
-        kind: KIND_APP_DATA,
-        created_at,
-        tags: [["d", d]],
-        content,
-      }) as Promise<VerifiedEvent>,
+  const d = eventKeysBackupD(blindingKey, coordinate, ownPubkey);
+  await withMutationLock(`rmw:${ownPubkey}:${KIND_APP_DATA}:${d}`, async () => {
+    const local = keysAsBackup(keys, coordinate, coordinatorGen);
+    const remote = await readEventKeysBackup(organizer, ownPubkey, d);
+    const backup = remote ? mergeEventKeysBackups(local, remote.backup, { configInbox: opts.configInbox }) : local;
+    if (remote && foldBackupIntoKeys(keys, backup)) await saveEventKeys(keys, opts.owner);
+    const content = await organizer.nip44Encrypt(ownPubkey, JSON.stringify(backup));
+    // Monotonic republish (audit P3): the 30078 backup is rewritten on every
+    // attach/detach/rotation. Two rotations in the same second must not let the
+    // §3.1 tie-break resurrect the older backup (stale coordinator gen / ECK set).
+    await publishMonotonic({
+      kind: KIND_APP_DATA,
+      author: ownPubkey,
+      identifier: d,
+      owner: ownPubkey,
+      sign: (created_at) =>
+        organizer.signEvent({
+          kind: KIND_APP_DATA,
+          created_at,
+          tags: [["d", d]],
+          content,
+        }) as Promise<VerifiedEvent>,
+    });
   });
 }
 

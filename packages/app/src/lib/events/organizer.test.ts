@@ -950,6 +950,83 @@ describe("roster read-modify-write safety", () => {
     });
   });
 
+  // Audit SB-89: the backup is one address per (account, event), written by every
+  // device of the account. Publishing the local snapshot erased the other device's
+  // ECK version, rotated inbox and install generation from the only durable copy.
+  it("merges the other device's backup into the one it publishes, and into this device", async () => {
+    const otherV2 = { id: 2, key: bytesToBase64(generateEck()) };
+    const OTHER_INBOX = "5".repeat(64);
+    const otherBackup = {
+      v: 2,
+      a: COORD,
+      eid_nsec: bytesToHex(EID_SK),
+      einbox_nsec: OTHER_INBOX,
+      eck: [{ id: 1, key: bytesToBase64(ECK_BYTES) }, otherV2],
+      coordinator_gen: 4,
+    };
+    const withInbox = await loadEventKeys(COORD);
+    await saveEventKeys({ ...withInbox!, einboxNsecHex: "3".repeat(64) }, OWNER);
+    fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[]; "#d"?: string[] }) =>
+      filter.kinds?.includes(30078)
+        ? [{ id: "bk", kind: 30078, pubkey: ALICE, created_at: 10, tags: [["d", filter["#d"]![0]]], content: `enc:${JSON.stringify(otherBackup)}` }]
+        : [
+            rosterEvent([
+              { pubkey: ALICE, d: "d-alice", role: "attendee" },
+              { pubkey: BOB, d: "d-bob", role: "attendee" },
+            ]),
+          ],
+    );
+    const published: string[] = [];
+    const signer = {
+      getPublicKey: async () => ALICE,
+      nip44Encrypt: async (_pk: string, plaintext: string) => {
+        published.push(plaintext);
+        return `enc:${plaintext}`;
+      },
+      nip44Decrypt: async (_pk: string, ct: string) => ct.replace(/^enc:/, ""),
+      signEvent: async (e: unknown) => e,
+    } as unknown as AppSigner;
+
+    await revokeAttendeeClient(signer, ctx, BOB, new Uint8Array(32).fill(7));
+
+    const backup = JSON.parse(published.at(-1)!) as { eck: { id: number; key: string }[]; coordinator_gen: number; prior_einbox_nsecs?: string[]; pending_eck?: unknown[] };
+    // Both devices' v2 keys survive, plus this revoke's staged v3; the higher gen wins.
+    expect([...backup.eck, ...((backup.pending_eck as { key: string }[]) ?? [])].map((v) => v.key)).toContain(otherV2.key);
+    expect(backup.coordinator_gen).toBe(4);
+    expect(backup.prior_einbox_nsecs).toContain(OTHER_INBOX);
+    // …and this device now holds the other device's key and inbox too.
+    const keys = await loadEventKeys(COORD);
+    expect(keys?.eck.map((v) => v.key)).toContain(otherV2.key);
+    expect(keys?.priorEinboxNsecs).toContain(OTHER_INBOX);
+    expect(keys?.coordinatorGen).toBe(4);
+  });
+
+  it("does not rewrite a backup it cannot read", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const withInbox = await loadEventKeys(COORD);
+    await saveEventKeys({ ...withInbox!, einboxNsecHex: "3".repeat(64) }, OWNER);
+    fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[]; "#d"?: string[] }) =>
+      filter.kinds?.includes(30078)
+        ? [{ id: "bk", kind: 30078, pubkey: ALICE, created_at: 10, tags: [["d", filter["#d"]![0]]], content: "garbled" }]
+        : [rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }, { pubkey: BOB, d: "d-bob", role: "attendee" }])],
+    );
+    const encrypted: string[] = [];
+    const signer = {
+      getPublicKey: async () => ALICE,
+      nip44Encrypt: async (_pk: string, p: string) => (encrypted.push(p), `enc:${p}`),
+      nip44Decrypt: async () => {
+        throw new Error("bunker timed out");
+      },
+      signEvent: async (e: unknown) => e,
+    } as unknown as AppSigner;
+
+    await revokeAttendeeClient(signer, ctx, BOB, new Uint8Array(32).fill(7));
+
+    expect(encrypted).toHaveLength(0); // no blind overwrite
+    expect(warn.mock.calls.flat().join(" ")).toMatch(/backup did not publish/i);
+    warn.mockRestore();
+  });
+
   it("still revokes, loudly, when no blinding key is available", async () => {
     // Better a rotation the organizer is warned about than a refusal that leaves a
     // revoked attendee holding a live key.

@@ -17,3 +17,4 @@ export * from "./hierarchy.js";
 export * from "./languages.js";
 export * from "./settings-merge.js";
 export * from "./eck-identity.js";
+export * from "./keys-backup.js";

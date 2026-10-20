@@ -1224,6 +1224,8 @@ export type UserSettings = z.infer<typeof userSettingsSchema>;
  * through it, the gentler failure than an unbounded payload).
  */
 export const MAX_SETTINGS_TOMBSTONES = 200;
+/** Retired E_inbox secrets one event-keys backup / organizer grant carries. */
+export const MAX_PRIOR_INBOXES = 64;
 const settingsStamps = z
   .record(hex32, z.number().int().nonnegative())
   .refine((r) => Object.keys(r).length <= MAX_ROSTER + MAX_SETTINGS_TOMBSTONES, {
@@ -1310,6 +1312,10 @@ export const eventKeysBackupSchema = z.object({
   // restores them as staged and a client promotes one once it finds the 31604
   // written under it. Additive: older readers ignore it.
   pending_eck: z.array(eckVersionSchema).max(MAX_ECK_VERSIONS).optional(),
+  // E_inbox secrets retired by a rotation (NIP §3.7), so a recovered device can
+  // still read submissions sealed to a pre-rotation inbox, and two devices that
+  // each rotated keep both (audit SB-89). Additive.
+  prior_einbox_nsecs: z.array(secretKeyHex).max(MAX_PRIOR_INBOXES).optional(),
 });
 export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 

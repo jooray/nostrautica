@@ -16630,5 +16630,216 @@
     }
    }
   ]
- }
+ },
+ "backupMerges": [
+  {
+   "label": "two rotations",
+   "a": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "coordinator_gen": 1,
+    "prior_einbox_nsecs": [
+     "0202020202020202020202020202020202020202020202020202020202020202"
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0404040404040404040404040404040404040404040404040404040404040404",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+     }
+    ],
+    "coordinator_gen": 2,
+    "prior_einbox_nsecs": [
+     "0202020202020202020202020202020202020202020202020202020202020202"
+    ]
+   },
+   "configInbox": null,
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwM="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "coordinator_gen": 2,
+    "prior_einbox_nsecs": [
+     "0404040404040404040404040404040404040404040404040404040404040404",
+     "0202020202020202020202020202020202020202020202020202020202020202"
+    ]
+   }
+  },
+  {
+   "label": "config names the other inbox",
+   "a": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0303030303030303030303030303030303030303030303030303030303030303",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0404040404040404040404040404040404040404040404040404040404040404",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ]
+   },
+   "configInbox": "462779ad4aad39514614751a71085f2f10e1c7a593e4e030efb5b8721ce55b0b",
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0404040404040404040404040404040404040404040404040404040404040404",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "coordinator_gen": 0,
+    "prior_einbox_nsecs": [
+     "0303030303030303030303030303030303030303030303030303030303030303"
+    ]
+   }
+  },
+  {
+   "label": "staged then promoted",
+   "a": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "pending_eck": [
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ]
+   },
+   "configInbox": null,
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     },
+     {
+      "id": 2,
+      "key": "AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI="
+     }
+    ],
+    "coordinator_gen": 0
+   }
+  },
+  {
+   "label": "old backup without a",
+   "a": {
+    "v": 2,
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ]
+   },
+   "b": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "coordinator_gen": 3
+   },
+   "configInbox": null,
+   "out": {
+    "v": 2,
+    "a": "31923:e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0:plan-b",
+    "eid_nsec": "0101010101010101010101010101010101010101010101010101010101010101",
+    "einbox_nsec": "0202020202020202020202020202020202020202020202020202020202020202",
+    "eck": [
+     {
+      "id": 1,
+      "key": "AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE="
+     }
+    ],
+    "coordinator_gen": 3
+   }
+  }
+ ]
 }

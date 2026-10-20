@@ -125,6 +125,15 @@ class ParityVectorsTest {
         }
     }
 
+    @Test fun eventKeysBackupMergeLikeTs() {
+        val ser = EventKeysBackup.serializer()
+        for (m in v["backupMerges"]!!.jsonArray.map { it.jsonObject }) {
+            val cfg = m["configInbox"]!!.let { if (it is JsonNull) null else it.jsonPrimitive.content }
+            val got = KeysBackup.merge(Wire.json.decodeFromJsonElement(ser, m["a"]!!), Wire.json.decodeFromJsonElement(ser, m["b"]!!), cfg)
+            assertEquals(m["label"]!!.jsonPrimitive.content, Wire.json.decodeFromJsonElement(ser, m["out"]!!), got)
+        }
+    }
+
     @Test fun aLibraryEntryKeepsItsExplicitNullA() {
         // SB-85: the key must be present for TS readers; @Required makes this reader agree.
         val ok = Wire.parseSafe(MyProfileContent.serializer(), JsonObject(mapOf("v" to kotlinx.serialization.json.JsonPrimitive(2), "a" to JsonNull)))
