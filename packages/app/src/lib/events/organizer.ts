@@ -78,7 +78,7 @@ import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
-import { loadEventKeys, currentEck, saveEventKeys } from "./keystore.js";
+import { loadEventKeys, currentEck, saveEventKeys, activeKeystoreOwner } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
@@ -1273,7 +1273,11 @@ export async function revokeAttendeeClient(
    */
   blindingKey?: Uint8Array,
 ): Promise<void> {
-  const keys = await loadEventKeys(ctx.coordinate);
+  // Captured once (audit DS41-001): the rotated ECK is saved after a roster read
+  // and a directory read, and must land under the identity that read these keys,
+  // not whoever is signed in by then.
+  const owner = activeKeystoreOwner() ?? undefined;
+  const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer keys not available");
   }
@@ -1349,7 +1353,7 @@ export async function revokeAttendeeClient(
   const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
 
   keys.eck = eckAll;
-  await saveEventKeys(keys);
+  await saveEventKeys(keys, owner);
   // The new ECK must reach the DURABLE backup, not just this device.
   //
   // Every other path that mints an ECK writes the 30078 backup;  this one never
@@ -1506,7 +1510,9 @@ async function rotateEckAndInbox(
   organizer: AppSigner,
   ctx: EventContext,
   keys: EventKeys,
-  blindingKey?: Uint8Array,
+  blindingKey: Uint8Array | undefined,
+  /** The identity whose custody `keys` is — written back under it explicitly (DS41-001). */
+  owner: string | undefined,
 ): Promise<{ newInboxNsecHex: string; newInboxPubkey: string; eck: EckVersion[] }> {
   const eidSk = hexToBytes(keys.eidNsecHex!);
   const prevEck = currentEck(keys);
@@ -1545,7 +1551,7 @@ async function rotateEckAndInbox(
   keys.eck = eckAll;
   if (keys.einboxNsecHex) keys.priorEinboxNsecs = [...(keys.priorEinboxNsecs ?? []), keys.einboxNsecHex];
   keys.einboxNsecHex = newInboxNsecHex;
-  await saveEventKeys(keys);
+  await saveEventKeys(keys, owner);
   await publishRekeyed(ctx, [], rekeyed, rosterEvents);
   // Never silent (audit EV-11). The rotation has already happened locally; if the
   // backup does not publish, the durable record of the new ECK and the new inbox
@@ -1696,7 +1702,10 @@ export async function attachCoordinator(
   coordinatorPubkey: string,
   blindingKey?: Uint8Array,
 ): Promise<void> {
-  const keys = await loadEventKeys(ctx.coordinate);
+  // Captured once (audit DS41-001): the write-backs below happen after several
+  // relay round trips, and must land under the identity that read these keys.
+  const owner = activeKeystoreOwner() ?? undefined;
+  const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex || !keys.einboxNsecHex) {
     throw new Error("organizer keys not available on this device");
   }
@@ -1733,7 +1742,7 @@ export async function attachCoordinator(
       content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
     });
     await publishAccountGiftWrap(detachWrap as any, previous!, ctx.config.relays);
-    const rotated = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
+    const rotated = await rotateEckAndInbox(organizer, ctx, keys, blindingKey, owner);
     einboxNsecHex = rotated.newInboxNsecHex;
     einboxPubkey = rotated.newInboxPubkey;
     eck = rotated.eck;
@@ -1790,7 +1799,7 @@ export async function attachCoordinator(
 
   // 3. Persist the new gen locally and (durably) in the 30078 backup so a re-attach
   //    — on this or a fresh device — increments past it instead of colliding.
-  await saveEventKeys({ ...keys, coordinatorGen: gen });
+  await saveEventKeys({ ...keys, coordinatorGen: gen }, owner);
   if (blindingKey) {
     // Never silent (audit EV-11): without this backup the last-used coordinator
     // generation is not durable, and the next attach reuses a colliding gen that
@@ -1853,7 +1862,8 @@ export async function detachCoordinator(
   blindingKey?: Uint8Array,
 ): Promise<void> {
   if (!ctx.config.coordinator) return;
-  const keys = await loadEventKeys(ctx.coordinate);
+  const owner = activeKeystoreOwner() ?? undefined; // see attachCoordinator (DS41-001)
+  const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
@@ -1881,7 +1891,7 @@ export async function detachCoordinator(
   //    keys it held, so both are rotated (re-encrypt directory/roster, re-grant to
   //    all attendees) to protect future content. Reads the CURRENT (still
   //    coordinator-authored) records, so it must run before the new config publishes.
-  const { newInboxPubkey, eck: rotatedEck } = await rotateEckAndInbox(organizer, ctx, keys, blindingKey);
+  const { newInboxPubkey, eck: rotatedEck } = await rotateEckAndInbox(organizer, ctx, keys, blindingKey, owner);
 
   // 3. Republish 31600 without the coordinator tag, advertising the NEW inbox so
   //    senders encrypt future submissions to the rotated inbox the organizer holds.

@@ -743,6 +743,27 @@ describe("roster read-modify-write safety", () => {
     expect(publishSigned).not.toHaveBeenCalled();
   });
 
+  // Audit DS41-001, revoke path: the rotated keys were saved under whoever was
+  // signed in when the reads finished.
+  it("saves the rotated ECK under the identity that started the revoke", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+    const OTHER_OWNER = "c".repeat(64);
+    fetchEvents.mockImplementation(async () => {
+      setActiveOwner(OTHER_OWNER); // account switch while the read is in flight
+      return [];
+    });
+
+    await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+
+    expect((await loadEventKeys(COORD, OWNER))?.eck).toHaveLength(2);
+    expect(await loadEventKeys(COORD, OTHER_OWNER)).toBeUndefined();
+  });
+
   it("reads every remaining member's directory entry in one request", async () => {
     fetchEventsRelayOnly.mockResolvedValue([
       rosterEvent([
