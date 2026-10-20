@@ -7057,6 +7057,25 @@ describe("audit SB-99 — a join in flight across a detach publishes nothing", (
   });
 });
 
+/** Audit DS41-046: the revoked attendee's own 31605 stayed readable to them. */
+describe("audit DS41-046 — revoke deletes the match list published to the removed attendee", () => {
+  it("the revoke's NIP-09 deletion names their 31605 at the pre-rotation d", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const listD = blindedD(h.eck, h.coordinate, pk);
+    expect(latestMatchList(h.transport, sk, getPublicKey(h.coordSk), listD)).toBeDefined();
+    const before = h.transport.published.length;
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+    const want = `${KIND_MATCH_LIST}:${getPublicKey(h.coordSk)}:${listD}`;
+    const deletions = h.transport.published.slice(before).filter((e) => e.kind === KIND_DELETION);
+    expect(deletions.some((e) => e.tags.some((t) => t[0] === "a" && t[1] === want))).toBe(true);
+  });
+});
+
 /** Audit DS41-042 / SB-98: a forward and a reverse batch for one directed pair both paid. */
 describe("audit SB-98 — one directed pair is scored once, however many batches hold it", () => {
   it("concurrent forward + reverse batches make one provider call", async () => {

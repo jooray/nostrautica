@@ -4833,11 +4833,24 @@ export class Coordinator {
     // 1. Delete the removed attendee's directory entry (addressable, NIP-09) at the
     //    PRE-rotation blinded d.
     const removedD = blindedD(prevBytes, state.coordinate, removedPubkey);
+    // …and the match list published TO them (audit DS41-046): it holds other
+    // attendees' pubkeys, scores and private reasoning, and was replaced for
+    // everyone else by the rotation. Its d is blinded under whichever ECK was
+    // current when it was published, so every pre-rotation version is named.
+    const matchListDs = new Set(
+      state.eck.filter((v) => v.id !== newId).map((v) => blindedD(base64ToBytes(v.key), state.coordinate, removedPubkey)),
+    );
+    matchListDs.add(blindedD(prevBytes, state.coordinate, removedPubkey));
     const deletion = finalizeEvent(
       {
         kind: KIND_DELETION,
         created_at: Math.floor(this.now() / 1000),
-        tags: [["a", `${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${removedD}`], ["k", String(KIND_DIRECTORY_ENTRY)]],
+        tags: [
+          ["a", `${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${removedD}`],
+          ...[...matchListDs].map((d) => ["a", `${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`]),
+          ["k", String(KIND_DIRECTORY_ENTRY)],
+          ["k", String(KIND_MATCH_LIST)],
+        ],
         content: "revoked",
       },
       this.deps.coordSk,
