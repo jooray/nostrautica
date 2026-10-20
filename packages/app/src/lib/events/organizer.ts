@@ -1784,6 +1784,11 @@ export async function attachCoordinator(
       inbox_nsec: einboxNsecHex,
       eck,
       config_relays: ctx.config.relays,
+      // The coordinator this one takes over from (NIP §3.7, audit SB-122). The
+      // new coordinator adopts a roster only from E_id or from the coordinator
+      // named here, so naming it is what lets the outgoing coordinator's approvals
+      // carry over; a forged roster under any other key is ignored.
+      ...(replacing ? { prev_coordinator: previous } : {}),
     },
   });
 

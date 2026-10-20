@@ -47,6 +47,9 @@ import {
   KIND_COMMUNITY,
   KIND_EVENT_CONFIG,
   buildEventConfig,
+  unwrapRumor,
+  KIND_COORDINATOR_GRANT,
+  coordinatorGrantContentSchema,
 } from "@nostrautica/protocol";
 import { WHITENOISE_RELAYS } from "$lib/nostr/relays.js";
 
@@ -1160,6 +1163,58 @@ describe("updateEventConfig relay editing", () => {
         .map((c) => c[0] as { kind: number; tags: string[][] })
         .find((e) => e.kind === KIND_EVENT_CONFIG)!;
       expect(cfg.tags.find((t) => t[0] === "coordinator")).toEqual(["coordinator", coordinator, "5"]);
+    });
+
+    /** The 21603 the attach sealed to `coordinatorSk`'s pubkey. */
+    const grantFor = (coordinatorSk: Uint8Array) =>
+      publishSigned.mock.calls
+        .map((c) => c[0] as { kind: number })
+        .filter((e) => e.kind === 1059)
+        .map((e) => {
+          try {
+            return unwrapRumor(e as any, coordinatorSk);
+          } catch {
+            return undefined;
+          }
+        })
+        .filter((r) => r?.kind === KIND_COORDINATOR_GRANT)
+        .map((r) => coordinatorGrantContentSchema.parse(JSON.parse(r!.content)))[0];
+
+    // Audit SB-122: the incoming coordinator adopts a roster only from E_id or the
+    // coordinator the grant names, so a replace must name the one it replaces.
+    it("names the coordinator it replaces in the 21603 (prev_coordinator)", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const oldCoordinator = getPublicKey(generateSecretKey());
+      const newSk = generateSecretKey();
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK), coordinator: oldCoordinator, coordinatorGen: 1 });
+      // The replace rotates the ECK, which reads the roster first: serve the
+      // config to config reads only, so the event simply has no roster yet.
+      const served = await fetchEventsRelayOnly({ kinds: [KIND_EVENT_CONFIG] });
+      fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[] }) =>
+        filter.kinds?.includes(KIND_EVENT_CONFIG) ? served : [],
+      );
+
+      await attachCoordinator({} as AppSigner, stale, getPublicKey(newSk));
+
+      const grant = grantFor(newSk);
+      expect(grant?.gen).toBe(2);
+      expect(grant?.prev_coordinator).toBe(oldCoordinator);
+    });
+
+    it("names no previous coordinator on a re-attach of the same one", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const sk = generateSecretKey();
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK), coordinator: getPublicKey(sk), coordinatorGen: 1 });
+
+      await attachCoordinator({} as AppSigner, stale, getPublicKey(sk));
+
+      const grant = grantFor(sk);
+      expect(grant).toBeDefined();
+      expect(grant!.prev_coordinator).toBeUndefined();
     });
 
     // Audit SB-90: another organizer device rotated the inbox on a detach; this
