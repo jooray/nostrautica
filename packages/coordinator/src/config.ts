@@ -232,8 +232,25 @@ export const configSchema = z.object({
       /**
        * When non-empty, only install events whose E_id (hex pubkey) is listed.
        * Empty (default) = accept any E_id-authenticated install.
+       *
+       * npub or hex, normalized to lowercase hex at load (audit DS41-028). The
+       * install check compares against the canonical hex of the coordinate, so an
+       * npub (the form the daemon's own startup line prints) or uppercase hex
+       * used to match nothing: every install denied, with no error at startup.
+       * An entry that is neither is a load error for the same reason.
        */
-      allowed_eid_pubkeys: z.array(z.string()).default([]),
+      allowed_eid_pubkeys: z
+        .array(
+          z.string().transform((id, ctx) => {
+            const hex = toHexPubkey(id);
+            if (!hex) {
+              ctx.addIssue({ code: z.ZodIssueCode.custom, message: `not an npub or 64-char hex pubkey: ${JSON.stringify(id)}` });
+              return z.NEVER;
+            }
+            return hex;
+          }),
+        )
+        .default([]),
       /**
        * Escape hatch for startup model-privacy verification (audit COORD-20):
        * when GET /models can't be fetched, startup normally ABORTS if any role
