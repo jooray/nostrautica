@@ -27,7 +27,7 @@
   } from "$lib/events/scan-budget.js";
   import { connectivity } from "$lib/stores/connectivity.svelte.js";
   import { defaultEventIcon } from "$lib/media/image.js";
-  import { backupNag, markBackedUp } from "$lib/stores/backup-nag.svelte.js";
+  import { backupNag, dismissBackupNudge } from "$lib/stores/backup-nag.svelte.js";
   import { prefetchEventContext } from "$lib/nostr/prefetch.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import { loadEventContext, cachedEventContext } from "$lib/events/event-context.js";
@@ -390,7 +390,7 @@
   {t("home.intro")}
 </p>
 
-{#if session.loggedIn && session.signer?.method === "local" && !backupNag.done}
+{#if session.loggedIn && session.signer?.method === "local" && !backupNag.done && !backupNag.dismissed}
   <!-- One gentle nudge until the key is backed up (UI-SUGGESTIONS #8). -->
   <div class="card warn">
     <strong>{t("home.backup.title")}</strong>
@@ -401,7 +401,9 @@
       <button class="btn inline primary" onclick={() => router.go({ name: "me" })}>
         {t("home.backup.now")}
       </button>
-      <button class="btn inline" onclick={() => markBackedUp()}>{t("home.backup.saved")}</button>
+      <!-- Hides the nudge only (DS41-016): nothing was shown or confirmed here, so
+           it must not tell the logout guard the key is safe to delete. -->
+      <button class="btn inline" onclick={() => dismissBackupNudge()}>{t("home.backup.saved")}</button>
     </div>
   </div>
 {/if}
