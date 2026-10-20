@@ -1152,6 +1152,7 @@ function streamDirectoryEvents(
     // ALL parts, not any: this is a fan-out over `d` chunks, so an absence is
     // only believable when every chunk was answered (see StreamHandle.answered).
     answered: () => parts.every((p) => p.answered()),
+    allAnswered: () => parts.every((p) => p.allAnswered()),
     ready: Promise.all(parts.map((p) => p.ready)).then((sets) => {
       const byId = new Map<string, (typeof sets)[number][number]>();
       for (const events of sets) for (const e of events) byId.set(e.id, e);
