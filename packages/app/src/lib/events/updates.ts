@@ -87,25 +87,34 @@ export async function publishEventUpdate(
   const eidSk = hexToBytes(keys.eidNsecHex);
   const now = Math.floor(Date.now() / 1000);
   const d = input.d ?? `update-${now.toString(36)}`;
-  const publishedAt = input.publishedAt ?? now;
-  const tags = [
-    ["d", d],
-    ["title", input.title],
-    ["published_at", String(publishedAt)],
-    ["a", ctx.coordinate], // ties the update to the event for NIP-23 clients
-  ];
-  if (input.summary) tags.push(["summary", input.summary]);
-  if (input.image) tags.push(["image", input.image]);
+  // A NEW update's published_at is the created_at it is signed with. `now` is
+  // read before publishMonotonic's relay round-trip, so using it made every fresh
+  // update older than its own created_at and it rendered "(edited)" on first
+  // publish (manual e2e NOTE-5). An edit keeps the original published_at.
+  let publishedAt = input.publishedAt ?? now;
+  const tagsAt = (at: number) => {
+    const tags = [
+      ["d", d],
+      ["title", input.title],
+      ["published_at", String(at)],
+      ["a", ctx.coordinate], // ties the update to the event for NIP-23 clients
+    ];
+    if (input.summary) tags.push(["summary", input.summary]);
+    if (input.image) tags.push(["image", input.image]);
+    return tags;
+  };
   const { createdAt, published } = await publishMonotonic({
     kind: KIND_LONGFORM,
     author: ctx.config.eidPubkey,
     identifier: d,
     relays: ctx.config.relays,
-    sign: (created_at) =>
-      finalizeEvent(
-        { kind: KIND_LONGFORM, created_at, tags, content: input.content },
+    sign: (created_at) => {
+      publishedAt = input.publishedAt ?? created_at;
+      return finalizeEvent(
+        { kind: KIND_LONGFORM, created_at, tags: tagsAt(publishedAt), content: input.content },
         eidSk,
-      ) as VerifiedEvent,
+      ) as VerifiedEvent;
+    },
   });
   return {
     update: {
