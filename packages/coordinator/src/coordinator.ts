@@ -3223,18 +3223,22 @@ export class Coordinator {
         );
         return;
       }
-      roster = mergeRosterPages([roster, ...rest]);
-    }
-    // The roster ceiling applies to a bootstrapped roster too (audit SB-123). Each
-    // page is schema-capped, but the merge is not: 40 pages × 700 entries is 28,000
-    // "approved" members, each granted the ECK and given paid pipeline work. No
-    // roster a coordinator could have published is that large, so one that is was
-    // not written by a coordinator: adopt none of it.
-    if (roster.attendees.length > MAX_ROSTER) {
-      log(
-        `[handover] ${state.coordinate}: ABORTING — the roster from ${short(rosterAuthor)} names ${roster.attendees.length} members, past the ${MAX_ROSTER}-member roster cap`,
-      );
-      return;
+      const pageSet = [roster, ...rest];
+      // The roster ceiling applies to a bootstrapped roster too (audit SB-123).
+      // Each page is schema-capped, but 40 pages × 700 entries is 28,000
+      // "approved" members, each granted the ECK and given paid pipeline work.
+      // No roster a coordinator could have published is that large, so one that
+      // is was not written by a coordinator: adopt none of it. Counted on the RAW
+      // pages: mergeRosterPages itself truncates at MAX_ROSTER (SB-28), which
+      // would quietly turn this refusal into adopting the first 2,000.
+      const members = new Set(pageSet.flatMap((page) => page.attendees.map((a) => a.pubkey))).size;
+      if (members > MAX_ROSTER) {
+        log(
+          `[handover] ${state.coordinate}: ABORTING — the roster from ${short(rosterAuthor)} names ${members} members, past the ${MAX_ROSTER}-member roster cap`,
+        );
+        return;
+      }
+      roster = mergeRosterPages(pageSet);
     }
     log(
       `[handover] ${state.coordinate}: bootstrapping ${roster.attendees.length} attendee(s) from a roster authored by ${short(rosterAuthor)}` +
