@@ -200,7 +200,9 @@ describe("per-event settings read-modify-write safety", () => {
     });
     await toggleSetting(signer({ content: "" }), ctx, BLINDING, "met", OTHER);
     expect(cacheGet(`evsettings:${COORD}`, OTHER)).toBeUndefined();
-    expect(cacheGet<PerEventSettings>(`evsettings:${COORD}`, ME)?.data.met).toEqual([FRIEND, OTHER]);
+    // The switch bumped the cache generation (DS41-003), so the late write is
+    // dropped rather than filed anywhere — not even back under ME.
+    expect(cacheGet(`evsettings:${COORD}`, ME)).toBeUndefined();
   });
 
   // Audit DS41-007: two taps in a row used to read the same baseline, and the
