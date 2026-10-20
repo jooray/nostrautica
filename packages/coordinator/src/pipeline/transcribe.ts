@@ -13,6 +13,7 @@ import {
   extractAudioSegments,
   probeDurationFromBytes,
   ProbeUnavailableError,
+  SubprocessError,
   type AudioSegment,
 } from "./audio.js";
 import { safeFetch, SafeFetchError } from "../net/safe-fetch.js";
@@ -183,7 +184,18 @@ export async function transcribeMedia(
     );
   }
 
-  const plaintext = await decryptMedia(descriptor, ciphertext);
+  // Deterministic failures reject THIS media, not the attendee (audit DS41-037).
+  // The ciphertext's hash was already verified by the download, so a decrypt that
+  // fails (GCM tag, `ox` mismatch) will fail identically on every retry; thrown as
+  // a plain Error it rode the 3-day retry tail, re-downloading each time, and then
+  // poisoned the attendee's whole pipeline over one bad recording. Not cached: the
+  // key lives in the descriptor, not the blob.
+  let plaintext: Uint8Array;
+  try {
+    plaintext = await decryptMedia(descriptor, ciphertext);
+  } catch (e) {
+    throw new MediaPolicyError(`media does not decrypt with its descriptor: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   // H-3: probe the REAL decoded duration and reject over-limit media BEFORE STT,
   // regardless of the declared `duration`. Account the actual bytes + duration.
@@ -249,7 +261,18 @@ export async function transcribeMedia(
   const caps = await deps.stt.capabilities();
   const extract =
     deps.extractAudio ?? ((m, mime, maxBytes) => extractAudioSegments(m, mime, maxBytes, deps.signal));
-  const segments = await extract(plaintext, descriptor.m, caps.maxUploadBytes);
+  let segments: AudioSegment[];
+  try {
+    segments = await extract(plaintext, descriptor.m, caps.maxUploadBytes);
+  } catch (e) {
+    // ffmpeg ran and refused the input (non-zero exit, or output past the cap):
+    // the same bytes will be refused again (DS41-037). A timeout or a failed spawn
+    // is about this host, not the media, and stays retryable.
+    if (e instanceof SubprocessError && (e.kind === "exit" || e.kind === "output")) {
+      throw new MediaPolicyError(`audio extraction failed on this media: ${e.message}`);
+    }
+    throw e;
+  }
 
   const parts: string[] = [];
   let lang: string | undefined;
