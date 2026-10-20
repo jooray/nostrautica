@@ -208,7 +208,7 @@ describe("scanDmGiftWraps ciphertext routing and history", () => {
     const owner = "1".repeat(64);
     setActiveCacheOwner(owner);
     fetchEvents.mockResolvedValue([dmListEvent(owner, ["wss://my-private-inbox.example"])]);
-    streamEvents.mockReturnValue({ ready: Promise.resolve([]), stop: () => {} });
+    streamEvents.mockReturnValue({ ready: Promise.resolve([]), stop: () => {}, allAnswered: () => true });
 
     await scanDmGiftWraps(owner);
 
@@ -227,6 +227,7 @@ describe("scanDmGiftWraps ciphertext routing and history", () => {
     streamEvents.mockReturnValue({
       ready: Promise.resolve([{ id: "recent-wrap", created_at: 900 }]),
       stop: () => {},
+      allAnswered: () => true,
     });
 
     await scanDmGiftWraps(owner, { history: false });
@@ -246,9 +247,9 @@ describe("scanDmGiftWraps ciphertext routing and history", () => {
       ...wraps(DM_HISTORY_PAGE_LIMIT - 1, 800, "second"),
     ];
     streamEvents
-      .mockReturnValueOnce({ ready: Promise.resolve(first), stop: () => {} })
-      .mockReturnValueOnce({ ready: Promise.resolve(second), stop: () => {} })
-      .mockReturnValueOnce({ ready: Promise.resolve([]), stop: () => {} });
+      .mockReturnValueOnce({ ready: Promise.resolve(first), stop: () => {}, allAnswered: () => true })
+      .mockReturnValueOnce({ ready: Promise.resolve(second), stop: () => {}, allAnswered: () => true })
+      .mockReturnValueOnce({ ready: Promise.resolve([]), stop: () => {}, allAnswered: () => true });
 
     const result = await scanDmGiftWraps(owner);
 
@@ -269,7 +270,7 @@ describe("scanDmGiftWraps ciphertext routing and history", () => {
       ...wrap,
       created_at: 100,
     }));
-    streamEvents.mockReturnValue({ ready: Promise.resolve(repeated), stop: () => {} });
+    streamEvents.mockReturnValue({ ready: Promise.resolve(repeated), stop: () => {}, allAnswered: () => true });
 
     const result = await scanDmGiftWraps(owner);
 
@@ -282,6 +283,34 @@ describe("scanDmGiftWraps ciphertext routing and history", () => {
       98,
       97,
     ]);
+  });
+  // DS41-062: a short page while a relay is still silent is a partial page.
+  it("does not mark history complete on a short page unless every relay answered", async () => {
+    const owner = "5".repeat(64);
+    setActiveCacheOwner(owner);
+    fetchEvents.mockResolvedValue([]);
+    const partial = wraps(37, 500, "partial");
+    streamEvents.mockReturnValue({
+      ready: Promise.resolve(partial),
+      stop: () => {},
+      allAnswered: () => false,
+    });
+
+    await scanDmGiftWraps(owner);
+    await scanDmGiftWraps(owner);
+    // History was walked again on the second scan (one recent + one history read each).
+    const historyReads = streamEvents.mock.calls.filter(([filter]) => filter.limit !== undefined);
+    expect(historyReads).toHaveLength(2);
+
+    streamEvents.mockReturnValue({
+      ready: Promise.resolve(partial),
+      stop: () => {},
+      allAnswered: () => true,
+    });
+    await scanDmGiftWraps(owner); // complete now
+    streamEvents.mockClear();
+    await scanDmGiftWraps(owner);
+    expect(streamEvents.mock.calls.filter(([filter]) => filter.limit !== undefined)).toHaveLength(0);
   });
 });
 
@@ -300,7 +329,7 @@ describe("fetchDms unwrap memo persistence (§2.6)", () => {
 
   it("decrypts wraps once, then serves history from the persisted memo", async () => {
     // First scan returns one gift-wrap that unwraps to a DM from PEER.
-    streamEvents.mockReturnValue({ ready: Promise.resolve([{ id: "wrap-1" }]), stop: () => {} });
+    streamEvents.mockReturnValue({ ready: Promise.resolve([{ id: "wrap-1" }]), stop: () => {}, allAnswered: () => true });
     signerUnwrap.mockResolvedValue({
       id: "rumor-1",
       pubkey: PEER,
@@ -345,7 +374,7 @@ describe("the unwrap loop does not outlive a logout (DS41-004)", () => {
     setActiveCacheOwner(OWNER);
     streamEvents.mockReset();
     signerUnwrap.mockReset();
-    streamEvents.mockReturnValue({ ready: Promise.resolve([{ id: "wrap-x" }]), stop: () => {} });
+    streamEvents.mockReturnValue({ ready: Promise.resolve([{ id: "wrap-x" }]), stop: () => {}, allAnswered: () => true });
     let answer: ((rumor: unknown) => void) | undefined;
     signerUnwrap.mockImplementation(() => new Promise((r) => (answer = r)));
 

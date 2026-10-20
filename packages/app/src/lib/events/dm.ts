@@ -271,18 +271,24 @@ export async function scanDmGiftWraps(
       limit: DM_HISTORY_PAGE_LIMIT,
       ...(historyUntil !== undefined ? { until: historyUntil } : {}),
     };
-    const page = (await streamEvents(filter, {
+    const handle = streamEvents(filter, {
       relays,
       relayOnly: true,
       timeoutMs: 10_000,
-    }).ready) as unknown as GiftWrap[];
+    });
+    const page = (await handle.ready) as unknown as GiftWrap[];
 
     for (const wrap of page) {
       byId.set(wrap.id, wrap);
     }
     if (page.length < DM_HISTORY_PAGE_LIMIT) {
-      historyComplete = true;
-      historyUntil = undefined;
+      // A short page ends the walk only when every relay answered; otherwise
+      // a silent relay's older DMs would be written off for good (DS41-062).
+      // Keep the cursor and try again on a later scan.
+      if (handle.allAnswered()) {
+        historyComplete = true;
+        historyUntil = undefined;
+      }
       break;
     }
 

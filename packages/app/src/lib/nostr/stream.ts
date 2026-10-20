@@ -57,6 +57,13 @@ export interface StreamHandle {
    * unanswered read as "unknown", not as "none".
    */
   answered: () => boolean;
+  /**
+   * Stricter than `answered`: EVERY relay in the set EOSEd. A short page is
+   * only proof of "there is no more" when nobody was still silent — one relay
+   * timing out while another returns 37 of 200 is a partial page, not the end
+   * of history (audit DS41-062). Read AFTER awaiting `ready`.
+   */
+  allAnswered: () => boolean;
 }
 
 export function streamEvents(
@@ -199,5 +206,14 @@ export function streamEvents(
     stop(); // subscribe failed (no relays?) — resolve with whatever we have
   }
 
-  return { ready, stop, answered: () => sawEose };
+  const allAnswered = (): boolean => {
+    if (!sawEose) return false;
+    try {
+      return typeof sub?.relaysMissingEose === "function" && sub.relaysMissingEose().length === 0;
+    } catch {
+      return false; // NDK internals shifted — "unknown" is never "everything"
+    }
+  };
+
+  return { ready, stop, answered: () => sawEose, allAnswered };
 }
