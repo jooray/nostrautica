@@ -42,7 +42,11 @@ describe("parseExternalChatPubkey", () => {
   it("refuses an nsec, garbage, and a mangled npub", () => {
     expect(parseExternalChatPubkey(nsecEncode(wSk))).toBeNull();
     expect(parseExternalChatPubkey("hello")).toBeNull();
-    expect(parseExternalChatPubkey(npubEncode(W).slice(0, -2) + "qq")).toBeNull();
+    // Change the checksum's last two characters to something they are not, so
+    // the mangling is real even when the random key's npub happens to end in "qq".
+    const npub = npubEncode(W);
+    const tail = npub.slice(-2) === "qq" ? "pp" : "qq";
+    expect(parseExternalChatPubkey(npub.slice(0, -2) + tail)).toBeNull();
     expect(parseExternalChatPubkey("a".repeat(63))).toBeNull();
   });
 });
