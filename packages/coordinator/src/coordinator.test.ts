@@ -6977,6 +6977,36 @@ describe("space hierarchy (PROTOCOL-NIP.md §15)", () => {
 });
 
 /**
+ * Coordinator twin of audit SB-10. The install path picked the newest 31600 out of
+ * the relay's answer by kind alone, trusting the relay to have honoured `authors`
+ * and `#d`. A relay that does not could hand it another address's newer config.
+ */
+describe("install re-checks the 31600's author and d", () => {
+  it("ignores a newer 31600 at another d or by another author", async () => {
+    const h = await setup(0, { skipAutoInstall: true });
+    const eid = getPublicKey(h.eidSk);
+    const stranger = getPublicKey(generateSecretKey());
+    const forged = (pubkey: string, d: string, id: string) =>
+      ({
+        kind: 31600, pubkey, created_at: 99, id, sig: "", content: "",
+        tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["coordinator", stranger, "1"]],
+      }) as any;
+    const realFetch = h.transport.fetch.bind(h.transport);
+    // A relay that ignores the filter and returns everything it has.
+    h.transport.fetch = async (filter: any, relays?: string[]) => [
+      ...(await realFetch(filter, relays)),
+      forged(eid, "some-other-event", "f1"),
+      forged(stranger, "cypherpunk", "f2"),
+    ];
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk), eck: [{ id: 1, key: bytesToBase64(h.eck) }],
+      configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+    expect(h.store.getEvent(h.coordinate)).toBeDefined();
+  });
+});
+
+/**
  * Audit DS41-034. A 31605 is ONE NIP-44 payload (65,535 plaintext bytes) and the
  * client schema caps it at 100 matches. Reasoning is capped in characters, so CJK
  * text could take a long list past the byte ceiling (nip44Encrypt throws on every

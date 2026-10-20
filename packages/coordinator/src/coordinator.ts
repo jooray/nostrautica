@@ -351,6 +351,16 @@ function parseEventEndSec(evt: NostrEvent | undefined): number {
   return read("end") || read("start");
 }
 
+/**
+ * Only the events actually at the address `<kind>:<author>:<d>` we asked for. A
+ * relay's `authors`/`#d` filtering is not a guarantee, and every addressable read
+ * that picks "the newest" from a relay answer must re-check both (audit SB-10, the
+ * coordinator side).
+ */
+function onlyAddressed(events: NostrEvent[], author: string, d: string): NostrEvent[] {
+  return events.filter((e) => e.pubkey === author && e.tags.some((t) => t[0] === "d" && t[1] === d));
+}
+
 /** A stored `events.eck_json`, or [] when it is not a readable version list. */
 function parseHeldEck(json: string): EckVersion[] {
   try {
@@ -1322,7 +1332,11 @@ export class Coordinator {
     // arbitrary order. Pick with the shared §3.1 comparator — higher created_at,
     // then LOWEST id on a tie (NIP-01). v1 picked the highest id here, which
     // disagreed with the convention and with every other reader.
-    const cfgEvent = pickLatest(cfgEvents.filter((e) => e.kind === KIND_EVENT_CONFIG));
+    // Re-checked here, not trusted to the relay's filter (the coordinator twin of
+    // audit SB-10): a relay that ignores `authors`/`#d` could otherwise hand us
+    // another address's newer 31600 and have it authorize (or detach) this one.
+    const addressed = onlyAddressed(cfgEvents, eidPubkey, identifier);
+    const cfgEvent = pickLatest(addressed.filter((e) => e.kind === KIND_EVENT_CONFIG));
     // Newest space record wins too (audit P9): relays return replaceable events in
     // arbitrary order and this event controls the title and, critically,
     // `eventEndSec` — the anchor the retention sweep deletes member records from. v1
@@ -1333,7 +1347,7 @@ export class Coordinator {
     // EMPTY scoring context — the matcher prompt said "EVENT: the event" with no
     // ABOUT and no TOPICS for the whole life of the install, and no live title edit
     // could ever repair it.
-    const evtEvent = pickLatest(cfgEvents.filter((e) => e.kind === spaceKind));
+    const evtEvent = pickLatest(addressed.filter((e) => e.kind === spaceKind));
     // A 31600 that is present but UNPARSEABLE — a pre-v2 wire config carrying
     // ["v","1"], a config whose `v` is newer than we speak, or any other malformed
     // tag parseEventConfig rejects — is treated EXACTLY like an unfetchable config:
@@ -5306,7 +5320,11 @@ export class Coordinator {
       { kinds: [KIND_INVITE_LIST], authors: [state.eidPubkey], "#d": [parseCoordinate(state.coordinate).identifier] },
       state.configRelays,
     );
-    const latest = pickLatest(events);
+    const latest = pickLatest(
+      onlyAddressed(events, state.eidPubkey, parseCoordinate(state.coordinate).identifier).filter(
+        (e) => e.kind === KIND_INVITE_LIST,
+      ),
+    );
     let invites = new Map<string, InvitePolicy>();
     if (latest) {
       try {
