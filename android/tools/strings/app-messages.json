@@ -15,7 +15,8 @@
     "signin.link.title": "Sign in from a login link?",
     "signin.link.body": "This link holds the secret key of the account below. Continue only if it is your own saved login link: anyone can send you a link that would sign you in as someone else.",
     "signin.link.use": "Sign in as this account",
-    "signin.link.ignore": "Ignore this link"
+    "signin.link.ignore": "Ignore this link",
+    "publish.rejected": "The relays refused this, so it was not sent and will not be retried."
   },
   "sk": {
     "signin.nip55": "Podpisovacia aplikácia v tomto telefóne",
@@ -33,7 +34,8 @@
     "signin.link.title": "Prihlásiť sa cez prihlasovací odkaz?",
     "signin.link.body": "Tento odkaz obsahuje tajný kľúč účtu nižšie. Pokračujte, len ak je to váš vlastný uložený prihlasovací odkaz: ktokoľvek vám môže poslať odkaz, ktorý by vás prihlásil ako niekoho iného.",
     "signin.link.use": "Prihlásiť sa ako tento účet",
-    "signin.link.ignore": "Ignorovať tento odkaz"
+    "signin.link.ignore": "Ignorovať tento odkaz",
+    "publish.rejected": "Relaye to odmietli, takže sa to neodoslalo a nebude sa to skúšať znova."
   },
   "cs": {
     "signin.nip55": "Podepisovací aplikace v tomto telefonu",
@@ -51,7 +53,8 @@
     "signin.link.title": "Přihlásit se přes přihlašovací odkaz?",
     "signin.link.body": "Tento odkaz obsahuje tajný klíč účtu níže. Pokračujte, jen pokud je to váš vlastní uložený přihlašovací odkaz: kdokoli vám může poslat odkaz, který by vás přihlásil jako někoho jiného.",
     "signin.link.use": "Přihlásit se jako tento účet",
-    "signin.link.ignore": "Ignorovat tento odkaz"
+    "signin.link.ignore": "Ignorovat tento odkaz",
+    "publish.rejected": "Relaye to odmítly, takže se to neodeslalo a nebude se to zkoušet znovu."
   },
   "de": {
     "signin.nip55": "Signer-App auf diesem Telefon",
@@ -69,7 +72,8 @@
     "signin.link.title": "Mit einem Anmeldelink anmelden?",
     "signin.link.body": "Dieser Link enthält den geheimen Schlüssel des Kontos unten. Fahre nur fort, wenn es dein eigener gespeicherter Anmeldelink ist: Jeder kann dir einen Link schicken, der dich als jemand anderes anmelden würde.",
     "signin.link.use": "Als dieses Konto anmelden",
-    "signin.link.ignore": "Link ignorieren"
+    "signin.link.ignore": "Link ignorieren",
+    "publish.rejected": "Die Relays haben das abgelehnt. Es wurde nicht gesendet und wird nicht erneut versucht."
   },
   "es": {
     "signin.nip55": "App firmante en este teléfono",
@@ -87,6 +91,7 @@
     "signin.link.title": "¿Iniciar sesión con un enlace de acceso?",
     "signin.link.body": "Este enlace contiene la clave secreta de la cuenta de abajo. Continúa solo si es tu propio enlace de acceso guardado: cualquiera puede enviarte un enlace que te haría iniciar sesión como otra persona.",
     "signin.link.use": "Iniciar sesión con esta cuenta",
-    "signin.link.ignore": "Ignorar este enlace"
+    "signin.link.ignore": "Ignorar este enlace",
+    "publish.rejected": "Los relés lo rechazaron, así que no se envió y no se volverá a intentar."
   }
 }

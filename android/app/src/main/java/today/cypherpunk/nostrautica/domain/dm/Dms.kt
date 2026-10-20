@@ -391,6 +391,7 @@ class Dms(
             val toPeer = async { nostr.publish(out.toRecipient, inboxRelays(peer), me, "dm") }
             val toSelf = async { nostr.publish(out.toSelf, inboxRelays(me), me, "dm") }
             val results = listOf(toPeer.await(), toSelf.await())
+            (results[0] as? Nostr.PublishResult.Rejected)?.let { throw Nostr.PublishRejected(it.reason) }
             if (results.all { it is Nostr.PublishResult.Published }) results[0] else Nostr.PublishResult.Queued
         }
     }
