@@ -1,6 +1,7 @@
 package today.cypherpunk.nostrautica.signer
 
 import android.content.Context
+import android.util.Log
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.Serializable
@@ -49,14 +50,30 @@ class Session(
     /** A key this app generated that the user hasn't saved anywhere yet. */
     val needsBackup: StateFlow<Boolean> get() = _needsBackup
 
-    /** Restore on start. Local and NIP-55 are instant; NIP-46 restores without a network round trip. */
+    /**
+     * Restore on start. Local and NIP-55 are instant; NIP-46 restores without a network round trip.
+     *
+     * Runs in Application.onCreate, so it must never throw: a stored blob that no
+     * longer builds a signer (bad hex, an invalid key, a field-shape change) would
+     * otherwise crash every launch before any UI. Such a blob is moved aside under
+     * [KEY_UNREADABLE], not deleted (for a local account it may be the only copy of
+     * the key), and the app starts signed out.
+     */
     fun restore() {
-        val stored = secure.get(KEY)?.let { runCatching { json.decodeFromString(Stored.serializer(), it) }.getOrNull() } ?: return
-        val signer: NostrSigner? = when (stored.method) {
-            "local" -> stored.localSk?.let { LocalSigner(Bytes.fromHex(it)) }
-            "nip55" -> stored.signerPackage?.let { Nip55Signer(context, stored.pubkey, it, bridge) }
-            "nip46" -> stored.nip46?.let { Nip46Signer.restore(pool, it) }
-            else -> null
+        val raw = secure.get(KEY) ?: return
+        val stored = runCatching { json.decodeFromString(Stored.serializer(), raw) }.getOrNull() ?: return
+        val signer: NostrSigner? = try {
+            when (stored.method) {
+                "local" -> stored.localSk?.let { LocalSigner(Bytes.fromHex(it)) }
+                "nip55" -> stored.signerPackage?.let { Nip55Signer(context, stored.pubkey, it, bridge) }
+                "nip46" -> stored.nip46?.let { Nip46Signer.restore(pool, it) }
+                else -> null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "stored ${stored.method} session is unreadable (${e.javaClass.simpleName}); starting signed out")
+            secure.put(KEY_UNREADABLE, raw)
+            secure.put(KEY, null)
+            return
         }
         if (signer == null || signer.pubkey != stored.pubkey) { secure.put(KEY, null); return }
         _needsBackup.value = stored.fresh
@@ -117,5 +134,7 @@ class Session(
 
     companion object {
         private const val KEY = "account"
+        private const val KEY_UNREADABLE = "account.unreadable"
+        private const val TAG = "Session"
     }
 }

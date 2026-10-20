@@ -15,7 +15,7 @@ import javax.crypto.spec.GCMParameterSpec
  * AES-GCM key that lives in the Android Keystore and never leaves it. The
  * ciphertext sits in app-private SharedPreferences, excluded from backups.
  */
-class SecureStore(context: Context) {
+open class SecureStore(context: Context) {
     private val prefs = context.getSharedPreferences("secure", Context.MODE_PRIVATE)
 
     private fun key(): SecretKey {
@@ -33,7 +33,7 @@ class SecureStore(context: Context) {
     }
 
     @Synchronized
-    fun put(name: String, value: String?) {
+    open fun put(name: String, value: String?) {
         if (value == null) { prefs.edit().remove(name).apply(); return }
         val c = Cipher.getInstance("AES/GCM/NoPadding")
         c.init(Cipher.ENCRYPT_MODE, key())
@@ -42,7 +42,7 @@ class SecureStore(context: Context) {
     }
 
     @Synchronized
-    fun get(name: String): String? {
+    open fun get(name: String): String? {
         val raw = prefs.getString(name, null) ?: return null
         val (iv, ct) = raw.split(':').takeIf { it.size == 2 } ?: return null
         return runCatching {
