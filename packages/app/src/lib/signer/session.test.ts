@@ -101,7 +101,12 @@ describe("consumeNsecFromHash (audit UX-12)", () => {
 
   it("strips the nsec from URL, history, AND the in-memory route", async () => {
     expect(await consumeNsecFromHash()).toBe(true);
+    // Staged for the Login screen to confirm, not imported (SB-129).
+    expect(session.loggedIn).toBe(false);
+    expect(session.pendingLinkKey?.nsec).toBe(nsec);
+    expect(await session.confirmLinkKey()).toBe(true);
     expect(session.loggedIn).toBe(true);
+    expect(session.pendingLinkKey).toBeNull();
 
     // URL + history cleaned…
     expect(replaceState).toHaveBeenCalledWith(null, "", "#/login");
@@ -121,6 +126,22 @@ describe("consumeNsecFromHash (audit UX-12)", () => {
 
     await expect(consumeNsecFromHash()).rejects.toThrow();
     expect(router.route.nsec).toBeUndefined();
+  });
+
+  it("never signs the visitor into the link's identity on its own (SB-129)", async () => {
+    await session.createLocalKey();
+    const mine = session.pubkey;
+    keystore.saveLocalKey.mockClear();
+
+    expect(await consumeNsecFromHash()).toBe(true);
+    // Still the visitor's own identity, and their stored key was not overwritten.
+    expect(session.pubkey).toBe(mine);
+    expect(keystore.saveLocalKey).not.toHaveBeenCalled();
+    expect(session.pendingLinkKey?.pubkey).not.toBe(mine);
+
+    session.cancelLinkKey();
+    expect(session.pendingLinkKey).toBeNull();
+    expect(session.pubkey).toBe(mine);
   });
 
   it("returns false when the hash carries no nsec", async () => {

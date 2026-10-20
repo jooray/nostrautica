@@ -12,7 +12,7 @@ import {
   Nip46IdentityMismatchError,
   type Nip46Session,
 } from "./nip46.js";
-import { importCredential } from "./backup.js";
+import { importCredential, pubkeyFromSk } from "./backup.js";
 import {
   saveLocalKey,
   loadLocalKey,
@@ -124,6 +124,15 @@ class Session {
    * ends up with two.
    */
   restoreErrorKind = $state<"signer" | "extension" | null>(null);
+  /**
+   * A key carried in a `#/login?nsec=` link, held IN MEMORY until the person
+   * confirms it on the Login screen (audit SB-129). It is never imported on its
+   * own: anyone can mint such a link for an identity they control, and opening
+   * it used to sign the visitor straight into that identity, silently replacing
+   * the key already on this device. The secret leaves the URL immediately either
+   * way; it lives only here, and only until confirmed or cancelled.
+   */
+  pendingLinkKey = $state<{ nsec: string; pubkey: string } | null>(null);
   /** Human-readable reason for the failed restore, for the retry surface. */
   restoreErrorMessage = $state<string | null>(null);
 
@@ -452,6 +461,20 @@ class Session {
     });
   }
 
+  /** Import the key from a recovery link, after the person confirmed it. */
+  async confirmLinkKey(): Promise<boolean> {
+    const pending = this.pendingLinkKey;
+    this.pendingLinkKey = null;
+    if (!pending) return false;
+    if (pending.pubkey === this.pubkey) return true; // already this identity
+    return this.importLocalKey(pending.nsec);
+  }
+
+  /** Drop a recovery-link key without using it. */
+  cancelLinkKey(): void {
+    this.pendingLinkKey = null;
+  }
+
   async logout(): Promise<void> {
     this.loggingOut = true;
     try {
@@ -659,7 +682,9 @@ export const session = new Session();
 
 /**
  * Consume an `nsec` carried in `#/login?nsec=…` and immediately strip it from the
- * URL and history (spec §5.2, §14). Returns true if a key was imported.
+ * URL and history (spec §5.2, §14). Returns true if a usable key was found; it is
+ * then STAGED as `session.pendingLinkKey` for the Login screen to confirm, never
+ * imported here (audit SB-129). Throws on a malformed key, as before.
  *
  * The fragment never reaches a server, but it must not linger in history either.
  */
@@ -673,7 +698,9 @@ export async function consumeNsecFromHash(): Promise<boolean> {
   if (!nsec) return false;
 
   try {
-    await session.importLocalKey(nsec);
+    // Validate now, so a damaged link still surfaces as one at boot.
+    const pubkey = pubkeyFromSk(importCredential(nsec));
+    session.pendingLinkKey = { nsec, pubkey };
   } finally {
     // Strip the secret from the URL + history regardless of import success.
     params.delete("nsec");

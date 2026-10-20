@@ -121,7 +121,7 @@ stated in the UI where organizers configure events and where they revoke.
 
 - Local keys in IndexedDB (not localStorage strings where avoidable).
 - NIP-49 (`ncryptsec`) for any at-rest key export.
-- `#/login?nsec=` is consumed and stripped from the URL/history immediately on open.
+- `#/login?nsec=` is consumed and stripped from the URL/history immediately on open, and the key is imported only after the person confirms the account it belongs to (anyone can mint such a link for an identity they control).
 - No third-party scripts. CSP: `default-src 'self'`; `connect-src` limited to
   `wss:`/`https:` (relays + Blossom).
 - NIP-04 is lint-banned project-wide; NIP-44 is always requested with the scheme
