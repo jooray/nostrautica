@@ -6,6 +6,12 @@ name: Release gate
 # coordinator Docker build — the same things docs/DEPLOYMENT.md's release
 # verification requires, enforced in CI so they can't silently rot.
 #
+# What it does NOT gate (audit DS41-068): the reference production deploy. That is
+# a push to a private remote whose post-receive hook builds and ships, and these
+# workflows run only on the public GitHub mirror. A red gate here blocks PR merges
+# and the manual nsite deploy, nothing else; for production the same checks are a
+# checklist (docs/DEPLOYMENT.md "Release Verification").
+#
 # Reusable so both push/PR CI (.github/workflows/ci.yml) and tagged deploy
 # (.github/workflows/deploy.yml) run the IDENTICAL gate. Every third-party action
 # is pinned to a commit SHA (audit R15): a moving major tag can't swap the code
