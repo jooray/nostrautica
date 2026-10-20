@@ -13,6 +13,7 @@ import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
   parseModelJson,
   PROVIDER_TIMEOUTS,
+  completionTimeoutMs,
   providerHttpError,
   readJsonCapped,
   withProviderTimeout,
@@ -91,7 +92,10 @@ export class RoutstrLlm implements LlmProvider {
     try {
       body = await withProviderTimeout(
         "Routstr chat/completions",
-        PROVIDER_TIMEOUTS.completion,
+        // Scaled by the output budget like Venice's (audit SB-06): a K=10 score batch
+        // asks for 12,000 tokens, which the flat 120 s cut off below its p95, billed
+        // and then retried for three days.
+        completionTimeoutMs(req.maxTokens),
         (signal) =>
           guardedProviderFetch(
             `${this.base()}/chat/completions`,
