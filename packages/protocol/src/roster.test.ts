@@ -238,6 +238,22 @@ describe("a reader reassembles the pages", () => {
     ]);
     expect(merged.attendees.map((a) => a.pubkey)).toEqual([pubkeyOf(1), pubkeyOf(2)]);
   });
+
+  it("never merges past MAX_ROSTER, however many full pages a hostile set declares (SB-28)", () => {
+    const perPage = 700;
+    const pages = Array.from({ length: MAX_ROSTER_PAGES }, (_, p) => ({
+      v: ROSTER_PAGED_VERSION,
+      eck_current: 2,
+      ...(p === 0 ? { pages: MAX_ROSTER_PAGES } : {}),
+      attendees: Array.from({ length: perPage }, (_, i) => attendee(p * perPage + i + 1)),
+    }));
+    const merged = mergeRosterPages(pages);
+    expect(merged.attendees).toHaveLength(MAX_ROSTER);
+    // Page order is kept, so page 0 always survives the cap.
+    expect(merged.attendees[0]!.pubkey).toBe(pubkeyOf(1));
+    // …and the capped value is still something a writer can put back on the wire.
+    expect(() => splitRoster(merged)).not.toThrow();
+  });
 });
 
 describe("an old client meets a paginated roster", () => {
