@@ -35,6 +35,7 @@ import {
   KIND_MATCH_MATRIX,
   KIND_DELETION,
   giftwrapSince,
+  GIFTWRAP_MAX_BACKDATE_SEC,
   unwrapRumor,
   eckEncrypt,
   eckDecrypt,
@@ -187,9 +188,94 @@ export function acceptedRecordAuthors(ctx: EventContext): string[] {
     : [ctx.config.eidPubkey];
 }
 
+type PendingSubmission = {
+  key: RevisionKey;
+  profile: AttendeeProfile;
+  media: MediaDescriptor[];
+  introText?: string;
+};
+type PendingWithdrawal = { id: string; created_at: number; deleteData: boolean };
+
+/**
+ * The per-attendee winners of every inbox scan so far, persisted (owner-scoped)
+ * so the next scan only has to read what is new. Holding the WINNERS rather than
+ * the finished queue is what makes that safe: a submission that arrives after
+ * its join has left the read window still folds into the join it belongs to,
+ * because the join is in here.
+ */
+interface PendingScanState {
+  /** Unix seconds of the last scan that covered everything up to then. */
+  cursor?: number;
+  joins: Record<string, PendingRequest>;
+  joinIds: Record<string, string>;
+  subs: Record<string, PendingSubmission>;
+  withdrawals: Record<string, PendingWithdrawal>;
+}
+
+function pendingStateKey(coordinate: string): string {
+  return `pendingscan:${coordinate}`;
+}
+
+/** Page size and page cap for the first, full read of an event's inbox. */
+const PENDING_PAGE_SIZE = 500;
+const PENDING_MAX_PAGES = 20;
+
+/**
+ * The E_inbox wraps to fold in. With a cursor: everything since it, minus the
+ * NIP-59 backdating allowance and a day of slack (the DM scan's rule). Without
+ * one (first scan of this event on this device): the whole history, paged
+ * backwards; `complete` is false if the page cap or a stalled page stopped it.
+ */
+async function readInboxWraps(
+  ctx: EventContext,
+  inboxPubkeys: string[],
+  cursor: number | undefined,
+): Promise<{ wraps: GiftWrap[]; complete: boolean }> {
+  const now = Math.floor(Date.now() / 1000);
+  if (cursor !== undefined) {
+    const since = Math.min(giftwrapSince(now), cursor - GIFTWRAP_MAX_BACKDATE_SEC - 24 * 60 * 60);
+    // Relay-only: join requests must not be lost to the cache/EOSE race (see ndk.ts).
+    const wraps = (await fetchEventsRelayOnly(
+      { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, since },
+      ctx.config.relays,
+    )) as unknown as GiftWrap[];
+    return { wraps, complete: true };
+  }
+  const seen = new Set<string>();
+  const wraps: GiftWrap[] = [];
+  let until: number | undefined;
+  for (let page = 0; page < PENDING_MAX_PAGES; page++) {
+    const filter: Record<string, unknown> = { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, limit: PENDING_PAGE_SIZE };
+    if (until !== undefined) filter.until = until;
+    const batch = (await fetchEventsRelayOnly(filter, ctx.config.relays)) as unknown as GiftWrap[];
+    let added = 0;
+    let oldest: number | undefined;
+    for (const w of batch) {
+      if (!seen.has(w.id)) {
+        seen.add(w.id);
+        wraps.push(w);
+        added++;
+      }
+      if (oldest === undefined || w.created_at < oldest) oldest = w.created_at;
+    }
+    if (batch.length < PENDING_PAGE_SIZE) return { wraps, complete: true };
+    if (added === 0 || oldest === undefined) return { wraps, complete: false };
+    until = oldest; // inclusive: the boundary second is re-read, the id dedupe absorbs it
+  }
+  return { wraps, complete: false };
+}
+
 /**
  * Fetch and unwrap all inbound gift wraps to E_inbox, collapsing to the latest
  * join request + submission per attendee (latest by rumor created_at wins).
+ *
+ * It used to read only `giftwrapSince()` (the last 3 days) and then REPLACE the
+ * cached queue with that window. A join request sent four days before the
+ * organizer opened Admin was in neither, and on a coordinator-less event this
+ * queue is the only place an approval can happen: the attendee waited forever
+ * and nobody could see they had asked (audit DS41-011). The first scan on a
+ * device now reads the whole inbox (paged), later scans read from a persisted
+ * cursor, and the per-attendee winners carry over between scans.
  */
 export async function fetchPending(
   ctx: EventContext,
@@ -201,21 +287,19 @@ export async function fetchPending(
   // holds, so history stays readable across a detach/replace.
   const inboxSks = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])].map((h) => hexToBytes(h));
   const inboxPubkeys = inboxSks.map((sk) => getPublicKey(sk));
-  // Relay-only: join requests must not be lost to the cache/EOSE race (see ndk.ts).
-  const wraps = (await fetchEventsRelayOnly(
-    { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, since: giftwrapSince() },
-    ctx.config.relays,
-  )) as unknown as GiftWrap[];
+  const state = cacheGet<PendingScanState>(pendingStateKey(ctx.coordinate))?.data;
+  const scanStartedAt = Math.floor(Date.now() / 1000);
+  const { wraps, complete } = await readInboxWraps(ctx, inboxPubkeys, state?.cursor);
 
-  const byAttendee = new Map<string, PendingRequest>();
+  // Start from the winners of earlier scans (copies: the fold below mutates).
+  const byAttendee = new Map<string, PendingRequest>(
+    Object.entries(state?.joins ?? {}).map(([k, v]) => [k, { ...v }]),
+  );
   // The winning join rumor's id per attendee, so equal-created_at siblings apply
   // the global §3.1 tie-break (lowest id) rather than non-deterministic arrival
   // order (audit P4).
-  const joinRumorId = new Map<string, string>();
-  const submissions = new Map<
-    string,
-    { key: RevisionKey; profile: AttendeeProfile; media: MediaDescriptor[]; introText?: string }
-  >();
+  const joinRumorId = new Map<string, string>(Object.entries(state?.joinIds ?? {}));
+  const submissions = new Map<string, PendingSubmission>(Object.entries(state?.subs ?? {}));
 
   /** Unwrap a wrap with whichever inbox secret it was sealed to (current or prior). */
   const unwrapAny = (wrap: GiftWrap) => {
@@ -233,7 +317,7 @@ export async function fetchPending(
   };
 
   /** Newest 21610 per attendee, by the same (created_at, lowest id) tie-break. */
-  const withdrawals = new Map<string, { id: string; created_at: number; deleteData: boolean }>();
+  const withdrawals = new Map<string, PendingWithdrawal>(Object.entries(state?.withdrawals ?? {}));
 
   for (const wrap of wraps) {
     const rumor = unwrapAny(wrap);
@@ -319,6 +403,19 @@ export async function fetchPending(
     }
   }
 
+  // Persist the winners BEFORE the fold below, which mutates requests and
+  // synthesizes withdrawal-only ones that are not joins. The cursor only moves
+  // when this read covered everything up to now; a full read cut short by the
+  // page cap leaves it unset, so the next scan reads the whole history again.
+  const nextState: PendingScanState = {
+    cursor: complete ? scanStartedAt : state?.cursor,
+    joins: Object.fromEntries([...byAttendee].map(([k, v]) => [k, { ...v }])),
+    joinIds: Object.fromEntries(joinRumorId),
+    subs: Object.fromEntries(submissions),
+    withdrawals: Object.fromEntries(withdrawals),
+  };
+  cacheSet(pendingStateKey(ctx.coordinate), nextState, scanStartedAt);
+
   // Fold submissions into their requests.
   for (const [pubkey, sub] of submissions) {
     const req = byAttendee.get(pubkey);
@@ -334,10 +431,10 @@ export async function fetchPending(
   for (const [pubkey, w] of withdrawals) {
     let req = byAttendee.get(pubkey);
     if (!req) {
-      // No join request for this person IN THIS WINDOW. That is the ordinary case,
-      // not an edge one: the inbox is read over the 3-day gift-wrap window, and
-      // somebody who joined when the invite went out and withdrew a week later has
-      // only the withdrawal inside it. Dropping it here meant their request reached
+      // No join request for this person in anything this device has read. Less
+      // common now that the first scan reads the whole inbox, but still real: a
+      // join older than a capped first read, or one sealed to an inbox this device
+      // never held, leaves only the withdrawal. Dropping it here meant their request reached
       // nobody at all, while their client had already deleted their media and their
       // 31602 self-copy and told them it was sent.
       //

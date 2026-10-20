@@ -889,6 +889,28 @@ describe("fetchPending surfaces withdrawals", () => {
     expect(who?.withdrawalRequestedPurge).toBe(true);
   });
 
+  // Audit DS41-011: the inbox was read over the last 3 days only and the cached
+  // queue replaced with that window, so an older request vanished from both.
+  it("finds a request older than the 3-day window and keeps it on later scans", async () => {
+    const now = Math.floor(Date.now() / 1000);
+    const old = joinWrap(now - 10 * 86400);
+    // A relay whose copy of this wrap is older than any windowed read reaches:
+    // only an unbounded read returns it.
+    fetchEventsRelayOnly.mockImplementation(async (f: { since?: number }) =>
+      f.since === undefined ? [old] : [],
+    );
+    const keys = (await loadEventKeys(COORD))!;
+
+    const first = await fetchPending(inboxCtx, keys);
+    expect(first.map((p) => p.attendeePubkey)).toEqual([ATTENDEE]);
+    expect((fetchEventsRelayOnly.mock.calls[0]![0] as { since?: number }).since).toBeUndefined();
+
+    // The next scan reads from the cursor; the old join is outside that window.
+    const second = await fetchPending(inboxCtx, keys);
+    expect((fetchEventsRelayOnly.mock.calls[1]![0] as { since?: number }).since).toBeDefined();
+    expect(second.map((p) => p.attendeePubkey)).toEqual([ATTENDEE]);
+  });
+
   it("does not let a stale withdrawal shadow a later re-join", async () => {
     fetchEventsRelayOnly.mockResolvedValue([withdrawWrap(100, true), joinWrap(200)]);
 
