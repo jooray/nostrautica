@@ -162,12 +162,20 @@ class Nostr(
 
     suspend fun discardOwner(owner: String) = outbox.deleteOwner(owner)
 
+    /**
+     * The signed-in account (set by AppContainer). The flusher only touches that
+     * owner's rows, like the PWA's publish-queue: on a shared phone account B never
+     * publishes account A's queued actions, and signed out nothing is flushed.
+     */
+    @Volatile var activeOwner: () -> String? = { null }
+
     /** Retry what is due. Called on reconnect, on foreground, and after a publish elsewhere succeeds. */
     suspend fun flush(force: Boolean) = flushLock.withLock {
         if (!_network.value) return@withLock
+        val owner = activeOwner() ?: return@withLock
         val list = ListSerializer(String.serializer())
         val now = System.currentTimeMillis()
-        for (row in outbox.all()) {
+        for (row in outbox.forOwner(owner)) {
             if (row.failed && !force) continue
             val due = row.lastAttemptAt + BACKOFF_MS[minOf(row.attempts, BACKOFF_MS.size - 1)]
             if (!force && now < due) continue

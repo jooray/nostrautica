@@ -72,4 +72,21 @@ class NostrOutboxTest {
         assertEquals(1, db.outbox().all().size)
     }
 
+    // Audit SB-39: the flusher only publishes the signed-in account's rows.
+    @Test fun flushOnlyTouchesTheActiveOwnersRows() = runBlocking {
+        val other = LocalSigner.generate()
+        val down = refusing("rate-limited: later")
+        val mine = event(); val theirs = event(other)
+        nostr.publish(mine, listOf(down.url), me.pubkey)
+        nostr.publish(theirs, listOf(down.url), other.pubkey)
+        assertEquals(2, db.outbox().all().size)
+
+        val up = relay()
+        // Point both rows at the now-working relay, as a reconnect would.
+        db.outbox().all().forEach { db.outbox().put(it.copy(missing = """["${RelayPool.normalize(up.url)}"]""", lastAttemptAt = 0)) }
+        nostr.activeOwner = { me.pubkey }
+        nostr.flush(force = true)
+        assertEquals(listOf(mine.id), up.received.map { it.id })
+        assertEquals(listOf(other.pubkey), db.outbox().all().map { it.owner })
+    }
 }
