@@ -1640,3 +1640,17 @@ describe("event-wide job_status rows (no pubkey) upsert in place", () => {
     }
   });
 });
+
+/** Audit DS41-036: the delete_data withdrawal left the attendee's job_status rows behind. */
+describe("purgeAttendeeArtifacts removes the subject's pipeline status", () => {
+  it("deletes their job_status rows and keeps everyone else's and the usage tally", () => {
+    const store = new Store();
+    const C = "31923:aa:d";
+    for (const pubkey of ["gone", "stays"]) {
+      store.recordJobStatus({ coordinate: C, stage: "process_attendee", pubkey, state: "poison", attempts: 1, error_category: "x", retryable: 1, updated_at: 1 } as any);
+    }
+    store.purgeAttendeeArtifacts(C, "gone");
+    expect(store.poisonStatuses(C).map((r) => r.pubkey)).toEqual(["stays"]);
+    store.close();
+  });
+});

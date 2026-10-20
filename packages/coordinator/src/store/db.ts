@@ -2605,6 +2605,11 @@ export class Store {
       // later reapproval (audit R2); the event is still live, so it is security state.
       this.db.prepare("DELETE FROM marmot_chat_keys WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
       this.db.prepare("DELETE FROM marmot_chat_links WHERE coordinate = ? AND account_pubkey = ?").run(coordinate, pubkey);
+      // Their organizer-visible pipeline status (stage + error category) is
+      // attendee-identifying too (audit DS41-036). The `usage` row is deliberately
+      // KEPT: per-event spend is the SUM of those rows, so deleting it would refund
+      // the event's budget and reset this person's per-attendee cap on a rejoin.
+      this.db.prepare("DELETE FROM job_status WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
       this.db.exec("COMMIT");
     } catch (e) {
       // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
