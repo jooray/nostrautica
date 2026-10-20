@@ -4691,7 +4691,10 @@ export class Coordinator {
     //    rotation. Routed through the durable job runner (audit COORD-9): a
     //    transient marmot failure retries with backoff and surfaces via the
     //    poison/21606 path rather than leaving the member in the group forever.
-    if (state.chat && this.marmot) {
+    //    Also while chat is OFF, if the event has a (frozen) group (audit DS41-047):
+    //    re-enabling chat re-activates that same group with every leaf in it, so a
+    //    removal skipped here put the ex-attendee straight back in the room.
+    if (this.marmot && (state.chat || this.deps.store.getMarmotGroup(state.coordinate))) {
       this.marmot.invalidateEligibility(state.coordinate);
       // Carry the DEVICE keys in the payload, captured now (audit B-9). The job runs
       // asynchronously and `handleRevoke` reads the account's `marmot_chat_keys`

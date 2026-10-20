@@ -45,7 +45,9 @@ The coordinator runs a headless Marmot admin bot
 - Authenticates 21607 attestations, binds account ⇄ chat device key, and adds
   each approved attendee's attested devices from their kind-30443 key packages.
 - Removes a member's leaves (real MLS Remove → forward secrecy) on revoke or
-  attendee withdrawal.
+  attendee withdrawal, also while chat is turned off: turning chat off freezes the
+  group (no adds or Welcomes) but keeps every leaf, and turning it back on
+  re-activates the same group.
 - Publishes the active `nostr_group_id` on the 31604 roster, the authoritative
   event→group binding clients verify before trusting a group.
 - Promotes each approved **organizer**'s chat devices to MLS co-admins, so the

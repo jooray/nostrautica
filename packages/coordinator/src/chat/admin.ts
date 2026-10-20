@@ -10,8 +10,10 @@
  *  - remove members on revoke (real MLS Remove → forward secrecy);
  *  - ingest kind-445 traffic so the coordinator stays converged.
  *
- * A chat-off event never reaches here: the coordinator only constructs the admin's
- * group and subscriptions when `isMarmotChatEnabled` holds.
+ * A chat-off event never reaches the add paths: the coordinator only constructs the
+ * admin's group and subscriptions when `isMarmotChatEnabled` holds. The REMOVE paths
+ * do run for an event whose chat was turned off after its group existed (a frozen
+ * group, DS41-047), because re-enabling chat brings that group back as it was.
  */
 import type { Store, MarmotChatLinkRow } from "../store/db.js";
 import { keyPackageProfile, type ChatMls } from "./mls.js";
@@ -273,6 +275,20 @@ export class MarmotAdmin {
   private activeGroup(coordinate: string): { mls_group_id: string } | undefined {
     const g = this.store.getMarmotGroup(coordinate);
     return g && g.status === "active" ? g : undefined;
+  }
+
+  /**
+   * The group a REMOVE acts on: active OR frozen (audit DS41-047).
+   *
+   * Freezing stops adds and welcomes; it does not end the group. Its members keep
+   * their state, and re-enabling chat re-activates the same group and leaves. The
+   * remove paths used {@link activeGroup}, so a revoke or withdrawal while chat was
+   * off completed having removed nothing — and the ex-attendee was back in the room,
+   * able to read and send, the moment chat was turned on again. A Remove is the one
+   * post-compromise part of a revoke; it goes through whatever the group's status.
+   */
+  private removableGroup(coordinate: string): { mls_group_id: string } | undefined {
+    return this.store.getMarmotGroup(coordinate);
   }
 
   /**
@@ -1094,7 +1110,7 @@ export class MarmotAdmin {
     // trip, and the roster is what the user is staring at. Without this the
     // revoked device reappeared in their device list about four seconds later.
     this.rosterChanged(coordinate);
-    const group = this.activeGroup(coordinate);
+    const group = this.removableGroup(coordinate);
     if (group) await this.mls.removePubkeys(group.mls_group_id, [content.chat_pubkey]);
     // A revoked organizer device must also lose its co-admin standing.
     await this.maybeSyncAdmins(coordinate, accountPubkey);
@@ -1456,7 +1472,7 @@ export class MarmotAdmin {
      */
     opts?: { chatPubkeys?: string[] },
   ): Promise<void> {
-    const group = this.activeGroup(coordinate);
+    const group = this.removableGroup(coordinate);
     if (!group) return;
     const chatKeys = this.store.chatKeysForAccount(coordinate, accountPubkey);
     const pubkeys = [

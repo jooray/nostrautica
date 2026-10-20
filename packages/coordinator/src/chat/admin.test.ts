@@ -1034,6 +1034,45 @@ describe("MarmotAdmin — a failed Add asks for a durable retry (audit B-5)", ()
   });
 });
 
+describe("a revoke while chat is off still removes the leaf (DS41-047)", () => {
+  // Freezing keeps the group and every leaf; re-enabling chat re-activates it as it
+  // was. A remove that skipped the frozen group put the ex-attendee back in the room.
+  it("handleRevoke removes from a FROZEN group, and re-activation does not bring them back", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+
+    admin.freeze(COORD);
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "revoked", now: 2 });
+    await admin.handleRevoke(COORD, ACCOUNT);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
+    expect(store.getChatKey(COORD, CHATKEY)?.status).toBe("revoked");
+
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.backfillApproved(COORD);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
+  });
+
+  it("a device's own 21607 revoke while chat is off removes its leaf", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    await admin.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(true);
+
+    admin.freeze(COORD);
+    await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
+    expect(mls.members.get("mls-1")?.has(CHATKEY)).toBe(false);
+  });
+});
+
 describe("MarmotAdmin — remove on revoke (§4.2) & ingest", () => {
   it("handleRevoke MLS-removes every attested chat key (and defensively the account key)", async () => {
     const store = freshStore();

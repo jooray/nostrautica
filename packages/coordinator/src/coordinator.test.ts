@@ -3537,6 +3537,20 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     expect(mls.removed).toEqual([[pk]]);
   });
 
+  // DS41-047: chat turned off freezes the group but keeps every leaf, and turning it
+  // back on re-activates the same group. A revoke in between must still remove.
+  it("a revoke while chat is OFF still enqueues and performs the MLS remove", async () => {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    (h.coordinator as any).marmot.freeze(h.coordinate);
+    (h.coordinator as any).events.get(h.coordinate).chat = false;
+    await admin(h, "revoke", { pubkey: pk });
+    await h.coordinator.jobs.drain();
+    expect(mls.removed).toEqual([[pk]]);
+  });
+
   it("detach freezes the group and emits a chat-orphaned 21606 (reliability tail 6e)", async () => {
     const mls = new StubMls();
     const h = await setup(0, { chat: true, chatMls: mls });
