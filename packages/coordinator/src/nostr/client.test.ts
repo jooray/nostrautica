@@ -244,6 +244,31 @@ describe("NostrClient.publish outcomes", () => {
     await expect(client.publish(EVENT)).resolves.toEqual({ replaced: false });
   });
 
+  /**
+   * Audit DS41-025. nostr-tools' `SimplePool.publish` normalizes the list and
+   * rejects a repeated url with the bare string "duplicate url" in the same tick,
+   * before anything is sent. That matched the relay "duplicate:" ack, so a publish
+   * whose only real relay failed reported success. `wss://nos.lol` and
+   * `wss://nos.lol/` both reach publish in normal config (event relays are stored
+   * without the slash, `relays.default` with it).
+   */
+  it("never counts nostr-tools' synthetic `duplicate url` refusal as an ack", async () => {
+    const client = new NostrClient(["wss://nos.lol", "wss://nos.lol/"]);
+    const seenRelays: string[][] = [];
+    withPool(client, (relays) => {
+      seenRelays.push(relays);
+      // nostr-tools 2.25 pool.publish, verbatim in shape: one promise per entry,
+      // a repeat (after normalization) rejected with a string.
+      const norm = relays.map((u) => u.replace(/\/+$/, ""));
+      return norm.map((u, i) =>
+        norm.indexOf(u) !== i ? Promise.reject("duplicate url") : failLater(20, "blocked: not allowed"),
+      );
+    });
+    await expect(client.publish(EVENT)).rejects.toThrow(/blocked: not allowed/);
+    // And the duplicate spelling was never handed to the pool in the first place.
+    expect(seenRelays[0]).toEqual(["wss://nos.lol"]);
+  });
+
   it("rejects with a clear message when there are no relays at all", async () => {
     const client = new NostrClient([]);
     withPool(client, () => []);

@@ -458,7 +458,21 @@ export class NostrClient {
    * this time with a fair chance of being the first outcome seen.
    */
   async publish(event: NostrEvent, requested: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
-    const relays = this.usable(requested);
+    // One entry per NORMALIZED url (audit DS41-025). nostr-tools' pool rejects a
+    // repeat spelling of a url already in the list with the bare string
+    // "duplicate url", in the same tick and before anything is sent. Event relays
+    // are stored without a trailing slash and `relays.default` with one, so
+    // `wss://nos.lol` and `wss://nos.lol/` both reach here in normal config, and
+    // that synthetic rejection matched the relay "duplicate:" ack below: publish
+    // resolved "success" before any relay had answered at all.
+    const relays: string[] = [];
+    const keys = new Set<string>();
+    for (const url of this.usable(requested)) {
+      const key = normalizeURL(url);
+      if (keys.has(key)) continue;
+      keys.add(key);
+      relays.push(url);
+    }
     type Outcome = { url: string; ok: boolean; replaced: boolean; reason: string };
     let settledCount = 0;
     let resolvedToCaller = false;
@@ -470,7 +484,10 @@ export class NostrClient {
       // durably there, which is what publish promises. Burst republishes of 31605
       // lists otherwise fail every retry against strfry's "replaced: have newer event".
       const reason = String((err as Error)?.message ?? err);
-      if (/\b(duplicate|replaced)\b/i.test(reason)) {
+      // Only a RELAY's answer can be an ack. nostr-tools rejects with an Error
+      // carrying the relay's OK reason; its own client-side refusals ("duplicate
+      // url", "connection skipped by …") are bare strings and were never sent.
+      if (err instanceof Error && /\b(duplicate|replaced)\b/i.test(reason)) {
         console.debug(
           `[nostr] kind ${event.kind} ${event.id.slice(0, 8)} already-stored on ${url} (${reason.slice(0, 80)}) — treating as success`,
         );
