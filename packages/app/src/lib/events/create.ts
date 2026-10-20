@@ -272,7 +272,11 @@ export async function createEvent(
     eck: [{ id: 1, key: bytesToBase64(eck) }],
     eidNsecHex: bytesToHex(eidSk),
     einboxNsecHex: bytesToHex(einboxSk),
-  });
+    // The creating identity, not whoever is active once the publishes above
+    // settle (audit DS41-001): those can take a while on bad Wi-Fi, and an
+    // account switch in that window would otherwise hand this event's E_id to
+    // the next account. The 30078 backup above was encrypted to this key too.
+  }, ownPubkey);
 
   return {
     coordinate,

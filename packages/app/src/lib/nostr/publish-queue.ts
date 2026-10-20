@@ -241,13 +241,52 @@ export function __setOutboxLocks(l: OutboxLockManager | null | undefined): void 
  */
 async function withFlushLock<T>(fn: () => Promise<T>): Promise<T | undefined> {
   const mgr = locks === undefined ? defaultLocks() : locks;
-  if (!mgr) return fn();
+  if (!mgr) {
+    // No Web Locks (audit SB-101): cross-tab exclusion is out of reach, but two
+    // flushes in THIS tab — an `online` event landing on the interval sweep, or a
+    // Retry tap mid-flush — must still not walk the same snapshot twice and race
+    // each other's deletes. Same contract as the lock's `ifAvailable`: skip.
+    if (flushingInTab) return undefined;
+    flushingInTab = true;
+    try {
+      return await fn();
+    } finally {
+      flushingInTab = false;
+    }
+  }
   return (await mgr.request("nostrautica-outbox-flush", { ifAvailable: true }, async (lock) =>
     lock === null ? undefined : fn(),
   )) as T | undefined;
 }
 
+/** In-tab single-flusher latch for engines without Web Locks (SB-101). */
+let flushingInTab = false;
+
 // ── Queue operations ─────────────────────────────────────────────────────────
+
+/**
+ * Ids discarded in this tab WHILE a flush is running (audit DS41-014), or null
+ * when none is. A flush works from ONE snapshot of the store, so a Discard tapped
+ * while it is busy with an earlier row only deleted the row — the flusher still
+ * held the event and published it when it got there, after the UI had promised a
+ * cancel. Scoped to the flush so it never outlives the snapshot it corrects.
+ */
+let discardedDuringFlush: Set<string> | null = null;
+
+function noteDiscarded(id: string): void {
+  discardedDuringFlush?.add(id);
+}
+
+/**
+ * Is this row still queued, right now? Checked immediately before the flusher
+ * publishes a row and before it writes one back, so a discard (here or, where the
+ * backend can answer a point read cheaply, in another tab) wins over a snapshot.
+ */
+async function stillQueued(id: string): Promise<boolean> {
+  if (discardedDuringFlush?.has(id)) return false;
+  if (!backend?.get) return true; // no point read: the in-tab set is the guard
+  return (await backend.get(id).catch(() => undefined)) !== undefined;
+}
 
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
@@ -324,13 +363,23 @@ export async function publishOrQueue(
   event: VerifiedEvent,
   relays?: string[],
 ): Promise<boolean> {
+  // U1 attribution, captured NOW rather than when the publish gives up (audit
+  // DS41-010). The retries below can run for seconds, plus each relay's own
+  // timeout, and a logout or account switch in that window used to stamp the
+  // item with whoever was active at the END: the next account (whose flush would
+  // then publish this one's join/DM/approval under its session), or — logged out
+  // — `event.pubkey`, which for a gift wrap is a throwaway key and for an
+  // organizer record is E_id, neither of which any session ever matches, so the
+  // item could never be flushed, shown, or discarded. The author fallback is now
+  // reached only by a publish that STARTED with nobody signed in.
+  const owner = activeCacheOwner() ?? event.pubkey;
   const online = typeof navigator === "undefined" || navigator.onLine;
   if (online) {
     // Offline skips retries entirely (below); online gets 1 + PUBLISH_BACKOFFS_MS.length tries.
     for (let attempt = 0; ; attempt++) {
       try {
         const outcomes = await publishSigned(event, relays);
-        await queueUndelivered(event, outcomes);
+        await queueUndelivered(event, outcomes, owner);
         return true;
       } catch {
         if (attempt >= PUBLISH_BACKOFFS_MS.length) break; // exhausted — fall through to queue
@@ -351,10 +400,8 @@ export async function publishOrQueue(
     relays: relays ? [...relays] : undefined,
     queuedAt: Date.now(),
     attempts: 0,
-    // U1: stamp the queuing account. Falls back to the event author when logged
-    // out (no active cache owner) so an item is never silently ownerless — the
-    // author signed it, so it belongs to that key.
-    owner: activeCacheOwner() ?? event.pubkey,
+    // U1: stamp the queuing account, as captured at entry (above).
+    owner,
   });
   return false;
 }
@@ -378,6 +425,7 @@ export async function publishOrQueue(
 async function queueUndelivered(
   event: VerifiedEvent,
   outcomes: RelayPublishOutcome[],
+  owner: string,
 ): Promise<void> {
   try {
     if (!backend) return;
@@ -396,7 +444,7 @@ async function queueUndelivered(
       queuedAt: existing?.queuedAt ?? Date.now(),
       attempts: existing?.attempts ?? 0,
       partial: true,
-      owner: activeCacheOwner() ?? event.pubkey,
+      owner,
     });
   } catch {
     /* convergence is best-effort; the event is already out on at least one relay */
@@ -431,6 +479,15 @@ export async function flushQueue(): Promise<FlushResult> {
 
 async function flushQueueCore(): Promise<FlushResult> {
   if (!backend) return { sent: 0, remaining: 0, failed: 0 };
+  discardedDuringFlush = new Set();
+  try {
+    return await flushQueueSnapshot(backend);
+  } finally {
+    discardedDuringFlush = null;
+  }
+}
+
+async function flushQueueSnapshot(backend: OutboxBackend): Promise<FlushResult> {
   const active = activeCacheOwner();
   const now = Date.now();
   const items = (await backend.getAll()).sort((a, b) => a.queuedAt - b.queuedAt);
@@ -470,6 +527,8 @@ async function flushQueueCore(): Promise<FlushResult> {
       tally(item, true, false);
       continue;
     }
+    // Discarded since the snapshot (DS41-014): the user was promised a cancel.
+    if (!(await stillQueued(item.event.id))) continue;
     try {
       const missing = stillMissing(await publishSigned(item.event, item.relays));
       if (missing.length === 0) {
@@ -486,6 +545,8 @@ async function flushQueueCore(): Promise<FlushResult> {
       // the outbox. So narrow the target set to what is still missing and keep
       // going; the action itself counts as sent.
       sent++;
+      // Never resurrect a row discarded while the publish was in flight.
+      if (!(await stillQueued(item.event.id))) continue;
       const attempts = (item.attempts ?? 0) + 1;
       if (attempts >= MAX_FLUSH_ATTEMPTS) {
         // Same policy as an unreachable straggler below: give up quietly.
@@ -513,6 +574,8 @@ async function flushQueueCore(): Promise<FlushResult> {
         await backend.delete(item.event.id).catch(() => {});
         continue;
       }
+      // Discarded while the publish was in flight: leave it gone.
+      if (!(await stillQueued(item.event.id))) continue;
       const lastError = e instanceof Error ? e.message : String(e);
       await backend
         .put({ ...item, attempts, lastAttemptAt: now, failed, lastError })
@@ -556,6 +619,8 @@ export async function countQueuedForOwner(owner: string): Promise<number> {
 export async function discardQueuedForOwner(owner: string): Promise<number> {
   if (!backend) return 0;
   const mine = (await backend.getAll()).filter((i) => i.owner === owner);
+  // Marked first, so a flush already holding these rows skips them (DS41-014).
+  for (const item of mine) noteDiscarded(item.event.id);
   for (const item of mine) await backend.delete(item.event.id).catch(() => {});
   return mine.length;
 }
@@ -579,6 +644,7 @@ export async function retryFailed(id: string): Promise<FlushResult> {
 
 /** User action from the outbox UI: permanently drop a queued/failed item. */
 export async function discardQueued(id: string): Promise<void> {
+  noteDiscarded(id);
   await backend?.delete(id);
 }
 

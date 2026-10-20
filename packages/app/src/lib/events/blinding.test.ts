@@ -119,4 +119,45 @@ describe("blinding seed", () => {
     expect(publishOrQueue).not.toHaveBeenCalled();
     expect(fetchEventsAnswered).not.toHaveBeenCalled();
   });
+
+  it("two tabs that both see no seed mint ONE, not two (DS41-012)", async () => {
+    // A shared relay: what one tab publishes, the next read sees.
+    const relay: Array<{ id: string; content: string; created_at: number }> = [];
+    fetchEventsAnswered.mockImplementation(async () => {
+      const seen = [...relay]; // what the relay holds when the REQ goes out
+      await new Promise((r) => setTimeout(r, 5)); // a real round trip
+      return { events: seen, answered: true };
+    });
+    publishOrQueue.mockImplementation((async (e: { id: string; content: string; created_at: number }) => {
+      relay.push(e);
+      return true;
+    }) as never);
+    let n = 0;
+    const signer = remoteSigner({
+      signEvent: (async (e: Record<string, unknown>) => ({ ...e, id: String(++n).repeat(64), sig: "s" })) as never,
+    });
+
+    // Tab A and tab B open the reuse library at the same moment. Each tab has
+    // its own in-memory promise memo, which clearBlindingCache stands in for.
+    const tabA = deriveBlindingKey(signer);
+    await new Promise((r) => setTimeout(r, 0)); // A is now waiting on its relay read
+    clearBlindingCache();
+    const tabB = deriveBlindingKey(signer);
+    const [a, b] = await Promise.all([tabA, tabB]);
+
+    expect(publishOrQueue).toHaveBeenCalledTimes(1);
+    expect(Buffer.from(b).equals(Buffer.from(a))).toBe(true);
+  });
+
+  it("adopts the seed relays kept when another device minted in the same window (DS41-012)", async () => {
+    const otherSeed = btoa("o".repeat(32));
+    const theirs = { id: "0".repeat(64), content: `cipher:${otherSeed}`, created_at: 4_000_000_000 };
+    let reads = 0;
+    fetchEventsAnswered.mockImplementation(async () =>
+      ++reads === 1 ? { events: [], answered: true } : { events: [theirs], answered: true },
+    );
+    const key = await deriveBlindingKey(remoteSigner());
+    expect(publishOrQueue).toHaveBeenCalledTimes(1);
+    expect(new TextDecoder().decode(key)).toBe("o".repeat(32));
+  });
 });

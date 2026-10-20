@@ -53,6 +53,7 @@ import { signerUnwrap } from "./giftwrap.js";
 import {
   addEckVersions,
   applyOrganizerGrant,
+  activeKeystoreOwner,
   loadEventKeys,
   listEventKeys,
   currentEck,
@@ -64,7 +65,13 @@ import { onlyVerified, onlyByAuthors, onlyAddressed } from "$lib/nostr/verify.js
 import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { eventRelayHints } from "./event-context.js";
-import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
+import {
+  cacheGet,
+  cacheSet,
+  whenCacheReady,
+  cacheGeneration,
+  activeCacheOwner,
+} from "$lib/cache/persist.js";
 import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
 import { recordOwnStatus } from "./attendee-status.js";
 import {
@@ -582,7 +589,20 @@ export async function receiveGrants(
     return configCache.get(coordinate);
   };
 
+  // Fence for the whole pass (audit DS41-001): every unwrap below can wait a
+  // minute on a remote signer, and a logout or account switch in that window must
+  // neither file this identity's custody under the next one nor write it back to
+  // a store the logout just locked. Writes name `pubkey` explicitly; the loop
+  // stops (un-memoized, so the next scan of this identity resumes) once the
+  // session is no longer this identity's.
+  const gen = cacheGeneration();
+  const sessionMovedOn = () => activeKeystoreOwner() !== pubkey || cacheGeneration() !== gen;
+
   for (const wrap of wraps) {
+    if (sessionMovedOn()) {
+      outcome.truncated = true;
+      break;
+    }
     // Recipient binding: the relay filter already restricts `#p`, but a hostile
     // relay can return extra wraps — the successful unwrap below proves the wrap
     // was actually sealed to us, this is just a cheap early guard.
@@ -654,11 +674,19 @@ export async function receiveGrants(
       // Union the granted ECK versions into any existing record (audit APPK-4):
       // an authentic-but-stale 21605 processed after a fresher 21602 must not
       // clobber the record back to older versions — only role/secrets update.
-      await applyOrganizerGrant(grant.a, {
-        eck: grant.eck,
-        eidNsecHex: grant.eid_nsec,
-        einboxNsecHex: grant.einbox_nsec,
-      });
+      if (sessionMovedOn()) {
+        outcome.truncated = true;
+        break;
+      }
+      await applyOrganizerGrant(
+        grant.a,
+        {
+          eck: grant.eck,
+          eidNsecHex: grant.eid_nsec,
+          einboxNsecHex: grant.einbox_nsec,
+        },
+        pubkey,
+      );
       coordinates.add(grant.a);
       memo[wrap.id] = { coordinate: grant.a, versions: grant.eck.map((v) => v.id), organizer: true };
       memoDirty = true;
@@ -724,10 +752,15 @@ export async function receiveGrants(
         memoDirty = true;
         continue;
       }
+      if (sessionMovedOn()) {
+        outcome.truncated = true;
+        break;
+      }
       await addEckVersions(
         grant.a,
         grant.eck,
         grant.role === "organizer" ? "organizer" : "attendee",
+        pubkey,
       );
       coordinates.add(grant.a);
       // §15.3: a proof to join the event's community. Kept only when it is for the
@@ -817,7 +850,7 @@ export async function receiveGrants(
       const keep = new Set(keys.slice(-MAX_GRANT_WRAPS));
       for (const k of keys) if (!keep.has(k)) delete memo[k];
     }
-    cacheSet(GRANT_MEMO_KEY, memo, Math.floor(Date.now() / 1000), pubkey);
+    cacheSet(GRANT_MEMO_KEY, memo, Math.floor(Date.now() / 1000), pubkey, gen);
   }
   // §15.5: join the community of any event the person consented to, from the
   // proofs just stored AND from earlier ones (a grant is memoized once processed,
@@ -841,8 +874,8 @@ export async function isApproved(coordinate: string): Promise<boolean> {
   return !!currentEck(keys);
 }
 
-async function eckBytesFor(coordinate: string): Promise<Uint8Array | undefined> {
-  const keys = await loadEventKeys(coordinate);
+async function eckBytesFor(coordinate: string, owner?: string): Promise<Uint8Array | undefined> {
+  const keys = await loadEventKeys(coordinate, owner);
   const eck = currentEck(keys);
   return eck ? base64ToBytes(eck.key) : undefined;
 }
@@ -892,6 +925,48 @@ export function cachedRoster(coordinate: string): RosterContent | undefined {
 const inflightRoster = new Map<string, Promise<RosterContent | undefined>>();
 const inflightDirectory = new Map<string, Promise<DirectoryEntryContent[]>>();
 
+/**
+ * Who a member-only read runs FOR, captured when it starts (audit DS41-003).
+ *
+ * These reads await relays (and the roster continuation, a second REQ) before
+ * they decrypt and cache, and the identity can change underneath them: a logout
+ * followed by a different sign-in, or an imported key. Keyed by coordinate
+ * alone, B's `fetchRoster` joined A's in-flight promise and got back the roster
+ * A decrypted with A's ECK — whether or not B holds any key for that event — and
+ * the completion wrote it into whatever scope was active by then, i.e. B's.
+ *
+ * So the share key carries the owner and the cache generation, the ECK is read
+ * for the captured owner, and the cache write is filed under that owner with the
+ * generation fence (a logout or account switch since the start drops it).
+ */
+interface ReadScope {
+  /** Keystore identity whose ECK decrypts this read; undefined = logged out. */
+  keysOwner?: string;
+  /** Cache scope the decrypted result is filed under; undefined = logged out. */
+  cacheOwner?: string;
+  gen: number;
+}
+
+function captureReadScope(): ReadScope {
+  return {
+    keysOwner: activeKeystoreOwner() ?? undefined,
+    cacheOwner: activeCacheOwner() ?? undefined,
+    gen: cacheGeneration(),
+  };
+}
+
+function shareKey(scope: ReadScope, coordinate: string): string {
+  return `${scope.keysOwner ?? ""}\u001f${scope.cacheOwner ?? ""}\u001f${scope.gen}\u001f${coordinate}`;
+}
+
+/** Owner-scoped cache write for a read that started under `scope`. */
+function scopedCacheSet<T>(scope: ReadScope, key: string, data: T, at: number): void {
+  // Logged out when the read started: nothing owner-scoped to write (cacheSet's
+  // own null-scope rule), and never the scope of whoever signed in since.
+  if (!scope.cacheOwner) return;
+  cacheSet(key, data, at, scope.cacheOwner, scope.gen);
+}
+
 function share<T>(map: Map<string, Promise<T>>, key: string, run: () => Promise<T>): Promise<T> {
   const running = map.get(key);
   if (running) return running;
@@ -910,11 +985,19 @@ export function __resetAttendeeInflightForTests(): void {
 
 /** Fetch + decrypt the roster. Returns undefined if the user isn't approved. */
 export function fetchRoster(ctx: EventContext): Promise<RosterContent | undefined> {
-  return share(inflightRoster, ctx.coordinate, () => fetchRosterOnce(ctx));
+  return fetchRosterFor(ctx, captureReadScope());
 }
 
-async function fetchRosterOnce(ctx: EventContext): Promise<RosterContent | undefined> {
-  const eck = await eckBytesFor(ctx.coordinate);
+function fetchRosterFor(ctx: EventContext, scope: ReadScope): Promise<RosterContent | undefined> {
+  return share(inflightRoster, shareKey(scope, ctx.coordinate), () => fetchRosterOnce(ctx, scope));
+}
+
+async function fetchRosterOnce(
+  ctx: EventContext,
+  scope: ReadScope,
+): Promise<RosterContent | undefined> {
+  if (!scope.keysOwner) return undefined;
+  const eck = await eckBytesFor(ctx.coordinate, scope.keysOwner);
   if (!eck) return undefined;
   const authors = acceptedRecordAuthors(ctx);
   const { identifier } = parseCoordinate(ctx.coordinate);
@@ -958,7 +1041,7 @@ async function fetchRosterOnce(ctx: EventContext): Promise<RosterContent | undef
     }
     roster = mergeRosterPages([parsed.value, ...rest]);
   }
-  cacheSet(rosterKey(ctx.coordinate), roster, latest.created_at ?? 0);
+  scopedCacheSet(scope, rosterKey(ctx.coordinate), roster, latest.created_at ?? 0);
   return roster;
 }
 
@@ -1009,8 +1092,13 @@ async function fetchRosterContinuation(
 // The decrypted directory entries survive reloads too (owner-scoped) so the
 // attendee-detail page paints one person instantly and the People list paints
 // its last snapshot before the roster stream even opens.
-function cacheDirectory(coordinate: string, entries: DirectoryEntryContent[], at?: number): void {
-  cacheSet(dirKey(coordinate), entries, at);
+function cacheDirectory(
+  scope: ReadScope,
+  coordinate: string,
+  entries: DirectoryEntryContent[],
+  at: number,
+): void {
+  scopedCacheSet(scope, dirKey(coordinate), entries, at);
 }
 
 /** All cached directory entries for a coordinate (no network), or undefined. */
@@ -1075,15 +1163,20 @@ function streamDirectoryEvents(
 
 /** Fetch + decrypt every directory entry listed in the roster. */
 export function fetchDirectory(ctx: EventContext): Promise<DirectoryEntryContent[]> {
-  return share(inflightDirectory, ctx.coordinate, () => fetchDirectoryOnce(ctx));
+  const scope = captureReadScope();
+  return share(inflightDirectory, shareKey(scope, ctx.coordinate), () =>
+    fetchDirectoryOnce(ctx, scope),
+  );
 }
 
 async function fetchDirectoryOnce(
   ctx: EventContext,
+  scope: ReadScope,
 ): Promise<DirectoryEntryContent[]> {
-  const eck = await eckBytesFor(ctx.coordinate);
+  if (!scope.keysOwner) return [];
+  const eck = await eckBytesFor(ctx.coordinate, scope.keysOwner);
   if (!eck) return [];
-  const roster = await fetchRoster(ctx);
+  const roster = await fetchRosterFor(ctx, scope);
   if (!roster || roster.attendees.length === 0) return [];
 
   const authors = acceptedRecordAuthors(ctx);
@@ -1111,7 +1204,7 @@ async function fetchDirectoryOnce(
       /* skip entries we can't decrypt (e.g. published under a newer ECK) */
     }
   }
-  cacheDirectory(ctx.coordinate, entries, newestAt);
+  cacheDirectory(scope, ctx.coordinate, entries, newestAt);
   return entries;
 }
 
@@ -1144,7 +1237,9 @@ export async function streamDirectory(
   ctx: EventContext,
   onEntries: (entries: DirectoryEntryContent[]) => void,
 ): Promise<DirectoryStream | undefined> {
-  const eck = await eckBytesFor(ctx.coordinate);
+  const scope = captureReadScope(); // DS41-003: see ReadScope
+  if (!scope.keysOwner) return undefined;
+  const eck = await eckBytesFor(ctx.coordinate, scope.keysOwner);
   if (!eck) return undefined; // not approved — nothing decryptable
   const authors = acceptedRecordAuthors(ctx);
   const acceptedAuthors = new Set(acceptedRecordAuthors(ctx));
@@ -1169,7 +1264,7 @@ export async function streamDirectory(
   const flush = () => {
     flushTimer = undefined;
     const snap = snapshot();
-    cacheDirectory(coord, snap, newestAt); // write-through the decrypted snapshot
+    cacheDirectory(scope, coord, snap, newestAt); // write-through the decrypted snapshot
     onEntries(snap);
   };
   const scheduleFlush = () => {
@@ -1211,7 +1306,7 @@ export async function streamDirectory(
   // real event from this stream always supersedes them; they replace a cache
   // seed (also at 0) because the warm's snapshot is strictly the fresher of the
   // two. Never awaited — a slow or dead warm must not hold up this stream.
-  const pendingWarm = inflightDirectory.get(coord);
+  const pendingWarm = inflightDirectory.get(shareKey(scope, coord));
   if (pendingWarm) {
     void pendingWarm
       .then((warmed) => {
@@ -1259,7 +1354,7 @@ export async function streamDirectory(
   // Refresh the roster from relays in the background; if its blinded-d set
   // changed, restart the entry stream over the new set (§2.3 step 2).
   const refreshRoster = async () => {
-    const fresh = await fetchRoster(ctx).catch(() => undefined);
+    const fresh = await fetchRosterFor(ctx, scope).catch(() => undefined);
     if (fresh && dsChanged(fresh.attendees.map((a) => a.d))) {
       const h = startStream(fresh.attendees.map((a) => a.d));
       void h.ready.then(() => {
@@ -1279,7 +1374,7 @@ export async function streamDirectory(
   } else {
     // Cold: must await the fresh roster before we know which d's to stream.
     void (async () => {
-      const fresh = await fetchRoster(ctx).catch(() => undefined);
+      const fresh = await fetchRosterFor(ctx, scope).catch(() => undefined);
       if (!fresh || fresh.attendees.length === 0) return settle(undefined);
       settle(startStream(fresh.attendees.map((a) => a.d)));
     })();
@@ -1321,7 +1416,9 @@ export async function fetchMatches(
 ): Promise<MatchListContent | undefined> {
   const coordinator = ctx.config.coordinator;
   if (!coordinator) return undefined;
-  const eck = await eckBytesFor(ctx.coordinate);
+  const scope = captureReadScope(); // DS41-003: see ReadScope
+  if (!scope.keysOwner) return undefined;
+  const eck = await eckBytesFor(ctx.coordinate, scope.keysOwner);
   if (!eck) return undefined;
   const pubkey = await signer.getPublicKey();
   const d = blindedD(eck, ctx.coordinate, pubkey);
@@ -1340,7 +1437,7 @@ export async function fetchMatches(
     const list = matchListContentSchema.parse(JSON.parse(json));
     // Persist the decrypted list (owner-scoped) so Matches paints instantly next
     // time (§2.3); latest-wins on the 31605's created_at.
-    cacheSet(matchesKey(ctx.coordinate), list, latest.created_at ?? 0);
+    scopedCacheSet(scope, matchesKey(ctx.coordinate), list, latest.created_at ?? 0);
     return list;
   } catch {
     return undefined;

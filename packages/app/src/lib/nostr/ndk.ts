@@ -14,7 +14,10 @@ import NDK, {
 import type { NDKFilter, NDKRelay, NDKSubscription } from "@nostr-dev-kit/ndk";
 import NDKCacheAdapterDexie from "@nostr-dev-kit/cache-dexie";
 import type { VerifiedEvent } from "nostr-tools/pure";
-import { DEFAULT_RELAYS, DEFAULT_READ_RELAYS, unionRelays } from "./relays.js";
+import { DEFAULT_RELAYS, DEFAULT_READ_RELAYS, unionRelays, isAcceptedRelayUrl } from "./relays.js";
+// Lives in relays.ts so the signer can use it without pulling NDK in; re-exported
+// here because every existing caller (and test mock) imports it from ndk.
+export { isAcceptedRelayUrl };
 import { streamEvents } from "./stream.js";
 import { noteRelayPublishFailure } from "./errors.js";
 
@@ -187,22 +190,6 @@ export function connectedRelayCount(): number {
   }
 }
 
-/**
- * A relay URL the app will actually open (audit APPR-8): `wss://` only —
- * plaintext `ws://` to a remote host would expose all event traffic to
- * interception. The one exception is loopback (`ws://localhost` / `127.0.0.1` /
- * `[::1]`), which the local e2e/dev stack uses for its dockerized relay.
- */
-export function isAcceptedRelayUrl(url: string): boolean {
-  try {
-    const u = new URL(url);
-    if (u.protocol === "wss:") return true;
-    if (u.protocol !== "ws:") return false;
-    return ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
-  } catch {
-    return false;
-  }
-}
 
 /**
  * Bounded event-relay growth (audit U16). Every visited event calls `addRelays`

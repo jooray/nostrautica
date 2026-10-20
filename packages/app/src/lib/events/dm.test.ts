@@ -56,6 +56,7 @@ import {
   __setPersistBackend,
   __resetPersistForTests,
   setActiveCacheOwner,
+  clearOwnerCache,
   type CacheEntry,
   type PersistBackend,
 } from "$lib/cache/persist.js";
@@ -319,5 +320,56 @@ describe("fetchDms unwrap memo persistence (§2.6)", () => {
     expect(cachedDms(OWNER)).toEqual([
       expect.objectContaining({ peer: PEER, text: "hello there" }),
     ]);
+  });
+});
+
+describe("the unwrap loop does not outlive a logout (DS41-004)", () => {
+  const OWNER = "e".repeat(64); // distinct owner so the module cache re-hydrates
+  const PEER = "f".repeat(64);
+  const signer = { getPublicKey: async () => OWNER } as never;
+
+  it("drops what it decrypted after the wipe instead of persisting it back", async () => {
+    const disk = new Map<string, CacheEntry>();
+    __resetPersistForTests();
+    __setPersistBackend({
+      async getAll() {
+        return [...disk.entries()];
+      },
+      async put(k, v) {
+        disk.set(k, v);
+      },
+      async delete(keys) {
+        for (const k of keys) disk.delete(k);
+      },
+    });
+    setActiveCacheOwner(OWNER);
+    streamEvents.mockReset();
+    signerUnwrap.mockReset();
+    streamEvents.mockReturnValue({ ready: Promise.resolve([{ id: "wrap-x" }]), stop: () => {} });
+    let answer: ((rumor: unknown) => void) | undefined;
+    signerUnwrap.mockImplementation(() => new Promise((r) => (answer = r)));
+
+    const pending = fetchDms(signer);
+    // Wait for the loop to be parked on the (remote) signer.
+    for (let i = 0; i < 50 && !answer; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(answer).toBeDefined();
+
+    // The user logs out while the signer is still thinking.
+    clearOwnerCache(OWNER);
+    setActiveCacheOwner(null);
+
+    answer!({
+      id: "rumor-x",
+      pubkey: PEER,
+      kind: KIND_DM,
+      tags: [["p", OWNER]],
+      content: "secret after logout",
+      created_at: 456,
+    });
+    await pending;
+    await Promise.resolve();
+
+    expect(cachedDms(OWNER)).toEqual([]);
+    expect([...disk.keys()].some((k) => k.includes("dmwraps"))).toBe(false);
   });
 });

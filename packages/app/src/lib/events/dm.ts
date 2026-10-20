@@ -14,7 +14,7 @@ import { fetchEvents, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
 import { streamEvents } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
-import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, whenCacheReady, cacheGeneration } from "$lib/cache/persist.js";
 
 export interface DmMessage {
   id: string; // rumor id (stable across the recipient/self copies)
@@ -126,6 +126,13 @@ export async function sendDm(
 // `unwrapAttempts` so a truly undecryptable wrap doesn't cost a signer
 // round-trip on every 5s tick forever.
 let unwrapCacheOwner = "";
+/**
+ * The owner-cache generation `unwrapCache` was hydrated under (audit DS41-004).
+ * A logout bumps the generation; the memo — and any unwrap loop still running
+ * on its behalf — belongs to the session that ended, so it is dropped rather
+ * than written back over the wipe.
+ */
+let unwrapCacheGen = -1;
 const unwrapCache = new Map<string, DmMessage | null>();
 /** In-memory per-wrap failure counts (session-scoped, never persisted). */
 const unwrapAttempts = new Map<string, number>();
@@ -175,10 +182,11 @@ function hydrateUnwrapCache(me: string): void {
   const memo = cacheGet<DmMemo>(DMWRAPS_KEY, me)?.data ?? {};
   for (const [id, m] of Object.entries(memo)) unwrapCache.set(id, m);
   unwrapCacheOwner = me;
+  unwrapCacheGen = cacheGeneration();
 }
 
 /** Persist the unwrap memo, capped to the 3000 most-recent wraps by message time. */
-function persistUnwrapCache(me: string): void {
+function persistUnwrapCache(me: string, gen: number): void {
   let entries = [...unwrapCache.entries()];
   if (entries.length > MAX_DM_WRAPS) {
     entries = entries
@@ -190,7 +198,7 @@ function persistUnwrapCache(me: string): void {
   }
   const memo: DmMemo = {};
   for (const [id, m] of entries) memo[id] = m;
-  cacheSet(DMWRAPS_KEY, memo, Math.floor(Date.now() / 1000), me);
+  cacheSet(DMWRAPS_KEY, memo, Math.floor(Date.now() / 1000), me, gen);
 }
 
 function snapshotDms(): DmMessage[] {
@@ -226,6 +234,9 @@ export async function scanDmGiftWraps(
   // real cursor. Every reload re-walked five pages of DM history from scratch —
   // and, with a remote signer, re-unwrapped all of it.
   await whenCacheReady();
+  // Fence the cursor write below: a logout while these relay pages load must
+  // not put the logged-out owner's scan state back on disk (DS41-004).
+  const gen = cacheGeneration();
   const now = Math.floor(Date.now() / 1000);
   const state = dmScanState(me);
   const ownDmRelays = await fetchDmRelays(me).catch(() => []);
@@ -292,7 +303,7 @@ export async function scanDmGiftWraps(
     historyComplete,
     ...(historyComplete || historyUntil === undefined ? {} : { historyUntil }),
   };
-  cacheSet(DMSCAN_KEY, nextState, now, me);
+  cacheSet(DMSCAN_KEY, nextState, now, me, gen);
   return [...byId.values()];
 }
 
@@ -303,7 +314,7 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   // the memo was never re-read for the rest of the session and the first
   // `persistUnwrapCache` wrote that empty memo over the full one on disk.
   await whenCacheReady();
-  if (unwrapCacheOwner !== me) hydrateUnwrapCache(me);
+  if (unwrapCacheOwner !== me || unwrapCacheGen !== cacheGeneration()) hydrateUnwrapCache(me);
   const events = await scanDmGiftWraps(me);
   for (const wrap of events) {
     if (!unwrapCache.has(wrap.id)) pendingWraps.set(wrap.id, wrap);
@@ -316,11 +327,20 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
   // decrypted so far (empty on a dead signer, so the UI leaves "Decrypting…" and
   // shows the composer), and the next 5s poll surfaces more as the cache fills.
   if (!unwrapInFlight) {
+    // The loop belongs to THIS owner and THIS session (audit DS41-004). It can
+    // sit on a remote signer for a long time, and it used to outlive a logout:
+    // its `finally` persisted the decrypted memo back to IndexedDB after
+    // `clearOwnerCache` had wiped it, and once another account hydrated the
+    // shared maps it kept unwrapping — and inserting — into that account's view.
+    // Checked before every unwrap and again before every write.
+    const gen = unwrapCacheGen;
+    const live = () => unwrapCacheOwner === me && cacheGeneration() === gen;
     unwrapInFlight = (async () => {
       // Polls may append while this loop awaits a remote signer. Map iteration
       // visits those additions, so paged ciphertext is not lost when its scan
       // cursor has already advanced.
       for (const wrap of pendingWraps.values()) {
+        if (!live()) return;
         if (unwrapCache.has(wrap.id)) continue;
         // Bounded retries for past failures (see the memo policy above).
         if ((unwrapAttempts.get(wrap.id) ?? 0) >= MAX_UNWRAP_ATTEMPTS) {
@@ -329,6 +349,7 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
         }
         try {
           const rumor = await signerUnwrap(signer, wrap);
+          if (!live()) return;
           if (rumor.kind !== KIND_DM) {
             unwrapCache.set(wrap.id, null);
             pendingWraps.delete(wrap.id);
@@ -362,8 +383,9 @@ export async function fetchDms(signer: AppSigner): Promise<DmMessage[]> {
         }
       }
     })().finally(() => {
-      // Persist the decrypted memo (capped) so it survives reloads (§2.6).
-      persistUnwrapCache(me);
+      // Persist the decrypted memo (capped) so it survives reloads (§2.6) —
+      // only while it is still this session's memo.
+      if (live()) persistUnwrapCache(me, gen);
       unwrapInFlight = null;
     });
   }

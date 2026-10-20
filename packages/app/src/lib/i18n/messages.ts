@@ -166,6 +166,14 @@ export const messages = {
       "A Nostr identity was just created for you. Back it up now so you never lose access.",
     "login.continue": "Continue",
     "login.alreadyLoggedIn": "You're already logged in.",
+    "login.link.title": "Sign in with the key from this link?",
+    "login.link.account": "This link signs you in as:",
+    "login.link.warnStranger":
+      "Only continue if this is your own recovery link, for example from your backup email. Whoever made a link like this controls the account it signs you into and can read everything you do with it.",
+    "login.link.warnReplace":
+      "This replaces the identity signed in on this device now. If its key is not backed up, it will be lost.",
+    "login.link.confirm": "Sign in with this key",
+    "login.link.cancel": "Cancel",
     "login.welcome": "Welcome",
     "login.failed": "Couldn't log in.",
     "login.createIdentity": "Create an identity",
@@ -1905,6 +1913,14 @@ export const messages = {
       "Práve sme pre vás vytvorili identitu na Nostri. Zálohujte si ju teraz, aby ste o prístup nikdy neprišli.",
     "login.continue": "Pokračovať",
     "login.alreadyLoggedIn": "Už ste prihlásení.",
+    "login.link.title": "Prihlásiť sa kľúčom z tohto odkazu?",
+    "login.link.account": "Tento odkaz vás prihlási ako:",
+    "login.link.warnStranger":
+      "Pokračujte, len ak je to váš vlastný záchranný odkaz, napríklad z vášho zálohového e-mailu. Kto takýto odkaz vytvoril, ovláda účet, do ktorého vás prihlási, a vidí všetko, čo pod ním urobíte.",
+    "login.link.warnReplace":
+      "Nahradí identitu, ktorá je teraz na tomto zariadení prihlásená. Ak jej kľúč nemáte zálohovaný, stratíte ho.",
+    "login.link.confirm": "Prihlásiť sa týmto kľúčom",
+    "login.link.cancel": "Zrušiť",
     "login.welcome": "Vitajte",
     "login.failed": "Prihlásenie sa nepodarilo.",
     "login.createIdentity": "Vytvoriť identitu",
@@ -3624,6 +3640,14 @@ export const messages = {
       "Právě jsme pro vás vytvořili identitu na Nostru. Zazálohujte si ji teď, abyste o přístup nikdy nepřišli.",
     "login.continue": "Pokračovat",
     "login.alreadyLoggedIn": "Už jste přihlášeni.",
+    "login.link.title": "Přihlásit se klíčem z tohoto odkazu?",
+    "login.link.account": "Tento odkaz vás přihlásí jako:",
+    "login.link.warnStranger":
+      "Pokračujte, jen pokud je to váš vlastní záchranný odkaz, například z vašeho zálohovacího e-mailu. Kdo takový odkaz vytvořil, ovládá účet, do kterého vás přihlásí, a vidí vše, co pod ním uděláte.",
+    "login.link.warnReplace":
+      "Nahradí identitu, která je teď na tomto zařízení přihlášená. Pokud její klíč nemáte zálohovaný, přijdete o něj.",
+    "login.link.confirm": "Přihlásit se tímto klíčem",
+    "login.link.cancel": "Zrušit",
     "login.welcome": "Vítejte",
     "login.failed": "Přihlášení se nezdařilo.",
     "login.createIdentity": "Vytvořit identitu",
@@ -5360,6 +5384,14 @@ export const messages = {
       "Für dich wurde gerade eine Nostr-Identität erstellt. Sichere sie jetzt, damit du nie den Zugriff verlierst.",
     "login.continue": "Weiter",
     "login.alreadyLoggedIn": "Du bist bereits angemeldet.",
+    "login.link.title": "Mit dem Schlüssel aus diesem Link anmelden?",
+    "login.link.account": "Dieser Link meldet dich an als:",
+    "login.link.warnStranger":
+      "Fahre nur fort, wenn das dein eigener Wiederherstellungslink ist, zum Beispiel aus deiner Backup-E-Mail. Wer einen solchen Link erstellt hat, kontrolliert das Konto, in das er dich anmeldet, und kann alles lesen, was du damit tust.",
+    "login.link.warnReplace":
+      "Das ersetzt die Identität, die auf diesem Gerät gerade angemeldet ist. Wenn ihr Schlüssel nicht gesichert ist, geht er verloren.",
+    "login.link.confirm": "Mit diesem Schlüssel anmelden",
+    "login.link.cancel": "Abbrechen",
     "login.welcome": "Willkommen",
     "login.failed": "Anmeldung fehlgeschlagen.",
     "login.createIdentity": "Identität erstellen",
@@ -7071,6 +7103,14 @@ export const messages = {
       "Se acaba de crear una identidad de Nostr para ti. Haz una copia de seguridad ahora para no perder nunca el acceso.",
     "login.continue": "Continuar",
     "login.alreadyLoggedIn": "Ya iniciaste sesión.",
+    "login.link.title": "¿Iniciar sesión con la clave de este enlace?",
+    "login.link.account": "Este enlace inicia tu sesión como:",
+    "login.link.warnStranger":
+      "Continúa solo si es tu propio enlace de recuperación, por ejemplo el de tu correo de copia de seguridad. Quien haya creado un enlace así controla la cuenta con la que te hace iniciar sesión y puede leer todo lo que hagas con ella.",
+    "login.link.warnReplace":
+      "Esto reemplaza la identidad con la que este dispositivo tiene la sesión iniciada ahora. Si su clave no tiene copia de seguridad, se perderá.",
+    "login.link.confirm": "Iniciar sesión con esta clave",
+    "login.link.cancel": "Cancelar",
     "login.welcome": "Te damos la bienvenida",
     "login.failed": "No se pudo iniciar sesión.",
     "login.createIdentity": "Crear una identidad",

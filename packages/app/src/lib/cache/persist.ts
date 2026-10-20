@@ -81,6 +81,14 @@ let activeOwner: string | null = null;
  * under the current identity. Wired next to keystore's `setActiveOwner`.
  */
 export function setActiveCacheOwner(pubkey: string | null): void {
+  // An account SWITCH (A → B with no logout in between: an imported key, a
+  // second bunker paste) invalidates A's in-flight async writes exactly as a
+  // logout does. Without the bump, a producer fenced with `cacheGeneration()`
+  // that started under A still passed the check and — if it resolved its scope
+  // at completion — wrote A's decrypted data into B's scope (audit DS41-003).
+  // null → A (a login or restore) is not an invalidation and must not bump:
+  // boot hydration runs across it and would discard the warm owner cache.
+  if (activeOwner !== null && pubkey !== activeOwner) generation++;
   activeOwner = pubkey;
 }
 

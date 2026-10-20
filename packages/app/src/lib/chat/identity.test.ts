@@ -10,6 +10,7 @@ import {
   clearLegacyClientId,
   lockChatIdentityForLogout,
   unlockChatIdentityForLogin,
+  __resetChatResolveInFlightForTests,
   type ChatIdentity,
 } from "./identity.js";
 import {
@@ -409,6 +410,27 @@ describe("per-device chat identity (NIP §10.1, decision D3)", () => {
     expect(id.pubkey).not.toBe(account);
     expect(id.isAccountKey).toBe(false);
     expect(getPublicKey(id.secretKey)).toBe(id.pubkey);
+  });
+
+  it("two tabs of one browser profile mint ONE device key, not two (SB-96)", async () => {
+    // A shared store whose reads take a real round trip, so both tabs read
+    // before either has written.
+    const shared = new InMemoryKvBackend();
+    const slow = Object.create(shared) as InMemoryKvBackend;
+    slow.get = async (k: string) => {
+      const v = await shared.get(k);
+      await new Promise((r) => setTimeout(r, 5));
+      return v;
+    };
+    __setMarmotKvBackendForTests(slow);
+    const account = "c".repeat(64);
+    const tabA = resolveChatIdentity(remoteSigner(account));
+    await new Promise((r) => setTimeout(r, 0)); // A is now reading the store
+    __resetChatResolveInFlightForTests(); // tab B has its own realm
+    const tabB = resolveChatIdentity(remoteSigner(account));
+    const [a, b] = await Promise.all([tabA, tabB]);
+    expect(b.pubkey).toBe(a.pubkey);
+    expect(getPublicKey((await loadChatDeviceKey(account))!)).toBe(a.pubkey);
   });
 
   it("a second device (fresh storage) of the SAME account mints a DIFFERENT key", async () => {

@@ -80,6 +80,17 @@ export function setActiveOwner(pubkey: string | null): void {
   activeOwner = pubkey;
 }
 
+/**
+ * The identity keystore calls currently resolve against, or null when logged
+ * out. A long-running scan (grant/recovery) captures its owner when it starts and
+ * passes it to every write explicitly (audit DS41-001); this lets it also stop
+ * early once the session has moved on instead of writing into a store that now
+ * belongs to nobody (or to the next person on a shared device).
+ */
+export function activeKeystoreOwner(): string | null {
+  return activeOwner;
+}
+
 function ownerForRead(explicit?: string): string | null {
   return explicit ?? activeOwner;
 }

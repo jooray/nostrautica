@@ -85,7 +85,7 @@ NIP-04 is banned project-wide (deprecated, `final unrecommended`). All NIP-44 ca
 ### 5.2 Key backup (local-key users)
 
 - **Backup card** shown after registration and nagging gently until completed, offering:
-  - **Email-to-self**: a `mailto:` link with subject "Your Nostrautica key" and a body containing the app URL with the key in the **URL fragment**: `https://<app>/#/login?nsec=<nsec>`. Fragments never reach a server, and the app consumes and strips the parameter from history immediately on open. The UI must state plainly: *email is not confidential transport; this is a convenience trade-off against losing access.*
+  - **Email-to-self**: a `mailto:` link with subject "Your Nostrautica key" and a body containing the app URL with the key in the **URL fragment**: `https://<app>/#/login?nsec=<nsec>`. Fragments never reach a server, and the app consumes and strips the parameter from history immediately on open. It then shows the npub the link signs into and imports the key only after the person confirms; it never replaces the identity on the device on its own. The UI must state plainly: *email is not confidential transport; this is a convenience trade-off against losing access.*
   - **NIP-49 export**: password-encrypted `ncryptsec` (scrypt + XChaCha20-Poly1305) as file download / copyable string.
   - Raw nsec copy (with a warning), for pasting into other Nostr clients (§5.4).
 - Login accepts: `#/login?nsec=` links, pasted nsec, pasted ncryptsec + password, NIP-07, NIP-46.
