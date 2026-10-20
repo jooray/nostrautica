@@ -1286,8 +1286,7 @@ describe("a revoke that lands while a sync is in flight is not undone (DS41-048 
   it("re-checks authorization right before the Add", async () => {
     const store = freshStore();
     const mls = new FakeMls();
-    let admin!: MarmotAdmin;
-    admin = makeAdmin(store, mls, [], undefined, {
+    const admin: MarmotAdmin = makeAdmin(store, mls, [], undefined, {
       fetchKeyPackages: async () => {
         await admin.handleAttestation(COORD, ACCOUNT, attest("revoke"), CREATED_AT);
         return [kpEvent(CHATKEY, "kp1")];
