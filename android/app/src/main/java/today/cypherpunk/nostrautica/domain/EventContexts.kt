@@ -137,11 +137,16 @@ class EventContexts(private val nostr: Nostr, private val cache: Cache) {
     /** After the organizer edits something, write the new state through. */
     suspend fun invalidate(naddr: String) = cache.forget(key(naddr))
 
-    /** Latest signed 31600 for a coordinate (grant authentication needs the live config). */
-    suspend fun fetchConfig(coordinate: String, extraRelays: List<String> = emptyList()): EventConfig? {
+    /**
+     * Latest signed 31600 for a coordinate (grant authentication needs the live config).
+     * With [requireAnswer], null unless at least one relay answered the read, so the
+     * result is never only this phone's stored copy.
+     */
+    suspend fun fetchConfig(coordinate: String, extraRelays: List<String> = emptyList(), requireAnswer: Boolean = false): EventConfig? {
         val c = Coordinate.parseOrNull(coordinate) ?: return null
         val relays = Relays.forEventRead(null, relayHints(coordinate) + extraRelays)
-        nostr.fetch(relays, Filter(kinds = listOf(Kinds.EVENT_CONFIG), authors = listOf(c.pubkey), tags = mapOf("d" to listOf(c.identifier))))
+        val r = nostr.fetch(relays, Filter(kinds = listOf(Kinds.EVENT_CONFIG), authors = listOf(c.pubkey), tags = mapOf("d" to listOf(c.identifier))))
+        if (requireAnswer && r.answered == 0) return null
         val e = nostr.store.latest(Kinds.EVENT_CONFIG, c.pubkey, c.identifier) ?: return null
         return runCatching { EventConfig.parse(e) }.getOrNull()
     }

@@ -884,7 +884,10 @@ class Organizer(
     /** organizer.ts updateEventConfig: every other field is preserved; chat relays stay a separate set. */
     suspend fun updateConfig(ctx: EventContext, change: ConfigChange): Boolean {
         val keys = orgKeys(ctx)
-        val cfg = ctx.cfg
+        // The edit applies to the NEWEST config, never the screen's (R-42): a 31600 rebuilt from
+        // a cached one re-signs its coordinator, inbox, gen and eck, and publishMonotonic makes that
+        // stale copy win, undoing a detach, attach or inbox rotation made on another device.
+        val cfg = contexts.fetchConfig(ctx.coordinate, ctx.cfg.relays, requireAnswer = true) ?: throw ConfigUnreadable()
         val relays = change.relays?.let { OrganizerEvents.unionRelays(it) } ?: cfg.relays
         if (change.relays != null && relays.isEmpty()) throw IllegalArgumentException("at least one relay is required")
         val chat = change.chat ?: cfg.chat
@@ -896,6 +899,10 @@ class Organizer(
         )
         return publishConfig(ctx, eidSk(keys), next, OrganizerEvents.unionRelays(cfg.relays, relays))
     }
+
+    class ConfigUnreadable : Exception(
+        "Couldn't read this event's current settings from any relay, so nothing was changed (saving over an older copy would undo changes made on your other devices). Check your connection and try again.",
+    )
 
     private suspend fun publishConfig(ctx: EventContext, eidSk: ByteArray, base: EventConfig, relays: List<String>): Boolean {
         // The space hierarchy (§15) is edited from other screens and devices: a settings change built
