@@ -11,6 +11,8 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { GiftWrap } from "@nostrautica/protocol";
 import { signerWrap, signerUnwrap } from "./giftwrap.js";
 import { fetchEvents, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
+import { onlyVerified, onlyByAuthors, type SignedEventLike } from "$lib/nostr/verify.js";
+import type { OrderableEvent } from "@nostrautica/protocol";
 import { streamEvents } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { publishOrQueue } from "$lib/nostr/publish-queue.js";
@@ -65,10 +67,26 @@ export function selectDmRelays(
   );
 }
 
+/**
+ * The newest kind-10050 that `pubkey` actually signed, out of a raw fetch.
+ *
+ * The `authors` filter is the relay's promise, not ours (audit R-83): a relay
+ * that ignores it can answer with someone else's validly signed, newer 10050,
+ * and a bare latest-wins pick would then route this user's DMs and MLS
+ * welcomes to relays the attacker chose. Pin signature and author first, the
+ * same `onlyByAuthors(onlyVerified(…))` every other trusted read uses.
+ */
+export function latestDmRelayList<T extends Partial<SignedEventLike> & OrderableEvent>(
+  events: T[],
+  pubkey: string,
+): T | undefined {
+  return pickLatest(onlyByAuthors(onlyVerified(events), [pubkey]));
+}
+
 /** Fetch a pubkey's kind-10050 DM relay list; [] if they've published none. */
 export async function fetchDmRelays(pubkey: string): Promise<string[]> {
   const events = await fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey] });
-  const latest = pickLatest(events);
+  const latest = latestDmRelayList(events, pubkey);
   return latest ? relayUrlsFromDmList(latest.tags) : [];
 }
 

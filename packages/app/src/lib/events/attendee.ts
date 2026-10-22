@@ -400,7 +400,8 @@ function ownInboxRelays(pubkey: string): Promise<string[]> {
   if (!pending) {
     pending = (async () => {
       const lists = await fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey] });
-      const latest = pickLatest(onlyVerified(lists));
+      // Author-pinned (audit R-83): a relay may ignore the `authors` filter.
+      const latest = pickLatest(onlyByAuthors(onlyVerified(lists), [pubkey]));
       return (latest?.tags ?? [])
         .filter((t) => t[0] === "relay" && !!t[1] && isDialableRelay(t[1]))
         .map((t) => t[1]!)
