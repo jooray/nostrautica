@@ -651,6 +651,51 @@ async function readCapped(
   return out;
 }
 
+/** A loopback, private, link-local or otherwise non-public host, by its literal form. */
+function isNonPublicHost(hostname: string): boolean {
+  const h = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h.endsWith(".internal")) return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(h);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return (
+      a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127) || a >= 224
+    );
+  }
+  if (h.includes(":")) {
+    // IPv6 literal (WHATWG URL has already normalised it): loopback, unspecified,
+    // unique-local fc00::/7, link-local fe80::/10, and v4-mapped addresses.
+    return h === "::1" || h === "::" || /^f[cd]/.test(h) || /^fe[89ab]/.test(h) || h.startsWith("::ffff:");
+  }
+  return false;
+}
+
+/**
+ * Whether the VIEWER's browser may fetch a media URL taken from a descriptor
+ * (audit R-19). A descriptor is attendee-authored and republished verbatim by
+ * the coordinator, so its URLs are any https endpoint the author chose — a
+ * loopback admin port, a router on the viewer's LAN, a URL with credentials in
+ * it. The hash check means nothing it returns can be used, but the request
+ * itself is a beacon and a port scan from inside the viewer's network. So:
+ * https only, no userinfo, and no non-public host by literal — except when the
+ * app itself runs on such a host (local development against a local Blossom).
+ * A public DNS name that resolves to a private address is not caught here;
+ * that needs the network, which the browser does not expose.
+ */
+export function isFetchableMediaUrl(url: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" || u.username || u.password) return false;
+  if (!isNonPublicHost(u.hostname)) return true;
+  const appHost = typeof location !== "undefined" ? location.hostname : "";
+  return !!appHost && isNonPublicHost(appHost);
+}
+
 /**
  * Download a blob's ciphertext, trying each mirror URL in turn. Verifies the
  * ciphertext hash against the expected sha256 (x). Downloads are size-capped
@@ -669,6 +714,10 @@ export async function downloadBlob(
   }
   let lastErr: unknown;
   for (const url of urls) {
+    if (!isFetchableMediaUrl(url)) {
+      lastErr = new Error(`refusing to fetch ${url}: not a public https media URL`);
+      continue;
+    }
     // One controller, two budgets (see DOWNLOAD_STALL_TIMEOUT_MS): the headers
     // have to arrive promptly, the body only has to keep moving.
     const controller = new AbortController();
@@ -677,8 +726,15 @@ export async function downloadBlob(
         `Download from ${url} timed out after ${DOWNLOAD_TIMEOUT_MS}ms`,
         DOWNLOAD_TIMEOUT_MS,
         controller,
-        fetch(url, { signal: controller.signal }),
+        // No referrer (the hash-routed page URL can name a private event) and no
+        // cookies or HTTP auth for a host the descriptor's author chose (R-19).
+        fetch(url, { signal: controller.signal, referrerPolicy: "no-referrer", credentials: "omit" }),
       );
+      // A redirect is followed by the browser; refuse one that LANDED somewhere
+      // we would not have asked for directly.
+      if (res.redirected && res.url && !isFetchableMediaUrl(res.url)) {
+        throw new Error(`refusing ${url}: redirected to a non-public URL`);
+      }
       if (!res.ok) throw new Error(`${res.status} from ${url}`);
       const bytes = await readCapped(res, maxBytes, url, controller, opts);
       if (sha256Hex(bytes) !== expectedSha256) throw new Error(`hash mismatch from ${url}`);

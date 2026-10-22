@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   uploadAndMirror,
   acceptedBlobUrl,
+  isFetchableMediaUrl,
   mirror,
   downloadBlob,
   preflight,
@@ -175,6 +176,57 @@ describe("Blossom reply URLs are bound to https + origin + content address (audi
     expect(fetchMock).not.toHaveBeenCalled();
     const r = await uploadAndMirror(signer, ["http://plain.example", "https://primary.example"], data, "x");
     expect(r.urls).toEqual([`https://primary.example/${sha}`]);
+  });
+});
+
+describe("downloadBlob request hygiene (audit R-19)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const data = new Uint8Array([4, 2]);
+  const sha = sha256Hex(data);
+
+  it("refuses userinfo, non-https, and loopback/private/link-local literals", () => {
+    for (const bad of [
+      `https://user:pw@cdn.example/${sha}`,
+      `http://cdn.example/${sha}`,
+      `https://127.0.0.1:8080/${sha}`,
+      `https://localhost/${sha}`,
+      `https://10.0.0.1/${sha}`,
+      `https://192.168.1.1/${sha}`,
+      `https://172.20.0.5/${sha}`,
+      `https://169.254.169.254/${sha}`,
+      `https://[::1]/${sha}`,
+      `https://[fd00::1]/${sha}`,
+      `https://[fe80::1]/${sha}`,
+      `https://router.local/${sha}`,
+    ]) {
+      expect(isFetchableMediaUrl(bad), bad).toBe(false);
+    }
+    expect(isFetchableMediaUrl(`https://blossom.example/${sha}`)).toBe(true);
+    expect(isFetchableMediaUrl(`https://172.32.0.1/${sha}`)).toBe(true);
+  });
+
+  it("allows a local Blossom when the app itself runs locally (dev/e2e)", () => {
+    vi.stubGlobal("location", { hostname: "localhost" });
+    expect(isFetchableMediaUrl(`https://localhost:3443/${sha}`)).toBe(true);
+  });
+
+  it("skips a refused mirror without a request, and fetches the rest with no referrer and no credentials", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(data));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await downloadBlob([`https://192.168.0.1/${sha}`, `https://cdn.example/${sha}`], sha);
+    expect(out).toEqual(data);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe(`https://cdn.example/${sha}`);
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ referrerPolicy: "no-referrer", credentials: "omit" });
+  });
+
+  it("rejects a response that redirected onto a non-public host", async () => {
+    const res = new Response(data);
+    Object.defineProperty(res, "redirected", { value: true });
+    Object.defineProperty(res, "url", { value: `https://127.0.0.1/${sha}` });
+    vi.stubGlobal("fetch", vi.fn(async () => res));
+    await expect(downloadBlob([`https://cdn.example/${sha}`], sha)).rejects.toThrow(/non-public/);
   });
 });
 
