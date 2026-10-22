@@ -173,6 +173,19 @@ class InvitesAndAdminTest {
         assertEquals(AdminModel.Op.FAILED, people[1].op)
     }
 
+    @Test fun aJoinSentBeforeARevokeStaysOutOfTheQueue() {
+        // R-14: after a reload the inbox still holds the removed member's old join.
+        val pk = "ab".repeat(32)
+        val old = PendingRequest(pk, "Old", rumorCreatedAt = 100)
+        val revokedAt = mapOf(pk to 200L)
+        assertTrue(AdminModel.predatesRevoke(old, revokedAt))
+        assertEquals(emptyList<PendingRequest>(), AdminModel.visiblePending(listOf(old), { false }, emptySet(), revokedAt = revokedAt))
+        // A request sent after the removal is a real re-request and shows.
+        val again = old.copy(rumorCreatedAt = 300)
+        assertFalse(AdminModel.predatesRevoke(again, revokedAt))
+        assertEquals(listOf(again), AdminModel.visiblePending(listOf(again), { false }, emptySet(), revokedAt = revokedAt))
+    }
+
     @Test fun overviewPutsExceptionsFirstAndNeverCallsUnknownLiveness() {
         val (ex, metrics) = AdminModel.buildOverview(AdminModel.OverviewInput(2, 3, 1, 1, 0, true, true, true, true))
         assertEquals(listOf("failedJobs", "billing"), ex.map { it.id })

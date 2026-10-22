@@ -49,8 +49,20 @@ object AdminModel {
         return by.values.sortedBy { it.rumorCreatedAt }
     }
 
-    fun visiblePending(known: List<PendingRequest>, isApproved: (String) -> Boolean, revoked: Set<String>, rejected: Set<String> = emptySet()) =
-        known.filter { !isApproved(it.attendeePubkey) && it.attendeePubkey !in revoked && it.attendeePubkey !in rejected }
+    fun visiblePending(
+        known: List<PendingRequest>, isApproved: (String) -> Boolean, revoked: Set<String>, rejected: Set<String> = emptySet(),
+        revokedAt: Map<String, Long> = emptyMap(),
+    ) = known.filter {
+        !isApproved(it.attendeePubkey) && it.attendeePubkey !in revoked && it.attendeePubkey !in rejected && !predatesRevoke(it, revokedAt)
+    }
+
+    /**
+     * A join sent before its author was removed (R-14). The inbox keeps it, so after a
+     * reload it would reappear as new and Approve would hand the removed member the very
+     * key minted to exclude them. A request sent after the removal is a real re-request.
+     */
+    fun predatesRevoke(req: PendingRequest, revokedAt: Map<String, Long>): Boolean =
+        revokedAt[req.attendeePubkey]?.let { req.rumorCreatedAt <= it } == true
 
     enum class Op { OK, PROCESSING, FAILED }
 

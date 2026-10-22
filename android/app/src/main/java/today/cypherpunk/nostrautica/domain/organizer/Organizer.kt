@@ -416,6 +416,8 @@ class Organizer(
     private suspend fun approveOffMain(ctx: EventContext, req: PendingRequest, role: String) = lock("roster:${ctx.coordinate}").withLock {
         // One roster author (SB-91): with a coordinator attached this is a 21604.
         assertNoCoordinatorAuthority(ctx)
+        // Never re-grant a removed member from the join they sent before the removal (R-14).
+        if (AdminModel.predatesRevoke(req, loadRevoked(ctx.coordinate))) throw RevokedRequest()
         val keys0 = orgKeys(ctx)
         keys0.current ?: throw IllegalStateException("no ECK available")
         // Roster first, with every version held (DS41-002): it may promote a staged
@@ -1077,6 +1079,19 @@ class Organizer(
     }
 
     // ── Local review state (stores/review-state.ts), owner-scoped ───────────
+
+    /** When this device removed each member, per coordinate (R-14): survives the screen and a restart. */
+    private val revokedSer = MapSerializer(String.serializer(), Long.serializer())
+    suspend fun loadRevoked(coordinate: String): Map<String, Long> = cache.get(owner, "revoked:$coordinate", revokedSer) ?: emptyMap()
+    suspend fun markRevoked(coordinate: String, pubkey: String, at: Long = nowSec()): Map<String, Long> = lock("revoked:$coordinate").withLock {
+        val next = loadRevoked(coordinate) + (pubkey to at)
+        cache.put(owner, "revoked:$coordinate", revokedSer, next, nowSec())
+        next
+    }
+
+    class RevokedRequest : Exception(
+        "This person was removed after sending this request, so it was not approved. If they should come back, they need to send a new request.",
+    )
 
     private val reviewSer = MapSerializer(String.serializer(), String.serializer())
     suspend fun loadReview(coordinate: String): Map<String, String> = cache.get(owner, "review:$coordinate", reviewSer) ?: emptyMap()

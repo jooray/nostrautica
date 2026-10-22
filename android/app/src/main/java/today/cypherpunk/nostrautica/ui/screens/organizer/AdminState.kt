@@ -52,6 +52,8 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     var dismissed by mutableStateOf<Set<String>>(emptySet())
     var approvedSet by mutableStateOf<Set<String>>(emptySet())
     var revokedSet by mutableStateOf<Set<String>>(emptySet())
+    /** Persisted removals (R-14): a join sent before one never comes back as a request. */
+    var revokedAt by mutableStateOf<Map<String, Long>>(emptyMap())
     var approving by mutableStateOf<Set<String>>(emptySet())
     var bulk by mutableStateOf<List<AdminModel.BulkItem>>(emptyList())
     var bulkRan by mutableStateOf(false)
@@ -91,7 +93,7 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     private fun isApproved(pk: String) = pk in approvedSet || roster?.attendees?.any { it.pubkey == pk } == true
     val rejected get() = review.filterValues { it == "rejected" }.keys
     val deferred get() = review.filterValues { it == "deferred" }.keys
-    val visiblePending get() = AdminModel.visiblePending(pending, ::isApproved, revokedSet, rejected)
+    val visiblePending get() = AdminModel.visiblePending(pending, ::isApproved, revokedSet, rejected, revokedAt)
     val visibleTalks get() = talks.filter { "${it.pubkey}:${it.talkD}" !in moderated }
     val approvedPeople get() = AdminModel.buildApprovedPeople(roster, approvedSet, revokedSet, pending, directory, statuses)
     val poison get() = statuses.filter { it.state == "poison" && AdminModel.statusId(it) !in dismissed }
@@ -134,6 +136,7 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
         roster = org.cachedRoster(coordinate) ?: roster
         directory = org.cachedDirectory(coordinate).ifEmpty { directory }
         review = org.loadReview(coordinate)
+        revokedAt = org.loadRevoked(coordinate)
         dismissed = org.loadDismissed(coordinate)
         talks = org.cachedPendingTalks(coordinate)
         statuses = org.cachedStatuses(coordinate)
@@ -202,6 +205,10 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
 
     private suspend fun approveOne(pk: String, retried: Boolean = false) {
         val coord = coordinatorNow
+        // An approve through the coordinator clears its revocation tombstone, so a removed
+        // member's pre-removal join must be stopped here, not only in Organizer.approve (R-14).
+        val revoked = org.loadRevoked(coordinate).also { revokedAt = it }
+        if (pk in revoked && pending.none { it.attendeePubkey == pk && !AdminModel.predatesRevoke(it, revoked) }) throw Organizer.RevokedRequest()
         try {
             if (coord != null) org.sendAdminCommandTo(ctx, coord, "approve", mapOf("pubkey" to pk))
             else {
@@ -267,6 +274,8 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
                 if (coordinatorNow == null) throw e
                 once()
             }
+            // Recorded even when only queued: the intent is final, and the old join must not resurface.
+            revokedAt = org.markRevoked(coordinate, pk)
             // Only a removal that reached a relay is shown as done (R-43): a queued one
             // leaves the person with access until it is delivered, and says so.
             if (!sent) { error = strings().t(if (viaCoordinator) "admin.command.revokeQueued" else "admin.android.revokeQueued"); return@runCatching }
