@@ -9,7 +9,7 @@
   import { secretSurface } from "$lib/stores/secret-surface.svelte.js";
   import { theme } from "$lib/stores/theme.svelte.js";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
-  import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
+  import { session, consumeNsecFromHash, watchNsecInHash } from "$lib/signer/session.svelte.js";
   import { initSessionBroadcast } from "$lib/signer/session-broadcast.js";
   import { onNip46AuthUrl } from "$lib/signer/nip46.js";
   import { loadLoginMethod } from "$lib/signer/keystore.js";
@@ -135,6 +135,11 @@
       console.warn("[boot] recovery link carried an unusable key", e);
       bootError = "boot.badRecoveryLink";
     }
+    // …and every later one opened into this running tab (audit R-36).
+    watchNsecInHash((e) => {
+      console.warn("[nav] recovery link carried an unusable key", e);
+      bootError = "boot.badRecoveryLink";
+    });
     // UX-19: never gate the shell on a NIP-46 reconnect — a dead signer relay
     // otherwise burns connect (12s) + getPublicKey (12s) before `booted`,
     // delaying queue-flush/prefetch/registration behind it. Local/nip07

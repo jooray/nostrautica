@@ -717,3 +717,22 @@ export async function consumeNsecFromHash(): Promise<boolean> {
   }
   return true;
 }
+
+/**
+ * Consume a recovery link that arrives in an ALREADY-RUNNING tab (audit R-36).
+ *
+ * The boot call in the layout covers a cold open only. Pasting the link into a
+ * tab where the app is up, or tapping it while the installed PWA is open, is a
+ * hash-only navigation: no reload, so no boot, and the account key stayed in
+ * the address bar and in that history entry for as long as the tab lived.
+ * `onError` receives a malformed key (it has been stripped already). Returns
+ * the unsubscribe.
+ */
+export function watchNsecInHash(onError: (e: unknown) => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const onHashChange = () => {
+    consumeNsecFromHash().catch(onError);
+  };
+  window.addEventListener("hashchange", onHashChange);
+  return () => window.removeEventListener("hashchange", onHashChange);
+}

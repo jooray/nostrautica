@@ -76,7 +76,7 @@ vi.mock("$lib/stores/recent-events.svelte.js", () => ({
 }));
 vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent, setJoinSentOwner }));
 
-import { consumeNsecFromHash, session } from "./session.svelte.js";
+import { consumeNsecFromHash, watchNsecInHash, session } from "./session.svelte.js";
 import { Nip46Signer, Nip46IdentityMismatchError } from "./nip46.js";
 import { router } from "$lib/router/router.svelte.js";
 import { buildHash } from "$lib/router/routes.js";
@@ -142,6 +142,38 @@ describe("consumeNsecFromHash (audit UX-12)", () => {
     session.cancelLinkKey();
     expect(session.pendingLinkKey).toBeNull();
     expect(session.pubkey).toBe(mine);
+  });
+
+  it("consumes a recovery link opened into an already-running tab (R-36)", async () => {
+    const listeners: Array<() => void> = [];
+    const win = {
+      location: { hash: "#/" },
+      history: { replaceState },
+      addEventListener: (name: string, fn: () => void) => name === "hashchange" && listeners.push(fn),
+      removeEventListener: vi.fn(),
+    };
+    vi.stubGlobal("window", win);
+    const onError = vi.fn();
+    const stop = watchNsecInHash(onError);
+
+    // A hash-only navigation: no reload, so the boot-time consume never runs.
+    win.location.hash = `#/login?nsec=${nsec}`;
+    router.route = { name: "login", nsec };
+    for (const fn of listeners) fn();
+    await Promise.resolve();
+
+    expect(replaceState).toHaveBeenCalledWith(null, "", "#/login");
+    expect(session.pendingLinkKey?.nsec).toBe(nsec);
+    expect(router.route).toEqual({ name: "login", nsec: undefined });
+    expect(onError).not.toHaveBeenCalled();
+
+    // A damaged key is reported, not thrown into the event loop.
+    win.location.hash = "#/login?nsec=broken";
+    for (const fn of listeners) fn();
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    stop();
+    expect(win.removeEventListener).toHaveBeenCalled();
+    session.cancelLinkKey();
   });
 
   it("returns false when the hash carries no nsec", async () => {
