@@ -13,6 +13,7 @@ type RegisterOptions = {
   onRegisteredSW?: (swUrl: string, registration: unknown) => void;
   onRegisterError?: (error: unknown) => void;
   onNeedRefresh?: () => void;
+  onNeedReload?: () => void;
 };
 
 const h = vi.hoisted(() => ({
@@ -142,6 +143,19 @@ describe("registerPwa update wiring (SB-67)", () => {
     expect(win.location.reload).not.toHaveBeenCalled();
     sw.fire("controllerchange"); // a real update took control
     expect(h.requestRefresh).toHaveBeenCalledTimes(1);
+    expect(win.location.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("the plugin's own post-activation reload goes through the guard (R-34)", async () => {
+    // Without onNeedReload the plugin calls window.location.reload() directly.
+    await registered();
+    expect(h.options!.onNeedReload).toBeTypeOf("function");
+    h.requestRefresh.mockImplementationOnce(() => {}); // unsaved work: guard defers
+    h.options!.onNeedReload!();
+    expect(h.requestRefresh).toHaveBeenCalledTimes(1);
+    expect(win.location.reload).not.toHaveBeenCalled();
+    // …and once the guard applies it, the tab does reload: never stuck.
+    h.requestRefresh.mock.calls[0]![0]();
     expect(win.location.reload).toHaveBeenCalledTimes(1);
   });
 

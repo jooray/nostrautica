@@ -83,9 +83,13 @@ export function registerPwa(): void {
   // initial install claim (App-1) and deferring while unsaved work is in
   // progress (App-2).
   const latch = new ControllerLatch(!!navigator.serviceWorker.controller);
+  // The ONE way this module reloads for an update: through the guard, which
+  // reloads at once when nothing is dirty and otherwise the moment the last
+  // unsaved-work holder clears. Never a bare reload, never a stuck tab.
+  const reloadForUpdate = () => refreshGuard.requestRefresh(() => window.location.reload());
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (latch.shouldReload()) {
-      refreshGuard.requestRefresh(() => window.location.reload());
+      reloadForUpdate();
     }
     // A newly-acquired controller can now cache runtime fetches — warm the
     // critical participant chunks (U7). Skipped when the change triggers a reload.
@@ -96,6 +100,15 @@ export function registerPwa(): void {
 
   const updateSW = registerSW({
     immediate: true,
+    // In autoUpdate mode the plugin's client reloads the tab ITSELF on the new
+    // worker's `activated` event — `window.location.reload()` unless this hook
+    // is given (audit R-34). That bare reload raced the guarded controllerchange
+    // path above and won, destroying exactly the drafts and recordings the guard
+    // exists to protect. Route it through the guard too; when nothing is dirty
+    // it still reloads immediately, so the update is never delayed.
+    onNeedReload() {
+      reloadForUpdate();
+    },
     onRegisteredSW(swUrl: string, registration: ServiceWorkerRegistration | undefined) {
       if (!registration) return;
 
