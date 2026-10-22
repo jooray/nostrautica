@@ -21,6 +21,8 @@ import {
   saveNip46Session,
   loadNip46Session,
   clearKeystore,
+  saveLoginOwner,
+  loadLoginOwner,
 } from "./keystore.js";
 import {
   setActiveOwner,
@@ -233,6 +235,19 @@ class Session {
     await unlockChatIdentityForLogin(pubkey, (ct) => signer.nip44Decrypt(pubkey, ct)).catch((e) => {
       console.warn("[session] chat-identity unlock failed; device key remains locked", e);
     });
+    // Record WHOSE login is persisted (audit R-41), before the identity goes
+    // live: `verifyPersistedIdentity` compares against it, and every caller of
+    // adopt() runs inside trackLogin or a restore, which that check waits out.
+    // Only while still current, so a superseded adoption cannot overwrite the
+    // newer one's record. Best-effort: a failed write leaves the check as blind
+    // as it was before.
+    if (tok === this.opToken) {
+      try {
+        await saveLoginOwner(pubkey);
+      } catch {
+        /* storage unavailable */
+      }
+    }
     // Do not expose a live identity until custody has settled. Event pages react
     // to pubkey/signer and previously made a permanent visitor decision in this
     // window while the organizer snapshot was still encrypted.
@@ -616,10 +631,13 @@ class Session {
    * calls this, and a tab whose session the disk no longer backs tears itself
    * down exactly as if it had heard the broadcast.
    *
-   * Only "nothing persisted at all" counts. A DIFFERENT persisted identity is
-   * also what this tab's own login→login switch looks like mid-flight (the new
-   * key is saved before `adopt()` runs), so it is left alone; and a read error
-   * proves nothing.
+   * Two states count: nothing persisted at all, and a persisted login whose
+   * recorded owner is a DIFFERENT account (audit R-41: logged out elsewhere,
+   * then someone else signed in). A different identity is also what this tab's
+   * own login→login switch looks like mid-flight (the new key is saved before
+   * `adopt()` runs), which is why nothing runs while a login or restore is in
+   * flight; a missing owner record (an install from before it existed) and a
+   * read error prove nothing.
    */
   async verifyPersistedIdentity(): Promise<void> {
     if (!this.loggedIn || this.restoring || this.loggingOut || this.loginsInFlight > 0) return;
@@ -627,8 +645,10 @@ class Session {
     const epoch = this.loginEpoch;
     const pubkey = this.pubkey!;
     let method: string | undefined | null;
+    let owner: string | undefined | null;
     try {
       method = await loadLoginMethod();
+      owner = method ? await loadLoginOwner().catch(() => undefined) : undefined;
     } catch {
       return;
     }
@@ -643,6 +663,12 @@ class Session {
     }
     if (!method) {
       console.warn("[session] persisted login is gone (logged out in another tab); signing this tab out");
+      this.applyRemoteLogout(pubkey);
+    } else if (owner && owner !== pubkey) {
+      // Logged out elsewhere AND another account signed in since (audit R-41):
+      // the method string alone looked like "still logged in", so this tab kept
+      // acting as an account its owner had signed out of on this device.
+      console.warn("[session] persisted login now belongs to another account; signing this tab out");
       this.applyRemoteLogout(pubkey);
     }
   }

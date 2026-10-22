@@ -17,6 +17,8 @@ const keystore = vi.hoisted(() => ({
   saveNip46Session: vi.fn(async (_s?: unknown) => {}),
   loadNip46Session: vi.fn(async () => null as unknown),
   clearKeystore: vi.fn(async () => {}),
+  saveLoginOwner: vi.fn(async (_pk?: unknown) => {}),
+  loadLoginOwner: vi.fn(async () => undefined as string | undefined),
 }));
 vi.mock("$lib/signer/keystore.js", () => keystore);
 
@@ -355,6 +357,27 @@ describe("a resumed tab checks the persisted login (SB-95)", () => {
     keystore.loadLoginMethod.mockResolvedValue("local");
     await session.verifyPersistedIdentity();
     expect(session.loggedIn).toBe(true);
+  });
+
+  it("records whose login is persisted, and signs out when it is now someone else's (R-41)", async () => {
+    keystore.saveLoginOwner.mockClear();
+    await session.createLocalKey();
+    const mine = session.pubkey!;
+    expect(keystore.saveLoginOwner).toHaveBeenCalledWith(mine);
+    keystore.loadLoginMethod.mockResolvedValue("local");
+    // Same owner on disk: nothing happens.
+    keystore.loadLoginOwner.mockResolvedValue(mine);
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(true);
+    // An install from before the owner record: no evidence, nothing happens.
+    keystore.loadLoginOwner.mockResolvedValue(undefined);
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(true);
+    // Another tab logged this account out and signed in as somebody else.
+    keystore.loadLoginOwner.mockResolvedValue("e".repeat(64));
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(false);
+    keystore.loadLoginOwner.mockResolvedValue(undefined);
   });
 
   it("never mistakes a login that has not persisted yet for a remote logout", async () => {
