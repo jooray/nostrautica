@@ -438,7 +438,12 @@ async function queueUndelivered(
     // it targets every relay anyway, and the store is keyed by event id, so
     // writing over it would narrow that publish to this partial relay set.
     if (existing && !existing.partial) return;
+    // Spread the existing row rather than rebuilding it from a field list: a
+    // rebuild dropped `lastAttemptAt`/`lastError`, so every re-publish of an
+    // event with a pending straggler reset that row's backoff clock and the next
+    // flush retried it immediately.
     await backend.put({
+      ...existing,
       event,
       relays: [...new Set([...(existing?.relays ?? []), ...missing])],
       queuedAt: existing?.queuedAt ?? Date.now(),

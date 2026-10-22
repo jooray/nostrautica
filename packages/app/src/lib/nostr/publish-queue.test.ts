@@ -385,6 +385,30 @@ describe("partial publishes are carried to the relays that missed them", () => {
     expect(res.failed).toBe(0);
   });
 
+  it("keeps an existing straggler's backoff clock when it tops up the relay set", async () => {
+    // Rebuilding the row from a field list dropped lastAttemptAt/lastError, so a
+    // re-publish made the next flush retry the straggler immediately.
+    store.set("e6", {
+      event: evt2("e6"),
+      relays: ["wss://b/"],
+      queuedAt: 1,
+      attempts: 2,
+      lastAttemptAt: 12345,
+      lastError: "Timeout: 2500ms",
+      owner: OWNER2,
+      partial: true,
+    });
+    publishSigned.mockResolvedValue([ok("wss://a/"), bad("wss://c/", "Timeout: 2500ms")] as never);
+    await publishOrQueue(evt2("e6") as never);
+
+    const item = store.get("e6")!;
+    expect(item.relays).toEqual(["wss://b/", "wss://c/"]);
+    expect(item.attempts).toBe(2);
+    expect(item.lastAttemptAt).toBe(12345);
+    expect(item.lastError).toBe("Timeout: 2500ms");
+    expect(item.partial).toBe(true);
+  });
+
   it("never narrows a still-unsent item down to a straggler relay set", async () => {
     // A genuinely queued event targets every relay. If a later partial write
     // overwrote it (the store is keyed by event id) it would go out to one relay.
