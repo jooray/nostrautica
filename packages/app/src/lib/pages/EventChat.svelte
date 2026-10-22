@@ -11,6 +11,7 @@
   import { npubEncode } from "nostr-tools/nip19";
   import { sendDm } from "$lib/events/dm.js";
   import { parseDmCommand, matchDmTargets, type DmTarget } from "$lib/chat/dm-command.js";
+  import { parseMentions, shortNpub, type MentionSegment } from "$lib/chat/mentions.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import {
@@ -440,6 +441,12 @@
     for (const m of messages) {
       wanted.add(m.pubkey);
       wanted.add(accountOf(m.pubkey));
+      // People mentioned in the text render as a name + avatar chip.
+      for (const s of segmentsOf(m)) {
+        if (s.type !== "mention") continue;
+        wanted.add(s.pubkey);
+        wanted.add(accountOf(s.pubkey));
+      }
     }
     for (const mem of members) wanted.add(mem.account);
     const missing = [...wanted].filter((pk) => !fetchedProfileFor.has(pk));
@@ -457,13 +464,40 @@
   // child key, not a person — useful context there, but redundant noise here
   // where every sender in view already is one; strip it for our own display
   // only (the published kind-0 keeps the full branding).
-  function nameOf(pubkey: string): string {
-    // Resolve the device sender to its account name first (roster mapping), then
-    // fall back to the device's own kind-0, then a truncated key.
+  function profileNameOf(pubkey: string): string | undefined {
+    // Resolve the device key to its account name first (roster mapping), then
+    // fall back to the device's own kind-0.
     const account = accountOf(pubkey);
     const raw = (profiles.get(account)?.name ?? profiles.get(pubkey)?.name)?.trim();
-    if (!raw) return account.slice(0, 8);
-    return raw.replace(/^Nostrautica\s+/i, "").replace(/\s*\(chat\)\s*$/i, "");
+    if (!raw) return undefined;
+    return raw.replace(/^Nostrautica\s+/i, "").replace(/\s*\(chat\)\s*$/i, "") || undefined;
+  }
+  function nameOf(pubkey: string): string {
+    return profileNameOf(pubkey) ?? accountOf(pubkey).slice(0, 8);
+  }
+
+  // ── mentions in message text ────────────────────────────────────────────────
+  // White Noise writes a mention as a literal `@npub1…` (chat/mentions.ts), and
+  // a bubble that printed it verbatim showed 63 characters of bech32 where a
+  // name belonged. The mentioned key is often a chat DEVICE key, since that is
+  // what another Marmot client sees as our member, so it goes through accountOf
+  // like a sender does. Parsed once per message id: content never changes.
+  const segmentCache = new Map<string, MentionSegment[]>();
+  function segmentsOf(m: ChatMessage): MentionSegment[] {
+    let segs = segmentCache.get(m.id);
+    if (!segs) {
+      segs = parseMentions(m.content);
+      segmentCache.set(m.id, segs);
+    }
+    return segs;
+  }
+  /** A mention's label: the person's name, else a short npub (never a raw key). */
+  function mentionName(pubkey: string): string {
+    return profileNameOf(pubkey) ?? shortNpub(accountOf(pubkey));
+  }
+  function mentionsMe(pubkey: string): boolean {
+    const me = chatPubkey ? accountOf(chatPubkey) : session.pubkey;
+    return !!me && (accountOf(pubkey) === me || pubkey === session.pubkey);
   }
   function pictureOf(pubkey: string): string | undefined {
     const account = accountOf(pubkey);
@@ -627,6 +661,24 @@
   });
 </script>
 
+<!-- Message text with mentions as inline chips. A <span>, not a button: the
+     bubble around it is already the "open sender" click target, and nested
+     interactive elements would be announced as one control. The short npub in
+     the tooltip tells two people with one display name apart. Written without
+     whitespace between tags: the text is white-space: pre-wrap, so template
+     indentation would render as stray spaces around every chip. -->
+{#snippet richText(m: ChatMessage)}{#each segmentsOf(m) as s, i (i)}{#if s.type === "text"}{s.value}{:else}<span
+        class="mention"
+        class:me={mentionsMe(s.pubkey)}
+        title={shortNpub(accountOf(s.pubkey))}
+        ><Avatar
+          pubkey={accountOf(s.pubkey)}
+          name={mentionName(s.pubkey)}
+          picture={pictureOf(s.pubkey)}
+          size={16}
+        /><span class="mention-name">@{mentionName(s.pubkey)}</span></span
+      >{/if}{/each}{/snippet}
+
 <div class="chat-head">
   <h1 class="disp">{t("chat.title")}</h1>
   <span class="badge">{t("chat.experimental")}</span>
@@ -781,7 +833,7 @@
                 title={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
                 onclick={() => openProfile(m.pubkey)}
               >&lt;{nameOf(m.pubkey)}&gt;</button>
-              <span class="irc-text">{m.content}</span>
+              <span class="irc-text">{@render richText(m)}</span>
             </p>
           {:else}
             {@const showSender = i === 0 || g.items[i - 1]!.pubkey !== m.pubkey}
@@ -830,7 +882,7 @@
                     }
                   }}
                 >
-                  <p class="text">{m.content}</p>
+                  <p class="text">{@render richText(m)}</p>
                   <span class="time">{timeLabel(m.createdAt)}</span>
                 </div>
               </div>
@@ -1160,6 +1212,27 @@
     margin: 0;
     white-space: pre-wrap;
     overflow-wrap: anywhere;
+  }
+  /* A mention inside message text: avatar + name in a soft pill that still
+     wraps with the sentence around it. Mentions of the reader get the accent. */
+  .mention {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.2rem;
+    vertical-align: bottom;
+    max-width: 100%;
+    padding: 0 0.35rem 0 0.1rem;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .mention.me {
+    background: color-mix(in srgb, var(--accent) 30%, transparent);
+  }
+  .mention-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .time {
     display: block;
