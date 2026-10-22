@@ -175,6 +175,8 @@ async function runDaemon(): Promise<void> {
       ...(r.amount_sats ? { defaultAmountSats: r.amount_sats } : {}),
       // Durable journal (audit H8): reservations survive a crash mid-request.
       journal: store,
+      // Mint traffic gets the same DNS pinning as every provider request (R-50).
+      net: providerNet,
     });
     // Reconcile interrupted reservations from a previous run (audit COORD-5):
     // reserved-but-unsettled proofs are quarantined as ambiguous, never lost.

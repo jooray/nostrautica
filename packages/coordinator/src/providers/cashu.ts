@@ -27,8 +27,57 @@ import {
   getDecodedToken,
   type Proof,
 } from "@cashu/cashu-ts";
+import { HttpResponseError, MintOperationError } from "@cashu/cashu-ts";
 import type { PaymentReservation, PaymentStrategy } from "./types.js";
 import type { Store } from "../store/db.js";
+import { guardedProviderFetch, type ProviderNetPolicy } from "../net/safe-fetch.js";
+import { PROVIDER_BODY_LIMITS, readJsonCapped } from "./http.js";
+
+type MintRequest = ConstructorParameters<typeof CashuMint>[1];
+
+/**
+ * cashu-ts's own `request()`, routed through the provider DNS-pinning guard
+ * (audit R-50). The library's default calls the global fetch, so a mint whose
+ * name passed config validation could still rebind to a loopback or private
+ * address at connect time. Same wire shape and error classes as the library's,
+ * plus the byte caps every other provider read has.
+ */
+export function guardedMintRequest(policy: ProviderNetPolicy): NonNullable<MintRequest> {
+  return async function request<T>({
+    endpoint,
+    requestBody,
+    headers,
+    ...init
+  }: {
+    endpoint: string;
+    requestBody?: Record<string, unknown>;
+    headers?: Record<string, string>;
+  } & Omit<RequestInit, "body" | "headers">): Promise<T> {
+    const body = requestBody ? JSON.stringify(requestBody) : undefined;
+    const allHeaders = {
+      Accept: "application/json, text/plain, */*",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...headers,
+    };
+    return guardedProviderFetch(endpoint, { ...init, body, headers: allHeaders }, policy, async (res) => {
+      if (!res.ok) {
+        let err: { code?: unknown; detail?: unknown; error?: unknown };
+        try {
+          err = (await readJsonCapped(res, "Cashu mint", PROVIDER_BODY_LIMITS.error)) ?? {};
+        } catch {
+          err = { error: "bad response" };
+        }
+        if (res.status === 400 && typeof err.code === "number" && typeof err.detail === "string") {
+          throw new MintOperationError(err.code, err.detail);
+        }
+        const msg =
+          typeof err.error === "string" ? err.error : typeof err.detail === "string" ? err.detail : "HTTP request failed";
+        throw new HttpResponseError(msg, res.status);
+      }
+      return await readJsonCapped<T>(res, "Cashu mint");
+    });
+  };
+}
 
 interface WalletFile {
   mint: string;
@@ -49,6 +98,8 @@ export interface CashuPaymentOptions {
    * mode, where the whole token is a long-lived Bearer key (no per-request change).
    */
   journal?: Store;
+  /** DNS-pinning policy for mint requests (audit R-50). Default: pin + public-only. */
+  net?: ProviderNetPolicy;
 }
 
 export class CashuPayment implements PaymentStrategy {
@@ -72,7 +123,7 @@ export class CashuPayment implements PaymentStrategy {
   }
 
   constructor(private readonly opts: CashuPaymentOptions) {
-    this.wallet = new CashuWallet(new CashuMint(opts.mintUrl));
+    this.wallet = new CashuWallet(new CashuMint(opts.mintUrl, guardedMintRequest(opts.net ?? {})));
   }
 
   private load(): WalletFile {

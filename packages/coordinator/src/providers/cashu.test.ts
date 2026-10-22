@@ -6,14 +6,14 @@
  * and reserved-but-unsettled proofs are quarantined (never re-added to the wallet
  * → no double-spend, never dropped → no loss).
  */
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
-import { getEncodedTokenV4 } from "@cashu/cashu-ts";
+import { getEncodedTokenV4, MintOperationError } from "@cashu/cashu-ts";
 import { Store } from "../store/db.js";
-import { CashuPayment } from "./cashu.js";
+import { CashuPayment, guardedMintRequest } from "./cashu.js";
 
 const MINT = "https://mint.example";
 const SENT = [
@@ -243,6 +243,37 @@ describe("COORD-5 — Cashu request-failure + settle ordering", () => {
     expect(() => (payment as any).load()).toThrow(walletPath);
     // …and nothing overwrote the damaged original, which may still be recoverable.
     expect(readFileSync(walletPath, "utf8")).toContain('"proofs":[{"am');
+  });
+
+  it("mint traffic goes through the DNS-pinning guard: a rebinding mint is refused (R-50)", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const lookupFn = vi.fn(async () => [{ address: "127.0.0.1", family: 4 }]) as any;
+    const payment = new CashuPayment({
+      mintUrl: "https://rebinding-mint.example",
+      walletDbPath: tmpPath("w.json"),
+      net: { lookupFn },
+    });
+    await expect(payment.fund("cashuBo2FteBtodHRwczovL21pbnQuZXhhbXBsZWF1Y3NhdA")).rejects.toThrow(/blocked/);
+    expect(lookupFn).toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("the guarded mint request keeps cashu-ts's wire shape and error classes", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ keysets: [] }))
+      .mockResolvedValueOnce(Response.json({ code: 11001, detail: "Token already spent" }, { status: 400 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const request = guardedMintRequest({ allowInsecure: true }) as any;
+    await expect(request({ endpoint: "https://m/v1/keysets", method: "GET" })).resolves.toEqual({ keysets: [] });
+    const swap = request({ endpoint: "https://m/v1/swap", method: "POST", requestBody: { inputs: [] } });
+    await expect(swap).rejects.toBeInstanceOf(MintOperationError);
+    const [, init] = fetchSpy.mock.calls[1];
+    expect(init.body).toBe('{"inputs":[]}');
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    vi.unstubAllGlobals();
   });
 
   it("the wallet file is written owner-only (mode 0600)", () => {
