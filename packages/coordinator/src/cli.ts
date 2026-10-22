@@ -589,6 +589,11 @@ async function cmdDoctor(args: string[]): Promise<number> {
 
 /** Dispatch an operator subcommand; resolves to a process exit code. */
 export async function runCli(subcommand: CliSubcommand, args: string[]): Promise<number> {
+  // Owner-only for every file a verb creates (audit R-60). runDaemon() sets this,
+  // but main() dispatches here first, so `backup` wrote its CLEARTEXT snapshot
+  // (VACUUM INTO) under the inherited umask, 0644 on a stock host, and only
+  // chmodded it to 0600 afterwards. `restore` copies the live database the same way.
+  process.umask(0o077);
   switch (subcommand) {
     case "backup":
       return cmdBackup(args);

@@ -199,6 +199,17 @@ describe("doctor --local", () => {
     return lines.join("\n");
   }
 
+  it("every CLI verb runs under an owner-only umask (audit R-60)", async () => {
+    const before = process.umask(0o022);
+    let during: number;
+    try {
+      await doctor(["--local"]);
+    } finally {
+      during = process.umask(before); // setting returns the previous mask
+    }
+    expect(during).toBe(0o077);
+  });
+
   it("runs the network checks by default", async () => {
     const out = await doctor([]);
     expect(out).toMatch(/\[FAIL\] relays/);
