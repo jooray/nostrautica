@@ -6,7 +6,7 @@
  * HTTP cache, that the served body reaches the drift watchdog, that a waiting
  * worker is applied without a prompt, and that a new controller reloads the page.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeAll, beforeEach, afterEach } from "vitest";
 
 type RegisterOptions = {
   immediate?: boolean;
@@ -48,6 +48,13 @@ let sw: ReturnType<typeof target> & { controller: unknown };
 let win: ReturnType<typeof target> & { location: { reload: ReturnType<typeof vi.fn> } };
 let fetchMock: ReturnType<typeof vi.fn>;
 const SW_BODY = `precacheAndRoute([{url:"/index.html",revision:"${RELEASE_MANIFEST.swRevision}"}])`;
+
+// Transform pwa.ts's module graph once, outside any test's 5 s budget: on a
+// loaded machine the first cold import alone ran past it, and the timed-out
+// test's fake intervals then bled into the next one.
+beforeAll(async () => {
+  await import("./pwa.js");
+}, 60_000);
 
 beforeEach(() => {
   vi.resetModules();
@@ -166,5 +173,20 @@ describe("registerPwa update wiring (SB-67)", () => {
     const err = new Error("blocked");
     h.options!.onRegisterError!(err);
     expect(noted).toHaveBeenCalledWith(err);
+    const { updateStuck } = await import("$lib/stores/update-stuck.svelte.js");
+    expect(updateStuck.reason).toBe("register");
+  });
+
+  it("sustained sw.js drift raises the user-facing banner, and a match clears it (R-84)", async () => {
+    const { updateStuck } = await import("$lib/stores/update-stuck.svelte.js");
+    fetchMock.mockImplementation(async () => ({ text: async () => "precacheAndRoute([])" }));
+    await registered();
+    await vi.advanceTimersByTimeAsync(60_000 * 2);
+    expect(updateStuck.reason).toBeNull(); // two misses: a deploy in progress
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(updateStuck.reason).toBe("drift");
+    fetchMock.mockImplementation(async () => ({ text: async () => SW_BODY }));
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(updateStuck.reason).toBeNull();
   });
 });

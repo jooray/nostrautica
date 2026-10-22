@@ -30,6 +30,7 @@ import { warmRouteModules, CRITICAL_PARTICIPANT_ROUTES } from "$lib/router/route
 import { ensureEntryShellCached } from "$lib/pwa/offline-shell.js";
 import { UpdateHealth } from "$lib/pwa/update-health.js";
 import { RELEASE_MANIFEST } from "$lib/release.js";
+import { updateStuck } from "$lib/stores/update-stuck.svelte.js";
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
 
 /**
@@ -142,6 +143,9 @@ export function registerPwa(): void {
           // or a worker that cannot activate — and that is exactly the state
           // that used to persist for days in total silence.
           health.observeServiceWorkerSource(await res.text().catch(() => ""));
+          // Tell the user, not just the console (audit R-84) — and take the
+          // banner down again once the served worker matches.
+          updateStuck.set(health.driftDetected ? "drift" : null);
           await registration.update();
         } catch (e) {
           // Offline is normal and expected (the `online` listener below retries);
@@ -168,6 +172,7 @@ export function registerPwa(): void {
       // Without this the registration silently failed and NOTHING polled for the
       // rest of the page's life — no update checks, no offline shell, no signal.
       health.noteRegisterFailed(error);
+      updateStuck.set("register");
       (window as unknown as Record<string, unknown>).__nostrauticaPwaError = error;
     },
     onNeedRefresh() {

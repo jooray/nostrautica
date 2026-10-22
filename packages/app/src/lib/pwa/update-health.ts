@@ -124,6 +124,11 @@ export class UpdateHealth {
     return this.registerFailed;
   }
 
+  /** True while a sustained sw.js drift is in progress (from the warning until a match). */
+  get driftDetected(): boolean {
+    return this.driftWarned;
+  }
+
   /** Warn (once per silent stretch) when no check has succeeded in a long time. */
   warnIfSilent(): boolean {
     const silentFor = this.now() - this.lastOkAt;
