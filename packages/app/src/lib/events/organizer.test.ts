@@ -1428,6 +1428,25 @@ describe("updateEventConfig relay editing", () => {
     ]);
   });
 
+  // Audit R-29: a lagging relay's older 31600 was re-signed with a winning
+  // created_at, undoing a detach or inbox rotation this client already knew of.
+  it("refuses to rebuild on a config older than the one the page loaded", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const ctx = { ...ctxWith({}), configAt: 2000 } as EventContext; // relays serve 1000
+    await expect(updateEventConfig(ctx, { retentionDays: 30 })).rejects.toThrow(/older copy/);
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rebuild on a config older than this client's own last publish", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const ctx = ctxWith({});
+    await updateEventConfig(ctx, { retentionDays: 30 }); // published above 1000
+    publishSigned.mockClear();
+    // The relay that answers next has not caught up and still serves 1000.
+    await expect(updateEventConfig(ctx, { retentionDays: 60 })).rejects.toThrow(/older copy/);
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
   it("leaves relays untouched when only another field is edited (no silent migration)", async () => {
     await saveEventKeys(organizerKeys(), OWNER);
     await updateEventConfig(ctxWith({}), { retentionDays: 30 });

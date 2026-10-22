@@ -99,7 +99,12 @@ import { withMutationLock } from "$lib/nostr/mutation-lock.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
 import { activeCacheOwner, cacheGeneration, cacheGet, cacheSet } from "$lib/cache/persist.js";
-import { grantParentField, fetchNewestConfig } from "./hierarchy.js";
+import {
+  grantParentField,
+  fetchNewestConfig,
+  fetchNewestSignedConfig,
+  assertConfigNotStale,
+} from "./hierarchy.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
 // paints instantly and refreshes in parallel (CACHING-PLAN §2.11). Wiped on
@@ -1869,12 +1874,15 @@ const CONFIG_UNREADABLE =
  * could not read is exactly the write that destroys something.
  */
 async function freshConfig(ctx: EventContext): Promise<EventConfig> {
-  const cfg = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(
+  const read = await fetchNewestSignedConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(
     () => undefined,
   );
-  if (!cfg) throw new Error(CONFIG_UNREADABLE);
-  noteFreshConfig(ctx.coordinate, cfg);
-  return cfg;
+  if (!read) throw new Error(CONFIG_UNREADABLE);
+  // Newest on THESE relays is not newest: one that missed a detach answers with
+  // the config from before it (audit R-29). Not noted for the SB-91 guard either.
+  assertConfigNotStale(ctx.coordinate, read.createdAt, ctx.configAt);
+  noteFreshConfig(ctx.coordinate, read.config);
+  return read.config;
 }
 
 // ── One roster authority (audit SB-91) ───────────────────────────────────────
