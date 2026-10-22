@@ -96,6 +96,17 @@ describe("roster page addressing (§6.2)", () => {
     expect(() => rosterPageD("d", -1)).toThrow(/non-negative integer/);
     expect(() => rosterPageD("d", 1.5)).toThrow(/non-negative integer/);
   });
+
+  it("clamps a hostile page count instead of allocating it (audit R-54)", () => {
+    // A 56-byte page 0 claiming 1e9 pages used to materialise a 1e9-entry array
+    // in a reader that had not run the schema yet.
+    expect(rosterPageDs("d", 1e9)).toHaveLength(MAX_ROSTER_PAGES);
+    expect(rosterContinuationDs("d", 2 ** 31)).toHaveLength(MAX_ROSTER_PAGES - 1);
+    expect(rosterContinuationDs("d", Number.POSITIVE_INFINITY)).toEqual([]);
+    expect(rosterContinuationDs("d", Number.NaN)).toEqual([]);
+    expect(rosterContinuationDs("d", -5)).toEqual([]);
+    expect(rosterContinuationDs("d", 2.7)).toEqual(["d:1"]);
+  });
 });
 
 describe("a roster that fits is untouched (the no-flag-day guarantee)", () => {

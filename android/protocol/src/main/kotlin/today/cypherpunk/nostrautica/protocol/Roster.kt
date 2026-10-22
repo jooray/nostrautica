@@ -12,7 +12,9 @@ object Roster {
         return if (page == 0) identifier else "$identifier:$page"
     }
 
-    fun continuationDs(identifier: String, pages: Int): List<String> = (1 until maxOf(1, pages)).map { pageD(identifier, it) }
+    /** Pages 1..pages-1, the count clamped to MAX_ROSTER_PAGES like roster.ts (audit R-54). */
+    fun continuationDs(identifier: String, pages: Int): List<String> =
+        (1 until pages.coerceIn(1, Limits.MAX_ROSTER_PAGES)).map { pageD(identifier, it) }
 
     fun pageCountOf(page0: RosterContent): Int = page0.pages ?: 1
 

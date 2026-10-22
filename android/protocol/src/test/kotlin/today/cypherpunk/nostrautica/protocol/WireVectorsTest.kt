@@ -73,6 +73,12 @@ class WireVectorsTest {
         assertEquals(listOf("x:1", "x:2"), Roster.continuationDs("x", 3))
     }
 
+    @Test fun continuationDsClampsHostilePageCount() {
+        // Audit R-54: a page count off the wire never sizes more than MAX_ROSTER_PAGES addresses.
+        assertEquals(Limits.MAX_ROSTER_PAGES - 1, Roster.continuationDs("x", 1_000_000_000).size)
+        assertEquals(emptyList<String>(), Roster.continuationDs("x", -3))
+    }
+
     @Test fun smallRosterIsUntouched() {
         val r = RosterContent(2, 1, null, null, listOf(RosterAttendee(pk, "d", "attendee")))
         assertSame(r, Roster.split(r).single())

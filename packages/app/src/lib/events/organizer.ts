@@ -30,6 +30,8 @@ import {
   MAX_ROSTER,
   splitRoster,
   mergeRosterPages,
+  parsePayloadSafe,
+  rosterContentSchema,
   rosterContinuationDs,
   rosterPageD,
   KIND_MATCH_LIST,
@@ -759,7 +761,13 @@ export async function loadRoster(
     eckBytes = base64ToBytes(used.key);
   }
   try {
-    const page0 = JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent;
+    // Through the schema, not a cast (audit R-54): `pages` below sizes the
+    // continuation request, and an unvalidated `pages: 1e9` from any ECK holder's
+    // forgery was an allocation of gigabytes. A payload the schema refuses (newer
+    // version included) is one we cannot safely rewrite: `unreadable`.
+    const parsed0 = parsePayloadSafe(rosterContentSchema, JSON.parse(eckDecrypt(eckBytes, latest.content)));
+    if (!parsed0.ok) return { state: "unreadable", at };
+    const page0 = parsed0.value;
     let roster = page0;
     // A paginated roster (PROTOCOL-NIP.md §6.2) keeps the rest of its membership
     // on `<event-d>:1`… A rewrite path that read only page 0 would republish the
@@ -827,7 +835,9 @@ async function loadRosterPages(
     const latest = pickLatest(usable.filter((e) => e.tags?.some((t) => t[0] === "d" && t[1] === d)));
     if (!latest) return undefined;
     try {
-      out.push(JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent);
+      const parsed = parsePayloadSafe(rosterContentSchema, JSON.parse(eckDecrypt(eckBytes, latest.content)));
+      if (!parsed.ok) return undefined;
+      out.push(parsed.value);
     } catch {
       return undefined;
     }

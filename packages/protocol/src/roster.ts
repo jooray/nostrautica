@@ -70,16 +70,22 @@ export function rosterPageD(identifier: string, page: number): string {
   return page === 0 ? identifier : `${identifier}:${page}`;
 }
 
-/** Every page `d` of a `pages`-page roster, page 0 first. */
+/**
+ * Every page `d` of a `pages`-page roster, page 0 first. The count is clamped to
+ * 1..`MAX_ROSTER_PAGES` (audit R-54): it usually comes straight off a decrypted
+ * page 0, and a hostile `pages: 1e9` must cost a 40-entry array, not gigabytes
+ * allocated before any schema has looked at it.
+ */
 export function rosterPageDs(identifier: string, pages: number): string[] {
-  return Array.from({ length: Math.max(1, pages) }, (_, i) => rosterPageD(identifier, i));
+  const n = Number.isFinite(pages) ? Math.min(MAX_ROSTER_PAGES, Math.max(1, Math.floor(pages))) : 1;
+  return Array.from({ length: n }, (_, i) => rosterPageD(identifier, i));
 }
 
 /**
  * Pages 1..pages-1 — exactly what a reader asks for after page 0 told it the
  * count, in ONE relay REQ (`#d: ["<d>:1", "<d>:2", …]`). Empty for a roster that
  * did not paginate, which is the case a reader should never spend a round trip
- * on.
+ * on. Clamped like {@link rosterPageDs}.
  */
 export function rosterContinuationDs(identifier: string, pages: number): string[] {
   return rosterPageDs(identifier, pages).slice(1);
