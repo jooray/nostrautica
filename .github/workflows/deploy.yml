@@ -46,9 +46,8 @@ jobs:
             echo "::error::NSYTE_BUNKER_URI secret is not set — cannot publish the nsite. Set it in repo/environment secrets." >&2
             exit 1
           fi
+      # No version: here. package.json's packageManager is the exact pin (audit R-80).
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-        with:
-          version: 11
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
@@ -61,7 +60,7 @@ jobs:
       # (audit R15: pin the deploy CLI) so a release can't drift onto a new nsyte.
       - uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2.0.5
         with:
-          deno-version: v2.x
+          deno-version: v2.9.7 # exact (audit R-80); a floating v2.x picked up any new release
       # `--sec`, not `--bunker` (audit DS41-067): nsyte 0.27.2 has no `--bunker`
       # option and exits "Unknown option" after the whole gate has passed. `--sec`
       # auto-detects a bunker:// URL (or nbunksec/nsec). `--non-interactive` because
