@@ -109,6 +109,22 @@ export function publishWatermark(address: string, owner?: string): number {
   return cacheGet<number>(watermarkKey(address), owner ?? activeCacheOwner() ?? ANON)?.data ?? 0;
 }
 
+function acceptedKey(address: string): string {
+  return `mono-accepted:${address}`;
+}
+
+/**
+ * The highest created_at at `address` that a relay has ACCEPTED from this client
+ * (0 if none). Unlike {@link publishWatermark}, which is bumped before the
+ * publish and so also counts events that only ever sat in the outbox, this one
+ * names an event that exists on at least one relay: a reader that sees something
+ * older is looking at a relay that is behind, never at a publish that was lost
+ * (audit R-29).
+ */
+export function acceptedWatermark(address: string, owner?: string): number {
+  return cacheGet<number>(acceptedKey(address), owner ?? activeCacheOwner() ?? ANON)?.data ?? 0;
+}
+
 /**
  * Record that this client published `createdAt` for `address`. The persist layer
  * is latest-wins on `at`, so a stale write can never regress the watermark, even
@@ -194,5 +210,6 @@ export async function publishMonotonic(input: MonotonicInput): Promise<Monotonic
   // is enough; holding the lock across a slow WSS publish would needlessly stall
   // the next same-address reservation.
   const published = await publishOrQueue(event, input.relays);
+  if (published) cacheSet(acceptedKey(address), createdAt, createdAt, owner);
   return { published, createdAt };
 }

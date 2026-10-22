@@ -33,7 +33,12 @@ import {
 } from "@nostrautica/protocol";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyAddressed } from "$lib/nostr/verify.js";
-import { publishMonotonic, publishWatermark, eventAddress } from "$lib/nostr/monotonic.js";
+import {
+  publishMonotonic,
+  publishWatermark,
+  acceptedWatermark,
+  eventAddress,
+} from "$lib/nostr/monotonic.js";
 import { hasPendingPublishFor } from "$lib/nostr/publish-queue.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { loadEventKeys, listEventKeys } from "./keystore.js";
@@ -191,12 +196,15 @@ export const CONFIG_STALE =
  * gives that stale content a winning created_at, re-attaching the old
  * coordinator for everyone.
  *
- * The floor is the page's own `knownAt` (`ctx.configAt`), plus the highest
- * created_at this client has published at the address (the monotonic watermark)
- * ONLY while an unsent publish for it is still in the outbox. The watermark is
- * bumped before the publish resolves, so on its own it would remember a 31600
- * that never reached any relay — discarded, or parked as failed — and refuse
- * every later edit on this device for good.
+ * The floor is the highest of:
+ *  - the page's own `knownAt` (`ctx.configAt`);
+ *  - the newest 31600 a relay has ACCEPTED from this client (always: that event
+ *    exists, so a relay serving something older is merely behind — the detach
+ *    then edit case);
+ *  - the monotonic watermark, ONLY while an unsent publish for the address is
+ *    still in the outbox. That watermark is bumped before the publish resolves,
+ *    so on its own it would remember a 31600 that never reached any relay —
+ *    discarded, or parked as failed — and refuse every later edit for good.
  */
 export async function assertConfigNotStale(
   coordinate: string,
@@ -204,9 +212,20 @@ export async function assertConfigNotStale(
   knownAt = 0,
 ): Promise<void> {
   const { pubkey, identifier } = parseCoordinate(coordinate);
+  const address = eventAddress(KIND_EVENT_CONFIG, pubkey, identifier);
   const pending = await hasPendingPublishFor(KIND_EVENT_CONFIG, pubkey, identifier);
-  const watermark = pending ? publishWatermark(eventAddress(KIND_EVENT_CONFIG, pubkey, identifier)) : 0;
-  if (createdAt < Math.max(knownAt, watermark)) throw new Error(CONFIG_STALE);
+  const watermark = pending ? publishWatermark(address) : 0;
+  if (createdAt < Math.max(knownAt, acceptedWatermark(address), watermark)) throw new Error(CONFIG_STALE);
+}
+
+/**
+ * The newest 31600 a relay accepted from this client for `coordinate`, for a page
+ * to fold into `ctx.configAt` after its own save (R-29). Accepted only, so a save
+ * that merely queued never raises the page's floor above what exists anywhere.
+ */
+export function acceptedConfigAt(coordinate: string): number {
+  const { pubkey, identifier } = parseCoordinate(coordinate);
+  return acceptedWatermark(eventAddress(KIND_EVENT_CONFIG, pubkey, identifier));
 }
 
 // Link status is asked once per approval, and "Approve all" approves dozens in a

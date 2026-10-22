@@ -82,6 +82,7 @@ import {
   sharedInviteExp,
   updateEventConfig,
   attachCoordinator,
+  detachCoordinator,
   loadRoster,
   sendAdminCommand,
   type PendingRequest,
@@ -1612,6 +1613,36 @@ describe("updateEventConfig relay editing", () => {
         .map((c) => c[0] as { kind: number; tags: string[][] })
         .find((e) => e.kind === KIND_EVENT_CONFIG)!;
       expect(cfg.tags.find((t) => t[0] === "coordinator")).toEqual(["coordinator", coordinator, "5"]);
+    });
+
+    // Audit R-29: after a detach a relay acked, a relay still serving the
+    // coordinator-bearing config must not be the base of the next settings edit,
+    // which would re-sign it with a winning created_at and re-attach the old
+    // coordinator. Nothing is queued here, so only the accepted watermark knows.
+    it("refuses an edit built on a lagging relay's pre-detach config", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const oldCoordinator = getPublicKey(generateSecretKey());
+      const ctx = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK), coordinator: oldCoordinator, coordinatorGen: 1 });
+      const preDetach = await fetchEventsRelayOnly({ kinds: [KIND_EVENT_CONFIG] });
+      fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[] }) =>
+        filter.kinds?.includes(KIND_EVENT_CONFIG) ? preDetach : [],
+      );
+      const pageCtx = { ...ctx, config: { ...ctx.config, coordinator: oldCoordinator } } as EventContext;
+
+      await detachCoordinator({} as AppSigner, pageCtx);
+      const configPublishes = () =>
+        publishSigned.mock.calls.filter((c) => (c[0] as { kind: number }).kind === KIND_EVENT_CONFIG).length;
+      expect(configPublishes()).toBe(1);
+
+      // The relay answering the next read never got the detach.
+      const { coordinator: _drop, ...detachedPage } = pageCtx.config;
+      void _drop;
+      await expect(
+        updateEventConfig({ ...pageCtx, config: detachedPage } as EventContext, { retentionDays: 30 }),
+      ).rejects.toThrow(/older copy/);
+      expect(configPublishes()).toBe(1);
     });
 
     /** The 21603 the attach sealed to `coordinatorSk`'s pubkey. */
