@@ -1439,7 +1439,7 @@ export async function revokeAttendeeClient(
    * below.
    */
   blindingKey?: Uint8Array,
-): Promise<void> {
+): Promise<PublishOutcome> {
   // One roster authority (SB-91): with a coordinator attached the removal is a
   // 21604 and the coordinator rotates; a client rotation here would be a second
   // roster author and a second, colliding ECK mint (SB-86).
@@ -1552,10 +1552,20 @@ export async function revokeAttendeeClient(
       "[organizer] revoke rotated the ECK with no blinding key — the new key exists only on this device",
     );
   }
-  await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
-  await promotePending(keys, newEck, owner);
-  // Co-organizers hold custody but are not attendees: hand them the new key (SB-90).
-  await reissueOrganizerGrants(organizer, ctx, keys);
+  // Queued is not revoked (audit R-25, the client twin of SB-03): until the new
+  // roster and the deletion reach a relay, the removed member is still listed
+  // under the key they hold. So the version stays STAGED — loadRoster promotes
+  // it the moment it reads a live roster that uses it — and the caller is told.
+  const outcome = await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
+  if (outcome === "published") await promotePending(keys, newEck, owner);
+  // Co-organizers hold custody but are not attendees: hand them the new key
+  // (SB-90). The version the queued roster uses, too, or they could not read it.
+  await reissueOrganizerGrants(
+    organizer,
+    ctx,
+    outcome === "published" ? keys : { ...keys, eck: unionEck(keys.eck, [newEck]) },
+  );
+  return outcome;
 }
 
 /**
@@ -1704,15 +1714,17 @@ async function publishRekeyed(
   extra: VerifiedEvent[],
   rekeyed: Rekeyed,
   rosterEvents: VerifiedEvent[],
-): Promise<void> {
-  await Promise.all([
-    ...extra.map((e) => publishOrQueue(e, ctx.config.relays)),
-    ...rekeyed.entries.map((e) => publishOrQueue(e, ctx.config.relays)),
-    ...rekeyed.grants.map((g) => publishAccountGiftWrap(g.wrap as any, g.to, ctx.config.relays)),
+): Promise<PublishOutcome> {
+  const [authoritative] = await Promise.all([
+    // The roster (and `extra`, a revoke's directory deletion) decides who is in;
+    // every one of them has to have reached a relay for the change to be live.
     // No `previous` in rosterEvents: every entry's blinded `d` was re-derived
     // under the NEW ECK, so every page genuinely changed.
-    ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
+    Promise.all([...extra, ...rosterEvents].map((e) => publishOrQueue(e, ctx.config.relays))),
+    ...rekeyed.entries.map((e) => publishOrQueue(e, ctx.config.relays)),
+    ...rekeyed.grants.map((g) => publishAccountGiftWrap(g.wrap as any, g.to, ctx.config.relays)),
   ]);
+  return toOutcome(authoritative.every(Boolean));
 }
 
 /**

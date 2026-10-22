@@ -779,6 +779,34 @@ describe("roster read-modify-write safety", () => {
     expect(await loadEventKeys(COORD, OTHER_OWNER)).toBeUndefined();
   });
 
+  // Audit R-25: a rotation that only reached the outbox was reported, and
+  // promoted locally, as a completed revoke.
+  it("reports a revoke whose roster only reached the outbox as queued, keeping the key staged", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+    vi.stubGlobal("navigator", { onLine: false }); // publishOrQueue queues at once
+
+    expect(await revokeAttendeeClient({} as AppSigner, ctx, BOB)).toBe("queued");
+    const keys = (await loadEventKeys(COORD))!;
+    expect(keys.eck.map((v) => v.id)).toEqual([1]);
+    expect(keys.pendingEck?.map((v) => v.id)).toEqual([2]);
+  });
+
+  it("reports a revoke whose roster reached a relay as published", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+    expect(await revokeAttendeeClient({} as AppSigner, ctx, BOB)).toBe("published");
+    expect((await loadEventKeys(COORD))!.eck.map((v) => v.id)).toEqual([1, 2]);
+  });
+
   it("reads every remaining member's directory entry in one request", async () => {
     fetchEventsRelayOnly.mockResolvedValue([
       rosterEvent([

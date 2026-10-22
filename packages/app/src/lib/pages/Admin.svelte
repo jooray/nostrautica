@@ -1093,7 +1093,13 @@
       } else {
         // Pass the blinding key: revoke mints a new ECK, and without this the
         // rotated key never reaches the organizer's own 30078 backup.
-        await revokeAttendeeClient(session.signer, ctx, pubkey, await deriveBlindingKey(session.signer));
+        const outcome = await revokeAttendeeClient(session.signer, ctx, pubkey, await deriveBlindingKey(session.signer));
+        // Same rule as the coordinator branch (audit R-25): a rotation that only
+        // reached the outbox has not removed anyone yet. Don't say "Revoked ✓".
+        if (outcome === "queued") {
+          opStatus.queued(t("admin.revokeQueuedLocal"));
+          return;
+        }
       }
       revokedSet = new Set([...revokedSet, pubkey]);
       approvedSet = new Set([...approvedSet].filter((p) => p !== pubkey));
