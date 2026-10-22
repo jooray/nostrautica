@@ -12,7 +12,7 @@ both the daemon and the operator CLI:
 
 ```
 nostrautica-coordinator [coordinator.toml]        # run the daemon (default verb)
-nostrautica-coordinator doctor        [--config coordinator.toml]
+nostrautica-coordinator doctor        [--local] [--config coordinator.toml]
 nostrautica-coordinator backup  <dest> [--config coordinator.toml]
 nostrautica-coordinator verify-backup <file> [--allow-unsigned] [--config coordinator.toml]
 nostrautica-coordinator restore <file> [--force] [--allow-unsigned] [--config coordinator.toml]
@@ -174,7 +174,9 @@ unit). V8's JIT maps writable-then-executable pages and Node crashes under it
 (it would require `node --jitless`, far too slow). Do **not** "harden" it back on, 
 it breaks the daemon.
 
-The unit's `ExecStartPre` runs the read-only `doctor` (§3) as a preflight gate.
+The unit's `ExecStartPre` runs the read-only `doctor --local` (§3) as a preflight
+gate: the local checks only, without the relay and provider probes, so a third-party
+outage cannot leave the unit failed with no retry.
 Healthy startup logs the identity, per-role provider routes, the single-daemon
 lock, and `running — watching for installs, submissions, admin commands`. **Test
 ffmpeg under these restrictions before production**, `PrivateTmp` in particular

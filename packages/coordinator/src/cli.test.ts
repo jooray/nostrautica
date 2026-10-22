@@ -7,8 +7,11 @@
  * mid-July. Seven weeks, on production. These cases pin the questions about whether
  * it IS working, and in particular that an old poisoned row is never rendered as ok.
  */
-import { describe, it, expect } from "vitest";
-import { pipelineChecks, STALE_POISON_MS, type DoctorCheck } from "./cli.js";
+import { afterEach, describe, it, expect, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pipelineChecks, runCli, STALE_POISON_MS, type DoctorCheck } from "./cli.js";
 import type { PipelineInspection } from "./store/db.js";
 
 const NOW = 1_800_000_000_000;
@@ -160,5 +163,53 @@ describe("doctor pipeline checks", () => {
     const last = find(checks, "last completed job")!;
     expect(last.level).toBe("warn");
     expect(last.detail).toMatch(/never completed a job/);
+  });
+});
+
+/**
+ * Audit R-58: the system unit's ExecStartPre ran the full doctor, so a relay or
+ * Venice outage failed the PREFLIGHT and burned the unit's start-limit budget.
+ * `doctor --local` keeps the local preconditions and skips the network.
+ */
+describe("doctor --local", () => {
+  const tmp: string[] = [];
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    for (const d of tmp.splice(0)) rmSync(d, { recursive: true, force: true });
+  });
+
+  async function doctor(extra: string[]): Promise<string> {
+    const dir = mkdtempSync(join(tmpdir(), "doctor-local-"));
+    tmp.push(dir);
+    const cfg = join(dir, "coordinator.toml");
+    // A relay that cannot resolve (.invalid) and a Venice key variable that is not set: both
+    // network checks fail whenever they run.
+    writeFileSync(
+      cfg,
+      `[relays]\ndefault = ["wss://relay.invalid"]\n[providers.venice]\napi_key_env = "DOCTOR_TEST_UNSET_KEY"\n` +
+        `[models]\nsummary = { provider = "venice", model = "m" }\nmatch = { provider = "venice", model = "m" }\n` +
+        `embed = { provider = "venice", model = "m" }\n`,
+    );
+    vi.stubEnv("NOSTRAUTICA_COORDINATOR_DB", join(dir, "absent.sqlite"));
+    const lines: string[] = [];
+    vi.spyOn(console, "log").mockImplementation((...a: unknown[]) => void lines.push(a.join(" ")));
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runCli("doctor", ["--config", cfg, ...extra]);
+    return lines.join("\n");
+  }
+
+  it("runs the network checks by default", async () => {
+    const out = await doctor([]);
+    expect(out).toMatch(/\[FAIL\] relays/);
+    expect(out).toMatch(/\[FAIL\] Venice auth/);
+  });
+
+  it("skips relays and provider auth, and says so, under --local", async () => {
+    const out = await doctor(["--local"]);
+    expect(out).toMatch(/\[skip\] relays, provider auth/);
+    expect(out).not.toMatch(/\] relays —/);
+    expect(out).not.toMatch(/Venice auth/);
+    expect(out).toMatch(/\[ok\] {3}config parse/); // local checks still run
   });
 });
