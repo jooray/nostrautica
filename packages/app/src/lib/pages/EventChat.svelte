@@ -18,7 +18,17 @@
     type DmPin,
     type DmTarget,
   } from "$lib/chat/dm-command.js";
-  import { parseMentions, shortNpub, type MentionSegment } from "$lib/chat/mentions.js";
+  import {
+    parseMentions,
+    shortNpub,
+    mentionedPubkeys,
+    activeMention,
+    insertMention,
+    deleteMentionBackward,
+    matchMentionCandidates,
+    type MentionCandidate,
+    type MentionSegment,
+  } from "$lib/chat/mentions.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
   import {
@@ -456,6 +466,10 @@
       }
     }
     for (const mem of members) wanted.add(mem.account);
+    // The @ picker offers the whole roster, and the composer shows who a pasted
+    // npub is; both need names. The roster only once the picker is open.
+    for (const pk of mentionedPubkeys(draft)) wanted.add(accountOf(pk));
+    if (mentionOpen) for (const a of roster?.attendees ?? []) wanted.add(a.pubkey);
     const missing = [...wanted].filter((pk) => !fetchedProfileFor.has(pk));
     if (missing.length === 0) return;
     for (const pk of missing) fetchedProfileFor.add(pk);
@@ -647,6 +661,100 @@
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void runDmCommand(dmCommand.target, dmCommand.body);
+      return true;
+    }
+    return false;
+  }
+
+  // ── @ mentions while composing ──────────────────────────────────────────────
+  // Typing `@` opens a people picker; choosing someone writes `@npub1… ` into
+  // the text, which is exactly what White Noise's composer writes, and the send
+  // path adds the matching `p` tag (chat/messages.ts buildChatSend). The pick
+  // inserts the PUBKEY, so nothing is ever re-resolved from a name (R-30), and
+  // the row shows a short npub so two people with one name stay two people.
+  // A textarea cannot hold a chip, so the people this draft mentions are shown
+  // by name just above it instead.
+  let composeEl = $state<HTMLTextAreaElement | null>(null);
+  let caret = $state(0);
+  /** The `@` the reader pressed Escape on; that query stays closed. */
+  let mentionDismissed = $state<number | null>(null);
+  let mentionPick = $state(0);
+  function syncCaret(): void {
+    if (composeEl) caret = composeEl.selectionEnd ?? draft.length;
+  }
+
+  /** People in the chat first, then the rest of the event's roster; never you,
+   *  never a device row the roster has not bound to anyone. */
+  const mentionPeople = $derived.by(() => {
+    const me = chatPubkey ? accountOf(chatPubkey) : session.pubkey;
+    const seen = new Set<string>();
+    const out: MentionCandidate[] = [];
+    const add = (list: string[]) => {
+      const batch: MentionCandidate[] = [];
+      for (const account of list) {
+        if (account === me || seen.has(account)) continue;
+        seen.add(account);
+        batch.push({ account, name: profileNameOf(account) ?? shortNpub(account) });
+      }
+      out.push(...batch.sort((a, b) => a.name.localeCompare(b.name)));
+    };
+    add(members.filter((m) => !m.unattested).map((m) => m.account));
+    add((roster?.attendees ?? []).map((a) => a.pubkey));
+    return out;
+  });
+  const mentionQuery = $derived(
+    dmCommand || readOnly ? null : activeMention(draft, Math.min(caret, draft.length)),
+  );
+  const mentionOpen = $derived(!!mentionQuery && mentionQuery.start !== mentionDismissed);
+  const mentionMatches = $derived(
+    mentionOpen && mentionQuery ? matchMentionCandidates(mentionPeople, mentionQuery.query) : [],
+  );
+  const draftMentions = $derived(mentionedPubkeys(draft));
+  $effect(() => {
+    if (mentionPick >= mentionMatches.length) mentionPick = 0;
+  });
+  // A new `@` (or none) re-arms the picker after an Escape.
+  $effect(() => {
+    if (mentionDismissed !== null && mentionQuery?.start !== mentionDismissed) mentionDismissed = null;
+  });
+
+  async function pickMention(c: MentionCandidate): Promise<void> {
+    if (!mentionQuery) return;
+    const next = insertMention(draft, mentionQuery, c.account);
+    draft = next.text;
+    caret = next.caret;
+    await tick();
+    composeEl?.focus();
+    composeEl?.setSelectionRange(next.caret, next.caret);
+  }
+
+  /** The composer's keys while a mention is involved; true when handled. */
+  function handleMentionKey(e: KeyboardEvent): boolean {
+    const el = composeEl;
+    if (e.key === "Backspace" && el && el.selectionStart === el.selectionEnd) {
+      const next = deleteMentionBackward(draft, el.selectionStart);
+      if (!next) return false;
+      e.preventDefault();
+      draft = next.text;
+      caret = next.caret;
+      void tick().then(() => el.setSelectionRange(next.caret, next.caret));
+      return true;
+    }
+    if (!mentionOpen || mentionMatches.length === 0) return false;
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      e.preventDefault();
+      const n = mentionMatches.length;
+      mentionPick = (mentionPick + (e.key === "ArrowDown" ? 1 : n - 1)) % n;
+      return true;
+    }
+    if (e.key === "Escape") {
+      e.preventDefault();
+      mentionDismissed = mentionQuery!.start;
+      return true;
+    }
+    if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) {
+      e.preventDefault();
+      void pickMention(mentionMatches[mentionPick]!);
       return true;
     }
     return false;
@@ -953,6 +1061,39 @@
           {/each}
         </ul>
       {/if}
+      {#if mentionOpen && mentionMatches.length > 0}
+        <ul class="nickpop" role="listbox" aria-label={t("chat.mention.pick")}>
+          {#each mentionMatches as c, i (c.account)}
+            <li>
+              <button
+                type="button"
+                role="option"
+                aria-selected={i === mentionPick}
+                class:on={i === mentionPick}
+                onmouseenter={() => (mentionPick = i)}
+                onmousedown={(e) => e.preventDefault()}
+                onclick={() => void pickMention(c)}
+              >
+                <Avatar pubkey={c.account} name={c.name} picture={pictureOf(c.account)} size={20} />
+                <span class="pname">{c.name}</span>
+                <span class="pkey">{shortNpub(c.account)}</span>
+              </button>
+            </li>
+          {/each}
+        </ul>
+      {:else if draftMentions.length > 0 && !dmCommand}
+        <!-- The textarea holds the wire form (`@npub1…`), so say by name who
+             this draft tags before it goes out. -->
+        <p class="draft-mentions" aria-label={t("chat.mention.tagging")}>
+          {#each draftMentions as pk (pk)}
+            <span class="mention" title={shortNpub(accountOf(pk))}
+              ><Avatar pubkey={accountOf(pk)} name={mentionName(pk)} picture={pictureOf(pk)} size={16} /><span
+                class="mention-name">@{mentionName(pk)}</span
+              ></span
+            >
+          {/each}
+        </p>
+      {/if}
       {#if dmCommand?.ready}
         <p class="cmdhint" role="status">
           <!-- The short npub says WHICH person, not just which name (R-30). -->
@@ -962,13 +1103,19 @@
         </p>
       {/if}
       <textarea
+        bind:this={composeEl}
         bind:value={draft}
         rows="1"
         use:autoGrow={draft}
         placeholder={t("chat.compose.placeholder")}
         disabled={phase === "setup" || phase === "evicted"}
+        oninput={syncCaret}
+        onkeyup={syncCaret}
+        onclick={syncCaret}
+        onfocus={syncCaret}
         onkeydown={(e) => {
           if (handleCommandKey(e)) return;
+          if (handleMentionKey(e)) return;
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             void send();
@@ -1385,6 +1532,21 @@
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
     font-size: 0.72rem;
     color: var(--text-dim);
+  }
+  .draft-mentions {
+    position: absolute;
+    bottom: calc(100% + 0.35rem);
+    left: 0;
+    right: 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin: 0;
+    font-size: 0.8rem;
+  }
+  .draft-mentions .mention {
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
   }
   .cmdhint {
     position: absolute;

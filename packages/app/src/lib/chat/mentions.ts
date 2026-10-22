@@ -109,3 +109,94 @@ export function shortNpub(pubkey: string): string {
     return pubkey.slice(0, 8);
   }
 }
+
+// ── composing ────────────────────────────────────────────────────────────────
+
+/** An open `@` query in the composer: the `@` at `start`, then `query` up to the caret. */
+export interface ActiveMention {
+  start: number;
+  query: string;
+}
+
+const CHIP_AT = new RegExp(`^@npub1${BECH32}+`);
+
+/**
+ * The `@`-query the caret is in, or null. Same rules as White Noise's composer
+ * (`activeMentionQuery`): the nearest `@` left of the caret with no whitespace
+ * in between, that `@` starting a word (so an e-mail address never opens the
+ * picker), and not an already inserted `@npub1…` the caret is sitting in.
+ */
+export function activeMention(text: string, caret: number): ActiveMention | null {
+  if (caret < 0 || caret > text.length) return null;
+  let i = caret - 1;
+  while (i >= 0 && text[i] !== "@") {
+    if (/\s/.test(text[i]!)) return null;
+    i--;
+  }
+  if (i < 0) return null;
+  if (i > 0 && !/\s/.test(text[i - 1]!)) return null;
+  const chip = CHIP_AT.exec(text.slice(i));
+  if (chip && caret <= i + chip[0].length) return null;
+  return { start: i, query: text.slice(i + 1, caret) };
+}
+
+/**
+ * Replace the open query with `@<npub> ` and put the caret after the space. The
+ * space is skipped when the text already continues with whitespace, so a
+ * mention dropped mid-sentence does not leave a double space.
+ */
+export function insertMention(
+  text: string,
+  active: ActiveMention,
+  pubkey: string,
+): { text: string; caret: number } {
+  const end = Math.min(text.length, active.start + 1 + active.query.length);
+  const before = text.slice(0, active.start);
+  const after = text.slice(end);
+  const chip = `@${npubEncode(pubkey)}${/^\s/.test(after) ? "" : " "}`;
+  return { text: before + chip + after, caret: before.length + chip.length };
+}
+
+/**
+ * Backspace at a chip's right edge, or just past the space `insertMention`
+ * added, removes the whole chip: a 63-character npub one keystroke at a time
+ * is not editing, it is a chore. Returns null when the caret is anywhere else,
+ * so the textarea's own Backspace runs.
+ */
+export function deleteMentionBackward(text: string, caret: number): { text: string; caret: number } | null {
+  const head = text.slice(0, caret);
+  const m = new RegExp(`(?:^|(?<=\\s))@npub1${BECH32}{58}( ?)$`).exec(head);
+  if (!m || !pubkeyOfBech32(m[0].trim().slice(1))) return null;
+  const start = m.index;
+  return { text: text.slice(0, start) + text.slice(caret), caret: start };
+}
+
+/** Someone the picker can offer. `account` is hex and is what gets encoded. */
+export interface MentionCandidate {
+  account: string;
+  name: string;
+}
+
+/**
+ * Who to offer for `query`: name prefix matches first, then names containing
+ * it, then an npub typed out by hand. An empty query lists everyone, so a lone
+ * `@` is a people picker.
+ */
+export function matchMentionCandidates<T extends MentionCandidate>(
+  candidates: readonly T[],
+  query: string,
+  limit = 8,
+): T[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return candidates.slice(0, limit);
+  const pre: T[] = [];
+  const contains: T[] = [];
+  const byKey: T[] = [];
+  for (const c of candidates) {
+    const n = c.name.toLowerCase();
+    if (n.startsWith(q)) pre.push(c);
+    else if (n.includes(q)) contains.push(c);
+    else if (q.startsWith("npub1") && npubEncode(c.account).startsWith(q)) byKey.push(c);
+  }
+  return [...pre, ...contains, ...byKey].slice(0, limit);
+}
