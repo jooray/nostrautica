@@ -21,6 +21,15 @@ object Precheck {
         if (sizeBytes > MAX_UPLOAD_BYTES) return Violation("size", MAX_UPLOAD_BYTES, sizeBytes)
         return null
     }
+
+    /**
+     * What a picked file is uploaded as, from its probed tracks and never from the
+     * provider-declared MIME (audit R-22): the type decides how it is stripped, so a
+     * video the provider calls audio must not skip the video re-mux. Audio mode
+     * always drops any video track.
+     */
+    fun pickedMime(mode: String, hasVideo: Boolean): String =
+        if (mode == "audio" || !hasVideo) "audio/mp4" else "video/mp4"
 }
 
 /** External talk URLs (media/external.ts): YouTube or a direct video, https only. */

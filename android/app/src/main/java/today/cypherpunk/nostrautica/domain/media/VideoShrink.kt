@@ -120,6 +120,31 @@ class VideoShrink(private val context: Context) {
         if (!p.hasVideo || p.width <= 0 || p.height <= 0) return null
         val reencode = VideoRules.needsReencode(p.width, p.height, p.fps, p.bitrate)
         if (!reencode && !always) return null
+        return reencodeVideo(input, p, reencode, onProgress)
+    }
+
+    /**
+     * Rewrite a picked file so none of its own metadata survives (audit R-22): a
+     * phone video carries where it was shot, an m4a/mp3 its tags. Video is
+     * shrunk-or-re-muxed as [shrink] does; [audioOnly] drops any video track and
+     * writes AAC in a fresh MP4. Null means it could not be rewritten, and the
+     * caller must then refuse the file rather than upload the original bytes.
+     */
+    suspend fun strip(input: Uri, audioOnly: Boolean, onProgress: (Int) -> Unit = {}): File? {
+        val p = withContext(Dispatchers.IO) { probe(input) } ?: return null
+        if (!audioOnly) {
+            if (!p.hasVideo || p.width <= 0 || p.height <= 0) return null
+            return reencodeVideo(input, p, VideoRules.needsReencode(p.width, p.height, p.fps, p.bitrate), onProgress)
+        }
+        val out = File(dir, "${UUID.randomUUID()}.m4a")
+        val item = EditedMediaItem.Builder(MediaItem.fromUri(input)).setRemoveVideo(true).build()
+        val composition = Composition.Builder(EditedMediaItemSequence.withAudioFrom(listOf(item))).build()
+        val ok = withContext(Dispatchers.Main) { export(composition, out, 0, reencode = false, audioOnly = true, onProgress = onProgress) }
+        if (!ok || out.length() == 0L) { out.delete(); return null }
+        return out
+    }
+
+    private suspend fun reencodeVideo(input: Uri, p: Probe, reencode: Boolean, onProgress: (Int) -> Unit): File? {
         val (w, h) = VideoRules.targetSize(p.width, p.height)
         val out = File(dir, "${UUID.randomUUID()}.mp4")
         val effects = if (!reencode) emptyList() else buildList {
@@ -130,12 +155,12 @@ class VideoShrink(private val context: Context) {
         val composition = Composition.Builder(EditedMediaItemSequence.withAudioAndVideoFrom(listOf(item)))
             .setHdrMode(Composition.HDR_MODE_TONE_MAP_HDR_TO_SDR_USING_OPEN_GL)
             .build()
-        val ok = withContext(Dispatchers.Main) { export(composition, out, VideoRules.bitrate(w, h, p.fps, p.bitrate), reencode, onProgress) }
+        val ok = withContext(Dispatchers.Main) { export(composition, out, VideoRules.bitrate(w, h, p.fps, p.bitrate), reencode, audioOnly = false, onProgress = onProgress) }
         if (!ok || out.length() == 0L) { out.delete(); return null }
         return out
     }
 
-    private suspend fun export(composition: Composition, out: File, bitrate: Int, reencode: Boolean, onProgress: (Int) -> Unit): Boolean = coroutineScope {
+    private suspend fun export(composition: Composition, out: File, bitrate: Int, reencode: Boolean, audioOnly: Boolean, onProgress: (Int) -> Unit): Boolean = coroutineScope {
         var transformer: Transformer? = null
         val progress = launch {
             val holder = ProgressHolder()
@@ -149,6 +174,8 @@ class VideoShrink(private val context: Context) {
         try {
             suspendCancellableCoroutine { cont ->
                 val b = Transformer.Builder(context).setMuxerFactory(muxer)
+                // AAC plays everywhere the PWA does; an AAC source is only re-muxed.
+                if (audioOnly) b.setAudioMimeType(MimeTypes.AUDIO_AAC)
                 if (reencode) {
                     b.setVideoMimeType(MimeTypes.VIDEO_H264).setAudioMimeType(MimeTypes.AUDIO_AAC)
                         .setEncoderFactory(

@@ -7,6 +7,13 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaRulesTest {
+    @Test fun aPickedFileIsTypedByItsTracksNotItsProvider() {
+        assertEquals("video/mp4", Precheck.pickedMime("video", hasVideo = true))
+        assertEquals("audio/mp4", Precheck.pickedMime("video", hasVideo = false))
+        // Audio mode drops a video track rather than uploading it as-is.
+        assertEquals("audio/mp4", Precheck.pickedMime("audio", hasVideo = true))
+    }
+
     @Test fun precheck() {
         assertNull(Precheck.check(1000, 80.0, 90))
         assertEquals(Precheck.Violation("duration", 90, 91), Precheck.check(1000, 91.2, 90))
