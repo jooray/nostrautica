@@ -129,7 +129,7 @@ async function runDaemon(): Promise<void> {
     ? {
         payment: new ApiKeyPayment(apiKey),
         baseUrl: config.providers.venice?.base_url,
-        // Privacy is enforced PER ROLE by verifyModelPrivacy() below (a role may
+        // Privacy is enforced PER ROLE by resolveRoleRoutes() below (a role may
         // relax it via models.<role>.require_private = false, spec §16.2), so the
         // adapter must return the unfiltered list here.
         requirePrivate: false,

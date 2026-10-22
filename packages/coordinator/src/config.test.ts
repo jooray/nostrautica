@@ -7,7 +7,14 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, validateConfiguredUrl, spendExposure, type UnknownConfigKey } from "./config.js";
+import {
+  configSchema,
+  loadConfig,
+  roleRequiresPrivate,
+  validateConfiguredUrl,
+  spendExposure,
+  type UnknownConfigKey,
+} from "./config.js";
 
 const tmpDirs: string[] = [];
 afterEach(() => {
@@ -260,5 +267,34 @@ describe("SEC-7 spend exposure at startup", () => {
     const msg = spendExposure(loadConfig(writeConfig(BASE + mediaOnly)));
     expect(msg).toBeDefined();
     expect(msg).toMatch(/daemon_calls_per_window/);
+  });
+});
+
+// Moved from the deleted providers/privacy.test.ts (audit R-81): the knob is
+// config's, and resolveRoleRoutes (routes.test.ts) is the live enforcement.
+describe("roleRequiresPrivate (spec §16.2 knob)", () => {
+  const models = (match: Record<string, unknown> = {}) => ({
+    summary: { provider: "venice", model: "s" },
+    match: { provider: "venice", model: "m", ...match },
+    embed: { provider: "venice", model: "e" },
+  });
+
+  it("uses the per-role override when present, else the provider default", () => {
+    const cfg = configSchema.parse({
+      relays: { default: ["wss://relay.example"] },
+      providers: { venice: { require_private: true } },
+      models: models({ require_private: false }),
+    });
+    expect(roleRequiresPrivate(cfg, "summary")).toBe(true);
+    expect(roleRequiresPrivate(cfg, "match")).toBe(false);
+  });
+
+  it("a provider default of false is inherited by roles without an override", () => {
+    const cfg = configSchema.parse({
+      relays: { default: ["wss://r"] },
+      providers: { venice: { require_private: false } },
+      models: models(),
+    });
+    expect(roleRequiresPrivate(cfg, "summary")).toBe(false);
   });
 });
