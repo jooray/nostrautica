@@ -61,8 +61,8 @@ describe("resolveRoleRoutes — per-role provider instances (H-1)", () => {
       // `stt` was not — it used to be a hardcoded "private" sitting in the same
       // object, indistinguishable to a reader from the four that were verified,
       // and it is a public claim about where an attendee's recorded voice goes.
-      // The STT model is not in the LLM catalogue (same reason `embed` is exempt
-      // from the not-found warning), so it says what it actually knows.
+      // The STT model is not in the LLM catalogue, so it says what it actually
+      // knows.
       stt: "unverified",
       summary: "private",
       match: "non-private", // routstr non-private model, verified from the catalogue
@@ -135,7 +135,26 @@ describe("resolveRoleRoutes — per-role provider instances (H-1)", () => {
       logger: silent,
       allowUnverified: true,
     });
-    expect(routes.summary.privacy).toBe("private"); // falls back to intent
+    // Booting is allowed; claiming the tier is not (audit R-52).
+    expect(routes.summary.privacy).toBe("unverified");
+  });
+
+  it("announces a private-required model missing from the catalogue as unverified, not private (R-52)", async () => {
+    // The embed role always landed here before the embedding page was read, and
+    // its 31611 tier was the operator's require_private intent.
+    const warnings: string[] = [];
+    const venice = new MockLlm(() => ({}), { id: "venice", models: [{ id: "m", private: true }] });
+    const cfg = config({
+      summary: { provider: "venice", model: "m" },
+      match: { provider: "venice", model: "m" },
+      embed: { provider: "venice", model: "not-catalogued" },
+      translate: { provider: "venice", model: "m" },
+    });
+    const routes = await resolveRoleRoutes(cfg, { providers: { venice }, logger: { warn: (m) => warnings.push(m) } });
+    expect(routes.embed.privacy).toBe("unverified");
+    expect(disclosureFromRoutes(routes).embed).toBe("unverified");
+    expect(routes.summary.privacy).toBe("private"); // found and private: verified
+    expect(warnings.some((w) => w.includes("models.embed") && w.includes("not found"))).toBe(true);
   });
 });
 

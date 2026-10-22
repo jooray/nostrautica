@@ -57,6 +57,34 @@ describe("payment/credit classification", () => {
   });
 });
 
+/** Audit R-52: the embed role's tier was never in the catalogue models() read. */
+describe("VeniceLlm.models reads the embedding page", () => {
+  it("catalogues embedding models with their privacy tier, and survives the page failing", async () => {
+    const page = (data: unknown[]) => Response.json({ data });
+    const fetchFn = vi.fn(async (url: string) => {
+      if (url.endsWith("?type=embedding")) {
+        return page([
+          { id: "text-embedding-bge-m3", model_spec: { privacy: "private" } },
+          { id: "text-embedding-3-small", model_spec: { privacy: "anonymized" } },
+        ]);
+      }
+      if (url.endsWith("?type=decision")) return new Response("nope", { status: 404 });
+      return page([{ id: "chat", model_spec: { privacy: "private" } }]);
+    });
+    vi.stubGlobal("fetch", fetchFn);
+    const models = await new VeniceLlm({ payment: apiKey, net }).models();
+    const byId = new Map(models.map((m) => [m.id, m.private]));
+    expect(byId.get("text-embedding-bge-m3")).toBe(true);
+    expect(byId.get("text-embedding-3-small")).toBe(false);
+
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    fetchFn.mockImplementation(async (url: string) =>
+      url.includes("?type=") ? new Response("down", { status: 503 }) : page([{ id: "chat" }]),
+    );
+    expect((await new VeniceLlm({ payment: apiKey, net }).models()).map((m) => m.id)).toEqual(["chat"]);
+  });
+});
+
 describe("VeniceLlm — a failed completion is logged at the boundary", () => {
   it("logs a loud, specific line on 402 and throws a billing-classified error", async () => {
     const err = vi.spyOn(console, "error").mockImplementation(() => {});

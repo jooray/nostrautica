@@ -89,23 +89,21 @@ export async function resolveRoleRoutes(
             `or explicitly boot unverified with security.allow_unverified_model_privacy = true`,
         );
       }
-      privacy = requirePrivate ? "private" : "non-private";
+      // Booted under the escape hatch: say so in the announcement too, rather than
+      // publishing the operator's intent as a checked tier (audit R-52).
+      privacy = requirePrivate ? "unverified" : "non-private";
       logger.warn(
         `[coordinator] models.${role} "${ref.model}" privacy UNVERIFIED (${ref.provider} catalogue unfetchable)`,
       );
     } else {
       const info = catalogue.get(ref.model);
       if (!info) {
-        // Embedding models are catalogued on a separate endpoint that models()
-        // doesn't return, so a valid embed model is expectedly absent — not fatal.
-        // Decision models ARE catalogued (VeniceLlm.models() reads the decision
-        // page too), so one that is missing here is a real misconfiguration and
-        // warns like any other role.
-        if (role !== "embed") {
-          logger.warn(
-            `[coordinator] models.${role} "${ref.model}" not found in ${ref.provider} catalogue — cannot verify privacy tier`,
-          );
-        }
+        // Every role's model is expected in the catalogue: VeniceLlm.models() reads
+        // the embedding and decision pages as well as the text one. A miss is a
+        // typo, a model the provider retired, or a page that failed to load.
+        logger.warn(
+          `[coordinator] models.${role} "${ref.model}" not found in ${ref.provider} catalogue — cannot verify privacy tier`,
+        );
         // The decision model rides on a SEPARATE catalogue page, and a failure to
         // fetch that page is indistinguishable from "no decision models" by the
         // time it reaches here (audit DS41-045). Publishing `match_score: "private"`
@@ -119,7 +117,12 @@ export async function resolveRoleRoutes(
               `Check the model id, or explicitly boot unverified with security.allow_unverified_model_privacy = true`,
           );
         }
-        privacy = requirePrivate ? "private" : "non-private";
+        // Every other role used to publish "private" here on the operator's word
+        // alone, and embed always landed here (audit R-52). Announce what is
+        // actually known. Not fatal, unlike match_score above: that page is new
+        // and optional, while an embed or summary role that boots today must not
+        // start refusing to boot because one catalogue page had a bad minute.
+        privacy = requirePrivate ? "unverified" : "non-private";
       } else if (info.private) {
         privacy = "private";
       } else {

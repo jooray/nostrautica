@@ -250,9 +250,10 @@ export interface RoleRoute {
   /** Provider instance id, e.g. "venice" | "routstr". */
   provider: string;
   requirePrivate: boolean;
-  /** Verified at startup from the provider catalogue; falls back to intent when a
-   *  model can't be found in the catalogue (e.g. embeddings on a separate endpoint). */
-  privacy: "private" | "non-private";
+  /** Verified at startup from the provider catalogue. `"unverified"` when a
+   *  private-required role's model could not be confirmed there (audit R-52) —
+   *  never `"private"` by assertion. */
+  privacy: "private" | "non-private" | "unverified";
 }
 
 /** Per-role resolved routes threaded through the whole matching pipeline (H-1). */
