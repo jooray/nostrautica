@@ -7956,3 +7956,49 @@ describe("audit DS41-041 — an event-context edit suggests a recompute", () => 
     expect(contextNotices(h)).toHaveLength(0);
   });
 });
+
+/**
+ * Audit 2026-10-21 R-07 — a revoked member's pipeline work never republishes them.
+ *
+ * `processAttendeeJob` checked only that a row existed, `publishDirectory` never
+ * reads status, and the revoke cancelled no jobs. So a `process_attendee` queued
+ * before the revoke (the normal state right after a submission) ran afterwards and
+ * published the removed member's directory entry under the ROTATED ECK — the key
+ * minted to exclude them, readable by everyone who stayed.
+ */
+describe("audit 2026-10-21 R-07 — no pipeline publish for a revoked member", () => {
+  const directoryEntries = (h: Harness, from: number) =>
+    h.transport.published.slice(from).filter((e) => e.kind === KIND_DIRECTORY_ENTRY);
+
+  it("a process job queued before the revoke is cancelled and never runs", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    await admin(h, "revoke", { pubkey: pk });
+    const from = h.transport.published.length;
+    const sttBefore = h.stt.calls;
+
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, pk)?.ai_profile_json ?? null).toBeNull();
+    expect(h.stt.calls).toBe(sttBefore); // no paid work for someone who is gone
+    expect(directoryEntries(h, from)).toHaveLength(0);
+  });
+
+  it("a job already running when the revoke lands discards its result", async () => {
+    let onTranscribe: (() => Promise<void>) | undefined;
+    const h = await setup(0, { beforeTranscribe: async () => { await onTranscribe?.(); } });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    let from = 0;
+    onTranscribe = async () => {
+      onTranscribe = undefined;
+      await admin(h, "revoke", { pubkey: pk });
+      from = h.transport.published.length;
+    };
+
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    expect(h.store.getAttendee(h.coordinate, pk)?.ai_profile_json ?? null).toBeNull();
+    expect(from).toBeGreaterThan(0); // the revoke really landed mid-run
+    expect(directoryEntries(h, from)).toHaveLength(0);
+  });
+});

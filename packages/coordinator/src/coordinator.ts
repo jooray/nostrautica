@@ -3858,7 +3858,13 @@ export class Coordinator {
     // any STT/LLM spend.
     await this.assertSpendAllowed(coordinate, pubkey);
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
-    if (!attendee) return false;
+    // Only an APPROVED member is processed (audit 2026-10-21, R-07). A job queued
+    // before a revoke used to run anyway and `publishDirectory` (which never reads
+    // status) republished the removed member's entry under the ROTATED ECK.
+    if (attendee?.status !== "approved") {
+      if (attendee) log(`[pipeline] ${short(pubkey)}: skipped — attendee is '${attendee.status}', not approved`);
+      return false;
+    }
     const { profile, media, introText } = this.parseStoredProfile(attendee);
     // Server-side media caps (audit COORD-4): per-descriptor duration cap (the
     // event's configured max) and a total-download budget per submission —
@@ -3934,6 +3940,12 @@ export class Coordinator {
     signal?.throwIfAborted();
     if (!this.eventStillLive(coordinate, state.gen)) {
       log(`[pipeline] ${short(pubkey)}: event no longer live (detached/expired) — discarding result`);
+      return false;
+    }
+    // …and the member is still approved (R-07): a revoke or withdrawal that landed
+    // while STT/LLM ran must not be followed by a commit and a directory publish.
+    if (this.deps.store.getAttendee(coordinate, pubkey)?.status !== "approved") {
+      log(`[pipeline] ${short(pubkey)}: no longer approved (revoked/withdrawn during processing) — discarding result`);
       return false;
     }
     // Conditional commit (audit C2): write the ai_profile ONLY if the attendee's
@@ -4044,6 +4056,11 @@ export class Coordinator {
     // paid STT for a talks-off event.
     if (state.talks === "off") {
       log(`[talk] process_talk skipped for ${short(pubkey)}: talks are off for this event`);
+      return;
+    }
+    // A removed speaker's queued talk is not transcribed (audit 2026-10-21, R-07).
+    if (this.deps.store.getAttendee(coordinate, pubkey)?.status !== "approved") {
+      log(`[talk] process_talk skipped for ${short(pubkey)}: no longer an approved attendee`);
       return;
     }
     // Spend gate (spec §8/§9): billing block OR exceeded budget parks talk STT.
@@ -5131,8 +5148,11 @@ export class Coordinator {
     );
     await this.deps.transport.publish(deletion, state.configRelays);
 
-    // 2. Mark removed (idempotent).
+    // 2. Mark removed (idempotent), and drop their not-yet-started pipeline work
+    //    (audit 2026-10-21, R-07): it would otherwise spend on, and republish, a
+    //    member who is gone. A running job rechecks status before it commits.
     this.deps.store.upsertAttendee({ coordinate: state.coordinate, pubkey: removedPubkey, status: "revoked", now: this.now() });
+    this.deps.store.cancelSubjectPipelineJobs(state.coordinate, removedPubkey, { allStates: false });
 
     // 3. Drop every cached pair that involves the removed attendee so remaining
     //    lists/matrix don't reference them after rotation (audit H3).
