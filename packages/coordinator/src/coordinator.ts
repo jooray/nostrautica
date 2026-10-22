@@ -2684,12 +2684,31 @@ export class Coordinator {
     name: string,
     order?: { createdAt: number; rumorId: string },
   ): Promise<void> {
+    const existing = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+    // Revocation is authoritative over EVERY entitlement path (audit 2026-10-22,
+    // R-01). A join carrying the member's ORIGINAL invite code — or their community
+    // `member_of` proof — used to be auto-approved: `claimInvite`'s same-redeemer
+    // idempotency returns true for the very person the organizer removed, and
+    // `MemberOfChecker` checks only the link and its signature. The grant then
+    // carried the whole ECK list, including the version minted to exclude them.
+    //
+    // Checked before the approved fast-path, before the enrollment upsert and
+    // before any code is claimed, so a blocked re-join neither rewrites their row
+    // nor burns an invite slot. Only an organizer approve lifts it (handleAdmin),
+    // and the tombstone survives a `delete_data` purge — otherwise a removed member
+    // could withdraw to erase the row and re-join as a fresh one, still holding
+    // their claimed code.
+    if (this.deps.store.isRevoked(state.coordinate, attendeePubkey)) {
+      log(
+        `[join] ${short(attendeePubkey)} re-join REFUSED: revoked by the organizer and not approved again — no ECK grant`,
+      );
+      return;
+    }
     // Already approved: this is a re-delivery after a mid-grant failure (the
     // rumor was left unseen, COORD-2) — grantAndPublish is idempotent
     // (replaceable events + deduped grants), so re-running repairs a lost grant.
     // Ahead of the ordering guard below on purpose: it writes no status, so a
     // stale join can only ever REPAIR an approval here, never regress one.
-    const existing = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
     if (existing?.status === "approved") {
       await this.grantAndPublish(state, attendeePubkey);
       return;
@@ -2896,14 +2915,14 @@ export class Coordinator {
     // a manual-approval event would have put them.
     // `approval: "open"` (owner decision, 2026-10-20): holding the link is the
     // entitlement. A join that no code or membership proof admitted is approved
-    // anyway, with one exception: a member the organizer REVOKED. The early
-    // enrollment upsert above has already reset their row to `pending`, so the
-    // pre-join `existing` row is the record of that removal, and it stays
-    // authoritative: they wait in the queue for the organizer instead of walking
-    // back in by pressing Join. (A self-withdrawal with `delete_data` erased the
-    // row, so that person re-joins like anyone new. That was their own choice,
-    // not the organizer's.) A code they presented is still verified and claimed
-    // above, and still admits them like in `manual+invite`.
+    // anyway, with one exception: a member the organizer REVOKED. The tombstone
+    // check at the top of this handler already refuses those outright; what reaches
+    // here is a row a SELF-withdrawal left `revoked` (no tombstone, so they may come
+    // back), and it waits in the queue for the organizer instead of walking in by
+    // pressing Join. (A self-withdrawal with `delete_data` erased the row, so that
+    // person re-joins like anyone new. That was their own choice, not the
+    // organizer's.) A code they presented is still verified and claimed above, and
+    // still admits them like in `manual+invite`.
     if (!decision.grant && state.approval === "open") {
       if (existing?.status === "revoked") {
         decision = { grant: false, reason: `approval is "open" but they were revoked; ${decision.reason}` };
@@ -3182,6 +3201,15 @@ export class Coordinator {
 
   /** Grant the ECK and publish the directory entry + roster for a new attendee. */
   async grantAndPublish(state: EventState, attendeePubkey: string): Promise<void> {
+    // Last line of defence for R-01 (audit 2026-10-22): no path may hand the ECK to
+    // a member whose organizer revocation still stands. handleAdmin's approve
+    // clears the tombstone first; that is the only legitimate way past this.
+    if (this.deps.store.isRevoked(state.coordinate, attendeePubkey)) {
+      log(
+        `[grant] REFUSED ${short(attendeePubkey)}: revoked by the organizer and not approved again — no ECK grant published`,
+      );
+      return;
+    }
     const proof = await this.parentProofFor(state, attendeePubkey);
     // Re-checked after the (relay-reading) proof lookup: never publish ECK custody
     // for an event detached while this approval was in flight (audit SB-99).
@@ -4854,6 +4882,11 @@ export class Coordinator {
         // (audit B-8) — refuse BEFORE the grant rather than throwing mid-publish
         // with the ECK already in the attendee's hands.
         if (attendee.status !== "approved" && !(await this.admitToRoster(state, pubkey))) return;
+        // An organizer approve is the ONLY thing that lifts a revocation (audit
+        // 2026-10-22, R-01). Cleared only after the roster admitted them, so a
+        // refused approval leaves the tombstone in place rather than silently
+        // reopening the member to an automatic re-join later.
+        this.deps.store.clearRevocation(coordinate, pubkey);
         if (attendee.status !== "approved") {
           this.deps.store.upsertAttendee({ coordinate, pubkey, status: "approved", now: this.now() });
           log(`[approve] organizer approved ${short(pubkey)}`);
@@ -4948,7 +4981,7 @@ export class Coordinator {
       // Pass the operation context so the ECK rotation resumes idempotently on a
       // retry (audit C1): the intended new key is minted once and reused, never
       // re-minted, and missing grants/roster are repaired by the idempotent republish.
-      if (pubkey) await this.revokeAttendee(state, pubkey, order ? { subject, rumorId: order.rumorId } : undefined);
+      if (pubkey) await this.revokeAttendee(state, pubkey, order ? { subject, rumorId: order.rumorId } : undefined, { byOrganizer: true });
     } else if (cmd === "talk_publish") {
       // Moderate a submitted talk: publish its 31610 (spec F2). No-op if talks are off.
       if (state.talks !== "off") {
@@ -5017,6 +5050,7 @@ export class Coordinator {
     state: EventState,
     removedPubkey: string,
     opCtx?: { subject: string; rumorId: string },
+    opts: { byOrganizer?: boolean } = {},
   ): Promise<void> {
     // Durable idempotent ECK-rotation state machine (audit C1). The intended new key
     // is minted EXACTLY ONCE per operation and recorded in the command's progress
@@ -5034,6 +5068,13 @@ export class Coordinator {
       log(`[revoke] ${short(removedPubkey)}: superseded by a newer membership command — skipping side effects`);
       return;
     }
+    // Durable organizer revocation (audit 2026-10-22, R-01), written before the
+    // rotation so a crash mid-revoke leaves the member blocked rather than
+    // re-admittable. Only an organizer approve clears it (handleAdmin). A
+    // self-withdrawal (21610) deliberately records nothing: leaving is the member's
+    // own choice, and the documented behaviour is that they may re-join like anyone
+    // new — including when they chose to erase their row with `delete_data`.
+    if (opts.byOrganizer) this.deps.store.recordRevocation(state.coordinate, removedPubkey, this.now());
     const progress = opCtx ? this.deps.store.getCommandOpProgress(state.coordinate, opCtx.subject) : {};
     const rot = progress.eckRotation as { newId: number; newKey: string; prevId: number } | undefined;
     let newId: number;
