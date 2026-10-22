@@ -182,4 +182,10 @@ describe("renderMarkdown — emitted tags are opaque to later passes", () => {
     expect(html).not.toContain(String.fromCharCode(0));
     expect(html).toContain("before 0 after");
   });
+
+  it("folds a newline in alt text to a space, never a <br /> inside the attribute (R-24)", () => {
+    expect(renderMarkdown("before\n![two\nlines](https://x.example/p.png)\nafter")).toBe(
+      '<p>before<br /><img src="https://x.example/p.png" alt="two lines" loading="lazy" /><br />after</p>',
+    );
+  });
 });
