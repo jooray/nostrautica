@@ -6,8 +6,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -61,9 +59,8 @@ class Nip46Signer private constructor(
     private val pendingLock = Mutex()
     private var listener: Job? = null
 
-    private val _authUrls = MutableSharedFlow<String>(extraBufferCapacity = 4)
-    /** A bunker asking the user to approve in a browser (NIP-46 `auth_url`). */
-    val authUrls: SharedFlow<String> get() = _authUrls
+    /** Requests a bunker answered with `auth_url`: they get [AUTH_APPROVAL_TIMEOUT_MS] more to settle. */
+    private val awaitingApproval = HashSet<String>()
 
     private fun ensureListening() {
         if (listener?.isActive == true) return
@@ -81,7 +78,14 @@ class Nip46Signer private constructor(
         val id = (msg["id"] as? JsonPrimitive)?.content ?: return
         val result = (msg["result"] as? JsonPrimitive)?.content
         if (result == "auth_url") {
-            (msg["error"] as? JsonPrimitive)?.content?.let { _authUrls.tryEmit(it) }
+            // Not the reply: the real one follows on the same id once the user approves.
+            // Only for a request still waiting, so a late challenge can't resurrect the banner.
+            val url = (msg["error"] as? JsonPrimitive)?.content?.let(Nip46Approvals::safeAuthUrl) ?: return
+            pendingLock.withLock {
+                if (id !in pending) return
+                awaitingApproval += id
+                Nip46Approvals.open(id, url) // under the lock, so it can't land after call()'s settle
+            }
             return
         }
         pendingLock.withLock { pending.remove(id) }?.complete(msg)
@@ -110,9 +114,13 @@ class Nip46Signer private constructor(
             // withTimeoutOrNull, not withTimeout: a TimeoutCancellationException is a
             // CancellationException, which callers treat as "the user left" and
             // swallow (or rethrow, ending an enclosing scan).
-            withTimeoutOrNull(timeoutMs) { d.await() } ?: throw SignerUnavailable("the signer did not answer")
+            withTimeoutOrNull(timeoutMs) { d.await() }
+                // Approving in a browser takes longer than a signer app's tap.
+                ?: (if (pendingLock.withLock { id in awaitingApproval }) withTimeoutOrNull(AUTH_APPROVAL_TIMEOUT_MS) { d.await() } else null)
+                ?: throw SignerUnavailable("the signer did not answer")
         } finally {
-            pendingLock.withLock { pending.remove(id) }
+            pendingLock.withLock { pending.remove(id); awaitingApproval.remove(id) }
+            Nip46Approvals.settle(id)
         }
         (reply["error"] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }?.let { throw SignerRejected(it) }
         return reply["result"]?.jsonPrimitive?.content ?: throw SignerRejected("empty reply")
@@ -145,6 +153,7 @@ class Nip46Signer private constructor(
         const val CONNECT_TIMEOUT_MS = 45_000L
         const val NOSTRCONNECT_TIMEOUT_MS = 120_000L
         const val RESTORE_TIMEOUT_MS = 12_000L
+        const val AUTH_APPROVAL_TIMEOUT_MS = 180_000L
 
         fun restore(pool: RelayPool, session: Session) = Nip46Signer(pool, session)
 

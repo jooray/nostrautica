@@ -12,7 +12,22 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.unit.dp
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import android.content.Intent
+import android.net.Uri
+import today.cypherpunk.nostrautica.signer.Nip46Approvals
+import today.cypherpunk.nostrautica.ui.components.Notice
+import today.cypherpunk.nostrautica.ui.components.SmallButton
+import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 import kotlinx.coroutines.flow.MutableStateFlow
 import today.cypherpunk.nostrautica.AppContainer
 import today.cypherpunk.nostrautica.i18n.LocalStrings
@@ -71,8 +86,33 @@ fun AppRoot(container: AppContainer, incoming: MutableStateFlow<Pair<Route, Stri
         NostrauticaTheme(theme) {
             SignerBridgeHost(container.bridge)
             Surface(Modifier.fillMaxSize()) {
-                Screens(router.current)
+                Box(Modifier.fillMaxSize()) {
+                    Screens(router.current)
+                    SignerApprovalBanner(Modifier.align(Alignment.TopCenter))
+                }
             }
+        }
+    }
+}
+
+/**
+ * A remote signer waiting for approval in a browser (NIP-46 `auth_url`, R-77):
+ * a tappable link over whatever screen is up, until the call it approves settles.
+ */
+@Composable
+private fun SignerApprovalBanner(modifier: Modifier) {
+    val url by Nip46Approvals.url.collectAsState()
+    val link = url ?: return
+    val s = LocalStrings.current
+    val ctx = LocalContext.current
+    val t = LocalTokens.current
+    // Opaque underlay: the warn tint is translucent and the screen scrolls beneath.
+    Box(modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 8.dp).clip(RoundedCornerShape(12.dp)).background(t.bgRaised)) {
+        Notice(s.t("signin.remote.authRequired"), t.warnSoft) {
+            SmallButton(s.t("signin.remote.openAuth"), {
+                runCatching { ctx.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(link))) }
+            }, selected = true)
+            SmallButton(s.t("logout.dismiss"), { Nip46Approvals.dismiss() })
         }
     }
 }
