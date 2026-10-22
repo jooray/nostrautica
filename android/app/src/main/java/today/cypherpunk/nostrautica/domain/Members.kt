@@ -97,17 +97,20 @@ class Members(
     suspend fun fetchRoster(ctx: EventContext, owner: String): RosterContent? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { fetchRosterOffMain(ctx, owner) }
 
     private suspend fun fetchRosterOffMain(ctx: EventContext, owner: String): RosterContent? {
-        val c = ctx.coord
         val authors = acceptedAuthors(ctx)
-        nostr.fetch(ctx.relays, Filter(kinds = listOf(Kinds.ROSTER), authors = authors, tags = mapOf("d" to listOf(c.identifier))))
-        val latest = authors.mapNotNull { nostr.store.latest(Kinds.ROSTER, it, c.identifier) }.let(Ordering::pickLatest)
+        // Both page-0 addresses (NIP §6.2.2), and only a record naming THIS space: a
+        // same-named space on the same coordinator shares the legacy `d` (audit R-53).
+        val page0Ds = Roster.page0Ds(ctx.coordinate)
+        nostr.fetch(ctx.relays, Filter(kinds = listOf(Kinds.ROSTER), authors = authors, tags = mapOf("d" to page0Ds)))
+        val latest = authors.flatMap { a -> page0Ds.mapNotNull { d -> nostr.store.latest(Kinds.ROSTER, a, d) } }
+            .filter { Roster.isPageFor(ctx.coordinate, page0Ds, it.tags) }.let(Ordering::pickLatest)
             ?: return RosterContent(2, 1, null, null, emptyList()).also { cache.put(owner, rosterKey(ctx.coordinate), RosterContent.serializer(), it, 0) }
         val eck = eckFor(owner, ctx.coordinate, latest.tag("eck")) ?: return null
         val page0 = decryptRoster(eck, latest) ?: return null
         val pages = Roster.pageCountOf(page0)
         var roster = page0
         if (pages > 1) {
-            val ds = Roster.continuationDs(c.identifier, pages)
+            val ds = Roster.continuationDs(latest.tag("d") ?: page0Ds.first(), pages)
             nostr.fetch(ctx.relays, Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(latest.pubkey), tags = mapOf("d" to ds)))
             val rest = ds.map { d ->
                 val e = nostr.store.latest(Kinds.ROSTER, latest.pubkey, d)?.takeIf { ev -> ev.tag("a") == ctx.coordinate } ?: return null

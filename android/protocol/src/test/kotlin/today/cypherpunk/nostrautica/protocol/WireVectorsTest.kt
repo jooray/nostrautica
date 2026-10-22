@@ -79,6 +79,21 @@ class WireVectorsTest {
         assertEquals(emptyList<String>(), Roster.continuationDs("x", -3))
     }
 
+    @Test fun spaceRecordsDMatchesTs() {
+        val coord = ts["coordinate"]!!.jsonPrimitive.content
+        assertEquals(ts["spaceRecordsD"]!!.jsonPrimitive.content, Roster.spaceRecordsD(coord))
+        assertEquals(listOf(Roster.spaceRecordsD(coord), "plan-b:2026"), Roster.page0Ds(coord))
+        // Audit R-53: a same-named space elsewhere gets a different address, and its record
+        // at the shared legacy `d` is not ours.
+        val other = "31923:${"b".repeat(64)}:plan-b:2026"
+        assertTrue(Roster.spaceRecordsD(other) != Roster.spaceRecordsD(coord))
+        val ds = Roster.page0Ds(coord)
+        assertTrue(Roster.isPageFor(coord, ds, listOf(listOf("d", "plan-b:2026"), listOf("a", coord))))
+        assertTrue(!Roster.isPageFor(coord, ds, listOf(listOf("d", "plan-b:2026"), listOf("a", other))))
+        assertTrue(Roster.isPageFor(coord, ds, listOf(listOf("d", "plan-b:2026"))))
+        assertTrue(!Roster.isPageFor(coord, ds, listOf(listOf("d", "plan-b:2026:1"), listOf("a", coord))))
+    }
+
     @Test fun smallRosterIsUntouched() {
         val r = RosterContent(2, 1, null, null, listOf(RosterAttendee(pk, "d", "attendee")))
         assertSame(r, Roster.split(r).single())

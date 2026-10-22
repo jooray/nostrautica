@@ -588,6 +588,23 @@ describe("roster read-modify-write safety", () => {
     expect(fetchEventsRelayOnly).toHaveBeenCalledTimes(1);
   });
 
+  // Audit R-53: the legacy roster address is shared with any same-named space on
+  // the coordinator. A newer record there that names ANOTHER coordinate is not
+  // this event's roster, and must not turn every approve/revoke into a refusal.
+  it("ignores a same-named space's newer roster at the shared legacy address", async () => {
+    const neighbour = {
+      ...rosterEvent([], 9000, eckEncrypt(generateEck(), JSON.stringify({ v: 2, eck_current: 1, attendees: [] }))),
+      id: "neighbour",
+      tags: [["d", IDENTIFIER], ["a", `31923:${getPublicKey(generateSecretKey())}:${IDENTIFIER}`], ["eck", "1"], ["v", "2"]],
+    };
+    fetchEventsRelayOnly.mockResolvedValue([neighbour, rosterEvent([{ pubkey: ALICE, d: "d-alice", role: "attendee" }])]);
+
+    const read = await loadRoster(ctx, ECK_BYTES);
+
+    expect(read.state).toBe("ok");
+    expect(read.state === "ok" && read.roster.attendees.map((a) => a.pubkey)).toEqual([ALICE]);
+  });
+
   it("still publishes the first roster on an event that has never had one", async () => {
     // The genuine first approval must keep working — the tripwire only fires once
     // this device has actually seen or written a roster for the event.

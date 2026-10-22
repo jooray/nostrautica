@@ -26,6 +26,7 @@ import {
   KIND_DIRECTORY_ENTRY,
   splitRoster,
   rosterPageD,
+  spaceRecordsD,
   type RosterContent,
   type EventConfig,
 } from "@nostrautica/protocol";
@@ -252,12 +253,12 @@ describe("reading a paginated roster", () => {
     });
   }
 
-  function pageEvent(page: RosterContent, index: number, createdAt = 100) {
+  function pageEvent(page: RosterContent, index: number, createdAt = 100, base = "warm-event") {
     return finalizeEvent(
       {
         kind: KIND_ROSTER,
         created_at: createdAt,
-        tags: [["d", rosterPageD("warm-event", index)], ["a", coordinate]],
+        tags: [["d", rosterPageD(base, index)], ["a", coordinate]],
         content: eckEncrypt(eck, JSON.stringify(page)),
       },
       coordSk,
@@ -270,9 +271,10 @@ describe("reading a paginated roster", () => {
     const promise = fetchRoster(ctx);
     await settleMicrotasks();
 
-    // First REQ: page 0 alone, at the event's own d.
+    // First REQ: page 0 alone, at both of its addresses (the derived one and
+    // the event's own d, PROTOCOL-NIP.md §6.2.2).
     expect(ofKind(KIND_ROSTER)).toHaveLength(1);
-    expect(ofKind(KIND_ROSTER)[0].ds).toEqual(["warm-event"]);
+    expect(ofKind(KIND_ROSTER)[0].ds).toEqual([spaceRecordsD(coordinate), "warm-event"]);
     ofKind(KIND_ROSTER)[0].settle([pageEvent(pages[0]!, 0)]);
     await settleMicrotasks();
 
@@ -325,6 +327,40 @@ describe("reading a paginated roster", () => {
     ofKind(KIND_ROSTER)[1].settle([impostor, ...pages.slice(2).map((p, i) => pageEvent(p, i + 2))]);
 
     expect(await promise).toBeUndefined();
+  });
+
+  it("follows a page 0 at the derived address to continuation pages under it", async () => {
+    const pages = paginated(600);
+    const base = spaceRecordsD(coordinate);
+    const promise = fetchRoster(ctx);
+    await settleMicrotasks();
+    ofKind(KIND_ROSTER)[0].settle([pageEvent(pages[0]!, 0, 100, base)]);
+    await settleMicrotasks();
+    expect(ofKind(KIND_ROSTER)[1].ds).toEqual(pages.slice(1).map((_, i) => rosterPageD(base, i + 1)));
+    ofKind(KIND_ROSTER)[1].settle(pages.slice(1).map((p, i) => pageEvent(p, i + 1, 100, base)));
+
+    expect((await promise)?.attendees).toHaveLength(600);
+  });
+
+  // Audit R-53: a same-named space on the same coordinator publishes at the
+  // shared legacy address. Its record is newer, signed by the very coordinator
+  // this event trusts, and sealed under an ECK we do not hold; picking it as
+  // "latest" left this event's People screen empty.
+  it("a same-named space's newer record at the legacy address does not shadow ours", async () => {
+    const promise = fetchRoster(ctx);
+    await settleMicrotasks();
+    const neighbour = finalizeEvent(
+      {
+        kind: KIND_ROSTER,
+        created_at: 500,
+        tags: [["d", "warm-event"], ["a", makeCoordinate(getPublicKey(generateSecretKey()), "warm-event")]],
+        content: eckEncrypt(generateEck(), JSON.stringify({ v: 2, eck_current: 1, attendees: [] })),
+      },
+      coordSk,
+    );
+    ofKind(KIND_ROSTER)[0].settle([neighbour, rosterEvent(100)]);
+
+    expect((await promise)?.attendees).toHaveLength(2);
   });
 
   it("a roster that fits still costs exactly one relay read", async () => {

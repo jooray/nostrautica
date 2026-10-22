@@ -1,20 +1,48 @@
 package today.cypherpunk.nostrautica.protocol
 
 /**
- * Roster pagination (roster.ts, NIP §6.2.1). Page 0 lives at the event's own `d`,
- * page N at `<d>:N`; page 0's `pages` says how many there are.
+ * Roster pagination (roster.ts, NIP §6.2.1). Page 0 lives at a base `d`, page N at
+ * `<base>:N`; page 0's `pages` says how many there are. The base is [spaceRecordsD]
+ * for a coordinator and the event's own `d` for E_id (or a legacy publish, §6.2.2).
  */
 object Roster {
     const val PAGE_TARGET_BYTES = 60_000
 
-    fun pageD(identifier: String, page: Int): String {
-        require(page >= 0) { "roster page index must be a non-negative integer, got $page" }
-        return if (page == 0) identifier else "$identifier:$page"
+    private const val SPACE_RECORDS_D_TAG = "nostrautica-space-records-v2"
+
+    /**
+     * The `d` a coordinator publishes a space's 31604 page 0 and 31606 at (audit R-53):
+     * hex(sha256(JSON.stringify([tag, coordinate]))), so two same-named spaces on one
+     * coordinator no longer share an address. Matches spaceRecordsD in roster.ts.
+     */
+    fun spaceRecordsD(coordinate: String): String {
+        val sb = StringBuilder("[")
+        JsJson.appendQuoted(sb, SPACE_RECORDS_D_TAG)
+        sb.append(',')
+        JsJson.appendQuoted(sb, coordinate)
+        return Bytes.sha256Hex(Bytes.utf8(sb.append(']').toString()))
     }
 
-    /** Pages 1..pages-1, the count clamped to MAX_ROSTER_PAGES like roster.ts (audit R-54). */
-    fun continuationDs(identifier: String, pages: Int): List<String> =
-        (1 until pages.coerceIn(1, Limits.MAX_ROSTER_PAGES)).map { pageD(identifier, it) }
+    /** Both page-0 addresses a reader asks for, derived first, then the event `d`. */
+    fun page0Ds(coordinate: String): List<String> =
+        listOf(spaceRecordsD(coordinate), Coordinate.parse(coordinate).identifier).distinct()
+
+    /** A 31604 at one of [ds] whose `a` tag, when present, names [coordinate] (isRosterPageFor). */
+    fun isPageFor(coordinate: String, ds: List<String>, tags: List<List<String>>): Boolean {
+        val d = tags.firstOrNull { it.size >= 2 && it[0] == "d" }?.get(1) ?: return false
+        if (d !in ds) return false
+        val a = tags.firstOrNull { it.size >= 2 && it[0] == "a" }?.get(1)
+        return a == null || a == coordinate
+    }
+
+    fun pageD(base: String, page: Int): String {
+        require(page >= 0) { "roster page index must be a non-negative integer, got $page" }
+        return if (page == 0) base else "$base:$page"
+    }
+
+    /** Pages 1..pages-1 under [base] (page 0's own `d`), the count clamped to MAX_ROSTER_PAGES like roster.ts (audit R-54). */
+    fun continuationDs(base: String, pages: Int): List<String> =
+        (1 until pages.coerceIn(1, Limits.MAX_ROSTER_PAGES)).map { pageD(base, it) }
 
     fun pageCountOf(page0: RosterContent): Int = page0.pages ?: 1
 

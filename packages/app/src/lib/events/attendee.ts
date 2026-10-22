@@ -30,6 +30,8 @@ import {
   isCommunityCoordinate,
   mergeRosterPages,
   rosterContinuationDs,
+  rosterPage0Ds,
+  isRosterPageFor,
   rosterPageD,
   parseEventConfig,
   parsePayloadSafe,
@@ -1036,17 +1038,26 @@ async function fetchRosterOnce(
   const held = await heldFor(ctx.coordinate, scope.keysOwner);
   if (!held) return undefined;
   const authors = acceptedRecordAuthors(ctx);
-  const { identifier } = parseCoordinate(ctx.coordinate);
+  // Both page-0 addresses in one filter (PROTOCOL-NIP.md §6.2.2): the coordinator's
+  // derived one, and the event `d` that E_id and older coordinators write.
+  const page0Ds = rosterPage0Ds(ctx.coordinate);
   // Streamed one-shot: first EOSE + grace instead of the slowest relay — this
   // read gates the whole People screen ("Decrypting the roster…").
   const events = await streamEvents(
-    { kinds: [KIND_ROSTER], authors, "#d": [identifier] },
+    { kinds: [KIND_ROSTER], authors, "#d": page0Ds },
     { relays: ctx.config.relays },
   ).ready;
   // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7): only a
   // record authored by the CURRENTLY assigned coordinator (or E_id) is trusted, so
   // a hostile relay or cached event from a formerly assigned coordinator is dropped.
-  const latest = pickLatest(onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)));
+  // And only one naming THIS space (audit R-53): a same-named space on the same
+  // coordinator can hold the legacy address, and its newer record must not
+  // shadow ours.
+  const latest = pickLatest(
+    onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)).filter((e) =>
+      isRosterPageFor(ctx.coordinate, page0Ds, e.tags),
+    ),
+  );
   if (!latest) return { v: 2, eck_current: 1, attendees: [] };
   // The roster is authored by the coordinator (or E_id) — a trusted authority
   // (onlyVerified + directoryPublisher). Distinguish a newer-protocol roster
@@ -1073,7 +1084,8 @@ async function fetchRosterOnce(
   const pages = parsed.value.pages ?? 1;
   let roster = parsed.value;
   if (pages > 1) {
-    const rest = await fetchRosterContinuation(ctx, eck, latest.pubkey!, pages);
+    const base = latest.tags?.find((t) => t[0] === "d")?.[1] ?? page0Ds[0]!;
+    const rest = await fetchRosterContinuation(ctx, eck, latest.pubkey!, pages, base);
     if (!rest) {
       console.warn(`[roster] ${ctx.coordinate}: page 0 says ${pages} pages, not all of them read`);
       return undefined;
@@ -1089,19 +1101,21 @@ async function fetchRosterOnce(
  * page 0 we just accepted. `undefined` if any page is missing, authored by
  * someone else, addressed to another coordinate, or will not decrypt.
  *
- * The `a`-tag check matters because page N is addressed `<event-d>:N`, which a
- * DIFFERENT space under the same coordinator could hold as its own `d`. The
- * content is ECK-encrypted per event, so the worst such a collision could do is
- * withhold a page — but withholding it silently is exactly what must not happen.
+ * `base` is page 0's own `d`, so the pages follow whichever address family page
+ * 0 came from. The `a`-tag check matters because under the legacy base page N
+ * is `<event-d>:N`, which a DIFFERENT space under the same coordinator could hold
+ * as its own `d`. The content is ECK-encrypted per event, so the worst such a
+ * collision could do is withhold a page — but withholding it silently is exactly
+ * what must not happen.
  */
 async function fetchRosterContinuation(
   ctx: EventContext,
   eck: Uint8Array,
   author: string,
   pages: number,
+  base: string,
 ): Promise<RosterContent[] | undefined> {
-  const { identifier } = parseCoordinate(ctx.coordinate);
-  const ds = rosterContinuationDs(identifier, pages);
+  const ds = rosterContinuationDs(base, pages);
   const events = await streamEvents(
     { kinds: [KIND_ROSTER], authors: [author], "#d": ds },
     { relays: ctx.config.relays },
@@ -1111,7 +1125,7 @@ async function fetchRosterContinuation(
   );
   const out: RosterContent[] = [];
   for (let page = 1; page < pages; page++) {
-    const d = rosterPageD(identifier, page);
+    const d = rosterPageD(base, page);
     const latest = pickLatest(usable.filter((e) => e.tags?.some((t) => t[0] === "d" && t[1] === d)));
     if (!latest) return undefined;
     try {

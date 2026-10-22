@@ -251,8 +251,9 @@ therefore has protocol consequences beyond the coordinator's own state:
   allows, and from reprocessing otherwise), so that record-authority pinning (above) never
   leaves members without a readable directory.
 - **Handover roster authority.** Being able to decrypt a `31604` is not authority to
-  define membership: its `d` is the event's public `d`, so anyone can publish there, and
-  every current or former attendee holds an ECK version that decrypts it. A bootstrapping
+  define membership: its `d` is public (the event's `d`, or one derived from the public
+  coordinate, §6.2.2), so anyone can publish there, and every current or former attendee
+  holds an ECK version that decrypts it. A bootstrapping
   coordinator **MUST** adopt a roster (every page of it, §6.2) and the directory entries it
   seeds from only when it is authored by `E_id` or by the coordinator named in the
   `prev_coordinator` field of the `E_id`-sealed `21603` that installed it, and **MUST
@@ -360,9 +361,9 @@ randomized up to 2 days into the past).
 | 31601 | Invite List | `E_id` | public (hash-hidden) | event `d` |
 | 31602 | Self profile / reuse library | account | NIP-44 self | blinded |
 | 31603 | Directory Entry | coordinator (or `E_id`) | ECK | blinded |
-| 31604 | Roster | coordinator (or `E_id`) | ECK | event `d` |
+| 31604 | Roster | coordinator (or `E_id`) | ECK | derived (coordinator), event `d` (`E_id`), §6.2.2 |
 | 31605 | Match List | coordinator | NIP-44 → recipient | blinded |
-| 31606 | Match Matrix | coordinator | ECK | event `d` |
+| 31606 | Match Matrix | coordinator | ECK | derived, §6.2.2 |
 | 31607 | Members-only Post | `E_id` | ECK | random stable |
 | 31608 | Event Page | `E_id` | public + ECK `private` | event `d` |
 | 31609 | Event Theme | `E_id` | public | event `d` |
@@ -575,8 +576,10 @@ silently drop them.
 #### `31604`: Roster
 
 - **Class:** parameterized-replaceable. **Signer:** the coordinator, or `E_id` without
-  one. **Sealing:** ECK. **`d`:** event `d` for page 0 (not blinded); `<event-d>:N` for
-  page N of a paginated roster (see below).
+  one. **Sealing:** ECK. **`d`:** a page-0 base `<base>` (not blinded) and `<base>:N` for
+  page N of a paginated roster (see below). For a coordinator the base is
+  `spaceRecordsD(coordinate)`, with the event `d` as a transitional alias; for `E_id` it
+  is the event `d` (§6.2.2).
 - **Tags:** `["d", <page-d>]`, `["a", <coordinate>]`, `["eck", <version>]`, `["v","2"]`.
   The `v` TAG is `"2"` on every page, including a paginated one — the event envelope is
   unchanged; it is the payload that declares a version.
@@ -619,16 +622,21 @@ silently drop them.
 ##### 6.2.1 Roster pagination
 
 A roster that fits in one NIP-44 payload is published exactly as it always was: one
-31604 at the event's `d`, `v: 2`, no `pages` key, byte-identical to what shipped before
-this section existed. **Nothing below applies to it**, and that covers every event and
-community under a few hundred members.
+31604 at its base `d` (§6.2.2), `v: 2`, no `pages` key, byte-identical to what shipped
+before this section existed. **Nothing below applies to it**, and that covers every
+event and community under a few hundred members.
 
 A roster that does not fit is split across several 31604s under the same author:
 
 | page | `d` | carries |
 |---|---|---|
-| 0 | `<event-d>` | `pages`, `eck_current`, `nostr_group_id`, the first entries |
-| N | `<event-d>:N` | `eck_current`, the next entries |
+| 0 | `<base>` | `pages`, `eck_current`, `nostr_group_id`, the first entries |
+| N | `<base>:N` | `eck_current`, the next entries |
+
+The continuation pages hang off the base page 0 was read from: a reader passes page 0's
+own `d` as `<base>`. A reader **MUST** clamp the page count it builds a request from to
+`MAX_ROSTER_PAGES` (a `pages` outside 2..40 is a schema violation anyway, and the
+payload is validated before its count is used).
 
 `eck_current` and `nostr_group_id` are read from page 0 and are authoritative for the
 whole roster; a continuation page repeats `eck_current` only because the payload schema
@@ -638,9 +646,9 @@ actually changed, or one approval costs one relay publish per page for the lengt
 event. A reader fetches page 0, learns `pages`, and fetches 1..N-1 in a single REQ
 (`#d: ["<d>:1", "<d>:2", …]`) — two round trips, whatever the size.
 
-Because `<event-d>:N` could also be some *other* space's own `d` under the same
-coordinator, a reader **MUST** check a continuation page's `["a", <coordinate>]` tag as
-well as its author. The content is ECK-sealed per event, so a collision can only
+Because under the legacy base `<event-d>:N` could also be some *other* space's own `d`
+under the same coordinator, a reader **MUST** check a continuation page's
+`["a", <coordinate>]` tag as well as its author. The content is ECK-sealed per event, so a collision can only
 withhold a page, never forge one — but withholding it must not pass unnoticed. A reader
 that cannot read every page **MUST NOT** present the pages it did read as the roster; a
 partial membership list is indistinguishable from an event that shrank.
@@ -669,6 +677,64 @@ list and `21xxx` rumor on the network — a full wire-v3 flag day across every k
 solve a problem in exactly one of them. The bump is therefore scoped to the payload that
 has the problem. `31604` is the only kind whose `v` may be `2` **or** `3`; every other
 payload keeps the strict literal-2 parse of §2.
+
+##### 6.2.2 Coordinator record addresses (wire change, 2026-10)
+
+One coordinator signs for every space it serves, so the address of a record it publishes
+is `(kind, coordinator, d)`. Until this change the coordinator's roster page 0 and its
+`31606` used the space's bare identifier as `d`, and the identifier is not unique across
+spaces: anyone can install a space on an open coordinator, and the identifier is public
+(it is in every naddr and every `a` tag). Two spaces named `summit` therefore shared one
+roster address. The later publish became the current record for both, so the other
+space's members read a roster sealed under an ECK they do not hold, which is no roster at
+all; and one space's retention sweep NIP-09-deleted the other's roster (audit R-53).
+
+A coordinator now publishes both at a `d` derived from the whole coordinate:
+
+```
+spaceRecordsD(coordinate) = hex(sha256(utf8(JSON.stringify(["nostrautica-space-records-v2", coordinate]))))
+```
+
+The coordinate carries the space's kind and `E_id`, so two spaces never share it, and a
+64-hex base contains no `:`, so one space's page N (`<base>:N`) is never another's page
+0. Nothing has to be checked at install time, so there is no window in which a squatter
+who learns a space's identifier before it attaches can claim its address.
+
+- **Coordinator writers** **MUST** publish roster page 0 at `spaceRecordsD(coordinate)`
+  and page N at `<that>:N`, and the `31606` at `spaceRecordsD(coordinate)`. During the
+  transition they **SHOULD** also publish each roster page at the legacy address
+  (`<event-d>`, `<event-d>:N`) so clients that predate this section keep reading. They
+  **MUST NOT** publish the legacy alias for an identifier matching
+  `^[0-9a-f]{64}(:|$)`, because that alias could be another space's derived page. No
+  legacy `31606` is published, since no client reads the matrix.
+- **`E_id` writers** keep the event `d`: E_id's address is already unique to its space.
+- **Readers** **MUST** request page 0 at both addresses in one filter
+  (`#d: [spaceRecordsD(coordinate), <event-d>]`), **MUST** drop a record whose
+  `["a", …]` tag names a different coordinate (a record without an `a` tag predates the
+  tag and is accepted), then apply §3.1 across what is left. Continuation pages follow
+  the base of the page 0 they accepted. A coordinator bootstrapping a handover (§3.7)
+  reads the same way.
+- **Upgrade.** A coordinator upgrading to this section republishes, once per event, the
+  roster of every live event it has not yet published at the derived address (and the
+  `31606` of one that has a matrix), so readers stop falling back to the shared alias
+  without waiting for the next membership change.
+- **Deletion.** Retention and visibility-change deletions cover the derived addresses and,
+  for the legacy alias, only the addresses no other live space on the same coordinator
+  also occupies (§12).
+
+Compatibility, by pairing:
+
+| coordinator | client | outcome |
+|---|---|---|
+| new | new | reads the derived address; a same-named space can no longer withhold or delete it |
+| new | old | reads the legacy alias, exactly as before, still exposed to R-53 until it updates |
+| old | new | finds nothing at the derived address, falls back to the legacy one, as before |
+| old | old | unchanged |
+
+The legacy alias is a transition measure. A later release stops publishing it, after
+which a client that predates this section reads no coordinator-published roster and must
+update; deletions of legacy addresses continue regardless. No `v` changes: the payloads
+and the event envelope are unchanged, only the address moved.
 
 #### `31605`: Match List
 
@@ -704,8 +770,8 @@ payload keeps the strict literal-2 parse of §2.
 
 - **Class:** parameterized-replaceable, opt-in (published only when the event's
   `match_visibility` is `"event"`). **Signer:** the coordinator. **Sealing:** ECK.
-- **`d`:** event `d`. **Tags:** `["d", <event-d>]`, `["a", <coordinate>]`,
-  `["eck", <version>]`, `["v","2"]`.
+- **`d`:** `spaceRecordsD(coordinate)` (§6.2.2; the event `d` before that change).
+  **Tags:** `["d", <that>]`, `["a", <coordinate>]`, `["eck", <version>]`, `["v","2"]`.
 - **Content:**
   ```
   { v: 2, computed_at: int, pairs: [{ a: hex32, b: hex32, score: number }] ≤200000 }
@@ -1381,8 +1447,12 @@ downgrade, and obsolete `31610` addresses after rotation or rejection. Deletion 
 best-effort; the privacy model never depends on relays honoring it.
 
 A retention sweep that deletes a `31604` **MUST** cover every page address the roster
-could have used (`<event-d>` and `<event-d>:1`…`<event-d>:39`), not only the pages it
-currently has. A roster that grew and later shrank leaves higher pages on relays that no
+could have used (`<base>` and `<base>:1`…`<base>:39`, for the derived base and for the
+legacy `<event-d>` alias, §6.2.2), not only the pages it currently has. A coordinator
+**MUST NOT** delete a legacy address that another live space it serves also occupies
+(one of its legacy page addresses equals one of this space's):
+that address is shared, and deleting it deletes the other space's roster. The same holds
+for the legacy `31606` address. A roster that grew and later shrank leaves higher pages on relays that no
 reader asks for — `pages` on page 0 says they are not there — but they still hold member
 pubkeys, and nothing records how many pages an event ever had. Deleting an address that
 was never published is a no-op at the relay; missing one leaves member data behind.

@@ -6,8 +6,9 @@
  * device ~265, so a single-payload roster runs out somewhere between roughly 240
  * and 480 approved members — while `MAX_ROSTER` advertises 2,000 and a community
  * (31612) is a standing group that only ever grows. Past that ceiling the roster
- * is split across several 31604s addressed `<event-d>`, `<event-d>:1`,
- * `<event-d>:2`, … with a `pages` count on page 0.
+ * is split across several 31604s addressed `<base>`, `<base>:1`, `<base>:2`, …
+ * with a `pages` count on page 0, where `<base>` is {@link spaceRecordsD} for a
+ * coordinator and the event `d` for E_id.
  *
  * Two properties this module exists to guarantee, because getting either wrong
  * is worse than the ceiling was:
@@ -29,6 +30,9 @@
  * {@link ROSTER_PAGED_VERSION} in schemas.ts for why that `v` is a local
  * exception rather than a repo-wide wire bump.
  */
+import { sha256 } from "@noble/hashes/sha256";
+import { bytesToHex, utf8ToBytes } from "@noble/hashes/utils";
+import { parseCoordinate } from "./coordinate.js";
 import { NIP44_MAX_PLAINTEXT_BYTES, utf8ByteLength } from "./event-page.js";
 import {
   MAX_ROSTER,
@@ -53,21 +57,105 @@ import {
 export const ROSTER_PAGE_TARGET_BYTES = 60_000;
 
 /**
- * The `d` of roster page `page`. Page 0 is the event's own `d` — unchanged,
- * which is what keeps an unpaginated roster at exactly the address it has always
- * been at — and page N is `<event-d>:N`.
+ * Domain tag for {@link spaceRecordsD}, versioned like this package's other
+ * hashed tags (`nostrautica-invite-v2`, …).
+ */
+const SPACE_RECORDS_D_TAG = "nostrautica-space-records-v2";
+
+/**
+ * The `d` under which a COORDINATOR publishes a space's roster (31604, page 0)
+ * and match matrix (31606): `hex(sha256(JSON.stringify([tag, coordinate])))`
+ * (PROTOCOL-NIP.md §6.2.2).
  *
- * The suffix could in principle collide with a DIFFERENT space whose own `d`
- * literally ends in `:N` under the same coordinator. Readers close that by
+ * Why not the space's own `d`, as before (audit R-53): one coordinator signs for
+ * every space it serves, so its replaceable address is `(kind, coordinator, d)`
+ * and the space's E_id is not part of it. Two spaces on one coordinator with the
+ * same identifier, which anyone can arrange since installs are open and the
+ * identifier is public, shared ONE roster address: the later publish withheld
+ * the other space's roster from every reader, and one space's retention sweep
+ * NIP-09-deleted the other's. Hashing the whole coordinate (kind, E_id,
+ * identifier) gives every space its own address by construction, so there is
+ * no install-time check to race.
+ *
+ * Page N is `<this>:N` ({@link rosterPageD}). A 64-hex base contains no `:`, so
+ * one space's page N cannot be another space's page 0 either.
+ *
+ * `E_id`-authored rosters keep the event `d` ({@link legacyRosterD}): E_id's
+ * address is already unique to its space, and keeping it there is what lets an
+ * older coordinator still bootstrap a handover from it.
+ */
+export function spaceRecordsD(coordinate: string): string {
+  return bytesToHex(sha256(utf8ToBytes(JSON.stringify([SPACE_RECORDS_D_TAG, coordinate]))));
+}
+
+/**
+ * The pre-R-53 page-0 address: the space's own `d`. Still what `E_id` writes,
+ * and still published by the coordinator next to {@link spaceRecordsD} during
+ * the transition, so a client that predates the derived address keeps reading.
+ */
+export function legacyRosterD(coordinate: string): string {
+  return parseCoordinate(coordinate).identifier;
+}
+
+/**
+ * The page-0 addresses a reader asks for, in ONE `#d` filter: the derived one
+ * first, then the legacy one. Whichever record it accepts (see
+ * {@link isRosterPageFor}) is the base its continuation pages hang off: pass
+ * that record's own `d` to {@link rosterContinuationDs}.
+ */
+export function rosterPage0Ds(coordinate: string): string[] {
+  const derived = spaceRecordsD(coordinate);
+  const legacy = legacyRosterD(coordinate);
+  return derived === legacy ? [derived] : [derived, legacy];
+}
+
+/**
+ * True when a space identifier is shaped like a derived base (64 lowercase hex,
+ * alone or followed by `:`). Such a space's LEGACY roster address could be
+ * another space's derived page address, so a coordinator never publishes (or
+ * deletes) the legacy alias for it. No Nostrautica client mints one (they mint
+ * `<slug>-<8 hex>`), so nothing legitimate loses anything.
+ */
+export function legacyRosterDCollidesWithDerived(identifier: string): boolean {
+  return /^[0-9a-f]{64}(:|$)/.test(identifier);
+}
+
+/**
+ * Whether a fetched 31604 is a page of THIS space's roster: its `d` is one of
+ * `ds` and its `["a", …]` tag, when present, names `coordinate`. The `a` check
+ * is what keeps another space's record at a shared legacy address (or at
+ * `<legacy-d>:N`) from being read as ours. A record with no `a` tag predates the
+ * tag and is accepted: nobody but this space's own authors can write the
+ * derived address in the first place.
+ */
+export function isRosterPageFor(
+  coordinate: string,
+  ds: readonly string[],
+  tags: readonly (readonly string[])[] | undefined,
+): boolean {
+  if (!tags) return false;
+  const d = tags.find((t) => t[0] === "d")?.[1];
+  if (d === undefined || !ds.includes(d)) return false;
+  const a = tags.find((t) => t[0] === "a")?.[1];
+  return a === undefined || a === coordinate;
+}
+
+/**
+ * The `d` of roster page `page` under `base`, the page-0 `d` the roster lives
+ * at: {@link spaceRecordsD} for a coordinator, the event `d` for E_id or a
+ * legacy publish. Page 0 is `base` itself and page N is `<base>:N`.
+ *
+ * Under a LEGACY base the suffix could collide with a DIFFERENT space whose own
+ * `d` literally ends in `:N` under the same coordinator. Readers close that by
  * requiring the page's `["a", <coordinate>]` tag to name the event they asked
  * about; the content is ECK-encrypted per event anyway, so the worst a collision
  * could do is withhold a page, never forge one.
  */
-export function rosterPageD(identifier: string, page: number): string {
+export function rosterPageD(base: string, page: number): string {
   if (!Number.isInteger(page) || page < 0) {
     throw new Error(`roster page index must be a non-negative integer, got ${page}`);
   }
-  return page === 0 ? identifier : `${identifier}:${page}`;
+  return page === 0 ? base : `${base}:${page}`;
 }
 
 /**
@@ -76,9 +164,9 @@ export function rosterPageD(identifier: string, page: number): string {
  * page 0, and a hostile `pages: 1e9` must cost a 40-entry array, not gigabytes
  * allocated before any schema has looked at it.
  */
-export function rosterPageDs(identifier: string, pages: number): string[] {
+export function rosterPageDs(base: string, pages: number): string[] {
   const n = Number.isFinite(pages) ? Math.min(MAX_ROSTER_PAGES, Math.max(1, Math.floor(pages))) : 1;
-  return Array.from({ length: n }, (_, i) => rosterPageD(identifier, i));
+  return Array.from({ length: n }, (_, i) => rosterPageD(base, i));
 }
 
 /**
@@ -87,8 +175,8 @@ export function rosterPageDs(identifier: string, pages: number): string[] {
  * did not paginate, which is the case a reader should never spend a round trip
  * on. Clamped like {@link rosterPageDs}.
  */
-export function rosterContinuationDs(identifier: string, pages: number): string[] {
-  return rosterPageDs(identifier, pages).slice(1);
+export function rosterContinuationDs(base: string, pages: number): string[] {
+  return rosterPageDs(base, pages).slice(1);
 }
 
 /** How many pages page 0 says the roster has (1 when it is not paginated). */

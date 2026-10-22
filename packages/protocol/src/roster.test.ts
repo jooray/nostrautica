@@ -18,7 +18,12 @@ import {
   ROSTER_PAGED_VERSION,
   eckDecrypt,
   eckEncrypt,
+  isRosterPageFor,
+  legacyRosterD,
+  legacyRosterDCollidesWithDerived,
   mergeRosterPages,
+  rosterPage0Ds,
+  spaceRecordsD,
   parsePayloadSafe,
   rosterContentSchema,
   rosterContinuationDs,
@@ -95,6 +100,53 @@ describe("roster page addressing (§6.2)", () => {
   it("rejects a negative or fractional page index rather than inventing an address", () => {
     expect(() => rosterPageD("d", -1)).toThrow(/non-negative integer/);
     expect(() => rosterPageD("d", 1.5)).toThrow(/non-negative integer/);
+  });
+
+  it("gives every space its own coordinator address, whatever its identifier (audit R-53)", () => {
+    const eidA = "a".repeat(64);
+    const eidB = "b".repeat(64);
+    const a = `31923:${eidA}:summit`;
+    const b = `31923:${eidB}:summit`;
+    // The legacy address is the bare identifier: the same for both spaces.
+    expect(legacyRosterD(a)).toBe(legacyRosterD(b));
+    // The derived one hashes the whole coordinate, so it differs.
+    expect(spaceRecordsD(a)).not.toBe(spaceRecordsD(b));
+    expect(spaceRecordsD(a)).toMatch(/^[0-9a-f]{64}$/);
+    // Deterministic, and it is what every implementation must reproduce.
+    expect(spaceRecordsD(a)).toBe(spaceRecordsD(a));
+    // The kind is part of the coordinate too: a community and an event that
+    // happen to share E_id and identifier do not share an address.
+    expect(spaceRecordsD(`31612:${eidA}:summit`)).not.toBe(spaceRecordsD(a));
+    // Page N of one space is never another space's page 0: the base has no ':'.
+    const pageOfA = rosterPageD(spaceRecordsD(a), 1);
+    expect(pageOfA).toBe(`${spaceRecordsD(a)}:1`);
+    expect(spaceRecordsD(`31923:${eidA}:summit:1`)).not.toBe(pageOfA);
+    // A reader asks for both page-0 addresses during the transition, derived first.
+    expect(rosterPage0Ds(a)).toEqual([spaceRecordsD(a), "summit"]);
+  });
+
+  it("accepts a page only at an address asked for and only when its `a` names this space", () => {
+    const coord = `31923:${"a".repeat(64)}:summit`;
+    const other = `31923:${"b".repeat(64)}:summit`;
+    const ds = rosterPage0Ds(coord);
+    expect(isRosterPageFor(coord, ds, [["d", "summit"], ["a", coord]])).toBe(true);
+    expect(isRosterPageFor(coord, ds, [["d", spaceRecordsD(coord)], ["a", coord]])).toBe(true);
+    // A colliding space's record at the shared legacy address.
+    expect(isRosterPageFor(coord, ds, [["d", "summit"], ["a", other]])).toBe(false);
+    // An address nobody asked for.
+    expect(isRosterPageFor(coord, ds, [["d", "summit:1"], ["a", coord]])).toBe(false);
+    // A record that predates the `a` tag.
+    expect(isRosterPageFor(coord, ds, [["d", "summit"]])).toBe(true);
+    expect(isRosterPageFor(coord, ds, undefined)).toBe(false);
+  });
+
+  it("flags identifiers whose legacy alias could be a derived address", () => {
+    const h = "c".repeat(64);
+    expect(legacyRosterDCollidesWithDerived(h)).toBe(true);
+    expect(legacyRosterDCollidesWithDerived(`${h}:3`)).toBe(true);
+    expect(legacyRosterDCollidesWithDerived("summit-2f1a9c0d")).toBe(false);
+    expect(legacyRosterDCollidesWithDerived(`${h}x`)).toBe(false);
+    expect(legacyRosterDCollidesWithDerived("C".repeat(64))).toBe(false);
   });
 
   it("clamps a hostile page count instead of allocating it (audit R-54)", () => {
