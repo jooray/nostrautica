@@ -136,9 +136,7 @@ class BlossomClient(base: OkHttpClient) {
         }
         if (code !in 200..299) throw IOException("Upload to $server failed: $code $reason")
         emit(total)
-        // Take the server's URL only when it points at OUR blob (audit MED-9).
-        val serverUrl = (jsonObjectOf(text)?.get("url") as? JsonPrimitive)?.content?.takeIf { it.contains(sha256) && isAcceptedBlossomUrl(it) }
-        return serverUrl ?: "${trim(server)}/$sha256"
+        return boundReplyUrl(server, sha256, (jsonObjectOf(text)?.get("url") as? JsonPrimitive)?.content)
     }
 
     // ── BUD-04 mirror ───────────────────────────────────────────────────────
@@ -149,8 +147,7 @@ class BlossomClient(base: OkHttpClient) {
         val req = Request.Builder().url("${trim(server)}/mirror").put(body).header("Authorization", header).build()
         mirrorHttp.newCall(req).await().use { res ->
             if (!res.isSuccessful) null
-            else ((jsonObjectOf(res.body.string())?.get("url") as? JsonPrimitive)?.content?.takeIf { it.contains(sha256) && isAcceptedBlossomUrl(it) })
-                ?: "${trim(server)}/$sha256"
+            else boundReplyUrl(server, sha256, (jsonObjectOf(res.body.string())?.get("url") as? JsonPrimitive)?.content)
         }
     } catch (e: Exception) {
         if (e is kotlinx.coroutines.CancellationException) throw e
@@ -183,7 +180,8 @@ class BlossomClient(base: OkHttpClient) {
         val p = primary ?: throw IOException("Upload failed on every candidate server: ${errors.joinToString("; ")}")
         val sha = Bytes.sha256Hex(bytes)
         val mirrored = coroutineScope { rest.map { s -> async { mirror(signer, s, p, sha) } }.awaitAll() }
-        return UploadResult(listOf(p) + mirrored.filterNotNull().filter { it != p }, sha, p)
+        // A mirror whose address fails the rule is dropped, not allowed to fail the whole descriptor.
+        return UploadResult(listOf(p) + mirrored.filterNotNull().filter { it != p && isAcceptedBlossomUrl(it) }, sha, p)
     }
 
     // ── BUD-02 delete ───────────────────────────────────────────────────────
@@ -277,6 +275,22 @@ class BlossomClient(base: OkHttpClient) {
 
         private val buildOrigins by lazy {
             today.cypherpunk.nostrautica.nostr.Relays.BLOSSOM.mapNotNull { runCatching { origin(URI(it.trim())) }.getOrNull() }.toSet()
+        }
+
+        /**
+         * The URL to publish for a blob a [server] just took (audit MED-9, R-20/R-21): its reply
+         * `url` only when it is accepted, on the SAME origin we asked, and its last path segment
+         * starts with our hash; otherwise the BUD-01 address every server must serve. A substring
+         * check let `https://evil.example/?x=<sha>` through as the blob's location.
+         */
+        fun boundReplyUrl(server: String, sha256: String, reply: String?): String {
+            val fallback = "${trim(server)}/$sha256"
+            val r = reply?.trim()?.takeIf { it.isNotEmpty() && isAcceptedBlossomUrl(it) } ?: return fallback
+            val u = runCatching { URI(r) }.getOrNull() ?: return fallback
+            val s = runCatching { URI(trim(server.trim())) }.getOrNull() ?: return fallback
+            if (origin(u) != origin(s)) return fallback
+            val last = u.rawPath?.substringAfterLast('/') ?: return fallback
+            return if (last.lowercase().startsWith(sha256.lowercase())) r else fallback
         }
 
         internal fun origin(u: URI): String {
