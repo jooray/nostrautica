@@ -161,6 +161,109 @@
     <meta name="twitter:description" content="Nostr-native matchmaking for any event." />
     <meta name="twitter:image" content="https://nostrautica.cypherpunk.today/assets/og-card.png" />
     <!--
+      Boot-failure self-heal (prod incident 2026-10-22). SvelteKit's bootstrap is
+      two dynamic imports plus `kit.start(app, element)`. If either rejects — a
+      stale precached shell pointing at chunks a deploy deleted, or a browser
+      holding a cached module graph that no longer matches the new one (reported in
+      Firefox as `TypeError: can't access property "init", e.hooks is undefined`) —
+      the app never mounts, so `installStaleChunkRecovery()` (which runs from the
+      layout, i.e. AFTER a successful boot) never gets to install its listener, and
+      the tab is wedged until the user clears site data by hand.
+
+      This listener is inline and in <head> so it exists BEFORE the bootstrap. On a
+      boot failure it does, once per tab session, exactly what the user would
+      otherwise have to do by hand: unregister the service worker, delete Cache
+      Storage, and reload with a cache-busting `?r=` (the shell is already
+      no-cache; the query also defeats any intermediary). The one-shot latch means
+      a genuinely broken deploy cannot reload-loop. `installStaleChunkRecovery()`
+      clears the latch on a successful boot, so a LATER deploy can recover again.
+      Keep the key in sync with stale-chunk.ts.
+    -->
+    <script>
+      (function () {
+        var KEY = "nostrautica:boot-recovery";
+        var MODULE_FAILURE =
+          /hooks? is undefined|dynamically imported module|importing a module script|module script failed|mime type|chunkloaderror|loading chunk/i;
+        function booting() {
+          var s = document.getElementById("app-splash");
+          return !!s && !s.classList.contains("splash-hide");
+        }
+        function recover(reason) {
+          try {
+            if (sessionStorage.getItem(KEY)) return;
+            sessionStorage.setItem(KEY, "1");
+          } catch (e) {
+            /* private mode: still recover, just without the latch */
+          }
+          try {
+            console.warn("[boot] recovering from a failed boot:", reason);
+          } catch (e) {
+            /* console blocked */
+          }
+          var jobs = [];
+          try {
+            if (navigator.serviceWorker && navigator.serviceWorker.getRegistrations) {
+              jobs.push(
+                navigator.serviceWorker.getRegistrations().then(function (rs) {
+                  return Promise.all(
+                    rs.map(function (r) {
+                      return r.unregister();
+                    }),
+                  );
+                }),
+              );
+            }
+          } catch (e) {
+            /* no SW support */
+          }
+          try {
+            if (window.caches && caches.keys) {
+              jobs.push(
+                caches.keys().then(function (ks) {
+                  return Promise.all(
+                    ks.map(function (k) {
+                      return caches.delete(k);
+                    }),
+                  );
+                }),
+              );
+            }
+          } catch (e) {
+            /* Cache Storage unavailable */
+          }
+          var done = false;
+          function go() {
+            if (done) return;
+            done = true;
+            var u = location.href.replace(/([?&])r=\d+(&|$)/, "$1").replace(/[?&]$/, "");
+            location.replace(u + (u.indexOf("?") === -1 ? "?" : "&") + "r=" + Date.now());
+          }
+          // Never let a slow cache purge hold the tab hostage.
+          setTimeout(go, 1500);
+          try {
+            Promise.all(jobs).then(go, go);
+          } catch (e) {
+            go();
+          }
+        }
+        window.addEventListener("unhandledrejection", function (e) {
+          if (!booting()) return;
+          var m = (e && e.reason && (e.reason.message || e.reason)) || "";
+          if (MODULE_FAILURE.test(String(m))) recover(m);
+        });
+        window.addEventListener(
+          "error",
+          function (e) {
+            if (!booting()) return;
+            var t = e && e.target;
+            if (t && t.tagName === "SCRIPT" && t.src) recover("script " + t.src);
+            else if (e && e.message && MODULE_FAILURE.test(e.message)) recover(e.message);
+          },
+          true,
+        );
+      })();
+    </script>
+    <!--
       CSP (spec §14). The real goal is blocking THIRD-PARTY/external scripts and
       limiting network to relays (wss) + Blossom (https) — enforced by the absence
       of any external host in script-src/connect-src. 'unsafe-inline' is allowed for
