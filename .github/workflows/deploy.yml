@@ -18,6 +18,10 @@ name: Deploy PWA (nsite)
 on:
   workflow_dispatch:
 
+# Read-only token (audit R-64). Publishing signs with the bunker, not the token.
+permissions:
+  contents: read
+
 jobs:
   # Run the identical gate a PR clears — nothing is published without passing it.
   gate:
@@ -28,6 +32,8 @@ jobs:
     needs: gate
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       # Fail LOUDLY when the deploy credential is absent (audit R15). Previously the
       # only deploy step was `if: env.NSYTE_BUNKER_URI != ''`, so a run with no secret
       # went green having published nothing. A tag deploy with no bunker is a
