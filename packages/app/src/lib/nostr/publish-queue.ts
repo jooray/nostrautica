@@ -647,6 +647,26 @@ export async function retryFailed(id: string): Promise<FlushResult> {
   return flushQueue();
 }
 
+/**
+ * Whether the active account still has an unsent publish queued for the
+ * addressable event `kind:author:d` (audit R-29). Partial redeliveries count:
+ * the relay that missed one may be exactly the relay a later read asks. Parked
+ * `failed` items do not, since nothing sends them unless the user retries, and a
+ * check built on this must never be held hostage by one the user abandoned.
+ */
+export async function hasPendingPublishFor(kind: number, author: string, d: string): Promise<boolean> {
+  if (!backend) return false;
+  const active = activeCacheOwner();
+  return (await backend.getAll().catch(() => [] as QueuedItem[])).some(
+    (i) =>
+      ownedBy(i, active) &&
+      !i.failed &&
+      i.event.kind === kind &&
+      i.event.pubkey === author &&
+      i.event.tags?.some((t) => t[0] === "d" && t[1] === d),
+  );
+}
+
 /** User action from the outbox UI: permanently drop a queued/failed item. */
 export async function discardQueued(id: string): Promise<void> {
   noteDiscarded(id);

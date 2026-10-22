@@ -107,6 +107,7 @@ import {
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
+import { __setOutboxBackend, discardQueued, type QueuedItem } from "$lib/nostr/publish-queue.js";
 
 const OWNER = "b".repeat(64);
 const EID_SK = generateSecretKey();
@@ -1465,14 +1466,44 @@ describe("updateEventConfig relay editing", () => {
     expect(publishSigned).not.toHaveBeenCalled();
   });
 
-  it("refuses to rebuild on a config older than this client's own last publish", async () => {
+  it("refuses to rebuild on a config older than this client's own still-queued publish", async () => {
+    const outbox = new Map<string, QueuedItem>();
+    __setOutboxBackend({
+      getAll: async () => [...outbox.values()],
+      put: async (i) => void outbox.set(i.event.id, i),
+      delete: async (id) => void outbox.delete(id),
+    });
     await saveEventKeys(organizerKeys(), OWNER);
     const ctx = ctxWith({});
-    await updateEventConfig(ctx, { retentionDays: 30 }); // published above 1000
-    publishSigned.mockClear();
-    // The relay that answers next has not caught up and still serves 1000.
+    vi.stubGlobal("navigator", { onLine: false });
+    await updateEventConfig(ctx, { retentionDays: 30 }); // queued, stamped above 1000
+    expect(outbox.size).toBe(1);
+    vi.stubGlobal("navigator", { onLine: true });
+    // Back online, the relay that answers has not got it and still serves 1000.
     await expect(updateEventConfig(ctx, { retentionDays: 60 })).rejects.toThrow(/older copy/);
     expect(publishSigned).not.toHaveBeenCalled();
+    __setOutboxBackend(null);
+  });
+
+  // The watermark outlives a publish that never landed; without the outbox gate a
+  // discarded 31600 would refuse every later edit on this device.
+  it("does not lock config edits once the queued publish is discarded", async () => {
+    const outbox = new Map<string, QueuedItem>();
+    __setOutboxBackend({
+      getAll: async () => [...outbox.values()],
+      put: async (i) => void outbox.set(i.event.id, i),
+      delete: async (id) => void outbox.delete(id),
+    });
+    await saveEventKeys(organizerKeys(), OWNER);
+    const ctx = ctxWith({});
+    vi.stubGlobal("navigator", { onLine: false });
+    await updateEventConfig(ctx, { retentionDays: 30 });
+    for (const id of [...outbox.keys()]) await discardQueued(id);
+    vi.stubGlobal("navigator", { onLine: true });
+
+    await updateEventConfig(ctx, { retentionDays: 60 });
+    expect(publishSigned).toHaveBeenCalledTimes(1);
+    __setOutboxBackend(null);
   });
 
   it("leaves relays untouched when only another field is edited (no silent migration)", async () => {

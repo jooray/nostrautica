@@ -34,6 +34,7 @@ import {
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyAddressed } from "$lib/nostr/verify.js";
 import { publishMonotonic, publishWatermark, eventAddress } from "$lib/nostr/monotonic.js";
+import { hasPendingPublishFor } from "$lib/nostr/publish-queue.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { loadEventKeys, listEventKeys } from "./keystore.js";
 import {
@@ -185,20 +186,27 @@ export const CONFIG_STALE =
 
 /**
  * Refuse a config rewrite built on a 31600 older than one this client already
- * knows exists (audit R-29): the page's own `knownAt` (`ctx.configAt`) or the
- * highest created_at this client has published at the address (the monotonic
- * watermark). A relay that has not caught up with a detach or an inbox rotation
- * answers with the previous config, and `publishMonotonic` then gives that stale
- * content a winning created_at, re-attaching the old coordinator for everyone.
+ * knows exists (audit R-29). A relay that has not caught up with a detach or an
+ * inbox rotation answers with the previous config, and `publishMonotonic` then
+ * gives that stale content a winning created_at, re-attaching the old
+ * coordinator for everyone.
+ *
+ * The floor is the page's own `knownAt` (`ctx.configAt`), plus the highest
+ * created_at this client has published at the address (the monotonic watermark)
+ * ONLY while an unsent publish for it is still in the outbox. The watermark is
+ * bumped before the publish resolves, so on its own it would remember a 31600
+ * that never reached any relay — discarded, or parked as failed — and refuse
+ * every later edit on this device for good.
  */
-export function assertConfigNotStale(
+export async function assertConfigNotStale(
   coordinate: string,
   createdAt: number,
   knownAt = 0,
-): void {
+): Promise<void> {
   const { pubkey, identifier } = parseCoordinate(coordinate);
-  const floor = Math.max(knownAt, publishWatermark(eventAddress(KIND_EVENT_CONFIG, pubkey, identifier)));
-  if (createdAt < floor) throw new Error(CONFIG_STALE);
+  const pending = await hasPendingPublishFor(KIND_EVENT_CONFIG, pubkey, identifier);
+  const watermark = pending ? publishWatermark(eventAddress(KIND_EVENT_CONFIG, pubkey, identifier)) : 0;
+  if (createdAt < Math.max(knownAt, watermark)) throw new Error(CONFIG_STALE);
 }
 
 // Link status is asked once per approval, and "Approve all" approves dozens in a
@@ -263,7 +271,7 @@ async function republishConfig(
   }
   const read = await fetchNewestSignedConfig(coordinate, relays, { fresh: true });
   if (!read) throw new Error("Event config (31600) not found");
-  assertConfigNotStale(coordinate, read.createdAt);
+  await assertConfigNotStale(coordinate, read.createdAt);
   const current = read.config;
   const next = mutate(current);
   const sameChildren = JSON.stringify(next.children ?? []) === JSON.stringify(current.children ?? []);

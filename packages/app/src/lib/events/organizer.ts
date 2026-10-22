@@ -1892,7 +1892,7 @@ async function freshConfig(ctx: EventContext): Promise<EventConfig> {
   if (!read) throw new Error(CONFIG_UNREADABLE);
   // Newest on THESE relays is not newest: one that missed a detach answers with
   // the config from before it (audit R-29). Not noted for the SB-91 guard either.
-  assertConfigNotStale(ctx.coordinate, read.createdAt, ctx.configAt);
+  await assertConfigNotStale(ctx.coordinate, read.createdAt, ctx.configAt);
   noteFreshConfig(ctx.coordinate, read.config);
   return read.config;
 }
