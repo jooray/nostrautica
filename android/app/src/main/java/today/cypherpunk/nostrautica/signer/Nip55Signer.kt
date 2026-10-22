@@ -159,8 +159,10 @@ class Nip55Signer(
             if (result.resultCode != Activity.RESULT_OK || data == null) throw SignerRejected()
             val raw = data.getStringExtra("result")?.trim() ?: throw SignerRejected("the signer returned no key")
             val pubkey = Nip19.pubkeyFrom(raw) ?: throw SignerRejected("the signer returned an unreadable key")
-            val pkg = data.getStringExtra("package")?.takeIf { it.isNotBlank() } ?: signerPackage
-            return pubkey to pkg
+            // The package we addressed (setPackage), never the reply's `package` extra: every later
+            // intent and content-provider call is bound to this name, so a reply naming another
+            // app must not redirect them (R-69 residual).
+            return pubkey to signerPackage
         }
     }
 }
