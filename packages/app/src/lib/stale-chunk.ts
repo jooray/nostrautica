@@ -148,6 +148,14 @@ export function recoverFromStaleChunk(reason?: unknown, opts?: { force?: boolean
  */
 export function installStaleChunkRecovery(): void {
   if (typeof window === "undefined") return;
+  // The inline pre-boot listener in app.html latches on a boot failure. Reaching
+  // here means the app MOUNTED, so clear it: a later deploy in this tab may
+  // recover again. Keep the key in sync with app.html.
+  try {
+    sessionStorage.removeItem("nostrautica:boot-recovery");
+  } catch {
+    /* private mode */
+  }
   window.addEventListener("vite:preloadError", (event) => {
     const err = (event as Event & { payload?: unknown }).payload;
     if (recoverFromStaleChunk(err ?? "Failed to fetch dynamically imported module")) {
