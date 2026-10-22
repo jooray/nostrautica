@@ -1947,6 +1947,12 @@ export class Store {
    * successive publishes within one second straddling the restart). Atomic under the
    * single-daemon write lock.
    */
+  /** Whether this coordinator ever built a replaceable publish at `address`
+   *  (`${kind}:${d}`): every builder routes through {@link nextPublishCreatedAt}. */
+  everPublished(address: string): boolean {
+    return this.db.prepare("SELECT 1 FROM publish_watermarks WHERE address = ?").get(address) !== undefined;
+  }
+
   nextPublishCreatedAt(address: string, now: number): number {
     const row = this.db.prepare("SELECT last_created_at FROM publish_watermarks WHERE address = ?").get(address) as
       | { last_created_at: number }

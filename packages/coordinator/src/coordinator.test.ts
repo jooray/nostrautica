@@ -7499,6 +7499,55 @@ describe("audit DS41-046 — revoke deletes the match list published to the remo
   });
 });
 
+/**
+ * Audit R-59: kind-5 deletions are public. Naming a member's blinded d under an
+ * ECK version retired before they joined let anyone still holding that version
+ * test whether a given pubkey joined after they lost access.
+ */
+describe("audit R-59 — deletions name only addresses that were published", () => {
+  it("revoke and retention skip ECK versions a later joiner was never published under", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec + 86_400 });
+    const early = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    await admin(h, "revoke", { pubkey: early }); // rotates ECK v1 → v2
+    await h.coordinator.jobs.drain();
+    const eck = (h.coordinator as any).events.get(h.coordinate).eck as { id: number; key: string }[];
+    expect(eck.length).toBe(2);
+    const v1 = base64ToBytes(eck[0]!.key);
+    const v2 = base64ToBytes(eck[1]!.key);
+
+    const lateSk = generateSecretKey();
+    const late = await join(h, lateSk, "crypto");
+    const later = await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const coordPub = getPublicKey(h.coordSk);
+    const named = (from: number) =>
+      new Set(
+        h.transport.published
+          .slice(from)
+          .filter((e) => e.kind === KIND_DELETION)
+          .flatMap((e) => e.tags.filter((t) => t[0] === "a").map((t) => t[1])),
+      );
+
+    let before = h.transport.published.length;
+    await admin(h, "revoke", { pubkey: late }); // rotates v2 → v3
+    await h.coordinator.jobs.drain();
+    let a = named(before);
+    expect(a.has(`${KIND_MATCH_LIST}:${coordPub}:${blindedD(v2, h.coordinate, late)}`)).toBe(true);
+    expect(a.has(`${KIND_MATCH_LIST}:${coordPub}:${blindedD(v1, h.coordinate, late)}`)).toBe(false);
+
+    h.clock.t += 30 * 86_400_000; // past end + retention
+    before = h.transport.published.length;
+    await h.coordinator.retentionSweep();
+    a = named(before);
+    expect(a.has(`${KIND_DIRECTORY_ENTRY}:${coordPub}:${blindedD(v2, h.coordinate, later)}`)).toBe(true);
+    expect(a.has(`${KIND_DIRECTORY_ENTRY}:${coordPub}:${blindedD(v1, h.coordinate, later)}`)).toBe(false);
+    expect(a.has(`${KIND_MATCH_LIST}:${coordPub}:${blindedD(v1, h.coordinate, later)}`)).toBe(false);
+  });
+});
+
 /** Audit DS41-042 / SB-98: a forward and a reverse batch for one directed pair both paid. */
 describe("audit SB-98 — one directed pair is scored once, however many batches hold it", () => {
   it("concurrent forward + reverse batches make one provider call", async () => {
