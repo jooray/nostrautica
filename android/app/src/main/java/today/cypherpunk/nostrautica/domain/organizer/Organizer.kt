@@ -597,17 +597,24 @@ class Organizer(
         return Rotation(events, grantWraps)
     }
 
-    private suspend fun publishRotation(ctx: EventContext, rot: Rotation, extra: List<NostrEvent> = emptyList()) = coroutineScope {
+    /** True when every rebuilt 31604 reached a relay; anything else is only in the outbox. */
+    private suspend fun publishRotation(ctx: EventContext, rot: Rotation, extra: List<NostrEvent> = emptyList()): Boolean = coroutineScope {
         markSeen("roster", ctx.coordinate)
-        ((rot.events + extra).map { async { publish(it, ctx.relays, "rotation") } } +
+        val events = rot.events + extra
+        val sent = (events.map { async { publish(it, ctx.relays, "rotation") } } +
             rot.grants.map { (pk, w) -> async { sendWrap(w, pk, ctx, "grant") } }).awaitAll()
+        events.indices.filter { events[it].kind == Kinds.ROSTER }.all { sent[it] }
     }
 
     /** One past every id held, staged ones included, so an interrupted rotation's id is never reused. */
     private fun newEckVersion(k: EventKeys) = OrganizerEvents.nextEck(k.eck + (k.pendingEck ?: emptyList()), ProtocolCrypto.generateEck())
 
-    /** Revoke without a coordinator: forward-only ECK rotation, everyone else re-granted. */
-    suspend fun revokeClient(ctx: EventContext, removed: String) =
+    /**
+     * Revoke without a coordinator: forward-only ECK rotation, everyone else re-granted.
+     * True once the new roster reached a relay; false means it is only queued (R-43), and
+     * until it is delivered the removed member still reads the old one.
+     */
+    suspend fun revokeClient(ctx: EventContext, removed: String): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { revokeClientOffMain(ctx, removed) }
 
     private suspend fun revokeClientOffMain(ctx: EventContext, removed: String) = lock("roster:${ctx.coordinate}").withLock {
@@ -636,9 +643,10 @@ class Organizer(
         val staged = stageEck(keys, next)
         // The rotated ECK must reach the durable backup, or a fresh device restores v1 only.
         runCatching { writeBackup(ctx.coordinate, staged, staged.coordinatorGen ?: 0) }
-        publishRotation(ctx, rot, listOf(deletion))
+        val published = publishRotation(ctx, rot, listOf(deletion))
         promotePending(ctx.coordinate, next)
         reissueOrganizerGrants(ctx, ctx.coordinate)
+        published
     }
 
     /** Detach/replace (NIP §3.7): rotate the ECK AND E_inbox; the old inbox is kept for history. */

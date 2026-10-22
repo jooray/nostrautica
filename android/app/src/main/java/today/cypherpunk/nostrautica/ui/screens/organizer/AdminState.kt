@@ -255,16 +255,21 @@ class AdminState(private val c: AppContainer, val ctx: EventContext, private val
     fun retryBulk(pk: String) = scope.launch { runBulk(pk) }
 
     fun revoke(pk: String) = scope.launch {
-        suspend fun once() {
+        var viaCoordinator = false
+        suspend fun once(): Boolean {
             val coord = coordinatorNow
-            if (coord != null) org.sendAdminCommandTo(ctx, coord, "revoke", mapOf("pubkey" to pk)) else org.revokeClient(ctx, pk)
+            viaCoordinator = coord != null
+            return if (coord != null) org.sendAdminCommandTo(ctx, coord, "revoke", mapOf("pubkey" to pk)) else org.revokeClient(ctx, pk)
         }
         runCatching {
-            try { once() } catch (e: Organizer.CoordinatorAttached) {
+            val sent = try { once() } catch (e: Organizer.CoordinatorAttached) {
                 refreshKeyStatus() // attached elsewhere (SB-91): the removal is the coordinator's
                 if (coordinatorNow == null) throw e
                 once()
             }
+            // Only a removal that reached a relay is shown as done (R-43): a queued one
+            // leaves the person with access until it is delivered, and says so.
+            if (!sent) { error = strings().t(if (viaCoordinator) "admin.command.revokeQueued" else "admin.android.revokeQueued"); return@runCatching }
             revokedSet = revokedSet + pk
             approvedSet = approvedSet - pk
         }.onFailure { error = msg(it) }
