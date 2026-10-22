@@ -66,15 +66,40 @@ import today.cypherpunk.nostrautica.ui.shell.Page
 import today.cypherpunk.nostrautica.ui.shell.Toasts
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 
-/** Log out the PWA's way: lock event keys with the signer, drop this owner's data. */
-suspend fun logout(c: AppContainer) {
-    val acct = c.session.account.value ?: return
-    runCatching { c.eventKeys.lockForLogout(acct.pubkey, acct.signer) }
-    runCatching { c.nostr.discardOwner(acct.pubkey) }
-    runCatching { c.cache.dropScope(acct.pubkey) }
-    c.joinFlow.forgetInvites(acct.pubkey) // R-27: the next account must not redeem this one's invite
-    c.accounts.forget(acct.pubkey)
+/**
+ * Log out the PWA's way: lock event keys with the signer, drop this owner's data.
+ * The lock is bounded, and a partial one is said out loud (logout.encryptFailed,
+ * the PWA's logoutError): keys a remote signer couldn't encrypt in time stay in
+ * plaintext rather than be lost, and the user must know the wipe wasn't complete
+ * (R-68). Returns false in that case.
+ */
+suspend fun logout(c: AppContainer): Boolean {
+    val acct = c.session.account.value ?: return true
+    val left = try {
+        c.eventKeys.lockForLogout(acct.pubkey, acct.signer)
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        1
+    }
     c.session.logout()
+    endSession(c, acct.pubkey)
+    if (left > 0) Toasts.show(c.i18n.strings.value.t("logout.encryptFailed"))
+    return left == 0
+}
+
+/**
+ * Everything a logout drops except the custody lock, for a session that already
+ * ended. The NIP-46 identity-mismatch sign-out comes here directly (R-72): the
+ * lock is skipped on purpose there, because the bunker now signs for someone else
+ * and a record self-encrypted with it could never be decrypted by the real owner
+ * again, which would lose the organizer keys outright.
+ */
+suspend fun endSession(c: AppContainer, owner: String) {
+    runCatching { c.nostr.discardOwner(owner) }
+    runCatching { c.cache.dropScope(owner) }
+    c.joinFlow.forgetInvites(owner) // R-27: the next account must not redeem this one's invite
+    c.accounts.forget(owner)
     c.membership.bump()
 }
 
