@@ -33,7 +33,7 @@
   } from "$lib/events/hierarchy.js";
   import { buildReceipt, type CreationReceipt } from "$lib/events/creation-outcomes.js";
   import { UNLIMITED_SEC } from "@nostrautica/protocol";
-  import { t } from "$lib/i18n/i18n.svelte.js";
+  import { t, tc } from "$lib/i18n/i18n.svelte.js";
   import { onMount, onDestroy } from "svelte";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft, clearDraft } from "$lib/stores/drafts.js";
@@ -282,7 +282,7 @@
         id: "on",
         message: !session.loggedIn && !organizerName.trim() ? t("create.error.nameRequired") : null,
       },
-      { id: "t", message: !title.trim() ? t("create.error.titleRequired") : null },
+      { id: "t", message: !title.trim() ? tc("create.error.titleRequired", isCommunity) : null },
       { id: "st", message: !isCommunity && !startLocal ? t("create.error.startRequired") : null },
       { id: "en", message: endBeforeStart ? t("create.error.endBeforeStart") : null },
     ]);
@@ -420,9 +420,9 @@
       // create events are safely queued but NOT yet visible — say so, and KEEP the
       // compose drafts so nothing is lost if the queued publish never lands.
       if (result.outcome === "queued") {
-        opStatus.queued(t("op.eventCreateQueued"));
+        opStatus.queued(tc("op.eventCreateQueued", isCommunity));
       } else {
-        opStatus.published(t("op.eventCreated"));
+        opStatus.published(tc("op.eventCreated", isCommunity));
         // Event published for real — the compose drafts are spent (App-2).
         clearDraft("create:title");
         clearDraft("create:summary");
@@ -513,7 +513,7 @@
         id: "on",
         message: !session.loggedIn && !organizerName.trim() ? t("create.error.nameRequired") : null,
       },
-      { id: "t", message: !title.trim() ? t("create.error.titleRequired") : null },
+      { id: "t", message: !title.trim() ? tc("create.error.titleRequired", isCommunity) : null },
       { id: "st", message: !isCommunity && !startLocal ? t("create.error.startRequired") : null },
       { id: "en", message: endBeforeStart ? t("create.error.endBeforeStart") : null },
     ]).errors,
@@ -527,24 +527,24 @@
 
 {#if duplicatedFrom && !created}
   <div class="card" role="status">
-    <p class="muted" style="margin:0">{t("create.duplicatedFrom", { title: duplicatedFrom })}</p>
+    <p class="muted" style="margin:0">{tc("create.duplicatedFrom", isCommunity, { title: duplicatedFrom })}</p>
   </div>
 {/if}
 
 {#if created}
   <div class="card">
-    <h2>{t("create.created")}</h2>
+    <h2>{tc("create.created", isCommunity)}</h2>
     <!-- Independent-outcome receipt (UX-A3): each publication reports its own
          state; failed secondary steps stay retryable and never masquerade as done. -->
     <ul class="stack receipt" style="margin:0.75rem 0 0;padding:0;list-style:none">
-      <li><span class="badge ok">{t("create.receipt.ok")}</span> {t("create.receipt.event")}</li>
+      <li><span class="badge ok">{t("create.receipt.ok")}</span> {tc("create.receipt.event", isCommunity)}</li>
       {#if receipt.organizerEnrolled !== "skipped"}
         <li>
           {#if receipt.organizerEnrolled === "ok"}
             <span class="badge ok">{t("create.receipt.ok")}</span> {t("create.receipt.enrolled")}
           {:else}
             <span class="badge warn">{t("create.receipt.failed")}</span> {t("create.receipt.enrolled")}
-            <p class="muted" style="margin:0.25rem 0">{t("create.step.enroll.failed.body")}</p>
+            <p class="muted" style="margin:0.25rem 0">{tc("create.step.enroll.failed.body", isCommunity)}</p>
             <button class="btn inline" disabled={retrying !== null} onclick={retryEnroll}>
               {retrying === "enroll" ? t("create.retrying") : t("create.retry")}
             </button>
@@ -569,7 +569,7 @@
             <p class="muted" style="margin:0.25rem 0">{t("create.step.coordinator.attached.body")}</p>
           {:else}
             <span class="badge warn">{t("create.receipt.failed")}</span> {t("create.receipt.grant")}
-            <p class="muted" style="margin:0.25rem 0">{t("create.step.coordinator.failed.body")}</p>
+            <p class="muted" style="margin:0.25rem 0">{tc("create.step.coordinator.failed.body", isCommunity)}</p>
             <button class="btn inline" disabled={retrying !== null} onclick={retryAttach}>
               {retrying === "attach" ? t("create.retrying") : t("create.retry")}
             </button>
@@ -591,7 +591,7 @@
     <!-- Next steps as a checklist, not a pile of equal buttons (UI-SUGGESTIONS #14). -->
     <ol class="stack" style="margin:1rem 0 0;padding-left:1.25rem">
       <li>
-        <strong>{t("create.step.share")}</strong>
+        <strong>{tc("create.step.share", isCommunity)}</strong>
         <p class="mono" style="margin:0.25rem 0">{shareLink}</p>
         <div class="row">
           <button class="btn inline" aria-live="polite" onclick={copyShare}>
@@ -613,12 +613,16 @@
           </p>
         </li>
       {/if}
-      <li style="margin-top:0.75rem">
-        <strong>{t("create.step.approve")}</strong>
-        <p class="muted" style="margin:0.25rem 0">
-          {t("create.step.approve.body")}
-        </p>
-      </li>
+      <!-- An open space (every community, by default) admits anyone holding the
+           link, so nobody ever lands in a queue: no step to take. -->
+      {#if approval !== "open"}
+        <li style="margin-top:0.75rem">
+          <strong>{t("create.step.approve")}</strong>
+          <p class="muted" style="margin:0.25rem 0">
+            {t("create.step.approve.body")}
+          </p>
+        </li>
+      {/if}
     </ol>
     <div class="stack" style="margin-top:1rem">
       <button
@@ -631,14 +635,14 @@
         class="btn"
         onclick={() => router.go({ name: "event", naddr: created!.naddr })}
       >
-        {t("create.viewEvent")}
+        {tc("create.viewEvent", isCommunity)}
       </button>
     </div>
   </div>
   {#if session.freshLocalKey}
     <div class="card">
       <h2>{t("create.backupOrganizer")}</h2>
-      <p class="muted">{t("create.backupOrganizer.body")}</p>
+      <p class="muted">{tc("create.backupOrganizer.body", isCommunity)}</p>
       <BackupCard />
     </div>
   {/if}
@@ -652,13 +656,13 @@
         <input
           id="on"
           bind:value={organizerName}
-          placeholder={t("create.organizerName.placeholder")}
+          placeholder={tc("create.organizerName.placeholder", isCommunity)}
           aria-invalid={errName}
           aria-describedby={describedBy("on", errName)}
         />
         {#if errName}<p id="on-error" class="field-error">{t("create.error.nameRequired")}</p>{/if}
         <p class="muted" style="margin:0.25rem 0 0">
-          {t("create.organizerName.body")}
+          {tc("create.organizerName.body", isCommunity)}
         </p>
       </div>
     {/if}
@@ -702,7 +706,7 @@
         aria-invalid={errTitle}
         aria-describedby={describedBy("t", errTitle)}
       />
-      {#if errTitle}<p id="t-error" class="field-error">{t("create.error.titleRequired")}</p>{/if}
+      {#if errTitle}<p id="t-error" class="field-error">{tc("create.error.titleRequired", isCommunity)}</p>{/if}
     </div>
     <div>
       <label for="s">{t("create.field.summary")}</label>
@@ -761,25 +765,25 @@
       </div>
     {/if}
     <div>
-      <label for="lang">{t("create.field.language")}</label>
+      <label for="lang">{tc("create.field.language", isCommunity)}</label>
       <LanguagePicker id="lang" bind:value={lang} />
-      <p class="muted" style="margin:0.25rem 0 0">{t("create.field.language.body")}</p>
+      <p class="muted" style="margin:0.25rem 0 0">{tc("create.field.language.body", isCommunity)}</p>
     </div>
     <!-- Images + intro length promoted out of "Advanced" (user feedback
          2026-07-16): nearly every event wants images, and the previews below
          show the EXACT crop attendees will see (uploads are cropped to it). -->
     <div>
-      <div class="field-label">{t("create.field.images")} <span class="muted" style="font-weight:400">{t("create.field.images.optional")}</span></div>
+      <div class="field-label">{tc("create.field.images", isCommunity)} <span class="muted" style="font-weight:400">{t("create.field.images.optional")}</span></div>
       <div class="row" style="align-items:flex-start;gap:0.75rem">
         <div style="flex:none;text-align:center">
-          <img src={previewIcon} alt={t("create.iconAlt")} style="width:64px;height:64px;border-radius:14px;object-fit:cover" />
+          <img src={previewIcon} alt={tc("create.iconAlt", isCommunity)} style="width:64px;height:64px;border-radius:14px;object-fit:cover" />
           <div class="stack" style="gap:0.35rem;margin-top:0.35rem">
             <FileButton
               class="btn inline"
               style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
               accept="image/*"
               onchange={(e) => onImageFile(e, "icon")}
-              label={t("create.iconPick")}
+              label={tc("create.iconPick", isCommunity)}
             >
               {uploading === "icon" ? "…" : t("create.icon")}
             </FileButton>
@@ -787,7 +791,7 @@
               type="button"
               class="btn inline"
               style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
-              aria-label={t("create.imageUrl.pickIcon")}
+              aria-label={tc("create.imageUrl.pickIcon", isCommunity)}
               aria-expanded={linkWhich === "icon"}
               onclick={() => openLink("icon")}
             >
@@ -796,14 +800,14 @@
           </div>
         </div>
         <div style="flex:1">
-          <img src={previewBanner} alt={t("create.bannerAlt")} style="width:100%;border-radius:12px;aspect-ratio:5/2;object-fit:cover" />
+          <img src={previewBanner} alt={tc("create.bannerAlt", isCommunity)} style="width:100%;border-radius:12px;aspect-ratio:5/2;object-fit:cover" />
           <div class="row" style="margin-top:0.35rem">
             <FileButton
               class="btn inline"
               style="width:auto;margin:0;font-size:0.8rem;padding:0.3rem 0.6rem"
               accept="image/*"
               onchange={(e) => onImageFile(e, "banner")}
-              label={t("create.bannerPick")}
+              label={tc("create.bannerPick", isCommunity)}
             >
               {uploading === "banner" ? "…" : t("create.banner")}
             </FileButton>
@@ -811,7 +815,7 @@
               type="button"
               class="btn inline"
               style="font-size:0.8rem;padding:0.3rem 0.6rem"
-              aria-label={t("create.imageUrl.pickBanner")}
+              aria-label={tc("create.imageUrl.pickBanner", isCommunity)}
               aria-expanded={linkWhich === "banner"}
               onclick={() => openLink("banner")}
             >
@@ -900,18 +904,22 @@
         <input type="checkbox" bind:checked={enrollSelf} style="width:auto" />
         {t("create.field.enrollSelf")}
       </label>
-      <p class="muted" style="margin:0.25rem 0 0">{t("create.enrollSelf.body")}</p>
+      <p class="muted" style="margin:0.25rem 0 0">{tc("create.enrollSelf.body", isCommunity)}</p>
     </div>
-    <div>
-      <label for="talks">{t("create.field.talks")}</label>
-      <select id="talks" bind:value={talks}>
-        <option value="off">{t("create.talks.off")}</option>
-        <option value="on">{t("create.talks.on")}</option>
-        <option value="prerecord-first">{t("create.talks.prerecordFirst")}</option>
-      </select>
-      <p class="muted" style="margin:0.25rem 0 0">{t("create.field.talks.body")}</p>
-    </div>
-    {#if talks !== "off"}
+    <!-- submit() sends talks "off" for a community whatever this says, so the
+         select would be a setting that silently does nothing. -->
+    {#if !isCommunity}
+      <div>
+        <label for="talks">{t("create.field.talks")}</label>
+        <select id="talks" bind:value={talks}>
+          <option value="off">{t("create.talks.off")}</option>
+          <option value="on">{t("create.talks.on")}</option>
+          <option value="prerecord-first">{t("create.talks.prerecordFirst")}</option>
+        </select>
+        <p class="muted" style="margin:0.25rem 0 0">{t("create.field.talks.body")}</p>
+      </div>
+    {/if}
+    {#if !isCommunity && talks !== "off"}
       <div>
         <label for="mt">{t("create.field.maxTalk")}</label>
         <div class="row" style="gap:0.75rem;align-items:center;flex-wrap:wrap">
@@ -943,7 +951,7 @@
         {t("create.coordinator.title")}
         <span class="muted" style="font-weight:400">{t("create.coordinator.optional")}</span>
       </div>
-      <p class="muted" style="margin:0.25rem 0 0">{t("create.coordinator.body")}</p>
+      <p class="muted" style="margin:0.25rem 0 0">{tc("create.coordinator.body", isCommunity)}</p>
       <CoordinatorPicker bind:selected={coordinatorPubkey} disabled={busy} />
     </div>
     <p class="muted">

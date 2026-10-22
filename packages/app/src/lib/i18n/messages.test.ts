@@ -315,3 +315,38 @@ describe("community wording (tc / tcp)", () => {
     expect(tc("attendees.decrypting", true)).toBe(messages.sk["attendees.decrypting"]);
   });
 });
+
+describe("create flow says community when it is making one", () => {
+  // A community organizer used to be asked for the "Event language" and sent off
+  // with "View event page": every create-flow string that names the thing being
+  // made needs its own community sentence, in every language, not a fallback.
+  const createFlow = Object.keys(messages.en).filter(
+    (k) => k.endsWith(".community") && (k.startsWith("create.") || k.startsWith("op.eventCreate")),
+  );
+
+  it("covers the label and the success-screen button the bug was about", () => {
+    expect(createFlow).toContain("create.field.language.community");
+    expect(createFlow).toContain("create.viewEvent.community");
+    expect(createFlow).toContain("create.created.community");
+  });
+
+  it("has a distinct community wording for each of them in every locale", () => {
+    for (const loc of LOCALES) {
+      i18n.locale = loc;
+      for (const variant of createFlow) {
+        if (variant === "create.kind.community" || variant === "create.submit.community") continue;
+        const base = variant.slice(0, -".community".length) as keyof (typeof messages)["en"];
+        const community = tc(base, true);
+        expect(community, `${loc} ${variant}`).toBe(messages[loc][variant as typeof base]);
+        expect(community, `${loc} ${variant} repeats the event wording`).not.toBe(tc(base, false));
+      }
+    }
+  });
+
+  it("keeps interpolation working in the duplicated-from notice", () => {
+    for (const loc of LOCALES) {
+      i18n.locale = loc;
+      expect(tc("create.duplicatedFrom", true, { title: "Brno meetup" })).toContain("Brno meetup");
+    }
+  });
+});
