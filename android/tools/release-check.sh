@@ -111,10 +111,16 @@ if [ "$SKIP_BUILD" = 0 ]; then
   [ -f "$STORE" ] || fail "keystore $STORE (storeFile in $PROPS) does not exist"
   echo "signing with $STORE"
 
-  if [ ! -d "$ANDROID_DIR/app/src/marmotkit/kotlin" ]; then
-    step "MarmotKit (not fetched yet)"
-    "$ANDROID_DIR/tools/marmotkit/fetch.sh"
-  fi
+  # Always run the fetch, not only when the directory is missing. It is a no-op
+  # when the unpacked copy matches the pinned version and checksum, and replaces
+  # it otherwise. Only checking for the directory's existence is how 0.13.2
+  # shipped with MarmotKit 0.12.0 (schema 101) while the repo pinned 0.13.0
+  # (schema 107): an app whose account database 0.13.0 had already migrated then
+  # refused to open it ("database schema version 107 is newer than the latest
+  # supported version 101"). A release build must never trust whatever happens to
+  # be unpacked in src/marmotkit.
+  step "MarmotKit (pinned)"
+  "$ANDROID_DIR/tools/marmotkit/fetch.sh"
 
   step "unit tests + assembleRelease"
   # A stale APK from an earlier build must not pass the checks below.
