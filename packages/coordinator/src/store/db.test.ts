@@ -1261,6 +1261,16 @@ describe("job matching survives an organizer-chosen identifier", () => {
     expect(store.waitingJobCount()).toBe(0);
   });
 
+  it("supersedePendingJobs treats a backslash in the identifier literally (R-11)", () => {
+    // Unescaped, the `\:` in this prefix is an escape sequence matching a bare `:`,
+    // so superseding event `a\`'s older revision also deleted event `a`'s job.
+    const store = new Store(":memory:");
+    store.enqueueJob("process_attendee", "proc:31923:pk:a:pk2:r1", { coordinate: "c" });
+    store.enqueueJob("process_attendee", "proc:31923:pk:a\\:pk2:r1", { coordinate: "c" });
+    expect(store.supersedePendingJobs("proc:31923:pk:a\\:pk2:", "keep")).toBe(1);
+    expect(store.supersedePendingJobs("proc:31923:pk:a:pk2:", "keep")).toBe(1);
+  });
+
   it("resumeWaitingJobs matches one coordinate exactly, never every parked job", () => {
     // A `%` in the identifier made `payload LIKE '%\"coordinate\":\"<coord>\"%'` match
     // EVERY parked row, so unblocking one event resumed paid work parked for other

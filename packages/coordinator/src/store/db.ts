@@ -3582,11 +3582,15 @@ export class Store {
     // replaced. Latent for app-created events (the slug generator only emits
     // [a-z0-9-]) and reachable through a third-party-authored 31923, which
     // `parseCoordinate` accepts.
+    //
+    // The backslash itself is escaped too (audit 2026-10-21, R-11): in an
+    // identifier ending in `\`, the prefix `proc:…:a\:` read `\:` as an escape for
+    // a bare `:`, so the DELETE reached event `a`'s pending jobs as well.
     const info = this.db
       .prepare(
         "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? ESCAPE '\\' AND dedupe_key != ?",
       )
-      .run(`${prefix.replace(/[%_]/g, "\\$&")}%`, keepKey);
+      .run(`${prefix.replace(/[\\%_]/g, "\\$&")}%`, keepKey);
     return Number(info.changes);
   }
 
