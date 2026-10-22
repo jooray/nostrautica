@@ -640,3 +640,27 @@ describe("a NIP-07 restore with no extension says so", () => {
     expect(session.restoreErrorKind).toBeNull();
   });
 });
+
+describe("logout purges stashed invite codes (audit R-26)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("a code stashed while signed out follows the identity created mid-join, and is gone after logout", async () => {
+    const map = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      get length() {
+        return map.size;
+      },
+      key: (i: number) => [...map.keys()][i] ?? null,
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => void map.set(k, v),
+      removeItem: (k: string) => void map.delete(k),
+    });
+    const { storeInvite, loadInvite } = await import("$lib/stores/invite-store.js");
+    await session.logout().catch(() => {});
+    storeInvite("31923:e:x", "nsec1invite"); // signed out, as Join stores it
+    await session.createLocalKey();
+    expect(loadInvite("31923:e:x")).toBe("nsec1invite"); // re-owned mid-join
+    await session.logout();
+    expect([...map.keys()].some((k) => k.startsWith("nostrautica:invite:"))).toBe(false);
+  });
+});

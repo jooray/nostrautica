@@ -37,7 +37,7 @@ import { recentEvents } from "$lib/stores/recent-events.svelte.js";
 import { clearAllJoinSent, setJoinSentOwner } from "$lib/stores/join-sent.svelte.js";
 import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
 import { mutes } from "$lib/stores/mutes.svelte.js";
-import { setInviteOwner } from "$lib/stores/invite-store.js";
+import { setInviteOwner, purgeInvites } from "$lib/stores/invite-store.js";
 import { router } from "$lib/router/router.svelte.js";
 import { broadcastLogout } from "./session-broadcast.js";
 
@@ -582,6 +582,7 @@ class Session {
     ownStatusStore.setOwner(null);
     mutes.setOwner(null);
     setInviteOwner(null);
+    purgeInvites(); // R-26: a stashed invite must not reach the next identity
     this.signer = null;
     this.pubkey = null;
     this.freshLocalKey = false;
@@ -671,6 +672,7 @@ class Session {
     ownStatusStore.setOwner(null);
     mutes.setOwner(null);
     setInviteOwner(null);
+    purgeInvites();
     void Promise.resolve(this.signer?.close?.()).catch(() => {});
     this.signer = null;
     this.pubkey = null;
