@@ -7,9 +7,11 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { nsecEncode } from "nostr-tools/nip19";
 import {
   configSchema,
   loadConfig,
+  resolveIdentity,
   roleRequiresPrivate,
   validateConfiguredUrl,
   spendExposure,
@@ -267,6 +269,26 @@ describe("SEC-7 spend exposure at startup", () => {
     const msg = spendExposure(loadConfig(writeConfig(BASE + mediaOnly)));
     expect(msg).toBeDefined();
     expect(msg).toMatch(/daemon_calls_per_window/);
+  });
+});
+
+describe("resolveIdentity never echoes a mistyped secret (audit R-61)", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("a bad nsec checksum throws a fixed message without the key", () => {
+    const good = nsecEncode(new Uint8Array(32).fill(7));
+    const typo = good.slice(0, -1) + (good.endsWith("q") ? "p" : "q");
+    vi.stubEnv("NOSTRAUTICA_COORDINATOR_NSEC", typo);
+    const cfg = loadConfig(writeConfig(BASE));
+    let message = "";
+    try {
+      resolveIdentity(cfg);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/not a valid nsec/);
+    // Not the key, and not any long run of it either.
+    expect(message).not.toContain(typo.slice(5, 25));
   });
 });
 

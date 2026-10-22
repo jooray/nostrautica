@@ -477,7 +477,15 @@ export function resolveIdentity(config: CoordinatorConfig): Uint8Array {
   const envKey = process.env.NOSTRAUTICA_COORDINATOR_NSEC;
   if (envKey) {
     if (envKey.startsWith("nsec1")) {
-      const decoded = decode(envKey);
+      // A fixed message, never the decoder's (audit R-61): bech32's checksum error
+      // quotes its whole INPUT, so one mistyped character put the rest of the
+      // secret key into doctor output, the fatal log, the journal and the deploy.
+      let decoded: ReturnType<typeof decode>;
+      try {
+        decoded = decode(envKey);
+      } catch {
+        throw new Error("NOSTRAUTICA_COORDINATOR_NSEC is not a valid nsec (bad checksum or encoding)");
+      }
       if (decoded.type !== "nsec") throw new Error("invalid nsec");
       return decoded.data;
     }
