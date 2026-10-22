@@ -348,9 +348,12 @@ sudo systemctl start nostrautica-coordinator
 journalctl -u nostrautica-coordinator -f     # confirm it resumes cleanly
 ```
 
-On restore, `-wal`/`-shm`/`-journal` sidecars of the target are cleared so the
-snapshot opens clean. After starting, run `doctor` again to confirm integrity and
-decryption.
+On restore, the snapshot is staged beside the target and swapped in by rename, so
+an interrupted restore leaves the old database in place. A database it replaces is
+moved aside, together with its `-wal`/`-shm`/`-journal` sidecars, to
+`<db>.pre-restore-<timestamp>` (the command prints the path), and the snapshot opens
+clean. Delete that copy once you are satisfied. After starting, run `doctor` again
+to confirm integrity and decryption.
 
 ## 7. Upgrade
 

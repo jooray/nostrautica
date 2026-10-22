@@ -205,6 +205,7 @@ function cmdRestore(args: string[]): number {
     console.log(`[restore] installed ${file} → ${db}`);
     console.log(`  release       ${v.meta.releaseId}`);
     console.log(`  events        ${v.installedEventCount}`);
+    if (v.preRestorePath) console.log(`  replaced db   kept at ${v.preRestorePath} (delete once satisfied)`);
     console.log("[restore] OK — start the daemon to resume");
     return 0;
   } catch (e) {

@@ -18,7 +18,19 @@
  * network — they are pure filesystem + SQLite + local-crypto operations.
  */
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, writeFileSync, copyFileSync, rmSync, chmodSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  copyFileSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { selfDecrypt } from "@nostrautica/protocol";
 import { Store, SCHEMA_VERSION, AT_REST_ENC_PREFIX } from "./db.js";
@@ -356,8 +368,9 @@ export interface RestoreOpts {
  * refuses to overwrite an existing target without `force`. The caller MUST hold
  * the single-daemon lock on `targetPath` (i.e. no daemon is running) before
  * calling — this function copies bytes and does not itself fence a live daemon.
+ * A replaced database is kept beside the target; its path is `preRestorePath`.
  */
-export function restoreBackup(opts: RestoreOpts): VerifyResult {
+export function restoreBackup(opts: RestoreOpts): VerifyResult & { preRestorePath?: string } {
   const v = verifyBackup({
     filePath: opts.filePath,
     identitySk: opts.identitySk,
@@ -391,15 +404,42 @@ export function restoreBackup(opts: RestoreOpts): VerifyResult {
       `refusing to overwrite existing database at ${opts.targetPath} without --force`,
     );
   }
-  // Drop any stale rollback/WAL sidecars of the target so the restored snapshot
-  // is opened clean, not merged with a previous database's journal.
-  for (const suffix of ["", "-wal", "-shm", "-journal"]) {
-    try {
-      rmSync(opts.targetPath + suffix);
-    } catch {
-      /* absent — fine */
+  // Copy first, swap second, and keep what was replaced (audit R-82). This used to
+  // delete the live database and its sidecars and THEN copy the snapshot over: an
+  // interrupted copy (full disk, a kill) left no database at all and no copy of the
+  // one it replaced. Now the snapshot is copied to a temp file beside the target and
+  // fsynced; the old database moves aside WITH its -wal/-shm/-journal (the WAL can
+  // hold committed pages the main file does not, so the pair must travel together
+  // for the copy to open as the database it was); and only then does a rename put
+  // the snapshot in place. Every step before that rename leaves the target as it was.
+  const target = opts.targetPath;
+  const tmp = `${target}.restore-tmp`;
+  rmSync(tmp, { force: true });
+  copyFileSync(opts.filePath, tmp);
+  fsyncPath(tmp);
+  let preRestorePath: string | undefined;
+  const sidecars = ["", "-wal", "-shm", "-journal"];
+  if (sidecars.some((s) => existsSync(target + s))) {
+    preRestorePath = `${target}.pre-restore-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    for (const suffix of sidecars) {
+      if (existsSync(target + suffix)) renameSync(target + suffix, preRestorePath + suffix);
     }
   }
-  copyFileSync(opts.filePath, opts.targetPath);
-  return v;
+  renameSync(tmp, target);
+  fsyncPath(dirname(target));
+  return { ...v, preRestorePath };
+}
+
+/** fsync a file or directory by path; best effort where a platform refuses. */
+function fsyncPath(path: string): void {
+  try {
+    const fd = openSync(path, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    /* not every platform can fsync a directory */
+  }
 }
