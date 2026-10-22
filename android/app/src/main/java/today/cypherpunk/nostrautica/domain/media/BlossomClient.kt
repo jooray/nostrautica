@@ -260,9 +260,46 @@ class BlossomClient(base: OkHttpClient) {
         const val DOWNLOAD_STALL_TIMEOUT_MS = 30_000L
         private const val AUTH_REUSE_MARGIN_SEC = 600L
 
-        /** https only (audit APPR-8): server lists come from unvalidated 10063 tags too. */
-        fun isAcceptedBlossomUrl(url: String): Boolean =
-            runCatching { URI(url).let { it.scheme == "https" && !it.host.isNullOrEmpty() } }.getOrDefault(false)
+        /**
+         * The one Blossom URL rule (audit APPR-8, R-71): https with a host, no userinfo,
+         * and no host on this phone or its network (loopback, RFC 1918, link-local,
+         * CGNAT, ULA, `localhost`/`.local`). Server lists and descriptor URLs come from
+         * peers (10063 tags, configs, replies), and a phone fetching what they name must
+         * not become a probe of the LAN it sits on. The build's own servers are exempt by
+         * origin, so a dev build pointed at https://localhost keeps working. Ports are
+         * not restricted: the host is what matters, and real servers do use other ports.
+         */
+        fun isAcceptedBlossomUrl(url: String): Boolean {
+            val u = runCatching { URI(url.trim()) }.getOrNull() ?: return false
+            if (!u.scheme.equals("https", ignoreCase = true) || u.host.isNullOrEmpty() || u.rawUserInfo != null) return false
+            return !isLocalHost(u.host) || origin(u) in buildOrigins
+        }
+
+        private val buildOrigins by lazy {
+            today.cypherpunk.nostrautica.nostr.Relays.BLOSSOM.mapNotNull { runCatching { origin(URI(it.trim())) }.getOrNull() }.toSet()
+        }
+
+        internal fun origin(u: URI): String {
+            val port = if (u.port == -1 && u.scheme.equals("https", ignoreCase = true)) 443 else u.port
+            return "${u.scheme?.lowercase()}://${u.host?.lowercase()}:$port"
+        }
+
+        /** A host literal that names this device or a private network. Names are not resolved. */
+        internal fun isLocalHost(rawHost: String): Boolean {
+            val h = rawHost.lowercase().removePrefix("[").removeSuffix("]").trimEnd('.')
+            if (h == "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) return true
+            val v4 = Regex("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$").matchEntire(h.removePrefix("::ffff:"))
+            if (v4 != null) {
+                val (a, b) = v4.destructured.let { it.component1().toInt() to it.component2().toInt() }
+                return a == 0 || a == 10 || a == 127 || (a == 169 && b == 254) || (a == 172 && b in 16..31) ||
+                    (a == 192 && b == 168) || (a == 100 && b in 64..127) || a >= 224
+            }
+            if (':' in h) {
+                return h == "::" || h == "::1" || h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") ||
+                    h.startsWith("feb") || h.startsWith("fc") || h.startsWith("fd")
+            }
+            return false
+        }
 
         fun trim(server: String) = server.trimEnd('/')
 
