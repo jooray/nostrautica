@@ -53,12 +53,19 @@ export default defineConfig({
         runtimeCaching: [
           {
             // Content-hashed app chunks — safe to cache-first (immutable URLs).
-            urlPattern: ({ url }: { url: URL }) => url.pathname.includes("/_app/immutable/"),
+            // OUR chunks only (audit R-40): a path test alone also captured any
+            // cross-origin URL containing "/_app/immutable/" (another SvelteKit
+            // site's assets, a crafted link), cached its opaque response
+            // forever and let it evict the offline shell's chunks from the
+            // same 200-entry cache. Same-origin responses are never opaque, so
+            // status 0 has no business being cacheable here either.
+            urlPattern: ({ url, sameOrigin }: { url: URL; sameOrigin: boolean }) =>
+              sameOrigin && url.pathname.includes("/_app/immutable/"),
             handler: "CacheFirst",
             options: {
               cacheName: "app-immutable",
               expiration: { maxEntries: 200, maxAgeSeconds: 60 * 60 * 24 * 30 },
-              cacheableResponse: { statuses: [0, 200] },
+              cacheableResponse: { statuses: [200] },
             },
           },
         ],
