@@ -39,9 +39,9 @@ import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
-import { loadEventKeys, currentEck } from "./keystore.js";
+import { loadEventKeys, currentEck, activeKeystoreOwner } from "./keystore.js";
 import type { EventContext } from "./event-context.js";
-import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
+import { cacheGet, cacheSet, activeCacheOwner, cacheGeneration, ANON } from "$lib/cache/persist.js";
 
 export interface EventPageModel {
   menu: MergedMenuItem[]; // merged, in display order; membersOnly flags kept
@@ -84,6 +84,13 @@ export async function fetchEventPage(
   ctx: EventContext,
 ): Promise<EventPageModel | undefined> {
   const { pubkey, identifier } = parseCoordinate(ctx.coordinate);
+  // Scope fixed at the START (audit R-28, as posts.ts): a read that began logged
+  // out never decrypts the members-only parts, and one whose identity was logged
+  // out or switched since drops its cache write instead of filing the private
+  // menu/sections under whoever is active (or the never-wiped anon scope).
+  const owner = activeCacheOwner();
+  const scope = owner ?? ANON;
+  const gen = cacheGeneration();
   const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_EVENT_PAGE], authors: [pubkey], "#d": [identifier] },
     ctx.config.relays,
@@ -110,7 +117,8 @@ export async function fetchEventPage(
   const publicMenu = rTagsToMenu(latest.tags);
   let priv: EventPagePrivate = { v: 2, menu: [], sections: [] };
   if (content.private) {
-    const keys = await loadEventKeys(ctx.coordinate);
+    const keys =
+      owner && activeKeystoreOwner() === owner ? await loadEventKeys(ctx.coordinate, owner) : undefined;
     const ref = readEckTag(latest.tags);
     const version = ref && keys ? eckCandidates(keys.eck, ref)[0] : undefined;
     if (version) {
@@ -126,7 +134,7 @@ export async function fetchEventPage(
     sections: mergeSections(content.sections, priv.sections),
     sources: content.sources,
   };
-  cacheSet(pageKey(ctx.coordinate), model, latest.created_at ?? 0, pageScope());
+  cacheSet(pageKey(ctx.coordinate), model, latest.created_at ?? 0, scope, gen);
   return model;
 }
 

@@ -294,6 +294,27 @@ describe("fetchEventPosts cache write-through (§2.4)", () => {
     expect(contested.map((p) => p.title)).toEqual(["The real one"]);
   });
 
+  // Audit R-28: the scope was picked at WRITE time, so a fetch that outlived its
+  // session filed the feed under whoever was active when it finished.
+  it("files the feed under the identity that started the fetch, or nowhere", async () => {
+    setActiveCacheOwner(OWNER);
+    fetchEvents.mockImplementationOnce(async () => {
+      setActiveCacheOwner(null); // logout while the relays answer
+      return [pub("x", 100, "Members-era feed")];
+    });
+    await fetchEventPosts(ctx);
+    // Logged out now: the anon scope, which logout never wipes, must stay empty.
+    expect(cachedEventPosts(ctx.coordinate)).toBeUndefined();
+
+    setActiveCacheOwner(OWNER);
+    fetchEvents.mockImplementationOnce(async () => {
+      setActiveCacheOwner("2".repeat(64)); // account switch mid-fetch
+      return [pub("x", 100, "A's feed")];
+    });
+    await fetchEventPosts(ctx);
+    expect(cachedEventPosts(ctx.coordinate)).toBeUndefined();
+  });
+
   it("latest-wins: an older re-fetch never regresses the cached feed", async () => {
     setActiveCacheOwner(OWNER);
     fetchEvents.mockResolvedValue([pub("x", 500, "New")]);
