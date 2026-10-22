@@ -1,6 +1,9 @@
 package today.cypherpunk.nostrautica.domain.media
 
 import today.cypherpunk.nostrautica.protocol.Limits
+import java.io.ByteArrayOutputStream
+import java.io.InputStream
+import java.io.OutputStream
 import java.net.URI
 
 /** Client-side media precheck (media/precheck.ts): fail before a doomed upload. */
@@ -30,6 +33,36 @@ object Precheck {
      */
     fun pickedMime(mode: String, hasVideo: Boolean): String =
         if (mode == "audio" || !hasVideo) "audio/mp4" else "video/mp4"
+}
+
+/**
+ * Reads that stop at a byte cap (audit R-74). A content provider's declared SIZE
+ * is advisory (absent as -1, or simply wrong), so a picked stream is only trusted
+ * as far as the cap: past it the read gives up rather than filling the cache or
+ * the heap with whatever the provider yields.
+ */
+object Bounded {
+    /** A picked photo to crop: far above any phone camera's JPEG, far below the heap. */
+    const val MAX_PICKED_IMAGE_BYTES = 40L * 1024 * 1024
+
+    /** Copy at most [max] bytes; false (with [out] incomplete) when [input] holds more. */
+    fun copy(input: InputStream, out: OutputStream, max: Long): Boolean {
+        val buf = ByteArray(64 * 1024)
+        var total = 0L
+        while (true) {
+            val n = input.read(buf)
+            if (n < 0) return true
+            total += n
+            if (total > max) return false
+            out.write(buf, 0, n)
+        }
+    }
+
+    /** All of [input] when it is at most [max] bytes, else null. */
+    fun readBytes(input: InputStream, max: Long): ByteArray? {
+        val out = ByteArrayOutputStream()
+        return if (copy(input, out, max)) out.toByteArray() else null
+    }
 }
 
 /** External talk URLs (media/external.ts): YouTube or a direct video, https only. */

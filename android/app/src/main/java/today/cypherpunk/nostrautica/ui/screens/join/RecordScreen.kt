@@ -53,6 +53,7 @@ import today.cypherpunk.nostrautica.domain.join.JoinFlow
 import today.cypherpunk.nostrautica.domain.join.introMedia
 import today.cypherpunk.nostrautica.domain.join.joinFlow
 import today.cypherpunk.nostrautica.domain.media.AudioTake
+import today.cypherpunk.nostrautica.domain.media.Bounded
 import today.cypherpunk.nostrautica.domain.media.CameraTake
 import today.cypherpunk.nostrautica.domain.media.CaptureClock
 import today.cypherpunk.nostrautica.domain.media.ExternalUrl
@@ -366,8 +367,11 @@ private fun RecordBody(ev: EventState, r: Route.Record, p: androidx.compose.foun
             val mime = Precheck.pickedMime(mode, probe.hasVideo)
             val ext = if (mime.startsWith("audio/")) "m4a" else "mp4"
             val dest = File(File(ctx.cacheDir, "recordings").apply { mkdirs() }, "${java.util.UUID.randomUUID()}.$ext")
-            val copied = runCatching { withContext(Dispatchers.IO) { cr.openInputStream(uri)?.use { i -> dest.outputStream().use { o -> i.copyTo(o) } } } }.isSuccess
-            if (!copied || dest.length() == 0L) { dest.delete(); error = s.t("record.deviceError.unknown.camera"); return@launch }
+            // The provider's SIZE is advisory (-1 when absent, or simply wrong): the copy itself
+            // stops at the cap instead of filling the cache with whatever the stream yields (R-74).
+            val within = runCatching { withContext(Dispatchers.IO) { cr.openInputStream(uri)?.use { i -> dest.outputStream().use { o -> Bounded.copy(i, o, Precheck.MAX_UPLOAD_BYTES) } } } }.getOrNull()
+            if (within == false) { dest.delete(); rejectOverLimits(Precheck.MAX_UPLOAD_BYTES + 1, duration); return@launch }
+            if (within == null || dest.length() == 0L) { dest.delete(); error = s.t("record.deviceError.unknown.camera"); return@launch }
             if (rejectOverLimits(dest.length(), duration)) { dest.delete(); return@launch }
             camera.release(); cameraOn = false; meter.stop(); micOn = false
             recorded?.file?.delete()

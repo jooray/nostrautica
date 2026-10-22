@@ -447,7 +447,9 @@ object ImageCrop {
      * [outWidth] wide, as JPEG. The organizer sees the exact crop before upload.
      */
     fun centerCrop(ctx: Context, uri: Uri, aspect: Float, outWidth: Int, quality: Int = 88): ByteArray {
-        val bytes = ctx.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+        // Bounded: the provider decides how long this stream is (R-74).
+        val bytes = ctx.contentResolver.openInputStream(uri)!!.use { today.cypherpunk.nostrautica.domain.media.Bounded.readBytes(it, today.cypherpunk.nostrautica.domain.media.Bounded.MAX_PICKED_IMAGE_BYTES) }
+            ?: throw IllegalArgumentException("That photo is too large. Please choose a smaller one.")
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1
