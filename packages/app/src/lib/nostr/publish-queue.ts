@@ -29,6 +29,7 @@ import type { VerifiedEvent } from "nostr-tools/pure";
 import { publishSigned, type RelayPublishOutcome } from "./ndk.js";
 import { isRetryableRelayFailure } from "./errors.js";
 import { activeCacheOwner } from "$lib/cache/persist.js";
+import { noteAcceptedEvent } from "./accepted-watermark.js";
 
 export interface QueuedItem {
   event: VerifiedEvent;
@@ -536,6 +537,11 @@ async function flushQueueSnapshot(backend: OutboxBackend): Promise<FlushResult> 
     if (!(await stillQueued(item.event.id))) continue;
     try {
       const missing = stillMissing(await publishSigned(item.event, item.relays));
+      // `publishSigned` resolved, so a relay took it: a queued 31600 (or any
+      // replaceable/addressable event) now exists, and readers that see an older
+      // one are looking at a relay that is behind (audit R-29). Under the
+      // account that queued it.
+      noteAcceptedEvent(item.event, item.owner);
       if (missing.length === 0) {
         await backend.delete(item.event.id);
         sent++;

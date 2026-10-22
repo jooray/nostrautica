@@ -25,6 +25,7 @@ import {
   type QueuedItem,
 } from "./publish-queue.js";
 import { setActiveCacheOwner, __resetPersistForTests } from "$lib/cache/persist.js";
+import { acceptedWatermark } from "./accepted-watermark.js";
 
 function memBackend() {
   const store = new Map<string, QueuedItem>();
@@ -383,6 +384,46 @@ describe("partial publishes are carried to the relays that missed them", () => {
     // since the action it describes already succeeded.
     expect(store.has("e4")).toBe(false);
     expect(res.failed).toBe(0);
+  });
+
+  // Audit R-29: a queued 31600 delivered by the flush must raise the accepted
+  // watermark, or the config guard forgets it the moment it leaves the outbox.
+  it("notes a delivered addressable event in the accepted watermark, under its queuer", async () => {
+    store.set("cfg", {
+      event: {
+        id: "cfg",
+        kind: 31600,
+        pubkey: OWNER2,
+        created_at: 4242,
+        tags: [["d", "conf"]],
+      } as unknown as QueuedItem["event"],
+      queuedAt: 1,
+      attempts: 0,
+      owner: OWNER2,
+    });
+    store.set("note", {
+      event: { id: "note", kind: 1, pubkey: OWNER2, created_at: 9999, tags: [] } as unknown as QueuedItem["event"],
+      queuedAt: 2,
+      attempts: 0,
+      owner: OWNER2,
+    });
+    publishSigned.mockResolvedValue([ok("wss://a/")] as never);
+
+    await flushQueue();
+    expect(acceptedWatermark(`31600:${OWNER2}:conf`, OWNER2)).toBe(4242);
+    expect(acceptedWatermark(`1:${OWNER2}`, OWNER2)).toBe(0); // not an address
+  });
+
+  it("does not note an event the flush failed to deliver", async () => {
+    store.set("cfg2", {
+      event: { id: "cfg2", kind: 31600, pubkey: OWNER2, created_at: 77, tags: [["d", "x"]] } as unknown as QueuedItem["event"],
+      queuedAt: 1,
+      attempts: 0,
+      owner: OWNER2,
+    });
+    publishSigned.mockRejectedValue(new Error("Not enough relays received the event"));
+    await flushQueue();
+    expect(acceptedWatermark(`31600:${OWNER2}:x`, OWNER2)).toBe(0);
   });
 
   it("keeps an existing straggler's backoff clock when it tops up the relay set", async () => {

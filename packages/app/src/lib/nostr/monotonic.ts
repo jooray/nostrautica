@@ -46,6 +46,9 @@ import { pickLatest } from "@nostrautica/protocol";
 import { fetchEventsRelayOnly } from "./ndk.js";
 import { publishOrQueue } from "./publish-queue.js";
 import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
+import { eventAddress, acceptedWatermark, noteAccepted } from "./accepted-watermark.js";
+
+export { eventAddress, acceptedWatermark };
 
 // ── Per-address serialization (R6) ───────────────────────────────────────────
 
@@ -95,10 +98,6 @@ async function withAddressLock<T>(name: string, fn: () => Promise<T>): Promise<T
   return withInProcessLock(name, fn);
 }
 
-/** The address a replaceable/addressable event occupies: `kind:pubkey[:d]`. */
-export function eventAddress(kind: number, author: string, identifier?: string): string {
-  return identifier !== undefined ? `${kind}:${author}:${identifier}` : `${kind}:${author}`;
-}
 
 function watermarkKey(address: string): string {
   return `mono:${address}`;
@@ -107,22 +106,6 @@ function watermarkKey(address: string): string {
 /** The durable owner-scoped created_at watermark for an address (0 if none). */
 export function publishWatermark(address: string, owner?: string): number {
   return cacheGet<number>(watermarkKey(address), owner ?? activeCacheOwner() ?? ANON)?.data ?? 0;
-}
-
-function acceptedKey(address: string): string {
-  return `mono-accepted:${address}`;
-}
-
-/**
- * The highest created_at at `address` that a relay has ACCEPTED from this client
- * (0 if none). Unlike {@link publishWatermark}, which is bumped before the
- * publish and so also counts events that only ever sat in the outbox, this one
- * names an event that exists on at least one relay: a reader that sees something
- * older is looking at a relay that is behind, never at a publish that was lost
- * (audit R-29).
- */
-export function acceptedWatermark(address: string, owner?: string): number {
-  return cacheGet<number>(acceptedKey(address), owner ?? activeCacheOwner() ?? ANON)?.data ?? 0;
 }
 
 /**
@@ -210,6 +193,7 @@ export async function publishMonotonic(input: MonotonicInput): Promise<Monotonic
   // is enough; holding the lock across a slow WSS publish would needlessly stall
   // the next same-address reservation.
   const published = await publishOrQueue(event, input.relays);
-  if (published) cacheSet(acceptedKey(address), createdAt, createdAt, owner);
+  // A queued one is noted by the outbox flush when it is finally delivered.
+  if (published) noteAccepted(address, createdAt, owner);
   return { published, createdAt };
 }
