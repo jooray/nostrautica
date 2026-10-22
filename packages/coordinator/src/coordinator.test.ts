@@ -2902,6 +2902,52 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
     expect(h.store.getAttendee(h.coordinate, p2.pubkey)).toBeDefined();
   });
 
+  // Audit 2026-10-21 R-05: `handleAdmin` returned on a missing live state, and the
+  // wrapper marked the command seen — so a revoke sent while the event was
+  // suspended was consumed and never applied, and the member kept their access.
+  it("an organizer revoke sent while the event is SUSPENDED is applied once it resumes (R-05)", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    h.transport.blockConfig = true;
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "restore",
+    });
+
+    const createdAt = Math.floor(h.clock.t / 1000);
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: pk }, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+    h.transport.seed.push(wrap as any); // it is on the relay, for the rescan
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false); // deferred, not consumed
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+
+    h.transport.blockConfig = false;
+    h.clock.t += 60_000;
+    await h.coordinator.retrySuspendedEvents();
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    expect(h.store.isRevoked(h.coordinate, pk)).toBe(true);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+  });
+
+  it("a command for an event this daemon does not hold is still consumed (R-05)", async () => {
+    const h = await setup();
+    const other = makeCoordinate(getPublicKey(h.eidSk), "not-installed", KIND_CALENDAR_EVENT);
+    const createdAt = Math.floor(h.clock.t / 1000);
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: other, cmd: "recompute", args: {}, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+  });
+
   /**
    * Audit B-10. A suspension (NIP §3.5 — the newest 31600 wasn't fetchable at
    * startup revalidation, which a relay outage at boot is enough to cause) drops

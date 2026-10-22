@@ -532,6 +532,14 @@ async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) =>
 }
 
 /**
+ * Thrown by a handler whose target exists but cannot act right now (audit
+ * 2026-10-21, R-05): an organizer 21604 for an event that is installed but
+ * suspended. `processRumorWithRetry` neither retries it in memory nor marks it
+ * seen, so the coordinator-inbox rescan replays it once the event is live again.
+ */
+class DeferredRumorError extends Error {}
+
+/**
  * Wall-clock accounting for the boot path, so "startup is slow" can be answered
  * with a measurement instead of a hypothesis.
  *
@@ -1708,6 +1716,7 @@ export class Coordinator {
    */
   async retrySuspendedEvents(): Promise<void> {
     const now = this.now();
+    let resumed = false;
     for (const [coordinate, s] of [...this.suspended]) {
       if (s.retryAt > now) continue;
       await this.installEvent({
@@ -1719,7 +1728,11 @@ export class Coordinator {
         backfill: "recent",
         source: "restore",
       });
+      if (this.events.has(coordinate)) resumed = true;
     }
+    // Replay the organizer commands deferred while it was suspended (R-05) now,
+    // rather than at the next periodic rescan.
+    if (resumed) await this.rescanCoordinatorInbox();
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
@@ -1865,6 +1878,10 @@ export class Coordinator {
           return;
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          if (e instanceof DeferredRumorError) {
+            log(`[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) deferred — left unseen: ${msg.slice(0, 160)}`);
+            return;
+          }
           // Permanent failures — the payload can never parse (schema) or is not
           // JSON at all — are marked seen instead of looping on every rescan.
           if (e instanceof ZodError || e instanceof SyntaxError) {
@@ -4886,7 +4903,22 @@ export class Coordinator {
     order?: { createdAt: number; rumorId: string; expires: number },
   ): Promise<void> {
     const state = this.events.get(coordinate);
-    if (!state) return;
+    if (!state) {
+      // Not live is not the same as unknown (audit 2026-10-21, R-05). A suspended
+      // event keeps its store rows and resumes later, but returning here let the
+      // wrapper mark the command seen — so an organizer's revoke sent while the
+      // event's config was briefly unfetchable was consumed and never applied.
+      // Defer it (left unseen; the rescan after resume replays it) when the event is
+      // held, not detached, and the command really is from its E_id.
+      if (
+        this.suspended.has(coordinate) &&
+        !this.deps.store.isInstallTombstoned(coordinate) &&
+        from === parseCoordinate(coordinate).pubkey
+      ) {
+        throw new DeferredRumorError(`"${cmd}" for ${coordinate}: the event is suspended, not live`);
+      }
+      return;
+    }
     // Only the organizer (E_id) may command the coordinator.
     if (from !== state.eidPubkey) return;
 
@@ -6657,6 +6689,22 @@ export class Coordinator {
     for (const { w } of ordered) await this.handleInboxWrap(state.coordinate, w as unknown as GiftWrap);
   }
 
+  /** Replay the coordinator's own inbox over the gift-wrap window (see rescanInboxes). */
+  private async rescanCoordinatorInbox(): Promise<void> {
+    const since = giftwrapSince(Math.floor(this.now() / 1000));
+    try {
+      const wraps = await this.deps.transport.fetch(
+        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since },
+        this.deps.defaultRelays,
+      );
+      const unseen = wraps.filter((w) => !this.deps.store.isRumorSeen(w.id)).length;
+      if (unseen > 0) log(`[rescan] coordinator inbox: ${unseen} unseen wrap(s) of ${wraps.length} in the window`);
+      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
+    } catch (e) {
+      log(`[rescan] coordinator-inbox rescan failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   /**
    * Periodic rescan of every live inbox (P1 #14, open since July).
    *
@@ -6680,17 +6728,7 @@ export class Coordinator {
    */
   async rescanInboxes(): Promise<void> {
     const since = giftwrapSince(Math.floor(this.now() / 1000));
-    try {
-      const wraps = await this.deps.transport.fetch(
-        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since },
-        this.deps.defaultRelays,
-      );
-      const unseen = wraps.filter((w) => !this.deps.store.isRumorSeen(w.id)).length;
-      if (unseen > 0) log(`[rescan] coordinator inbox: ${unseen} unseen wrap(s) of ${wraps.length} in the window`);
-      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
-    } catch (e) {
-      log(`[rescan] coordinator-inbox rescan failed: ${e instanceof Error ? e.message : e}`);
-    }
+    await this.rescanCoordinatorInbox();
     // Snapshot: an event can detach (or a config handover can repoint relays)
     // while this loop is awaiting, and `eventStillLive` re-checks per iteration.
     for (const coordinate of [...this.events.keys()]) {
