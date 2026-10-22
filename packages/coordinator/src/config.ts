@@ -529,7 +529,7 @@ export function roleRequiresPrivate(
  * All three conditions have to hold at once, and each one alone is fine:
  * announcing publicly is the point of a public coordinator; an empty
  * `allowed_eid_pubkeys` is the default and is what makes it usable; and an
- * unlimited daemon ceiling is reasonable for an operator whose spend cap is at
+ * unlimited daemon call ceiling is reasonable for an operator whose spend cap is at
  * the provider. Together they mean anyone who can read the announcement can
  * install up to `max_events` events and spend `max_events ×` the per-event
  * budget on the operator's single API key.
@@ -537,15 +537,17 @@ export function roleRequiresPrivate(
 export function spendExposure(config: CoordinatorConfig): string | undefined {
   if (!config.coordinator.announce) return undefined;
   if (config.security.allowed_eid_pubkeys.length > 0) return undefined;
-  const b = config.budgets;
-  const bounded =
-    b.daemon_bytes_per_window > 0 || b.daemon_duration_sec_per_window > 0 || b.daemon_calls_per_window > 0;
-  if (bounded) return undefined;
+  // Only the CALL ceiling bounds provider spend. The bytes and duration ceilings
+  // count decoded media, and a text-only join, a match run or a translation
+  // consumes none of either, so a bytes-only ceiling (audit R-47) leaves every
+  // LLM call unbounded while looking like a limit.
+  if (config.budgets.daemon_calls_per_window > 0) return undefined;
   return (
-    "publicly announced + open to any installer + every daemon-wide budget set to 0: " +
+    "publicly announced + open to any installer + budgets.daemon_calls_per_window = 0: " +
     `anyone can install up to security.max_events (${config.security.max_events}) events and spend ` +
     `budgets.per_event_calls (${config.budgets.per_event_calls}) provider calls each against your API key. ` +
-    "Set one of budgets.daemon_*_per_window, or security.allowed_eid_pubkeys, or coordinator.announce = false " +
+    "The media ceilings (daemon_bytes/duration) do not bound text-only calls. " +
+    "Set budgets.daemon_calls_per_window, or security.allowed_eid_pubkeys, or coordinator.announce = false " +
     "— or security.allow_unbounded_spend = true if your spend cap lives at the provider."
   );
 }

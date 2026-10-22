@@ -248,8 +248,17 @@ describe("SEC-7 spend exposure at startup", () => {
     // Restricted installs: only known organizers get a budget at all.
     const allowed = `\n[security]\nallowed_eid_pubkeys = ["${"a".repeat(64)}"]\n`;
     expect(spendExposure(loadConfig(writeConfig(BASE + zeroed + allowed)))).toBeUndefined();
-    // One ceiling left standing is enough to bound the total.
+    // The call ceiling alone is enough to bound the total.
     const oneLimit = `\n[budgets]\ndaemon_bytes_per_window = 0\ndaemon_duration_sec_per_window = 0\ndaemon_calls_per_window = 1000\n`;
     expect(spendExposure(loadConfig(writeConfig(BASE + oneLimit)))).toBeUndefined();
+  });
+
+  it("does not accept a media-only ceiling as a spend bound (audit R-47)", () => {
+    // Text joins, match runs and translations decode no media, so bytes and
+    // duration ceilings never trip on them: every LLM call is still unbounded.
+    const mediaOnly = `\n[budgets]\ndaemon_bytes_per_window = 1000\ndaemon_duration_sec_per_window = 3600\ndaemon_calls_per_window = 0\n`;
+    const msg = spendExposure(loadConfig(writeConfig(BASE + mediaOnly)));
+    expect(msg).toBeDefined();
+    expect(msg).toMatch(/daemon_calls_per_window/);
   });
 });

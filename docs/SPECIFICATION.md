@@ -735,9 +735,11 @@ model = "free"
 ```
 
 An announced coordinator (`coordinator.announce = true`) that accepts installs
-from any identity (`security.allowed_eid_pubkeys` empty) and sets every
-`daemon_*_per_window` to 0 **refuses to start**: that combination offers the
-operator's provider key to whoever reads the announcement. Override with
+from any identity (`security.allowed_eid_pubkeys` empty) and sets
+`daemon_calls_per_window` to 0 **refuses to start**: that combination offers the
+operator's provider key to whoever reads the announcement. The bytes and
+duration ceilings do not count here, because text-only work (text joins,
+matching, translation) decodes no media and never trips them. Override with
 `security.allow_unbounded_spend = true` when the spend cap lives at the provider
 instead.
 
