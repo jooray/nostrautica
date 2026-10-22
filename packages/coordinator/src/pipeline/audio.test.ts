@@ -8,7 +8,13 @@ import { mkdtemp, mkdir, utimes, rmdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { sweepStaleTempDirs, probeDurationFromBytes, ProbeUnavailableError } from "./audio.js";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { encryptMedia } from "@nostrautica/protocol";
+import { sweepStaleTempDirs, probeDurationFromBytes, ProbeUnavailableError, extractAudioSegments } from "./audio.js";
+import { transcribeMedia, MediaPolicyError } from "./transcribe.js";
+import { Store } from "../store/db.js";
+import { MockStt } from "../providers/mock.js";
 
 const created: string[] = [];
 
@@ -70,5 +76,53 @@ describe("probeDurationFromBytes failure classification", () => {
     await expect(probeDurationFromBytes(GARBAGE, "video/webm", undefined, 1)).rejects.toBeInstanceOf(
       ProbeUnavailableError,
     );
+  });
+});
+
+/**
+ * Audit R-17: `format=duration` is container metadata the uploader wrote. A WebM
+ * whose Duration element says 1 s over 10 s of audio passed a 3 s cap and booked
+ * 1 s while STT was billed for all ten.
+ */
+describe("a lying container duration does not get past the cap (R-17)", () => {
+  /** 10 s of Opus in WebM, its EBML Duration patched to claim 1 s. */
+  function lyingWebm(): Uint8Array {
+    const dir = mkdtempSync(join(tmpdir(), "r17-"));
+    try {
+      const path = join(dir, "long.webm");
+      execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=10", "-c:a", "libopus", "-b:a", "16k", path]);
+      const b = readFileSync(path);
+      const i = b.indexOf(Buffer.from([0x44, 0x89])); // Segment Info → Duration
+      expect(b[i + 2]).toBe(0x88); // an 8-byte float, in TimecodeScale (ms) units
+      b.writeDoubleBE(1000, i + 3);
+      return new Uint8Array(b);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("the container claims 1 s; extraction stops past the cap and measures what it decoded", async () => {
+    const media = lyingWebm();
+    expect(await probeDurationFromBytes(media, "audio/webm")).toBe(1);
+    const segments = await extractAudioSegments(media, "audio/webm", 25 * 1024 * 1024, undefined, 3);
+    const measured = segments.reduce((n, s) => n + (s.durationSec ?? 0), 0);
+    expect(measured).toBeGreaterThan(3.5); // decoded to the 4 s input cap, not the claimed 1 s
+    expect(measured).toBeLessThan(5);
+  });
+
+  it("transcribeMedia rejects it before STT and books the measured seconds", async () => {
+    const { ciphertext, descriptor } = await encryptMedia({
+      kind: "intro", data: lyingWebm(), mime: "audio/webm", duration: 1, urls: ["https://blob.example/x"],
+    });
+    const stt = new MockStt({ default: "x" });
+    const usage: { bytes: number; durationSec: number }[] = [];
+    await expect(
+      transcribeMedia(
+        { store: new Store(":memory:"), stt, sttModel: "m", fetchBlob: async () => ciphertext, maxDurationSec: 3, onUsage: (u) => usage.push(u) },
+        descriptor as never,
+      ),
+    ).rejects.toThrow(MediaPolicyError);
+    expect(stt.calls).toBe(0);
+    expect(usage.reduce((n, u) => n + u.durationSec, 0)).toBe(4);
   });
 });

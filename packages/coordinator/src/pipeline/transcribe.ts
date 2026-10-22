@@ -366,7 +366,8 @@ export async function transcribeMedia(
 
   const caps = await deps.stt.capabilities();
   const extract =
-    deps.extractAudio ?? ((m, mime, maxBytes) => extractAudioSegments(m, mime, maxBytes, deps.signal));
+    deps.extractAudio ??
+    ((m, mime, maxBytes) => extractAudioSegments(m, mime, maxBytes, deps.signal, deps.maxDurationSec));
   let segments: AudioSegment[];
   try {
     segments = await extract(plaintext, descriptor.m, caps.maxUploadBytes);
@@ -378,6 +379,29 @@ export async function transcribeMedia(
       throw new MediaPolicyError(`audio extraction failed on this media: ${e.message}`);
     }
     throw e;
+  }
+
+  // Audit R-17. The probe above reads `format=duration`, which is container
+  // METADATA the attendee authored: an MP4 whose header says 30 s and whose
+  // samples run for two hours passed a 90 s cap, booked 30 s, and paid STT for two
+  // hours. What reaches STT is the Ogg our own ffmpeg just wrote, decoding no more
+  // than one second past the limit, and that is measured here. Over-length media
+  // measures over the limit and is rejected before the provider is called. Half a
+  // second of tolerance absorbs Opus pre-skip, so a clean 90 s recording that
+  // reads 90.0065 s still passes. The usage budget is topped up to the measured
+  // figure, so the books carry the larger of what the container claimed and what
+  // was really decoded.
+  const measured = segments.every((seg) => typeof seg.durationSec === "number")
+    ? segments.reduce((n, seg) => n + seg.durationSec!, 0)
+    : undefined;
+  if (measured !== undefined) {
+    const extra = Math.round(measured) - (realDurationSec ?? 0);
+    if (extra > 0) deps.onUsage?.({ bytes: 0, durationSec: extra });
+    if (deps.maxDurationSec && measured > deps.maxDurationSec + 0.5) {
+      throw new MediaPolicyError(
+        `decoded audio runs past the ${deps.maxDurationSec}s event limit (the container claimed ${realDurationSec ?? "?"}s)`,
+      );
+    }
   }
 
   const parts: string[] = [];
