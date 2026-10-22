@@ -3988,7 +3988,38 @@ export class Store {
     const jobs = this.db
       .prepare("DELETE FROM jobs WHERE state IN ('done', 'poison') AND COALESCE(claimed_at, 0) < ?")
       .run(cutoff);
-    return Number(kps.changes) + Number(legacy.changes) + Number(rate.changes) + Number(jobs.changes);
+    const transcripts = this.sweepOrphanTranscripts(now - 24 * 60 * 60 * 1000);
+    return Number(kps.changes) + Number(legacy.changes) + Number(rate.changes) + Number(jobs.changes) + transcripts;
+  }
+
+  /**
+   * Drop cached STT transcripts nothing owns any more (audit R-15): no
+   * `transcript_refs` row and no attribution from any stored profile's media or
+   * any talk's current media. The talk path never recorded a ref, so a talk whose
+   * media a later revision replaced left the old recording's plaintext transcript
+   * reachable by nothing — not by `delete_data`, not by the retention purge, which
+   * both find transcripts through refs or CURRENT media only. The talk path records
+   * refs now; this clears what it left behind, and anything a future path forgets.
+   * `before` (unix ms) spares rows written in the last day, so a transcription
+   * still running cannot lose its row between the write and its ref.
+   */
+  sweepOrphanTranscripts(before: number): number {
+    const r = this.db
+      .prepare(
+        `WITH attributed(x) AS (
+           SELECT json_extract(m.value, '$.x')
+             FROM attendees a,
+                  json_each(CASE WHEN json_valid(a.profile_json) THEN a.profile_json ELSE '{}' END, '$.__media') m
+           UNION
+           SELECT json_extract(media_json, '$.x') FROM talks WHERE json_valid(media_json)
+         )
+         DELETE FROM transcripts
+          WHERE created_at < ?
+            AND blob_sha256 NOT IN (SELECT blob_sha256 FROM transcript_refs)
+            AND blob_sha256 NOT IN (SELECT x FROM attributed WHERE x IS NOT NULL)`,
+      )
+      .run(before);
+    return Number(r.changes);
   }
 
   // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────

@@ -912,6 +912,40 @@ describe("inbox rate accounting + population caps (audit C3)", () => {
   });
 });
 
+/**
+ * Audit R-15: the talk path never recorded a transcript ref, so a talk whose
+ * media a later revision replaced left the old transcript owned by nothing —
+ * unreachable by delete_data and the retention purge alike.
+ */
+describe("orphaned transcripts are swept (audit R-15)", () => {
+  const DAY = 86_400_000;
+  it("drops a transcript with no ref and no current media attribution, keeps the rest", () => {
+    const store = new Store();
+    const talk = (x: string, revision: number) =>
+      store.upsertTalk({
+        coordinate: "c", pubkey: "p", talkD: "d", title: "t", description: "", speakersJson: "[]",
+        mediaJson: JSON.stringify({ x }), lang: "en", revision, mediaX: x, now: 1,
+      });
+    store.putTranscript("oldTalk", "the replaced talk", 1);
+    talk("oldTalk", 1);
+    talk("newTalk", 2); // a re-recorded revision: oldTalk is now attributed to nothing
+    store.putTranscript("newTalk", "current talk", 1);
+    store.putTranscript("refd", "has a ref", 1, "en", { coordinate: "c", pubkey: "q" });
+    store.upsertAttendee({ coordinate: "c", pubkey: "r", status: "approved", profileJson: JSON.stringify({ __media: [{ x: "intro" }] }), now: 1 });
+    store.putTranscript("intro", "legacy intro, no ref", 1);
+    store.upsertAttendee({ coordinate: "c", pubkey: "s", status: "approved", profileJson: "not json", now: 1 });
+    store.putTranscript("fresh", "still being written", 10 * DAY);
+
+    store.pruneOldData(10 * DAY + 1000);
+
+    expect(store.getTranscript("oldTalk")).toBeUndefined();
+    expect(store.getTranscript("newTalk")).toBe("current talk");
+    expect(store.getTranscript("refd")).toBe("has a ref");
+    expect(store.getTranscript("intro")).toBe("legacy intro, no ref");
+    expect(store.getTranscript("fresh")).toBe("still being written");
+  });
+});
+
 // ── C5: reference-counted deletion of shared derived artifacts ────────────────
 describe("reference-counted purge (audit C5)", () => {
   it("keeps a shared transcript/summary/artifact alive for another event", () => {

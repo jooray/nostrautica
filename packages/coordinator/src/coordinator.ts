@@ -4076,6 +4076,10 @@ export class Coordinator {
               this.deps.store.addUsage(coordinate, pubkey, { bytes, durationSec }, this.now()),
             // Shutdown / per-event teardown (audit R13): unwind blocked STT/ffmpeg.
             signal,
+            // Ownership ref (audit R-15): without it a talk whose media a later
+            // revision replaced left this transcript owned by nothing, so neither
+            // delete_data nor the retention purge could ever reach it.
+            owner: { coordinate, pubkey },
             now: this.now,
           },
           d,
