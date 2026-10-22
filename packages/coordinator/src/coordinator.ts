@@ -2469,9 +2469,27 @@ export class Coordinator {
         return;
       }
       log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
-      // The public effect chain is identical to an organizer revoke (idempotent, and
-      // its ECK rotation resumes idempotently via the same operation progress).
-      await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      // Only an APPROVED member's departure rotates the ECK (audit 2026-10-21, R-06).
+      // A pending or already-revoked row holds no current key, no directory entry and
+      // no roster seat, yet its withdrawal used to mint a new ECK version and re-grant
+      // the whole (unbounded) list to every member — so anyone able to send a join
+      // could grow every member's grant and the coordinator's republish work on
+      // demand. Such a row is just marked revoked (or purged below). A rotation this
+      // operation already recorded still resumes, so a retry after a crash
+      // mid-revoke finishes the republish instead of skipping it on the now
+      // `revoked` row.
+      const rotating =
+        existing.status === "approved" ||
+        this.deps.store.getCommandOpProgress(state.coordinate, subject).eckRotation !== undefined;
+      if (rotating) {
+        // The public effect chain is identical to an organizer revoke (idempotent, and
+        // its ECK rotation resumes idempotently via the same operation progress).
+        await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      } else {
+        this.deps.store.upsertAttendee({ coordinate: state.coordinate, pubkey, status: "revoked", now: this.now() });
+        this.deps.store.cancelSubjectPipelineJobs(state.coordinate, pubkey, { allStates: false });
+        log(`[withdraw] ${short(pubkey)} was '${existing.status}', not approved — no ECK rotation`);
+      }
       if (content.delete_data) {
         // Ownership token recheck (audit R1, belt to the mutex): don't purge if a
         // newer membership command superseded this withdrawal mid-flight.

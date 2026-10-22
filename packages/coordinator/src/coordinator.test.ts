@@ -8036,3 +8036,45 @@ describe("audit 2026-10-21 R-08 — a retried submission after a delete_data wit
     expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
   });
 });
+
+/**
+ * Audit 2026-10-21 R-06 — a withdrawal from a row that holds no key rotates nothing.
+ *
+ * The 21610 handler ran the full revoke chain for any existing row, so a pending
+ * (never-approved) sender could mint a new ECK version per distinct withdrawal and
+ * make the coordinator re-grant the whole, ever-growing list to every member.
+ */
+describe("audit 2026-10-21 R-06 — only an approved member's withdrawal rotates the ECK", () => {
+  const eckIds = (h: Harness): number[] =>
+    ((h.coordinator as any).events.get(h.coordinate).eck as { id: number }[]).map((v) => v.id);
+
+  it("a pending member withdrawing (twice) leaves the ECK and every grant untouched", async () => {
+    const h = await setup(0, { approval: "manual" });
+    const member = await join(h, generateSecretKey(), "design");
+    await admin(h, "approve", { pubkey: member });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    const before = eckIds(h);
+    const from = h.transport.published.length;
+
+    h.clock.t += 60_000;
+    await withdraw(h, sk, { deleteData: false, createdAt: Math.floor(h.clock.t / 1000) });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    h.clock.t += 60_000;
+    await withdraw(h, sk, { deleteData: true, createdAt: Math.floor(h.clock.t / 1000) });
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+
+    expect(eckIds(h)).toEqual(before);
+    expect(h.transport.published.slice(from).filter((e) => e.kind === 1059)).toHaveLength(0);
+  });
+
+  it("an approved member withdrawing still rotates", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    await join(h, sk, "crypto");
+    const before = eckIds(h);
+    await withdraw(h, sk, { deleteData: false });
+    expect(eckIds(h).length).toBe(before.length + 1);
+  });
+});
