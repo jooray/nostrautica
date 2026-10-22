@@ -10,7 +10,14 @@
   import { router } from "$lib/router/router.svelte.js";
   import { npubEncode } from "nostr-tools/nip19";
   import { sendDm } from "$lib/events/dm.js";
-  import { parseDmCommand, matchDmTargets, type DmTarget } from "$lib/chat/dm-command.js";
+  import {
+    parseDmCommand,
+    matchDmTargets,
+    pinDmTarget,
+    pinHolds,
+    type DmPin,
+    type DmTarget,
+  } from "$lib/chat/dm-command.js";
   import { parseMentions, shortNpub, type MentionSegment } from "$lib/chat/mentions.js";
   import { outbox } from "$lib/stores/outbox.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
@@ -540,15 +547,24 @@
   // name cases are pinned as tests; the DM goes to the ACCOUNT, never the chat
   // device key, which is app-scoped and would deliver nowhere else.
 
-  /** Everyone in the room except yourself. */
+  /** Everyone in the room except yourself, and except a device the roster has
+   *  not bound to a person: its "account" is an app-scoped chat key that no DM
+   *  inbox reads (audit R-30). */
   const dmTargets = $derived.by(() => {
     const me = chatPubkey ? accountOf(chatPubkey) : "";
     return members
+      .filter((mem) => !mem.unattested)
       .map((mem) => ({ account: mem.account, name: nameOf(mem.account) }))
       .filter((x) => x.account !== me)
       .sort((a, b) => a.name.localeCompare(b.name));
   });
-  const dmCommand = $derived(parseDmCommand(draft, dmTargets));
+  // The person picked from the list, by pubkey (R-30): re-resolving the name on
+  // Enter let an impostor with the same display name receive the DM.
+  let dmPin = $state<DmPin | null>(null);
+  $effect(() => {
+    if (dmPin && !pinHolds(draft, dmPin, dmTargets)) dmPin = null;
+  });
+  const dmCommand = $derived(parseDmCommand(draft, dmTargets, dmPin));
   const dmMatches = $derived(
     dmCommand && !dmCommand.ready ? matchDmTargets(dmTargets, dmCommand.query) : [],
   );
@@ -563,7 +579,11 @@
 
   /** Complete the composer to `/msg <name> ` and let them type the message. */
   function completeNick(target: DmTarget): void {
-    draft = `/msg ${target.name} `;
+    const pin = pinDmTarget(target);
+    // A message typed after a name two people share is kept through the pick.
+    const kept = dmCommand && !dmCommand.ready ? (dmCommand.body ?? "") : "";
+    dmPin = pin;
+    draft = pin.prefix + kept;
     dmError = null;
   }
 
@@ -925,8 +945,9 @@
                 onmouseenter={() => (dmPick = i)}
                 onclick={() => completeNick(c)}
               >
-                <Avatar pubkey={c.account} name={c.name} size={20} />
-                <span>{c.name}</span>
+                <Avatar pubkey={c.account} name={c.name} picture={pictureOf(c.account)} size={20} />
+                <span class="pname">{c.name}</span>
+                <span class="pkey">{shortNpub(c.account)}</span>
               </button>
             </li>
           {/each}
@@ -934,9 +955,10 @@
       {/if}
       {#if dmCommand?.ready}
         <p class="cmdhint" role="status">
+          <!-- The short npub says WHICH person, not just which name (R-30). -->
           {dmCommand.body
-            ? t("chat.cmd.willSend", { name: dmCommand.target.name })
-            : t("chat.cmd.willOpen", { name: dmCommand.target.name })}
+            ? t("chat.cmd.willSend", { name: `${dmCommand.target.name} (${shortNpub(dmCommand.target.account)})` })
+            : t("chat.cmd.willOpen", { name: `${dmCommand.target.name} (${shortNpub(dmCommand.target.account)})` })}
         </p>
       {/if}
       <textarea
@@ -1350,6 +1372,19 @@
   }
   .nickpop button.on {
     background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+  .nickpop .pname {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .nickpop .pkey {
+    flex: none;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 0.72rem;
+    color: var(--text-dim);
   }
   .cmdhint {
     position: absolute;

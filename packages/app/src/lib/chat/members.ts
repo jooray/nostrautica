@@ -42,6 +42,14 @@ export interface ChatMember {
   deviceCount: number;
   /** The attested device keys, for the account's own device-management UI. */
   devices: { pubkey: string; label?: string; added_at: number }[];
+  /**
+   * A device in the group that no roster row claims yet, so `account` is really
+   * a DEVICE key standing in for a person we cannot name. Shown in the member
+   * list (the person is in the room), but never a DM recipient or a mention
+   * target: a DM sealed to an app-scoped chat key goes to a key the person
+   * never reads (audit R-30).
+   */
+  unattested?: true;
 }
 
 /** What a member list is derived from — the UI has to say which, they differ. */
@@ -122,7 +130,13 @@ export function chatMembers(
   // and their messages are already arriving.
   for (const pubkey of present ?? []) {
     if (accounted.has(pubkey)) continue;
-    members.push({ account: pubkey, role: "attendee", deviceCount: 1, devices: [{ pubkey, added_at: 0 }] });
+    members.push({
+      account: pubkey,
+      role: "attendee",
+      deviceCount: 1,
+      devices: [{ pubkey, added_at: 0 }],
+      unattested: true,
+    });
   }
   members.sort((x, y) => {
     if (x.role !== y.role) return x.role === "organizer" ? -1 : 1;

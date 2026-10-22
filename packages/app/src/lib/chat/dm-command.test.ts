@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseDmCommand, matchDmTargets, type DmTarget } from "./dm-command.js";
+import { parseDmCommand, matchDmTargets, pinDmTarget, pinHolds, type DmTarget } from "./dm-command.js";
 
 const JURAJ: DmTarget = { account: "a".repeat(64), name: "Juraj" };
 const JURAJ_B: DmTarget = { account: "b".repeat(64), name: "Juraj Bednár" };
@@ -86,6 +86,52 @@ describe("parseDmCommand", () => {
   it("keeps a multi-line message body", () => {
     const c = parseDmCommand("/msg stallion first\nsecond", ROOM);
     expect(c).toEqual({ ready: true, target: STALLION, body: "first\nsecond" });
+  });
+});
+
+describe("an impostor sharing a name (audit R-30)", () => {
+  // Display names are self-asserted kind-0s. Before the fix, "/msg Juraj hi"
+  // went to whichever "Juraj" the name resolved to, even after the sender had
+  // picked the real one from the list: the pick wrote only the name back.
+  const IMPOSTOR: DmTarget = { account: "f".repeat(64), name: "juraj" };
+  const room = [JURAJ, IMPOSTOR, JURAJ_B, STALLION];
+
+  it("never settles a name two accounts answer to", () => {
+    expect(parseDmCommand("/msg Juraj", room)).toEqual({ ready: false, query: "Juraj" });
+    // A message typed after the tied name survives into the pick.
+    expect(parseDmCommand("/msg Juraj hi there", room)).toEqual({
+      ready: false,
+      query: "Juraj",
+      body: "hi there",
+    });
+  });
+
+  it("sends to the picked pubkey, not to whoever the name resolves to", () => {
+    const pin = pinDmTarget(JURAJ);
+    expect(pin.prefix).toBe("/msg Juraj ");
+    expect(parseDmCommand("/msg Juraj hi", room, pin)).toEqual({ ready: true, target: JURAJ, body: "hi" });
+    const other = pinDmTarget(IMPOSTOR);
+    expect(parseDmCommand("/msg juraj hi", room, other)).toEqual({ ready: true, target: IMPOSTOR, body: "hi" });
+  });
+
+  it("drops the pin once the name is edited, or the person has left", () => {
+    const pin = pinDmTarget(JURAJ);
+    // Edited into a different name: matching again, the pin is ignored.
+    expect(parseDmCommand("/msg stallion hi", room, pin)).toEqual({
+      ready: true,
+      target: STALLION,
+      body: "hi",
+    });
+    // Text typed after the completion is the message, even when it happens to
+    // extend the name: the pick stands, and the hint names who it goes to.
+    expect(parseDmCommand("/msg Juraj Bednár hi", room, pin)).toEqual({
+      ready: true,
+      target: JURAJ,
+      body: "Bednár hi",
+    });
+    expect(pinHolds("/msg Jura", pin, room)).toBe(false);
+    expect(pinHolds("/msg Juraj ", pin, [IMPOSTOR, STALLION])).toBe(false);
+    expect(pinHolds("/msg Juraj ", pin, room)).toBe(true);
   });
 });
 
