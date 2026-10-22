@@ -1802,8 +1802,8 @@ export class Store {
     return row && row.window_start === windowStart ? row.count : 0;
   }
 
-  /** Count of attendee rows for an event (audit C3 population cap: pending + approved
-   *  + revoked). Used to bound roster growth below the 2,000 protocol cap. */
+  /** Count of attendee rows for an event (pending + approved + revoked). Sizes the
+   *  inbox rumor budget; the member cap counts approved rows only (R-03). */
   attendeeCount(coordinate: string): number {
     return (
       this.db.prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ?").get(coordinate) as { n: number }
@@ -1817,6 +1817,28 @@ export class Store {
         .prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ? AND status = 'pending'")
         .get(coordinate) as { n: number }
     ).n;
+  }
+
+  /** Count of approved members — what the 2,000-member intake cap bounds (audit
+   *  2026-10-21, R-03: pending and revoked rows hold no roster seat). */
+  approvedAttendeeCount(coordinate: string): number {
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ? AND status = 'approved'")
+        .get(coordinate) as { n: number }
+    ).n;
+  }
+
+  /** Pending rows not touched (no join, no submission) since `cutoffMs`, oldest
+   *  first — the join queue's eviction candidates (R-03). */
+  stalePendingPubkeys(coordinate: string, cutoffMs: number): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT pubkey FROM attendees WHERE coordinate = ? AND status = 'pending' AND COALESCE(updated_at, 0) < ? ORDER BY updated_at",
+        )
+        .all(coordinate, cutoffMs) as { pubkey: string }[]
+    ).map((r) => r.pubkey);
   }
 
   // ── events (installed via 21603) ──────────────────────────────────────────

@@ -6747,8 +6747,10 @@ describe("audit C3 — public inbox is population-bounded", () => {
 
   it("refuses a new attendee beyond the 2,000 roster population cap", async () => {
     const h = await setup();
+    // APPROVED members: since R-03 (2026-10-21) only they count toward the cap;
+    // pending requests have their own bounded queue.
     for (let i = 0; i < 2000; i++) {
-      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "seed" + i, status: "pending", now: 1 });
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "seed" + i, status: "approved", now: 1 });
     }
     expect(h.store.attendeeCount(h.coordinate)).toBe(2000);
     // A fresh join (even with a valid invite) is refused — the roster never grows
@@ -8142,8 +8144,10 @@ describe("audit 2026-10-21 R-06 — only an approved member's withdrawal rotates
 
     h.clock.t += 60_000;
     await withdraw(h, sk, { deleteData: false, createdAt: Math.floor(h.clock.t / 1000) });
-    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    // A pending request withdrawn is a request cancelled (R-03): no row is left.
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
     h.clock.t += 60_000;
+    await join(h, sk, "crypto");
     await withdraw(h, sk, { deleteData: true, createdAt: Math.floor(h.clock.t / 1000) });
     expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
 
@@ -8151,12 +8155,68 @@ describe("audit 2026-10-21 R-06 — only an approved member's withdrawal rotates
     expect(h.transport.published.slice(from).filter((e) => e.kind === 1059)).toHaveLength(0);
   });
 
-  it("an approved member withdrawing still rotates", async () => {
+  it("an approved member withdrawing still rotates (R-06)", async () => {
     const h = await setup();
     const sk = generateSecretKey();
     await join(h, sk, "crypto");
     const before = eckIds(h);
     await withdraw(h, sk, { deleteData: false });
     expect(eckIds(h).length).toBe(before.length + 1);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-03 — an anonymous join flood cannot close an event's door.
+ *
+ * The 2,000 cap counted every row, pending and revoked included, and pending rows
+ * never expired: 2,000 code-less joins to a manual-approval event refused every
+ * later join for good, invited guests included.
+ */
+describe("audit 2026-10-21 R-03 — member cap vs. pending join queue", () => {
+  const codeless = async (h: Harness, sk: Uint8Array): Promise<string> => {
+    const pk = getPublicKey(sk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, getPublicKey(h.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "x", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+      }) as any,
+    );
+    return pk;
+  };
+  const fill = (h: Harness, n: number, status: string, at: number) => {
+    for (let i = 0; i < n; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "a" + i.toString(16).padStart(63, "0"), status, now: at });
+    }
+  };
+
+  it("pending and revoked rows do not count toward the 2,000-member cap", async () => {
+    const h = await setup();
+    fill(h, 2000, "pending", h.clock.t);
+    for (let i = 0; i < 10; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "b" + i.toString(16).padStart(63, "0"), status: "revoked", now: h.clock.t });
+    }
+    const pk = await join(h, generateSecretKey(), "crypto"); // a valid invite
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
+  it("a full pending queue refuses a code-less join (no row) but still admits an invited guest", async () => {
+    const h = await setup();
+    fill(h, 1000, "pending", h.clock.t);
+    const stranger = await codeless(h, generateSecretKey());
+    expect(h.store.getAttendee(h.coordinate, stranger)).toBeUndefined();
+    expect(h.store.pendingAttendeeCount(h.coordinate)).toBe(1000);
+
+    const guest = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, guest)?.status).toBe("approved");
+  });
+
+  it("requests idle past the TTL are evicted when the queue is full", async () => {
+    const h = await setup();
+    fill(h, 1000, "pending", h.clock.t - 4 * 24 * 3600 * 1000);
+    const pk = await codeless(h, generateSecretKey());
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(h.store.pendingAttendeeCount(h.coordinate)).toBe(1);
   });
 });

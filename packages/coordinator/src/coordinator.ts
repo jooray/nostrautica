@@ -211,12 +211,31 @@ const MAX_MEDIA_FILE_BYTES = PROTOCOL_MAX_MEDIA_FILE_BYTES;
 const MAX_TALKS_PER_SPEAKER = 10;
 
 /**
- * Event-wide attendee-population cap (audit C3). The 31604 roster protocol cap is
- * 2,000, so the coordinator must never grow its attendee set (pending + approved +
- * revoked) past it and then FAIL to publish the roster. A join that would create a
- * NEW attendee beyond this is refused.
+ * Event-wide member cap (audit C3). The 31604 roster protocol cap is 2,000, so the
+ * coordinator must never grow its APPROVED set past it and then FAIL to publish the
+ * roster. A join that would create a NEW attendee beyond this is refused.
+ *
+ * Counts approved rows only (audit 2026-10-21, R-03). It used to count pending and
+ * revoked rows too, so 2,000 anonymous join requests closed a manual-approval
+ * event's door for good: pending rows never expired, a revoke freed nothing, and
+ * there was no reject. Pending requests have their own bounded queue below.
  */
 const MAX_ATTENDEES_PER_EVENT = 2000;
+/**
+ * Bound on an event's queue of PENDING join requests (R-03). Past it, a join that
+ * no invite or membership proof admits is refused rather than queued; an entitled
+ * join is still admitted. Sized well above a real door rush (a few hundred people
+ * at once), small enough that the queue stays something an organizer can read.
+ */
+const MAX_PENDING_JOINS_PER_EVENT = 1000;
+/**
+ * A pending request untouched (no new join, no submission) for this long is
+ * evicted when the queue is full, so a flood can close the queue only for as long
+ * as it keeps refreshing every row. Matches the gift-wrap rescan horizon: past it
+ * the coordinator could not have recovered the request's lost wraps anyway, and the
+ * organizer can still approve an evicted person by hand (an approve creates the row).
+ */
+const PENDING_JOIN_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 
 /** Durable inbox rate accounting (audit C3): fixed 60s window. */
 const INBOX_RATE_WINDOW_MS = 60_000;
@@ -2176,6 +2195,21 @@ export class Coordinator {
    * pending rows, which is the point: joins create them, so the budget rises
    * with the crowd during the burst instead of after it.
    */
+  /**
+   * Is the event's pending join queue at its bound (audit 2026-10-21, R-03)? Only
+   * when it is, evict requests idle past {@link PENDING_JOIN_TTL_MS} first, oldest
+   * first, through the per-attendee purge (which keeps any revocation tombstone).
+   * The TTL is past the rescan's gift-wrap window, so the evicted request's own
+   * join is no longer replayed to recreate it.
+   */
+  private pendingQueueFull(coordinate: string): boolean {
+    if (this.deps.store.pendingAttendeeCount(coordinate) < MAX_PENDING_JOINS_PER_EVENT) return false;
+    const stale = this.deps.store.stalePendingPubkeys(coordinate, this.now() - PENDING_JOIN_TTL_MS);
+    for (const pk of stale) this.deps.store.purgeAttendeeArtifacts(coordinate, pk);
+    if (stale.length) log(`[join] ${coordinate}: pending queue full — evicted ${stale.length} request(s) idle for over ${PENDING_JOIN_TTL_MS / 86_400_000} days`);
+    return this.deps.store.pendingAttendeeCount(coordinate) >= MAX_PENDING_JOINS_PER_EVENT;
+  }
+
   private eventRumorBudget(coordinate: string): number {
     if (coordinate === COORD_INBOX_RATE_KEY) return MAX_RUMORS_PER_EVENT_WINDOW;
     const enrolled = this.deps.store.attendeeCount(coordinate);
@@ -2518,10 +2552,16 @@ export class Coordinator {
         // The public effect chain is identical to an organizer revoke (idempotent, and
         // its ECK rotation resumes idempotently via the same operation progress).
         await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      } else if (existing.status === "pending") {
+        // Withdrawing a pending request cancels it: the row goes entirely, whatever
+        // `delete_data` says (nothing was processed for it — the pipeline runs only
+        // for approved members — so there is no spend to preserve). Keeping it as
+        // `revoked` would let join-then-withdraw cycles grow rows that neither the
+        // member cap nor the pending queue counts (R-03).
+        this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
+        log(`[withdraw] ${short(pubkey)} cancelled their pending request — no ECK rotation`);
       } else {
-        this.deps.store.upsertAttendee({ coordinate: state.coordinate, pubkey, status: "revoked", now: this.now() });
-        this.deps.store.cancelSubjectPipelineJobs(state.coordinate, pubkey, { allStates: false });
-        log(`[withdraw] ${short(pubkey)} was '${existing.status}', not approved — no ECK rotation`);
+        log(`[withdraw] ${short(pubkey)} was already '${existing.status}' — no ECK rotation`);
       }
       if (content.delete_data) {
         // Ownership token recheck (audit R1, belt to the mutex): don't purge if a
@@ -2810,11 +2850,14 @@ export class Coordinator {
     // Population cap (audit C3): a NEW attendee beyond the 2,000 roster protocol cap
     // is refused — the coordinator must never grow its attendee set past what the
     // 31604 roster can carry and then fail to publish it. Existing rows (re-delivered
-    // joins) are unaffected.
-    if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+    // joins) are unaffected. Approved members only (R-03, see the constant).
+    if (!existing && this.deps.store.approvedAttendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
       log(`[join] REJECTED ${short(attendeePubkey)}: event ${state.coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
       return;
     }
+    // Pending-queue bound (R-03): with the queue full, a NEW joiner gets no early
+    // enrollment row, and is refused below unless an entitlement admits them.
+    const queueFull = !existing && this.pendingQueueFull(state.coordinate);
 
     const inviteTag = tags.find((t) => t[0] === "invite");
     const invite = inviteTag && inviteTag[1] && inviteTag[2]
@@ -2851,13 +2894,19 @@ export class Coordinator {
     // the real one. C3's threat model is untouched: the gate exists so an unknown
     // sender can't create a row by SUBMITTING A PROFILE, and this row is created
     // by an authenticated join request, which is exactly what does that.
-    this.deps.store.upsertAttendee({
-      coordinate: state.coordinate,
-      pubkey: attendeePubkey,
-      status: "pending",
-      displayName: name.trim() || null,
-      now: this.now(),
-    });
+    //
+    // Skipped while the pending queue is full (R-03): a refused join must leave no
+    // row. The race above then costs only a delay — a submission that arrives
+    // first is left unseen and applied by the next inbox rescan once they are in.
+    if (!queueFull) {
+      this.deps.store.upsertAttendee({
+        coordinate: state.coordinate,
+        pubkey: attendeePubkey,
+        status: "pending",
+        displayName: name.trim() || null,
+        now: this.now(),
+      });
+    }
 
     // `approval: "manual"` (audit SB-124): every join waits for the organizer — a
     // valid invite included, which is the whole difference from `manual+invite`.
@@ -2891,6 +2940,10 @@ export class Coordinator {
         return;
       }
       const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+      if (!decision.grant && !current && queueFull) {
+        log(`[join] REJECTED ${short(attendeePubkey)}: the ${MAX_PENDING_JOINS_PER_EVENT}-request pending queue is full`);
+        return;
+      }
       this.deps.store.upsertAttendee({
         coordinate: state.coordinate,
         pubkey: attendeePubkey,
@@ -3015,6 +3068,12 @@ export class Coordinator {
       return;
     }
     const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+    if (!decision.grant && !current && queueFull) {
+      log(
+        `[join] REJECTED ${short(attendeePubkey)}: the ${MAX_PENDING_JOINS_PER_EVENT}-request pending queue is full (${decision.reason})`,
+      );
+      return;
+    }
     const status = decision.grant ? "approved" : (current?.status ?? "pending");
     if (!decision.grant && current && current.status !== "pending") {
       log(
@@ -3507,7 +3566,7 @@ export class Coordinator {
       // The same population cap a join is held to (audit SB-123): the E_inbox
       // backfill may already have enrolled people, so the merged-roster check above
       // is not enough on its own.
-      if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+      if (this.deps.store.approvedAttendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
         log(
           `[handover] ${state.coordinate}: stopped seeding at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap; the rest of the roster was not adopted`,
         );
@@ -4968,7 +5027,7 @@ export class Coordinator {
       // person's profile submission, held back by the enrollment gate, is picked up
       // by the periodic inbox rescan.
       if (!attendee && /^[0-9a-f]{64}$/.test(pubkey)) {
-        if (this.deps.store.attendeeCount(coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+        if (this.deps.store.approvedAttendeeCount(coordinate) >= MAX_ATTENDEES_PER_EVENT) {
           log(`[approve] REFUSED ${short(pubkey)}: event ${coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
           return;
         }
