@@ -24,12 +24,24 @@ export const FFMPEG_TIMEOUT_MS = 120_000; // wall-clock kill for a hung/adversar
  * 31603, which makes it a working read-and-publish channel for anything readable
  * by the daemon user — `coordinator.toml`, `.env`, database fragments.
  *
- * `-protocol_whitelist file` confines it to the one temp file we wrote.
+ * `-protocol_whitelist file` restricts ffmpeg to the `file:` protocol. It does
+ * not confine it to the one temp file we wrote: a demuxer that follows references
+ * can still open other local files. `-format_whitelist` closes that (audit R-65):
+ * auto-probing may only pick one of the plain container demuxers below, so a blob
+ * that sniffs as HLS, ffconcat, an image sequence or any other interpreter-like
+ * format is refused outright. The list is fixed and does not depend on the
+ * descriptor's declared mime. Picked files arrive labelled with whatever type the
+ * phone or browser guessed, and the container sniff stays as it was, only inside
+ * this list. It covers what the apps record (WebM/Matroska, MP4/M4A/QuickTime,
+ * Ogg) and the audio files people pick (MP3, WAV, AAC, FLAC). The coordinator's
+ * own Ogg output is read back through the same guard.
  * `-probesize`/`-analyzeduration` bound how much of a hostile container ffmpeg
  * will chew through before giving up.
  */
+export const FFMPEG_DEMUXER_ALLOWLIST = "mov,matroska,ogg,mp3,wav,aac,flac";
 const FFMPEG_INPUT_GUARD = [
   "-protocol_whitelist", "file",
+  "-format_whitelist", FFMPEG_DEMUXER_ALLOWLIST,
   "-probesize", "5M",
   "-analyzeduration", "5M",
 ];

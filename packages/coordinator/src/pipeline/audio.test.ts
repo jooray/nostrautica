@@ -80,6 +80,44 @@ describe("probeDurationFromBytes failure classification", () => {
 });
 
 /**
+ * Audit R-65: `-protocol_whitelist file` alone let ffmpeg auto-probe any demuxer,
+ * including the ones that follow references to other files. The probe is now
+ * confined to a fixed list of plain containers.
+ */
+describe("ffmpeg demuxer allowlist (R-65)", () => {
+  function make(args: string[], name: string): Uint8Array {
+    const dir = mkdtempSync(join(tmpdir(), "r65-"));
+    try {
+      execFileSync("ffmpeg", ["-v", "error", "-y", "-f", "lavfi", "-i", "sine=d=2", ...args, join(dir, name)]);
+      return new Uint8Array(readFileSync(join(dir, name)));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it("refuses a blob that sniffs as an ffconcat script, in the probe and in extraction", async () => {
+    const script = new TextEncoder().encode("ffconcat version 1.0\nfile in.webm\n");
+    await expect(probeDurationFromBytes(script, "audio/webm")).resolves.toBeUndefined();
+    await expect(extractAudioSegments(script, "audio/webm", 1 << 20)).rejects.toThrow(/whitelist/);
+  });
+
+  it("still decodes the containers the apps and file pickers produce, whatever mime they carry", async () => {
+    const samples: [Uint8Array, string][] = [
+      [make(["-c:a", "libopus"], "a.webm"), "audio/webm"],
+      [make(["-c:a", "aac"], "a.m4a"), "audio/mp4"],
+      [make(["-c:a", "aac"], "a.mp4"), "video/quicktime"],
+      [make(["-c:a", "libopus"], "a.ogg"), "audio/ogg"],
+      [make([], "a.wav"), "audio/x-wav"],
+    ];
+    for (const [media, mime] of samples) {
+      expect([2, 3]).toContain(await probeDurationFromBytes(media, mime)); // ceil of 2.0xx
+      const segs = await extractAudioSegments(media, mime, 1 << 20);
+      expect(segs[0]!.durationSec).toBeGreaterThan(1.5);
+    }
+  });
+});
+
+/**
  * Audit R-17: `format=duration` is container metadata the uploader wrote. A WebM
  * whose Duration element says 1 s over 10 s of audio passed a 3 s cap and booked
  * 1 s while STT was billed for all ten.
