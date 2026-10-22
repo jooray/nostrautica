@@ -166,6 +166,21 @@ export function authenticateKeyGrant(
 }
 
 /**
+ * Whether a 21602 that failed `authenticateKeyGrant` failed ONLY on its sealer
+ * not being E_id or the configured coordinator: a well-formed event coordinate
+ * and a `granted_by` naming the sealer. That verdict depends on which 31600 the
+ * check saw, so it is not final (audit R-39).
+ */
+function sealerOnlyMismatch(rumor: Rumor, grant: KeyGrantContent): boolean {
+  if (!isEventCoordinate(grant.a) || grant.granted_by !== rumor.pubkey) return false;
+  try {
+    return parseCoordinate(grant.a).pubkey !== rumor.pubkey;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Fetch and parse the latest signed 31600 config for an event coordinate.
  * `relayHints` are the event's own relays when the caller knows them (audit
  * APPK-5): an event living on custom relays is unreachable via DEFAULT_RELAYS
@@ -175,7 +190,7 @@ export function authenticateKeyGrant(
 async function fetchEventConfig(
   coordinate: string,
   relayHints: string[] = [],
-): Promise<EventConfig | undefined> {
+): Promise<{ config: EventConfig; createdAt: number } | undefined> {
   let coord;
   try {
     coord = parseCoordinate(coordinate);
@@ -192,7 +207,7 @@ async function fetchEventConfig(
   const latest = pickLatest(onlyAddressed(onlyVerified(events), KIND_EVENT_CONFIG, coord.pubkey, coord.identifier));
   if (!latest) return undefined;
   try {
-    return parseEventConfig(coord.pubkey, latest.tags);
+    return { config: parseEventConfig(coord.pubkey, latest.tags), createdAt: latest.created_at ?? 0 };
   } catch (e) {
     // The config is E_id-signed (onlyVerified + authored by coord.pubkey) — a
     // trusted authority. A newer protocol version here means this client is stale
@@ -333,7 +348,23 @@ export const MAX_GRANT_WRAPS = 5000;
 // per device — bounded by the scan budget's call cap, and memoized under this key
 // as it goes — and the old entry ages out with the rest of the cache.
 export const GRANT_MEMO_KEY = "grantwraps-v2";
-type GrantMemoEntry = true | { coordinate: string; versions: number[]; organizer: boolean };
+type GrantMemoEntry =
+  | true
+  | {
+      coordinate: string;
+      versions: number[];
+      organizer: boolean;
+      /**
+       * Set on a 21602 rejected ONLY because its sealer was neither E_id nor the
+       * coordinator named by the 31600 we had, whose `created_at` this is (audit
+       * R-39). That is not definitive: the config we read may simply be stale
+       * (a lagging relay, a coordinator attached since), and a bare `true` burned
+       * a genuine grant for good. Such a wrap is skipped until a NEWER 31600 is
+       * seen, then re-checked. `versions: []` keeps the shape an older build's
+       * check reads, where it just costs one re-unwrap.
+       */
+      staleConfigAt?: number;
+    };
 
 function grantMemoSatisfied(entry: GrantMemoEntry | undefined, held: EventKeys[]): boolean {
   if (entry === true) return true; // definitively not an accepted grant
@@ -576,11 +607,8 @@ export async function receiveGrants(
   let memoDirty = false;
   // Cache the (network-fetched) signed 31600 per coordinate so multiple grants
   // for one event only cost a single config lookup.
-  const configCache = new Map<string, EventConfig | undefined>();
-  const configFor = async (
-    coordinate: string,
-    relayHints: string[] = [],
-  ): Promise<EventConfig | undefined> => {
+  const configCache = new Map<string, { config: EventConfig; createdAt: number } | undefined>();
+  const signedConfigFor = async (coordinate: string, relayHints: string[] = []) => {
     if (!configCache.has(coordinate)) {
       // A fetch/relay failure is not a definitive "no config" — collapse it to
       // undefined (config-absent) so the caller treats the grant as retryable.
@@ -590,6 +618,19 @@ export async function receiveGrants(
       );
     }
     return configCache.get(coordinate);
+  };
+  const configFor = async (
+    coordinate: string,
+    relayHints: string[] = [],
+  ): Promise<EventConfig | undefined> => (await signedConfigFor(coordinate, relayHints))?.config;
+  /**
+   * A wrap memoized as "sealed by someone the config didn't name" stays skipped
+   * until the event's 31600 is newer than the one it was judged against (R-39).
+   * One config read per coordinate per scan (cached above), never a signer call.
+   */
+  const staleAuthoritySkip = async (coordinate: string, judgedAt: number): Promise<boolean> => {
+    const now = await signedConfigFor(coordinate, eventRelayHints(coordinate));
+    return !now || now.createdAt <= judgedAt;
   };
 
   // Fence for the whole pass (audit DS41-001): every unwrap below can wait a
@@ -612,7 +653,10 @@ export async function receiveGrants(
     if (!wrap.tags.some((tg) => tg[0] === "p" && tg[1] === pubkey)) continue;
     // Already definitively processed in a prior scan/session — skip the signer
     // round-trip.
-    if (grantMemoSatisfied(memo[wrap.id], held)) continue;
+    const memoEntry = memo[wrap.id];
+    if (memoEntry !== true && memoEntry?.staleConfigAt !== undefined) {
+      if (await staleAuthoritySkip(memoEntry.coordinate, memoEntry.staleConfigAt)) continue;
+    } else if (grantMemoSatisfied(memoEntry, held)) continue;
     // Out of time or out of prompts: stop rather than start another two-round-
     // trip unwrap. Everything decided so far is already memoized and the
     // full-history latch below is withheld, so the next scan resumes where this
@@ -724,8 +768,9 @@ export async function receiveGrants(
         }
         continue;
       }
-      const config = await configFor(grant.a, eventRelayHints(grant.a));
-      if (!config) {
+      const signed = await signedConfigFor(grant.a, eventRelayHints(grant.a));
+      const config = signed?.config;
+      if (!signed || !config) {
         // The event's signed 31600 isn't fetchable right now (transient relay
         // gap, or an event living on relays we haven't recorded yet), and
         // authenticateKeyGrant can't establish the granting authority without
@@ -752,8 +797,12 @@ export async function receiveGrants(
           "[receiveGrants] ignored forged/invalid key grant (21602) for",
           grant.a,
         );
-        // Definitive negative WITH a successfully fetched config — memoize.
-        memo[wrap.id] = true;
+        // A well-formed grant whose only fault is a sealer the config doesn't
+        // name may have been checked against a stale 31600 (R-39): remember which
+        // one, so a newer config re-opens it. Anything else is definitive.
+        memo[wrap.id] = sealerOnlyMismatch(rumor, grant)
+          ? { coordinate: grant.a, versions: [], organizer: false, staleConfigAt: signed.createdAt }
+          : true;
         memoDirty = true;
         continue;
       }

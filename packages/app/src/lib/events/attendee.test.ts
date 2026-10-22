@@ -587,6 +587,51 @@ describe("APPK-5 — grant memoization + config relay set", () => {
     expect(memoHas(wrap.id)).toBe(true);
   });
 
+  // Audit R-39: a genuine grant from a newly attached coordinator, checked
+  // against a lagging relay's older 31600, was memoized as forged for good.
+  it("re-checks a grant rejected against a stale config once a newer 31600 appears", async () => {
+    const newCoordSk = generateSecretKey();
+    const newCoord = getPublicKey(newCoordSk);
+    const grant: KeyGrantContent = {
+      v: 2,
+      a: coordinate,
+      role: "attendee",
+      eck: [{ id: 2, key: bytesToBase64(generateEck()) }],
+      granted_by: newCoord,
+    };
+    const wrap = await signerWrap(new LocalSigner(newCoordSk), attendeePk, {
+      kind: KIND_KEY_GRANT,
+      content: grant,
+    });
+    const configNaming = (who: string, at: number) =>
+      finalizeEvent(
+        {
+          kind: KIND_EVENT_CONFIG,
+          created_at: at,
+          tags: [
+            ["d", "cypherpunk-2026"],
+            ["v", "2"],
+            ["inbox", inbox],
+            ["coordinator", who, "1"],
+          ],
+          content: "",
+        },
+        eidSk,
+      );
+    fetchEventsRelayOnly.mockResolvedValue([wrap]);
+
+    // The relay still serves the config from before the coordinator change.
+    fetchEvents.mockResolvedValue([configNaming(coordinator, 1000)]);
+    expect(await receiveGrants(attendee)).toEqual([]);
+    expect(await receiveGrants(attendee)).toEqual([]); // same config: still skipped
+    expect(memoHas(wrap.id)).toBe(true);
+
+    // The new 31600 reaches the relay: the same wrap is accepted.
+    fetchEvents.mockResolvedValue([configNaming(newCoord, 2000)]);
+    expect(await receiveGrants(attendee)).toEqual([coordinate]);
+    expect((await loadEventKeys(coordinate))?.eck.map((v) => v.id)).toEqual([2]);
+  });
+
   it("an account switch mid-scan never files the grant under the next account (DS41-001)", async () => {
     const wrap = await keyGrantWrap();
     const other = getPublicKey(generateSecretKey());
