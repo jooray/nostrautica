@@ -1736,6 +1736,38 @@ describe("purgeAttendeeArtifacts removes the subject's pipeline status", () => {
     expect(store.poisonStatuses(C).map((r) => r.pubkey)).toEqual(["stays"]);
     store.close();
   });
+
+  it("deletes their pipeline jobs in every state, but not their chat removal (R-09)", () => {
+    const store = new Store();
+    const C = "31923:aa:d";
+    const keys = (): string[] =>
+      ((store as any).db.prepare("SELECT dedupe_key FROM jobs ORDER BY dedupe_key").all() as { dedupe_key: string }[]).map(
+        (r) => r.dedupe_key,
+      );
+    store.enqueueJob("process_attendee", "proc:gone:1", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("match_recompute", "match:gone:1", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("process_talk", "talk:gone:1", { coordinate: C, pubkey: "gone", talkD: "t" });
+    store.enqueueJob("chat_revoke_member", "chat-revoke:gone", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("process_attendee", "proc:stays:1", { coordinate: C, pubkey: "stays" });
+    store.enqueueJob("process_attendee", "proc:other-event", { coordinate: "31923:aa:other", pubkey: "gone" });
+    // A finished job still carries the pubkey in its payload.
+    (store as any).db.prepare("UPDATE jobs SET state = 'done' WHERE dedupe_key = 'match:gone:1'").run();
+    store.purgeAttendeeArtifacts(C, "gone");
+    expect(keys()).toEqual(["chat-revoke:gone", "proc:other-event", "proc:stays:1"]);
+    store.close();
+  });
+
+  it("cancelSubjectPipelineJobs without allStates leaves running and finished rows (revoke)", () => {
+    const store = new Store();
+    const C = "31923:aa:d";
+    store.enqueueJob("process_attendee", "proc:gone:pending", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("process_attendee", "proc:gone:running", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("process_attendee", "proc:gone:done", { coordinate: C, pubkey: "gone" });
+    (store as any).db.prepare("UPDATE jobs SET state = 'running' WHERE dedupe_key = 'proc:gone:running'").run();
+    (store as any).db.prepare("UPDATE jobs SET state = 'done' WHERE dedupe_key = 'proc:gone:done'").run();
+    expect(store.cancelSubjectPipelineJobs(C, "gone", { allStates: false })).toBe(1);
+    store.close();
+  });
 });
 
 /**

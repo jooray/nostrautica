@@ -2122,6 +2122,30 @@ export class Store {
       .run(coordinate, gen, detachedAt);
   }
 
+  /**
+   * Cancel one member's pipeline jobs (audit 2026-10-21, R-07/R-09): the types whose
+   * payload names the member as its subject (`$.pubkey`) and whose effect is to
+   * derive, publish or score THEIR data. Chat jobs are deliberately excluded — a
+   * revoke enqueues `chat_revoke_member` for exactly this pubkey, and dropping it
+   * would leave their device in the MLS group.
+   *
+   * `allStates: false` (revoke) drops only work that has not started (pending and
+   * parked); a running job is left to its own post-await status recheck.
+   * `allStates: true` (the `delete_data` purge) drops every row, terminal ones
+   * included, because the payload is a personal identifier the purge promised to
+   * remove. Returns the count deleted.
+   */
+  cancelSubjectPipelineJobs(coordinate: string, pubkey: string, opts: { allStates: boolean }): number {
+    const states = opts.allStates ? "" : "state IN ('pending','waiting') AND ";
+    const info = this.db
+      .prepare(
+        `DELETE FROM jobs WHERE ${states}type IN ('process_attendee','process_talk','match_recompute','publish_matches')
+           AND json_extract(payload, '$.coordinate') = ? AND json_extract(payload, '$.pubkey') = ?`,
+      )
+      .run(coordinate, pubkey);
+    return Number(info.changes);
+  }
+
   /** Cancel every pending/running/waiting job for an event (detach and retention:
    *  stop pending paid work). */
   cancelJobsForEvent(coordinate: string): number {
@@ -2875,6 +2899,11 @@ export class Store {
       // KEPT: per-event spend is the SUM of those rows, so deleting it would refund
       // the event's budget and reset this person's per-attendee cap on a rejoin.
       this.db.prepare("DELETE FROM job_status WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      // …and so are their pipeline jobs (audit 2026-10-21, R-09), which the
+      // event-wide purge already deletes. Left behind, the payload kept the pubkey
+      // in the queue, and a `process_attendee` queued before the withdrawal could
+      // still run against a row a retried submission recreated (R-08).
+      this.cancelSubjectPipelineJobs(coordinate, pubkey, { allStates: true });
       this.db.exec("COMMIT");
     } catch (e) {
       // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
