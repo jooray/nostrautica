@@ -52,8 +52,8 @@ describe("H-3 — declared-size verification", () => {
     expect(stt.calls).toBe(0); // never transcribed
     // Actual downloaded bytes were still accounted (abuse metered on rejection).
     expect(usage[0]!.bytes).toBe(ciphertext.length);
-    // An empty transcript is cached so a re-delivery of the same x doesn't re-download.
-    expect(store.getTranscript(descriptor.x)).toBe("");
+    // Nothing is cached (audit R-16): the verdict is this descriptor's, not the blob's.
+    expect(store.getTranscriptRow(descriptor.x)).toBeUndefined();
   });
 
   it("accepts media whose actual length matches the declared size", async () => {
@@ -469,5 +469,112 @@ describe("deterministic media failures reject the media, not the attendee", () =
     const err = await transcribeMedia(deps(new Store(":memory:"), ciphertext, timeout) as any, descriptor as any).catch((e) => e);
     expect(err).toBeInstanceOf(SubprocessError);
     expect(err).not.toBeInstanceOf(MediaPolicyError);
+  });
+});
+
+/**
+ * Audit R-16 — the transcript cache is keyed by the PUBLIC ciphertext hash, so a
+ * hit has to be tied to possession of the key, or anyone who knows `x` reads the
+ * owner's transcript, pins it with a ref, or silences it with a lying `size`.
+ */
+describe("a transcript cache hit requires the blob's key (R-16)", () => {
+  const owner = { coordinate: "31923:pk:d", pubkey: "a".repeat(64) };
+  const thief = { coordinate: "31923:pk:other", pubkey: "c".repeat(64) };
+  const seg = { data: new Uint8Array(MIN_AUDIO_BYTES_TO_EXPECT_SPEECH), mime: "audio/ogg" };
+  const refs = (store: Store, x: string) =>
+    (store as any).db.prepare("SELECT coordinate, pubkey FROM transcript_refs WHERE blob_sha256 = ?").all(x);
+
+  async function seeded() {
+    const store = new Store(":memory:");
+    const { ciphertext, descriptor } = await fixture(30);
+    await transcribeMedia(
+      {
+        store,
+        stt: new MockStt({ default: "the owner's private intro" }),
+        sttModel: "m",
+        fetchBlob: async () => ciphertext,
+        probeDuration: async () => 30,
+        extractAudio: async () => [seg],
+        owner,
+      },
+      descriptor as any,
+    );
+    return { store, ciphertext, descriptor };
+  }
+
+  it("the owner's own descriptor still hits the cache without a download", async () => {
+    const { store, descriptor } = await seeded();
+    const fetchBlob = vi.fn(async () => new Uint8Array());
+    const stt = new MockStt({ default: "x" });
+    const r = await transcribeMedia({ store, stt, sttModel: "m", fetchBlob, owner }, descriptor as any);
+    expect(r.text).toBe("the owner's private intro");
+    expect(fetchBlob).not.toHaveBeenCalled();
+    expect(stt.calls).toBe(0);
+  });
+
+  it("a descriptor with the right x but a wrong key gets no transcript and records no ref", async () => {
+    const { store, ciphertext, descriptor } = await seeded();
+    const forged = { ...descriptor, "decryption-key": btoa(String.fromCharCode(...new Uint8Array(32).fill(7))) };
+    const stt = new MockStt({ default: "x" });
+    await expect(
+      transcribeMedia({ store, stt, sttModel: "m", fetchBlob: async () => ciphertext, owner: thief }, forged as any),
+    ).rejects.toThrow(MediaPolicyError);
+    expect(stt.calls).toBe(0);
+    expect(refs(store, descriptor.x)).toEqual([owner]);
+  });
+
+  it("a wrong declared size cannot plant an empty transcript under the victim's x", async () => {
+    const store = new Store(":memory:");
+    const { ciphertext, descriptor } = await fixture(30);
+    await expect(
+      transcribeMedia(
+        { store, stt: new MockStt(), sttModel: "m", fetchBlob: async () => ciphertext },
+        { ...descriptor, size: 1 } as any,
+      ),
+    ).rejects.toThrow(MediaPolicyError);
+    const r = await transcribeMedia(
+      {
+        store,
+        stt: new MockStt({ default: "the victim speaks" }),
+        sttModel: "m",
+        fetchBlob: async () => ciphertext,
+        probeDuration: async () => 30,
+        extractAudio: async () => [seg],
+      },
+      descriptor as any,
+    );
+    expect(r.text).toBe("the victim speaks");
+  });
+
+  it("a legacy row is served only after a decrypt proves the key, then bound to it", async () => {
+    const store = new Store(":memory:");
+    const { ciphertext, descriptor } = await fixture(30);
+    store.putTranscript(descriptor.x, "legacy text", 0); // older binary: no key_fp
+    const stt = new MockStt({ default: "fresh" });
+    const fetchBlob = vi.fn(async () => ciphertext);
+    const r = await transcribeMedia({ store, stt, sttModel: "m", fetchBlob, owner }, descriptor as any);
+    expect(r.text).toBe("legacy text");
+    expect(fetchBlob).toHaveBeenCalledTimes(1);
+    expect(stt.calls).toBe(0);
+    expect(store.getTranscriptRow(descriptor.x)!.key_fp).toBeTruthy();
+    expect(refs(store, descriptor.x)).toEqual([owner]);
+  });
+
+  it("a legacy EMPTY row (what the old size-mismatch branch planted) is re-transcribed", async () => {
+    const store = new Store(":memory:");
+    const { ciphertext, descriptor } = await fixture(30);
+    store.putTranscript(descriptor.x, "", 0);
+    const r = await transcribeMedia(
+      {
+        store,
+        stt: new MockStt({ default: "real words" }),
+        sttModel: "m",
+        fetchBlob: async () => ciphertext,
+        probeDuration: async () => 30,
+        extractAudio: async () => [seg],
+      },
+      descriptor as any,
+    );
+    expect(r.text).toBe("real words");
   });
 });

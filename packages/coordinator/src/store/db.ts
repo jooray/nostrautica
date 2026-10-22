@@ -175,6 +175,17 @@ function applyBaselineDDL(db: DatabaseSync): void {
   } catch {
     /* column already exists */
   }
+  // Migration (audit R-16): the decryption-key fingerprint a cached transcript was
+  // produced under, so a cache hit requires the key and not just the public
+  // ciphertext hash. A plain nullable column: an older binary neither reads nor
+  // writes it (its INSERT OR REPLACE leaves it NULL), and NULL reads here as
+  // "unverified", which costs one download + decrypt before the row is served
+  // again. No SCHEMA_VERSION bump.
+  try {
+    db.exec("ALTER TABLE transcripts ADD COLUMN key_fp TEXT");
+  } catch {
+    /* column already exists */
+  }
   // Migration (COORD-7): the ECK version a talk's 31610 was published under.
   try {
     db.exec("ALTER TABLE talks ADD COLUMN published_eck_id INTEGER");
@@ -1256,6 +1267,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   blob_sha256 TEXT PRIMARY KEY,
   text TEXT NOT NULL,
   lang TEXT,
+  key_fp TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS nostr_summaries (
@@ -2328,11 +2340,18 @@ export class Store {
       .get(blobSha256) as { text: string } | undefined;
     return row?.text;
   }
-  /** Transcript text + STT-detected language (spec F1), for publishing on 31603. */
-  getTranscriptRow(blobSha256: string): { text: string; lang: string | null } | undefined {
+  /** Transcript text + STT-detected language (spec F1), for publishing on 31603,
+   *  and the key fingerprint it was produced under (audit R-16; NULL on rows an
+   *  older binary wrote). */
+  getTranscriptRow(blobSha256: string): { text: string; lang: string | null; key_fp: string | null } | undefined {
     return this.db
-      .prepare("SELECT text, lang FROM transcripts WHERE blob_sha256 = ?")
-      .get(blobSha256) as { text: string; lang: string | null } | undefined;
+      .prepare("SELECT text, lang, key_fp FROM transcripts WHERE blob_sha256 = ?")
+      .get(blobSha256) as { text: string; lang: string | null; key_fp: string | null } | undefined;
+  }
+  /** Bind a legacy (unfingerprinted) transcript row to the key that was just
+   *  proven to decrypt its blob (audit R-16). */
+  setTranscriptKeyFp(blobSha256: string, keyFp: string): void {
+    this.db.prepare("UPDATE transcripts SET key_fp = ? WHERE blob_sha256 = ?").run(keyFp, blobSha256);
   }
   /**
    * Cache a transcript keyed by its content-addressed blob hash (dedupe), and — when
@@ -2347,10 +2366,11 @@ export class Store {
     now: number,
     lang?: string,
     owner?: { coordinate: string; pubkey: string },
+    keyFp?: string,
   ): void {
     this.db
-      .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at) VALUES (?, ?, ?, ?)")
-      .run(blobSha256, text, lang ?? null, now);
+      .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at, key_fp) VALUES (?, ?, ?, ?, ?)")
+      .run(blobSha256, text, lang ?? null, now, keyFp ?? null);
     // A cached answer settles the blob; any empty-STT count before it is history.
     this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?").run(blobSha256);
     if (owner) {
