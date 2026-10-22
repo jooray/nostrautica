@@ -37,6 +37,14 @@ pnpm --filter @nostrautica/coordinator build || { echo "coordinator build failed
 NODE_ARGV="node dist/main.js coordinator.toml"
 # The daemon logs this once startup is complete and the lock is held (src/main.ts).
 READY_MARK="watching for installs, submissions, admin commands"
+# Matched as the WHOLE line (grep -x), never as a substring (audit R-48). Attendee
+# text — a join name, a talk title — reaches this log, and an unanchored match was
+# satisfied by a name that merely contained the marker, so a deploy could report a
+# hung daemon as ready. The real line is printed bare by console.log in main.ts;
+# every record that carries attendee text goes through log(), which prefixes a
+# "[HH:MM:SS] " timestamp and escapes newlines, so it can never equal this line.
+READY_LINE="[coordinator] running — $READY_MARK"
+ready_seen() { tail -c "+$((log_offset + 1))" "$LOG" 2>/dev/null | grep -qxF "$READY_LINE"; }
 STOP_TIMEOUT=45   # > the 30s drain, so a normally-draining daemon is given time to exit
 
 # Startup budget. Generous on purpose, and the two thresholds do different jobs.
@@ -143,7 +151,7 @@ if systemctl --user cat "$UNIT" >/dev/null 2>&1; then
       systemctl --user --no-pager --lines=15 status "$UNIT" 2>&1 | tail -n 20
       fail "coordinator unit went inactive during startup"
     fi
-    if tail -c "+$((log_offset + 1))" "$LOG" 2>/dev/null | grep -qF "$READY_MARK"; then
+    if ready_seen; then
       break
     fi
     if [ "$waited" -ge "$READY_TIMEOUT" ]; then
@@ -210,7 +218,7 @@ while :; do
     fail "new coordinator exited during startup"
   fi
   # Readiness marker in the NEW instance's log slice ⇒ lock acquired + startup done.
-  if tail -c "+$((log_offset + 1))" "$LOG" 2>/dev/null | grep -qF "$READY_MARK"; then
+  if ready_seen; then
     break
   fi
   if [ "$waited" -ge "$READY_TIMEOUT" ]; then
