@@ -5564,6 +5564,42 @@ describe("audit R4 — the coordinator's own inbox is rate-gated before durable 
     for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
     expect(wraps.every((w) => h.store.isRumorSeen((w as any).id))).toBe(true);
   });
+
+  // Audit 2026-10-21 R-12: the shared bucket was charged BEFORE the sender cap was
+  // tested, so one flooding identity's already-over-cap rumors spent the whole
+  // inbox's budget, and a rescan replaying them spent it again.
+  it("an over-cap sender's excess does not spend the inbox budget everyone shares (R-12)", async () => {
+    const h = await setup();
+    const coordPub = getPublicKey(h.coordSk);
+    const baseSec = Math.floor(h.clock.t / 1000);
+    const flooder = generateSecretKey();
+    for (let i = 0; i < 640; i++) {
+      const w = wrapRumor(flooder, coordPub, {
+        kind: KIND_ADMIN_COMMAND,
+        content: { v: 2, a: h.coordinate, cmd: "recompute" },
+        created_at: baseSec - i,
+      });
+      await h.coordinator.handleCoordinatorWrap(w as any);
+    }
+    const bystander = wrapRumor(generateSecretKey(), coordPub, {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "recompute" },
+    });
+    await h.coordinator.handleCoordinatorWrap(bystander as any);
+    expect(h.store.isRumorSeen((bystander as any).id)).toBe(true);
+  });
+
+  it("strangers exhausting the shared bucket cannot starve the organizer's commands (R-12)", async () => {
+    const h = await setup();
+    // A distinct-sender flood has used up the coordinator inbox's shared budget.
+    for (let i = 0; i < 700; i++) h.store.bumpInboxRate("coordinator-inbox", "", h.clock.t, 60_000);
+    const stranger = flood(h, generateSecretKey())[0]!;
+    await h.coordinator.handleCoordinatorWrap(stranger as any);
+    expect(h.store.isRumorSeen((stranger as any).id)).toBe(false); // the bucket still binds them
+    const organizer = flood(h, h.eidSk)[0]!;
+    await h.coordinator.handleCoordinatorWrap(organizer as any);
+    expect(h.store.isRumorSeen((organizer as any).id)).toBe(true);
+  });
 });
 
 describe("P1 #14 — the periodic inbox rescan makes \"left unseen\" recoverable", () => {

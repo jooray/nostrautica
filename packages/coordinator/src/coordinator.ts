@@ -2090,16 +2090,32 @@ export class Coordinator {
    * Durable inbox rate gate (audit C3): accept at most MAX_RUMORS_PER_SENDER_WINDOW
    * rumors from one sender, and MAX_RUMORS_PER_EVENT_WINDOW per event, per window.
    * Returns true when the rumor is WITHIN budget (process it); false when over (drop).
+   *
+   * A sender already over its own cap is refused BEFORE the shared bucket is
+   * charged (audit 2026-10-21, R-12). Charging first let one flooding identity
+   * spend the whole inbox's budget with rumors its own cap was going to drop
+   * anyway — and since drops stay unseen, every rescan replayed the backlog and
+   * spent it again. The check is a read, not a bump, so a distinct-sender flood
+   * still stops creating per-sender rows once the shared bucket is exhausted.
+   *
+   * `organizer` (an installed event's E_id sending admin commands, see
+   * {@link isInstalledEventIdentity}) is not charged to the shared bucket at all:
+   * it has its own per-E_id bucket of the same size, so strangers flooding the
+   * coordinator's public inbox can no longer starve the organizer's approvals.
    */
-  private inboxRateAllows(coordinate: string, senderPubkey: string, exemptSenderCap = false): boolean {
+  private inboxRateAllows(coordinate: string, senderPubkey: string, organizer = false): boolean {
     const now = this.now();
+    if (organizer) {
+      const own = this.deps.store.bumpInboxRate(`${coordinate}:organizer`, senderPubkey, now, INBOX_RATE_WINDOW_MS);
+      return own <= MAX_RUMORS_PER_EVENT_WINDOW;
+    }
+    if (this.deps.store.peekInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS) >= MAX_RUMORS_PER_SENDER_WINDOW) {
+      return false;
+    }
     const eventCount = this.deps.store.bumpInboxRate(coordinate, "", now, INBOX_RATE_WINDOW_MS);
     if (eventCount > this.eventRumorBudget(coordinate)) return false;
-    // Always bump the sender's counter, exempt or not: the accounting is what the
-    // per-window budget is computed from, and an exemption is a decision about
-    // whether to REFUSE, not a licence to stop counting.
     const senderCount = this.deps.store.bumpInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS);
-    return exemptSenderCap || senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+    return senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
   }
 
   /**

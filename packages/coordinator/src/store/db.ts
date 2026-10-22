@@ -1792,6 +1792,16 @@ export class Store {
     return count;
   }
 
+  /** The current window's count for (coordinate, pubkey) WITHOUT bumping it — 0 when
+   *  the stored row belongs to an earlier window (audit 2026-10-21, R-12). */
+  peekInboxRate(coordinate: string, pubkey: string, now: number, windowMs: number): number {
+    const windowStart = windowMs > 0 ? now - (now % windowMs) : now;
+    const row = this.db
+      .prepare("SELECT window_start, count FROM inbox_rate WHERE coordinate = ? AND pubkey = ?")
+      .get(coordinate, pubkey) as { window_start: number; count: number } | undefined;
+    return row && row.window_start === windowStart ? row.count : 0;
+  }
+
   /** Count of attendee rows for an event (audit C3 population cap: pending + approved
    *  + revoked). Used to bound roster growth below the 2,000 protocol cap. */
   attendeeCount(coordinate: string): number {
