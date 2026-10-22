@@ -98,7 +98,7 @@ import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { withMutationLock } from "$lib/nostr/mutation-lock.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
-import { cacheGet, cacheSet } from "$lib/cache/persist.js";
+import { activeCacheOwner, cacheGeneration, cacheGet, cacheSet } from "$lib/cache/persist.js";
 import { grantParentField, fetchNewestConfig } from "./hierarchy.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
@@ -300,7 +300,14 @@ export async function fetchPending(
   // holds, so history stays readable across a detach/replace.
   const inboxSks = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])].map((h) => hexToBytes(h));
   const inboxPubkeys = inboxSks.map((sk) => getPublicKey(sk));
-  const state = cacheGet<PendingScanState>(pendingStateKey(ctx.coordinate))?.data;
+  // Scope and generation as of NOW (audit R-32). The relay read below runs for
+  // seconds, often detached (prefetch), and an account switch in that window
+  // used to file this identity's decrypted queue under whoever was active when
+  // it finished. Writes go to the captured owner, fenced on the generation, so
+  // a switch or logout since drops them.
+  const cacheOwner = activeCacheOwner() ?? undefined;
+  const gen = cacheGeneration();
+  const state = cacheGet<PendingScanState>(pendingStateKey(ctx.coordinate), cacheOwner)?.data;
   const scanStartedAt = Math.floor(Date.now() / 1000);
   const { wraps, complete } = await readInboxWraps(ctx, inboxPubkeys, state?.cursor);
 
@@ -427,7 +434,7 @@ export async function fetchPending(
     subs: Object.fromEntries(submissions),
     withdrawals: Object.fromEntries(withdrawals),
   };
-  cacheSet(pendingStateKey(ctx.coordinate), nextState, scanStartedAt);
+  if (cacheOwner) cacheSet(pendingStateKey(ctx.coordinate), nextState, scanStartedAt, cacheOwner, gen);
 
   // Fold submissions into their requests.
   for (const [pubkey, sub] of submissions) {
@@ -482,7 +489,7 @@ export async function fetchPending(
     return ia < ib ? -1 : ia > ib ? 1 : 0;
   });
   const newestAt = result.reduce((m, r) => Math.max(m, r.rumorCreatedAt), 0);
-  cacheSet(pendingKey(ctx.coordinate), result, newestAt);
+  if (cacheOwner) cacheSet(pendingKey(ctx.coordinate), result, newestAt, cacheOwner, gen);
   return result;
 }
 

@@ -86,6 +86,7 @@ import {
   sendAdminCommand,
   type PendingRequest,
   fetchPending,
+  cachedPending,
   addCoOrganizer,
   checkOrganizerKeys,
   repairEventKeys,
@@ -1309,6 +1310,24 @@ describe("fetchPending surfaces withdrawals", () => {
 
     expect(first).toHaveLength(2);
     expect(second).toEqual(first);
+  });
+
+  // Audit R-32: the decrypted queue was written into whichever identity was
+  // active when the (often detached) scan finished, not the one that started it.
+  it("never files the queue under an account that became active mid-scan", async () => {
+    const NEXT = "d".repeat(64);
+    const keys = (await loadEventKeys(COORD))!;
+    fetchEventsRelayOnly.mockImplementation(async () => {
+      setActiveCacheOwner(NEXT); // account switch while the relays answer
+      return [joinWrap(100)];
+    });
+
+    const pending = await fetchPending(inboxCtx, keys);
+    expect(pending.map((p) => p.attendeePubkey)).toEqual([ATTENDEE]);
+    expect(cachedPending(COORD)).toBeUndefined();
+    setActiveCacheOwner(OWNER);
+    // Dropped for the starting owner too: the switch bumped the generation.
+    expect(cachedPending(COORD)).toBeUndefined();
   });
 
   it("does not let a stale withdrawal shadow a later re-join", async () => {
