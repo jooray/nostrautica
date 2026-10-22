@@ -123,6 +123,23 @@ data class WithdrawResult(val sent: Boolean, val blobsAttempted: Int, val blobsD
 data class TalkEditDraft(val talkId: String, val title: String, val description: String, val revision: Long)
 
 /**
+ * Invite codes consumed from links, kept in memory only (invite-store.ts used sessionStorage),
+ * keyed `owner|coordinate` (R-27). The process outlives a logout, so a code keyed only by
+ * coordinate was redeemed by whoever signed in next, with the proof minted for THEM. A code
+ * opened while signed out is held under the empty owner and goes to the first account that
+ * joins with it; a logout drops the leaving account's codes and any unclaimed ones.
+ */
+class InviteCodes {
+    private val codes = HashMap<String, String>()
+    private fun key(owner: String?, coordinate: String) = "${owner ?: ""}|$coordinate"
+
+    fun store(owner: String?, coordinate: String, code: String) = synchronized(codes) { codes[key(owner, coordinate)] = code }
+    fun load(owner: String?, coordinate: String): String? = synchronized(codes) { codes[key(owner, coordinate)] ?: codes[key(null, coordinate)] }
+    fun clear(owner: String?, coordinate: String) = synchronized(codes) { codes.remove(key(owner, coordinate)); codes.remove(key(null, coordinate)); Unit }
+    fun forget(owner: String) = synchronized(codes) { codes.keys.removeAll { it.startsWith("$owner|") || it.startsWith("|") }; Unit }
+}
+
+/**
  * The attendee's writes to an event: join (21600 + 21601 + 31602 + optional 31925),
  * profile correction (21608), talk submission (21609) and leaving (21610). Every
  * rumor is gift-wrapped to E_inbox and goes through the outbox, so it is never
@@ -134,12 +151,12 @@ class JoinFlow(
     private val media: IntroMedia,
     private val keys: EventKeysStore,
 ) {
-    /** Invite codes consumed from links, kept in memory only (invite-store.ts used sessionStorage). */
-    private val invites = HashMap<String, String>()
+    private val invites = InviteCodes()
 
-    fun storeInvite(coordinate: String, code: String) = synchronized(invites) { invites[coordinate] = code }
-    fun loadInvite(coordinate: String): String? = synchronized(invites) { invites[coordinate] }
-    fun clearInvite(coordinate: String) = synchronized(invites) { invites.remove(coordinate) }
+    fun storeInvite(owner: String?, coordinate: String, code: String) = invites.store(owner, coordinate, code)
+    fun loadInvite(owner: String?, coordinate: String): String? = invites.load(owner, coordinate)
+    fun clearInvite(owner: String?, coordinate: String) = invites.clear(owner, coordinate)
+    fun forgetInvites(owner: String) = invites.forget(owner)
 
     /** join.ts sendJoinRequest. True when every publish went out now; false if anything was queued. */
     suspend fun sendJoinRequest(signer: NostrSigner, ctx: EventContext, input: JoinInput, blindingKey: ByteArray): Boolean {

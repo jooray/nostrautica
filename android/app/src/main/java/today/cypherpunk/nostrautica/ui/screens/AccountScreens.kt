@@ -39,6 +39,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import today.cypherpunk.nostrautica.AppContainer
 import today.cypherpunk.nostrautica.BuildConfig
+import today.cypherpunk.nostrautica.domain.join.joinFlow
 import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.protocol.Nip19
 import today.cypherpunk.nostrautica.protocol.Nip49
@@ -71,6 +72,7 @@ suspend fun logout(c: AppContainer) {
     runCatching { c.eventKeys.lockForLogout(acct.pubkey, acct.signer) }
     runCatching { c.nostr.discardOwner(acct.pubkey) }
     runCatching { c.cache.dropScope(acct.pubkey) }
+    c.joinFlow.forgetInvites(acct.pubkey) // R-27: the next account must not redeem this one's invite
     c.accounts.forget(acct.pubkey)
     c.session.logout()
     c.membership.bump()

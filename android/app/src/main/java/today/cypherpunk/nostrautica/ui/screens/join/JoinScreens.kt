@@ -101,7 +101,7 @@ fun JoinScreen(r: Route.Join) {
         // it from the back stack at once, so no later navigation rebuilds it.
         LaunchedEffect(r.code) {
             val code = r.code ?: return@LaunchedEffect
-            c.joinFlow.storeInvite(ev.coordinate, code)
+            c.joinFlow.storeInvite(c.session.account.value?.pubkey, ev.coordinate, code)
             router.replace(Route.Join(r.naddr))
         }
         if (r.code != null) Page(p) { item { Loading() } } else JoinBody(ev, p)
@@ -121,7 +121,7 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
     val needsBackup by c.session.needsBackup.collectAsState()
     val network by c.nostr.network.collectAsState()
     val coord = ev.coordinate
-    val code = remember(coord) { c.joinFlow.loadInvite(coord) }
+    val code = remember(coord, account?.pubkey) { c.joinFlow.loadInvite(account?.pubkey, coord) }
     /** An invite-only space and no code in hand: say so, don't send (BUG-3). */
     val inviteRequired = JoinRules.needsInvite(ev.ctx.cfg.approval, code != null)
 
@@ -294,7 +294,7 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
                 )
                 sent = true
                 sentQueued = !published
-                c.joinFlow.clearInvite(coord)
+                c.joinFlow.clearInvite(a.pubkey, coord)
                 c.membership.markJoinSent(a.pubkey, coord)
                 pollToken++
             } catch (e: Exception) {
