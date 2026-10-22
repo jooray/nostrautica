@@ -3,8 +3,8 @@
  * that resolves to a private address, returns a mixed public/private answer, or
  * rebinds between checks — the websocket equivalent of net/safe-fetch's DNS pinning.
  */
-import { describe, it, expect } from "vitest";
-import { makeGuardedLookup } from "./relay-guard.js";
+import { afterEach, describe, it, expect } from "vitest";
+import { GuardedWebSocket, makeGuardedLookup, setRelayConnectPolicy } from "./relay-guard.js";
 
 /** Drive the lookup as node's net layer would (options.all=true) and capture the result. */
 function resolveVia(
@@ -68,5 +68,27 @@ describe("makeGuardedLookup (audit C4)", () => {
     const { err, addresses } = await resolveVia(lookup, "internal.example");
     expect(err).toBeNull();
     expect(addresses).toEqual([{ address: "10.0.0.5", family: 4 }]);
+  });
+});
+
+/**
+ * Audit R-55: node's net.connect never calls a custom `lookup` for an IP-literal
+ * host, so the literal branch above never ran for a real socket. The constructor
+ * is where a literal is actually refused.
+ */
+describe("GuardedWebSocket refuses a non-public IP literal before dialling (R-55)", () => {
+  afterEach(() => setRelayConnectPolicy({ allowInsecure: false }));
+
+  it("throws for loopback, private, link-local and bracketed IPv6 literals", () => {
+    setRelayConnectPolicy({ allowInsecure: false });
+    for (const url of ["wss://127.0.0.1:1/", "wss://10.0.0.5/", "wss://[::1]:1/", "wss://169.254.169.254/"]) {
+      expect(() => new GuardedWebSocket(url)).toThrow(/blocked/);
+    }
+  });
+
+  it("still dials a literal under the dev-only allowInsecure flag", () => {
+    setRelayConnectPolicy({ allowInsecure: true });
+    const ws = new GuardedWebSocket("ws://127.0.0.1:1/");
+    ws.terminate();
   });
 });
