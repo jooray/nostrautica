@@ -7,6 +7,7 @@
  */
 import { sha256Hex,
   MAX_MEDIA_FILE_BYTES,
+  MAX_URL,
 } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import { buildAuthEvent, authHeader } from "./auth.js";
@@ -150,6 +151,34 @@ export function isAcceptedBlossomUrl(url: string): boolean {
     return new URL(url).protocol === "https:";
   } catch {
     return false;
+  }
+}
+
+/**
+ * The URL to publish for a blob a server says it now holds (audit R-20, the
+ * PWA twin of Android's BlossomClient rule).
+ *
+ * A reply URL goes straight into the media descriptor other people's browsers
+ * and the coordinator fetch from, so it is accepted only when it is https, on
+ * the SAME origin as the server we asked, at most MAX_URL long, and its last
+ * path segment starts with the sha256 (BUD-02 allows an extension after it).
+ * Checking only "contains the hash" let `https://elsewhere/?x=<sha>` through.
+ * Anything else falls back to the content address BUD-01 obliges every server
+ * to serve, `<server>/<sha256>`; undefined when even that is unusable (a
+ * non-https server), so the caller drops that server instead of handing the
+ * media schema a URL that fails the whole submission.
+ */
+export function acceptedBlobUrl(reply: unknown, server: string, sha256: string): string | undefined {
+  if (!isAcceptedBlossomUrl(server)) return undefined;
+  const fallback = `${trimServer(server)}/${sha256}`;
+  if (typeof reply !== "string" || reply.length > MAX_URL) return fallback;
+  try {
+    const url = new URL(reply);
+    if (url.protocol !== "https:" || url.origin !== new URL(server).origin) return fallback;
+    const last = url.pathname.split("/").pop() ?? "";
+    return last.toLowerCase().startsWith(sha256.toLowerCase()) ? reply : fallback;
+  } catch {
+    return fallback;
   }
 }
 
@@ -363,6 +392,9 @@ export async function upload(
   opts: UploadOptions = {},
 ): Promise<BlobDescriptor> {
   const sha256 = sha256Hex(ciphertext);
+  // Before spending the upload: a non-https server can never yield a URL the
+  // media descriptor accepts (R-20), so let the caller move to the next one.
+  if (!isAcceptedBlossomUrl(server)) throw new Error(`Upload to ${server} refused: not an https server`);
   const auth = await buildAuthEvent(signer, { verb: "upload", sha256 });
   const total = ciphertext.length;
   const emit = (sent: number) => {
@@ -394,16 +426,16 @@ export async function upload(
     // BUD-02 says the response is a blob descriptor, but a server that answers
     // 200 with something else still stored the blob at its content address.
   }
-  // Take the server's URL only if it actually points at OUR blob (audit MED-9).
-  // Blossom is content-addressed, so a descriptor URL that does not carry the
-  // sha256 we uploaded is either a broken server or one substituting a different
-  // blob — and this URL goes straight into the media descriptor other people
-  // fetch from. The coordinator re-verifies the hash on download and would reject
-  // the substitute, but the app's own players would have followed it, and there
-  // is no reason to publish a pointer we can already tell is wrong.
-  const serverUrl = blob.url?.includes(sha256) ? blob.url : undefined;
+  // Take the server's URL only if it actually points at OUR blob on THAT server
+  // (audit MED-9, R-20). Blossom is content-addressed, so a descriptor URL that
+  // does not carry the sha256 we uploaded is either a broken server or one
+  // substituting a different blob — and this URL goes straight into the media
+  // descriptor other people fetch from. The coordinator re-verifies the hash on
+  // download and would reject the substitute, but the app's own players would
+  // have followed it, and there is no reason to publish a pointer we can already
+  // tell is wrong.
   return {
-    url: serverUrl ?? `${trimServer(server)}/${sha256}`,
+    url: acceptedBlobUrl(blob.url, server, sha256)!,
     sha256,
     size: ciphertext.length,
     type: contentType,
@@ -420,6 +452,7 @@ export async function mirror(
   sourceUrl: string,
   sha256: string,
 ): Promise<string | null> {
+  if (!isAcceptedBlossomUrl(server)) return null;
   const auth = await buildAuthEvent(signer, { verb: "upload", sha256 });
   try {
     const res = await fetchWithTimeout(
@@ -436,8 +469,11 @@ export async function mirror(
       `Mirror to ${server}`,
     );
     if (!res.ok) return null;
-    const blob = (await res.json().catch(() => ({}))) as { url?: string };
-    return blob.url ?? `${trimServer(server)}/${sha256}`;
+    const blob = (await res.json().catch(() => ({}))) as { url?: unknown };
+    // The same binding as upload() (R-20). This used to return the reply
+    // verbatim: no hash check, no scheme check, so one mirror answering with an
+    // http: URL made the descriptor schema reject the WHOLE submission.
+    return acceptedBlobUrl(blob.url, server, sha256) ?? null;
   } catch {
     return null;
   }
