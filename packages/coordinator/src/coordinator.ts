@@ -72,6 +72,10 @@ import {
   rosterPageD,
   rosterPageDs,
   rosterContinuationDs,
+  rosterPage0Ds,
+  isRosterPageFor,
+  spaceRecordsD,
+  legacyRosterDCollidesWithDerived,
   KIND_CHAT_KEY_ATTESTATION,
   isMarmotChatEnabled,
   CHAT_INTEROP_RELAYS,
@@ -493,6 +497,24 @@ function relayKey(relays: string[]): string {
  * or an inbox, so there is nothing left for them to race over.
  */
 const RESTORE_CONCURRENCY = 4;
+
+/**
+ * Whether the roster is also published at its pre-R-53 address, the bare event
+ * `d` (PROTOCOL-NIP.md §6.2.2), next to the derived {@link spaceRecordsD} one.
+ *
+ * The alias exists for clients that predate the derived address (app and
+ * Android before 0.14): without it they would read no roster at all from an
+ * upgraded coordinator. It keeps R-53 alive for exactly those clients, since the
+ * alias is still shared between same-named spaces, so it is a transition
+ * measure: a later release drops it once old clients are expected to have
+ * updated. Never for an identifier shaped like a derived address, whose alias
+ * could BE another space's derived page.
+ */
+const PUBLISH_LEGACY_ROSTER_ALIAS = true;
+
+function publishesLegacyRosterAlias(identifier: string): boolean {
+  return PUBLISH_LEGACY_ROSTER_ALIAS && !legacyRosterDCollidesWithDerived(identifier);
+}
 
 /**
  * Delays, in order, of the bounded chat-enrolment re-check that follows an
@@ -3298,16 +3320,16 @@ export class Coordinator {
     state: EventState,
     author: string,
     pages: number,
+    base: string,
   ): Promise<RosterContent[] | undefined> {
-    const { identifier } = parseCoordinate(state.coordinate);
-    const ds = rosterContinuationDs(identifier, pages);
+    const ds = rosterContinuationDs(base, pages);
     const events = await this.deps.transport.fetch(
       { kinds: [KIND_ROSTER], authors: [author], "#d": ds },
       state.configRelays,
     );
     const out: RosterContent[] = [];
     for (let page = 1; page < pages; page++) {
-      const d = rosterPageD(identifier, page);
+      const d = rosterPageD(base, page);
       const candidates = events
         .filter(
           (e) =>
@@ -3334,7 +3356,9 @@ export class Coordinator {
   }
 
   private async bootstrapHandover(state: EventState, prevCoordinator?: string): Promise<void> {
-    const { identifier } = parseCoordinate(state.coordinate);
+    // Both page-0 addresses (PROTOCOL-NIP.md §6.2.2): the outgoing coordinator may
+    // predate the derived one, and E_id always writes the event `d`.
+    const page0Ds = rosterPage0Ds(state.coordinate);
     // ROSTER AUTHORITY, NOT DECRYPTABILITY (NIP §3.7, audit SB-122). 31604's `d`
     // is the event's PUBLIC `d`, so anyone can publish there, and the ECK is held
     // by every approved attendee — `tryEckDecrypt` walks every version we hold, so
@@ -3365,7 +3389,7 @@ export class Coordinator {
     let rosterEvents: NostrEvent[];
     try {
       rosterEvents = await this.deps.transport.fetch(
-        { kinds: [KIND_ROSTER], authors: [...authorities], "#d": [identifier] },
+        { kinds: [KIND_ROSTER], authors: [...authorities], "#d": page0Ds },
         state.configRelays,
       );
     } catch {
@@ -3374,13 +3398,15 @@ export class Coordinator {
     const nowSec = Math.floor(this.now() / 1000);
     let roster: RosterContent | undefined;
     let rosterAuthor: string | undefined;
+    let rosterBase: string | undefined;
     // §3.1 order (created_at desc, then LOWEST id) via the shared comparator — a
     // created_at-only sort left two same-second rosters to relay arrival order, so
     // two coordinators bootstrapping the same handover could adopt different ones.
     for (const ev of [...rosterEvents].sort(compareLatest)) {
       // Re-checked here, never trusted to the relay's `authors`/`#d` filter.
       if (!authorities.has(ev.pubkey)) continue;
-      if (!ev.tags.some((t) => t[0] === "d" && t[1] === identifier)) continue;
+      // …and the `a` tag: another space's record can sit at the shared legacy `d`.
+      if (!isRosterPageFor(state.coordinate, page0Ds, ev.tags)) continue;
       // A roster dated in the future is a bid to win newest-wins against every
       // legitimate one. Same 15-minute tolerance the rumor path already applies.
       if ((ev.created_at ?? 0) > nowSec + 900) {
@@ -3392,19 +3418,20 @@ export class Coordinator {
       try {
         roster = rosterContentSchema.parse(JSON.parse(json));
         rosterAuthor = ev.pubkey;
+        rosterBase = ev.tags.find((t) => t[0] === "d")![1];
         break;
       } catch {
         /* malformed — try an older roster */
       }
     }
-    if (!roster || !rosterAuthor || roster.attendees.length === 0) return;
+    if (!roster || !rosterAuthor || rosterBase === undefined || roster.attendees.length === 0) return;
     // A paginated roster (PROTOCOL-NIP.md §6.2) has the rest of its membership on
     // `<d>:1`…`<d>:N-1`. Bootstrapping from page 0 alone would silently adopt a
     // fraction of the event and — because everyone missing is never re-granted —
     // lock the remainder out of the directory. So: all pages, from the SAME
     // author, or nothing.
     if ((roster.pages ?? 1) > 1) {
-      const rest = await this.fetchRosterPages(state, rosterAuthor, roster.pages!).catch(() => undefined);
+      const rest = await this.fetchRosterPages(state, rosterAuthor, roster.pages!, rosterBase).catch(() => undefined);
       if (!rest) {
         log(
           `[handover] ${state.coordinate}: ABORTING — the roster from ${short(rosterAuthor)} is paginated (${roster.pages} pages) and not every page was readable`,
@@ -3821,10 +3848,18 @@ export class Coordinator {
     const key = state.coordinate;
     const published = [...(this.rosterPagesPublished.get(key) ?? [])];
     const wire = pages.map((p) => JSON.stringify(p));
+    const legacy = publishesLegacyRosterAlias(state.identifier);
     for (const [i, page] of pages.entries()) {
       if (published[i] === wire[i]) continue;
       const event = buildRoster(this.publishKeys(state), key, page, this.nextCreatedAt, i);
       await this.publish(event, state.configRelays);
+      // The same page at the pre-R-53 address, for clients that predate the
+      // derived one (PROTOCOL-NIP.md §6.2.2). Readers that know the derived
+      // address check the `a` tag, so a colliding space at this alias can no
+      // longer withhold anything from them; it only still can from old clients.
+      if (legacy) {
+        await this.publish(buildRoster(this.publishKeys(state), key, page, this.nextCreatedAt, i, "legacy"), state.configRelays);
+      }
       // Record per page, not once at the end: a publish that throws halfway must
       // leave the pages it did NOT reach marked unpublished, so the next run
       // retries exactly those.
@@ -3838,6 +3873,48 @@ export class Coordinator {
     if (pages.length > 1) {
       log(`[roster] ${key}: ${roster.attendees.length} members across ${pages.length} pages`);
     }
+  }
+
+  /** Settles when the boot-time R-53 address upgrade has finished. Tests await it. */
+  rosterAddressMigration?: Promise<void>;
+
+  /**
+   * Upgrade step for the derived roster/matrix address (audit R-53,
+   * PROTOCOL-NIP.md §6.2.2). A coordinator that predates it published every
+   * roster at the bare event `d` only, and nothing republishes a roster until
+   * its membership next changes, so after the upgrade an updated client would
+   * find nothing at the derived address and fall back to the shared legacy one
+   * for as long as the event stays quiet. So, once per event: if this daemon has
+   * never written the derived page 0 (the durable publish watermark says so),
+   * republish the roster now, which writes it there and refreshes the alias,
+   * and likewise the 31606 for an event that has published one.
+   *
+   * Once per event, not once per boot: the watermark makes every later boot a
+   * handful of SQLite lookups. Sequential, because it is background work and
+   * the relays it publishes to are the same ones the live paths are using.
+   */
+  private async migrateRosterAddresses(stopped: () => boolean): Promise<void> {
+    let republished = 0;
+    for (const state of [...this.events.values()]) {
+      if (stopped()) return;
+      if (state.retentionExpired || this.events.get(state.coordinate) !== state) continue;
+      const derived = spaceRecordsD(state.coordinate);
+      if (
+        !this.deps.store.hasPublishWatermark(`${KIND_ROSTER}:${derived}`) &&
+        this.deps.store.approvedAttendees(state.coordinate).length > 0
+      ) {
+        await this.publishRosterCoalesced(state);
+        republished++;
+      }
+      if (
+        state.matchVisibility === "event" &&
+        this.deps.store.hasPublishWatermark(`${KIND_MATCH_MATRIX}:${state.identifier}`) &&
+        !this.deps.store.hasPublishWatermark(`${KIND_MATCH_MATRIX}:${derived}`)
+      ) {
+        await this.publishMatrix(state);
+      }
+    }
+    if (republished > 0) log(`[roster] republished ${republished} roster(s) at the derived address (R-53 upgrade)`);
   }
 
   // ── pipeline jobs ──────────────────────────────────────────────────────────
@@ -4772,13 +4849,51 @@ export class Coordinator {
     log(`[match] published 31606 matrix — ${pairs.length} pair(s)`);
   }
 
+  /**
+   * The pre-R-53 31604 page addresses (`<event-d>`, `<event-d>:1`…) this space may
+   * still NIP-09 delete: every one that no OTHER live space on this coordinator
+   * also occupies (PROTOCOL-NIP.md §6.2.2). Those aliases are shared by
+   * construction — two spaces named `summit` publish at the same legacy `d` — so
+   * deleting them unfiltered was one space's retention sweep erasing another's
+   * roster (audit R-53). Leaving a shared alias in place costs only an old
+   * client's copy; the space's own derived addresses are always deleted.
+   * Empty for an identifier whose alias could be a derived address, since this
+   * coordinator never published that alias in the first place.
+   */
+  private legacyRosterDsToDelete(state: EventState): string[] {
+    // The shape check only, not PUBLISH_LEGACY_ROSTER_ALIAS: a release that stops
+    // publishing the alias must still delete the ones earlier releases published.
+    if (legacyRosterDCollidesWithDerived(state.identifier)) return [];
+    const others = new Set<string>();
+    for (const coordinate of this.deps.store.liveEventCoordinates()) {
+      if (coordinate === state.coordinate) continue;
+      let identifier: string;
+      try {
+        identifier = parseCoordinate(coordinate).identifier;
+      } catch {
+        continue;
+      }
+      for (const d of rosterPageDs(identifier, MAX_ROSTER_PAGES)) others.add(d);
+    }
+    return rosterPageDs(state.identifier, MAX_ROSTER_PAGES).filter((d) => !others.has(d));
+  }
+
+  /** The 31606 addresses a matrix deletion covers: the derived one, plus the legacy one when no other space shares it. */
+  private matrixAddressesToDelete(state: EventState): string[] {
+    const out = [`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${spaceRecordsD(state.coordinate)}`];
+    if (this.legacyRosterDsToDelete(state).includes(state.identifier)) {
+      out.push(`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`);
+    }
+    return out;
+  }
+
   /** Delete the published 31606 matrix (visibility changed away from "event", H4/H5). */
   private async deleteMatrix(state: EventState): Promise<void> {
     const deletion = finalizeEvent(
       {
         kind: KIND_DELETION,
         created_at: Math.floor(this.now() / 1000),
-        tags: [["a", `${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`], ["k", String(KIND_MATCH_MATRIX)]],
+        tags: this.matrixAddressesToDelete(state).flatMap((a) => [["a", a], ["k", String(KIND_MATCH_MATRIX)]]),
         content: "match_visibility changed",
       },
       this.deps.coordSk,
@@ -5593,17 +5708,24 @@ export class Coordinator {
         pushAddr(`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST));
       }
     }
-    // 31604 roster + 31606 matrix keyed on the event `d` (not blinded). The
+    // 31604 roster + 31606 matrix, at addresses that are not blinded. The
     // roster may have paginated (PROTOCOL-NIP.md §6.2), and a roster that later
     // SHRANK leaves stale higher pages on relays that nothing reads but that
     // still hold member pubkeys. Nothing durably records how many pages this
     // event ever had, so retention deletes every address pagination could have
     // used: deleting one that was never published costs a tag pair and is a
     // no-op at the relay, whereas missing one leaves member data behind.
-    for (const d of rosterPageDs(state.identifier, MAX_ROSTER_PAGES)) {
+    //
+    // Both address families (PROTOCOL-NIP.md §6.2.2): the derived one is this
+    // space's alone; the legacy alias only where no other live space shares it
+    // (audit R-53 — see legacyRosterDsToDelete).
+    for (const d of rosterPageDs(spaceRecordsD(state.coordinate), MAX_ROSTER_PAGES)) {
       pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${d}`, String(KIND_ROSTER));
     }
-    pushAddr(`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX));
+    for (const d of this.legacyRosterDsToDelete(state)) {
+      pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${d}`, String(KIND_ROSTER));
+    }
+    for (const a of this.matrixAddressesToDelete(state)) pushAddr(a, String(KIND_MATCH_MATRIX));
     // Published 31610 talks: delete under every historical ECK version (audit C5),
     // not only the one recorded on the row, so a rotated-away talk address is cleaned.
     for (const talk of this.deps.store.publishedTalksForEvent(state.coordinate)) {
@@ -6123,6 +6245,15 @@ export class Coordinator {
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
     this.closers.add(() => clearInterval(retentionTimer));
+    // R-53 address upgrade: in the background, AFTER the retention sweep (so an
+    // event it just expired is not republished) and never on the readiness path.
+    let migrationStopped = false;
+    this.closers.add(() => {
+      migrationStopped = true;
+    });
+    this.rosterAddressMigration = this.migrateRosterAddresses(() => migrationStopped).catch((e) =>
+      log(`[roster] address upgrade failed: ${e instanceof Error ? e.message : e}`),
+    );
     // Profile-refresh sweep: pick up kind-0 bios edited outside Nostrautica (see
     // {@link profileRefreshSweep} for the user report this fixes).
     //

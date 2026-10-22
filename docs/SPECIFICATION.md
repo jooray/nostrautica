@@ -398,7 +398,7 @@ content(ECK): {"v":2, "pubkey": <attendee-hex>,
   "updated_at": <unix>}
 ```
 
-**kind 31604: Roster** (author = coordinator/organizer; ECK; `d` = event-d)
+**kind 31604: Roster** (author = coordinator/organizer; ECK; `d` = `spaceRecordsD(coordinate)` for the coordinator, event-d for E_id; NIP §6.2.2)
 ```
 content(ECK): {"v":2, "eck_current":1,
   "nostr_group_id":"<optional active Marmot group id>",
@@ -417,7 +417,7 @@ content(nip44→recipient): {"v":2, "computed_at":<unix>, "matches":[
 ```
 `icebreakers` is optional: up to 3 short (≤ 280 char) conversation starters the coordinator derives alongside the directional reasoning (§9.3). Clients without support simply ignore the field.
 
-**kind 31606: Match Matrix** (only when `match_visibility:"event"`; ECK; `d` = event-d): `{"v":2,"computed_at":…,"pairs":[{"a":<pk>,"b":<pk>,"score":…}]}` (scores only; reasoning stays pairwise).
+**kind 31606: Match Matrix** (only when `match_visibility:"event"`; ECK; `d` = `spaceRecordsD(coordinate)`, NIP §6.2.2): `{"v":2,"computed_at":…,"pairs":[{"a":<pk>,"b":<pk>,"score":…}]}` (scores only; reasoning stays pairwise).
 
 **kind 31610: Talk** (author = coordinator, or `E_id` when there's no coordinator; content encrypted under ECK; `d` blinded per speaker + talk)
 ```

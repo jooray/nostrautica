@@ -30,7 +30,11 @@ import {
   MAX_ROSTER,
   splitRoster,
   mergeRosterPages,
+  parsePayloadSafe,
+  rosterContentSchema,
   rosterContinuationDs,
+  rosterPage0Ds,
+  isRosterPageFor,
   rosterPageD,
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
@@ -729,21 +733,27 @@ export async function loadRoster(
   held: Uint8Array | EventKeys,
   owner?: string,
 ): Promise<RosterRead> {
-  const { identifier } = splitCoordinate(ctx.coordinate);
   // Ask for every author we would ACCEPT, not only the current publisher (SB-91),
   // matching attendee.ts `fetchRoster`. With a coordinator attached the request
   // named only the coordinator, so an E_id-authored roster (one this organizer
   // published from a page that had not yet seen the attach) was invisible to its
   // own next read: "absent" on a device that has seen a roster, i.e. every later
   // approve/revoke refused, while attendees were reading that very roster.
+  // At both page-0 addresses (PROTOCOL-NIP.md §6.2.2, audit R-53).
+  const page0Ds = rosterPage0Ds(ctx.coordinate);
   const events = await fetchEventsRelayOnly(
-    { kinds: [KIND_ROSTER], authors: acceptedRecordAuthors(ctx), "#d": [identifier] },
+    { kinds: [KIND_ROSTER], authors: acceptedRecordAuthors(ctx), "#d": page0Ds },
     ctx.config.relays,
   );
   // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7):
-  // re-verify and keep only the currently accepted authors before the §3.1
-  // latest-wins pick — the same read attendee.ts `fetchRoster` performs.
-  const latest = pickLatest(onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)));
+  // re-verify and keep only the currently accepted authors, and only records
+  // naming this space, before the §3.1 latest-wins pick — the same read
+  // attendee.ts `fetchRoster` performs.
+  const latest = pickLatest(
+    onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)).filter((e) =>
+      isRosterPageFor(ctx.coordinate, page0Ds, e.tags),
+    ),
+  );
   if (!latest) {
     return { state: "absent", suspect: hasSeenPublished(ctx.coordinate, "roster") };
   }
@@ -771,7 +781,13 @@ export async function loadRoster(
     eckBytes = base64ToBytes(used.key);
   }
   try {
-    const page0 = JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent;
+    // Through the schema, not a cast (audit R-54): `pages` below sizes the
+    // continuation request, and an unvalidated `pages: 1e9` from any ECK holder's
+    // forgery was an allocation of gigabytes. A payload the schema refuses (newer
+    // version included) is one we cannot safely rewrite: `unreadable`.
+    const parsed0 = parsePayloadSafe(rosterContentSchema, JSON.parse(eckDecrypt(eckBytes, latest.content)));
+    if (!parsed0.ok) return { state: "unreadable", at };
+    const page0 = parsed0.value;
     let roster = page0;
     // A paginated roster (PROTOCOL-NIP.md §6.2) keeps the rest of its membership
     // on `<event-d>:1`… A rewrite path that read only page 0 would republish the
@@ -780,7 +796,8 @@ export async function loadRoster(
     // So an unreadable continuation page is `unreadable`, not a smaller roster.
     const pages = page0.pages ?? 1;
     if (pages > 1) {
-      const rest = await loadRosterPages(ctx, eckBytes, latest.pubkey!, pages);
+      const base = latest.tags?.find((t) => t[0] === "d")?.[1] ?? page0Ds[0]!;
+      const rest = await loadRosterPages(ctx, eckBytes, latest.pubkey!, pages, base);
       if (!rest) return { state: "unreadable", at };
       roster = mergeRosterPages([page0, ...rest.pages]);
       // The republish must beat the newest page it read, not just page 0.
@@ -820,11 +837,12 @@ async function loadRosterPages(
   eckBytes: Uint8Array,
   author: string,
   pages: number,
+  /** Page 0's own `d`: the pages follow whichever address family it came from. */
+  base: string,
 ): Promise<{ pages: RosterContent[]; at: number } | undefined> {
   const { eckDecrypt } = await import("@nostrautica/protocol");
-  const { identifier } = splitCoordinate(ctx.coordinate);
   const events = await fetchEventsRelayOnly(
-    { kinds: [KIND_ROSTER], authors: [author], "#d": rosterContinuationDs(identifier, pages) },
+    { kinds: [KIND_ROSTER], authors: [author], "#d": rosterContinuationDs(base, pages) },
     ctx.config.relays,
   );
   // Same authority boundary as page 0, plus the `a` tag: page N's address could
@@ -835,11 +853,13 @@ async function loadRosterPages(
   const out: RosterContent[] = [];
   let at = 0;
   for (let page = 1; page < pages; page++) {
-    const d = rosterPageD(identifier, page);
+    const d = rosterPageD(base, page);
     const latest = pickLatest(usable.filter((e) => e.tags?.some((t) => t[0] === "d" && t[1] === d)));
     if (!latest) return undefined;
     try {
-      out.push(JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent);
+      const parsed = parsePayloadSafe(rosterContentSchema, JSON.parse(eckDecrypt(eckBytes, latest.content)));
+      if (!parsed.ok) return undefined;
+      out.push(parsed.value);
     } catch {
       return undefined;
     }
@@ -1189,7 +1209,6 @@ export async function fetchCoordinatorLastSeen(
   ctx: EventContext,
 ): Promise<number | undefined> {
   if (!ctx.config.coordinator) return undefined;
-  const { identifier } = splitCoordinate(ctx.coordinate);
   const events = await fetchEvents(
     {
       kinds: [KIND_DIRECTORY_ENTRY, KIND_ROSTER, KIND_MATCH_LIST, KIND_MATCH_MATRIX],
@@ -1198,17 +1217,22 @@ export async function fetchCoordinatorLastSeen(
     },
     ctx.config.relays,
   ).catch(() => []);
-  // Roster carries #d=identifier but per-attendee entries/matches use blinded d's;
-  // filtering by #a (the event coordinate) catches them all.
+  // The roster carries a coordinate-derived d but per-attendee entries/matches use
+  // blinded d's; filtering by #a (the event coordinate) catches them all.
   let newest = 0;
   for (const e of events) if ((e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
-  // Fall back to the roster #d query in case a relay ignores #a on some kinds.
+  // Fall back to the roster #d query in case a relay ignores #a on some kinds —
+  // keeping only records that name this space, since the legacy alias is shared
+  // with any same-named space on this coordinator (audit R-53).
   if (newest === 0) {
+    const page0Ds = rosterPage0Ds(ctx.coordinate);
     const roster = await fetchEvents(
-      { kinds: [KIND_ROSTER], authors: [ctx.config.coordinator], "#d": [identifier] },
+      { kinds: [KIND_ROSTER], authors: [ctx.config.coordinator], "#d": page0Ds },
       ctx.config.relays,
     ).catch(() => []);
-    for (const e of roster) if ((e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
+    for (const e of roster) {
+      if (isRosterPageFor(ctx.coordinate, page0Ds, e.tags) && (e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
+    }
   }
   const seen = newest || undefined;
   if (seen !== undefined) cacheSet(coordSeenKey(ctx.coordinate), seen, seen);

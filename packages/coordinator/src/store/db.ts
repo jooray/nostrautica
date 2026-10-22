@@ -1874,6 +1874,14 @@ export class Store {
     return !!row && row.retention_expired === 1;
   }
 
+  /** Coordinates of every installed event the retention sweep has not expired. */
+  liveEventCoordinates(): string[] {
+    const rows = this.db
+      .prepare("SELECT coordinate FROM events WHERE retention_expired = 0")
+      .all() as { coordinate: string }[];
+    return rows.map((r) => r.coordinate);
+  }
+
   /** Mark an event retention-expired (idempotent). */
   markRetentionExpired(coordinate: string): void {
     this.db.prepare("UPDATE events SET retention_expired = 1 WHERE coordinate = ?").run(coordinate);
@@ -1947,6 +1955,11 @@ export class Store {
       )
       .run(address, next);
     return next;
+  }
+
+  /** Whether this daemon has ever published at `address` (`${kind}:${d}`). Read-only. */
+  hasPublishWatermark(address: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM publish_watermarks WHERE address = ?").get(address);
   }
 
   // ── §15 hierarchy: membership-proof re-issue ledger ─────────────────────────

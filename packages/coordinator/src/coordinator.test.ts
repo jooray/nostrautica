@@ -40,6 +40,7 @@ import {
   rosterContentSchema,
   mergeRosterPages,
   rosterPageD,
+  spaceRecordsD,
   MAX_ROSTER,
   MAX_ROSTER_PAGES,
   NIP44_MAX_PLAINTEXT_BYTES,
@@ -1768,9 +1769,12 @@ describe("31604 roster pagination", () => {
     }
   }
 
-  /** Every 31604 the coordinator published, newest per page `d`, in page order. */
-  function rosterPages(h: Harness): NostrEvent[] {
-    const identifier = h.coordinate.split(":").slice(2).join(":");
+  /**
+   * Every 31604 the coordinator published, newest per page `d`, in page order,
+   * under `base` (the derived address by default; the event `d` for the alias).
+   */
+  function rosterPages(h: Harness, base = spaceRecordsD(h.coordinate)): NostrEvent[] {
+    const identifier = base;
     const byD = new Map<string, NostrEvent>();
     for (const e of h.transport.published.filter((e) => e.kind === KIND_ROSTER)) {
       const d = e.tags.find((t) => t[0] === "d")?.[1];
@@ -1830,16 +1834,18 @@ describe("31604 roster pagination", () => {
 
     await approve();
 
-    const published = h.transport.published.filter((e) => e.kind === KIND_ROSTER).length - before;
-    // One publish, not `pageCount` of them. This is the difference between an
-    // approval costing one relay round trip and costing N for the whole event.
-    expect(published).toBe(1);
+    const published = h.transport.published.filter((e) => e.kind === KIND_ROSTER).slice(before);
+    // One page, not `pageCount` of them: the difference between an approval
+    // costing one relay round trip and costing N for the whole event. It goes out
+    // twice, at the derived address and at the legacy alias (PROTOCOL-NIP.md §6.2.2).
     const identifier = h.coordinate.split(":").slice(2).join(":");
-    const last = h.transport.published.filter((e) => e.kind === KIND_ROSTER).at(-1)!;
-    expect(last.tags.find((t) => t[0] === "d")?.[1]).toBe(rosterPageD(identifier, pageCount - 1));
+    expect(published.map((e) => e.tags.find((t) => t[0] === "d")?.[1])).toEqual([
+      rosterPageD(spaceRecordsD(h.coordinate), pageCount - 1),
+      rosterPageD(identifier, pageCount - 1),
+    ]);
   });
 
-  it("a roster that still fits publishes exactly one 31604, at the event d, with v:2", async () => {
+  it("a roster that still fits publishes one v:2 page, at the derived address and at the event d", async () => {
     const h = await setup();
     const sk = generateSecretKey();
     const pk = await join(h, sk, "crypto");
@@ -1847,10 +1853,15 @@ describe("31604 roster pagination", () => {
     const identifier = h.coordinate.split(":").slice(2).join(":");
     const pages = rosterPages(h);
     expect(pages).toHaveLength(1);
-    expect(pages[0]!.tags.find((t) => t[0] === "d")?.[1]).toBe(identifier);
+    expect(pages[0]!.tags.find((t) => t[0] === "d")?.[1]).toBe(spaceRecordsD(h.coordinate));
     const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, pages[0]!.content)));
     expect(roster.v).toBe(2);
     expect(roster.pages).toBeUndefined();
+    // The legacy alias carries the same roster, for clients that predate the
+    // derived address.
+    const alias = rosterPages(h, identifier);
+    expect(alias).toHaveLength(1);
+    expect(JSON.parse(eckDecrypt(h.eck, alias[0]!.content))).toEqual(roster);
   });
 
   it("retention deletes every address pagination could have used, not just page 0", async () => {
@@ -1871,7 +1882,149 @@ describe("31604 roster pagination", () => {
     const coordPk = getPublicKey(h.coordSk);
     for (let i = 0; i < MAX_ROSTER_PAGES; i++) {
       expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD(identifier, i)}`), `page ${i}`).toBe(true);
+      expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD(spaceRecordsD(h.coordinate), i)}`), `derived page ${i}`).toBe(true);
     }
+    expect(addrs.has(`${KIND_MATCH_MATRIX}:${coordPk}:${spaceRecordsD(h.coordinate)}`)).toBe(true);
+    expect(addrs.has(`${KIND_MATCH_MATRIX}:${coordPk}:${identifier}`)).toBe(true);
+  });
+});
+
+/**
+ * Audit R-53: one coordinator signs for every space it serves, so its roster and
+ * matrix addresses are `(kind, coordinator, d)`. With `d` the bare identifier,
+ * two spaces named `cypherpunk` shared one roster address: the later publish
+ * withheld the other's roster, and one space's retention sweep deleted the
+ * other's. The derived `d` (spaceRecordsD) hashes the whole coordinate.
+ */
+describe("audit R-53 — same-named spaces on one coordinator get their own addresses", () => {
+  /** Install a second space, under a different E_id, with the SAME identifier. */
+  async function installSameNamedSpace(
+    h: Harness,
+    opts: { retentionDays?: number; eventEndSec?: number } = {},
+  ): Promise<Harness> {
+    const eidSk = generateSecretKey();
+    const eidPubkey = getPublicKey(eidSk);
+    const einboxSk = generateSecretKey();
+    const eck = generateEck();
+    const d = "cypherpunk";
+    const coordinate = makeCoordinate(eidPubkey, d, KIND_CALENDAR_EVENT);
+    const coordPubkey = getPublicKey(h.coordSk);
+    h.transport.seed.push(
+      { kind: KIND_CALENDAR_EVENT, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Another Assembly"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: `b1-${eidPubkey}`, sig: "" } as any,
+      { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", "on"], ["match_visibility", "pair"], ["coordinator", coordPubkey, "1"], ["approval", "manual"], ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : [])], content: "", id: `b2-${eidPubkey}`, sig: "" } as any,
+      { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: [] }), id: `b3-${eidPubkey}`, sig: "" } as any,
+    );
+    await h.coordinator.installEvent({
+      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: [{ id: 1, key: bytesToBase64(eck) }], configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+    expect(h.store.getEvent(coordinate)).toBeDefined();
+    return { ...h, eidSk, einboxSk, coordinate, eck, invites: [], nextInvite: 0 };
+  }
+
+  async function approveOne(h: Harness): Promise<string> {
+    const pk = getPublicKey(generateSecretKey());
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
+    await admin(h, "approve", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    return pk;
+  }
+
+  /** The newest coordinator-signed 31604 at `d`. */
+  function newestAt(h: Harness, d: string): NostrEvent | undefined {
+    return h.transport.published
+      .filter((e) => e.kind === KIND_ROSTER && e.tags.some((t) => t[0] === "d" && t[1] === d))
+      .at(-1);
+  }
+
+  it("a same-named space's later publish no longer displaces the other's roster", async () => {
+    const a = await setup();
+    const alice = await approveOne(a);
+    const b = await installSameNamedSpace(a);
+    await approveOne(b);
+
+    expect(spaceRecordsD(a.coordinate)).not.toBe(spaceRecordsD(b.coordinate));
+    // A's derived page 0 is still A's, readable under A's ECK, after B published.
+    const pageA = newestAt(a, spaceRecordsD(a.coordinate))!;
+    expect(pageA.tags.find((t) => t[0] === "a")?.[1]).toBe(a.coordinate);
+    const rosterA = rosterContentSchema.parse(JSON.parse(eckDecrypt(a.eck, pageA.content)));
+    expect(rosterA.attendees.map((x) => x.pubkey)).toEqual([alice]);
+    // The shared legacy alias is exactly what the bug was: B's publish is newest there.
+    expect(newestAt(a, "cypherpunk")!.tags.find((t) => t[0] === "a")?.[1]).toBe(b.coordinate);
+  });
+
+  it("one space's retention sweep leaves a same-named space's roster alone", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const a = await setup(); // no retention policy: never swept
+    await approveOne(a);
+    const b = await installSameNamedSpace(a, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    await approveOne(b);
+
+    await a.coordinator.retentionSweep();
+
+    const deletion = a.transport.published.filter((e) => e.kind === KIND_DELETION).at(-1)!;
+    expect(deletion.content).toBe("retention window elapsed");
+    const addrs = new Set(deletion.tags.filter((t) => t[0] === "a").map((t) => t[1]));
+    const coordPk = getPublicKey(a.coordSk);
+    // B's own derived addresses go…
+    expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${spaceRecordsD(b.coordinate)}`)).toBe(true);
+    expect(addrs.has(`${KIND_MATCH_MATRIX}:${coordPk}:${spaceRecordsD(b.coordinate)}`)).toBe(true);
+    // …and nothing A occupies: neither A's derived pages nor the legacy alias the
+    // two share (that sweep used to delete A's roster outright).
+    for (let i = 0; i < MAX_ROSTER_PAGES; i++) {
+      expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD(spaceRecordsD(a.coordinate), i)}`)).toBe(false);
+      expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD("cypherpunk", i)}`)).toBe(false);
+    }
+    expect(addrs.has(`${KIND_MATCH_MATRIX}:${coordPk}:cypherpunk`)).toBe(false);
+  });
+
+  it("an upgraded coordinator republishes an existing roster at the derived address once", async () => {
+    const h = await setup();
+    // What an older coordinator left behind: an approved member, a roster at the
+    // legacy address only, and no derived-address watermark.
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: getPublicKey(generateSecretKey()), status: "approved", now: h.clock.t });
+    const derived = spaceRecordsD(h.coordinate);
+    expect(newestAt(h, derived)).toBeUndefined();
+    try {
+      await h.coordinator.start();
+      await h.coordinator.rosterAddressMigration;
+      expect(newestAt(h, derived)).toBeDefined();
+      expect(newestAt(h, "cypherpunk")).toBeDefined();
+    } finally {
+      h.coordinator.stop();
+    }
+    // A later boot finds the watermark and publishes nothing more.
+    const count = h.transport.published.filter((e) => e.kind === KIND_ROSTER).length;
+    try {
+      await h.coordinator.start();
+      await h.coordinator.rosterAddressMigration;
+    } finally {
+      h.coordinator.stop();
+    }
+    expect(h.transport.published.filter((e) => e.kind === KIND_ROSTER).length).toBe(count);
+  });
+
+  it("never publishes the legacy alias for an identifier shaped like a derived address", async () => {
+    // Such a space's alias (`<hex64>`, `<hex64>:N`) could BE another space's
+    // derived page, which the alias would then overwrite.
+    const h = await setup();
+    const victim = spaceRecordsD(h.coordinate);
+    const eidSk = generateSecretKey();
+    const eidPubkey = getPublicKey(eidSk);
+    const einboxSk = generateSecretKey();
+    const eck = generateEck();
+    const coordinate = makeCoordinate(eidPubkey, victim, KIND_CALENDAR_EVENT);
+    const coordPubkey = getPublicKey(h.coordSk);
+    h.transport.seed.push(
+      { kind: KIND_CALENDAR_EVENT, pubkey: eidPubkey, created_at: 1, tags: [["d", victim], ["title", "Squatter"]], content: "", id: "sq1", sig: "" } as any,
+      { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", victim], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["coordinator", coordPubkey, "1"], ["approval", "manual"]], content: "", id: "sq2", sig: "" } as any,
+    );
+    await h.coordinator.installEvent({
+      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: [{ id: 1, key: bytesToBase64(eck) }], configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+    await approveOne({ ...h, eidSk, einboxSk, coordinate, eck });
+
+    expect(newestAt(h, spaceRecordsD(coordinate))).toBeDefined();
+    expect(newestAt(h, victim)).toBeUndefined();
   });
 });
 

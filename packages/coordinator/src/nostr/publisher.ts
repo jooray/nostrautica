@@ -23,6 +23,7 @@ import {
   wrapRumor,
   parseCoordinate,
   rosterPageD,
+  spaceRecordsD,
   type EckVersion,
   type DirectoryEntryContent,
   type RosterContent,
@@ -79,7 +80,16 @@ export function buildDirectoryEntry(
 }
 
 /**
- * kind 31604 roster page (ECK, `d` = event-d for page 0, `<event-d>:N` after).
+ * Which page-0 base a coordinator roster publish uses (PROTOCOL-NIP.md §6.2.2):
+ * `derived` is {@link spaceRecordsD}, the address readers trust (audit R-53);
+ * `legacy` is the bare event `d`, still published beside it during the
+ * transition so clients that predate the derived address keep reading.
+ */
+export type RosterAddressing = "derived" | "legacy";
+
+/**
+ * kind 31604 roster page (ECK, `d` = the page-0 base for page 0, `<base>:N`
+ * after; the base is {@link spaceRecordsD} or, for `legacy`, the event `d`).
  *
  * `page` defaults to 0, which is the address every roster has always used and
  * the only one an unpaginated roster occupies. Callers pass the pages that
@@ -99,9 +109,10 @@ export function buildRoster(
   roster: RosterContent,
   createdAt: CreatedAtFor = wallClockCreatedAt,
   page = 0,
+  addressing: RosterAddressing = "derived",
 ): NostrEvent {
-  const { identifier } = parseCoordinate(coordinate);
-  const d = rosterPageD(identifier, page);
+  const base = addressing === "derived" ? spaceRecordsD(coordinate) : parseCoordinate(coordinate).identifier;
+  const d = rosterPageD(base, page);
   return finalizeEvent(
     {
       kind: KIND_ROSTER,
@@ -143,20 +154,24 @@ export function buildMatchListEvent(
   );
 }
 
-/** kind 31606 match matrix (ECK, scores only — reasoning stays pairwise). */
+/**
+ * kind 31606 match matrix (ECK, scores only — reasoning stays pairwise), at
+ * {@link spaceRecordsD} (audit R-53). No legacy alias: no client reads the
+ * matrix, so there is nobody to keep working at the old address.
+ */
 export function buildMatchMatrix(
   keys: PublishKeys,
   coordinate: string,
   content: MatchMatrixContent,
   createdAt: CreatedAtFor = wallClockCreatedAt,
 ): NostrEvent {
-  const { identifier } = parseCoordinate(coordinate);
+  const d = spaceRecordsD(coordinate);
   return finalizeEvent(
     {
       kind: KIND_MATCH_MATRIX,
-      created_at: createdAt(KIND_MATCH_MATRIX, identifier),
+      created_at: createdAt(KIND_MATCH_MATRIX, d),
       tags: [
-        ["d", identifier],
+        ["d", d],
         ["a", coordinate],
         ["eck", String(keys.eckId), eckFingerprint(keys.eck)],
         ["v", "2"],

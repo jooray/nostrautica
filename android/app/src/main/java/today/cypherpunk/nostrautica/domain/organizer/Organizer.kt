@@ -351,10 +351,13 @@ class Organizer(
         val cfg = ctx.cfg
         val publisher = cfg.coordinator ?: cfg.eidPubkey
         val accepted = listOfNotNull(cfg.coordinator, cfg.eidPubkey)
-        val id = ctx.coord.identifier
-        val r = nostr.pool.fetch(ctx.relays, listOf(Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(publisher), tags = mapOf("d" to listOf(id)))), timeoutMs = 10_000, graceMs = 2_000)
+        // Both page-0 addresses (NIP §6.2.2), and only a record naming THIS space: a
+        // same-named space on the same coordinator shares the legacy `d` (audit R-53).
+        val page0Ds = Roster.page0Ds(ctx.coordinate)
+        val r = nostr.pool.fetch(ctx.relays, listOf(Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(publisher), tags = mapOf("d" to page0Ds))), timeoutMs = 10_000, graceMs = 2_000)
         nostr.store.put(r.events)
-        val latest = nostr.store.latest(Kinds.ROSTER, publisher, id)?.takeIf { it.pubkey in accepted }
+        val latest = page0Ds.mapNotNull { nostr.store.latest(Kinds.ROSTER, publisher, it) }
+            .filter { it.pubkey in accepted && Roster.isPageFor(ctx.coordinate, page0Ds, it.tags) }.let(Ordering::pickLatest)
         if (latest == null) return OrganizerEvents.RosterRead.Absent(suspect = seen("roster", ctx.coordinate))
         var at = latest.createdAt
         // The key the roster's own `eck` tag names, from EVERY version held, staged
@@ -373,7 +376,7 @@ class Organizer(
         var roster = page0
         val pages = Roster.pageCountOf(page0)
         if (pages > 1) {
-            val ds = Roster.continuationDs(id, pages)
+            val ds = Roster.continuationDs(latest.tag("d") ?: page0Ds.first(), pages)
             nostr.store.put(nostr.pool.fetch(ctx.relays, listOf(Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(latest.pubkey), tags = mapOf("d" to ds))), timeoutMs = 10_000, graceMs = 2_000).events)
             val rest = ds.map { d ->
                 val e = nostr.store.latest(Kinds.ROSTER, latest.pubkey, d)?.takeIf { it.tag("a") == ctx.coordinate } ?: return OrganizerEvents.RosterRead.Unreadable(at)
@@ -979,9 +982,12 @@ class Organizer(
     suspend fun fetchCoordinatorLastSeen(ctx: EventContext): Long? {
         val coordinator = ctx.cfg.coordinator ?: return null
         val f = Filter(kinds = listOf(Kinds.DIRECTORY_ENTRY, Kinds.ROSTER, Kinds.MATCH_LIST, Kinds.MATCH_MATRIX), authors = listOf(coordinator), tags = mapOf("a" to listOf(ctx.coordinate)))
-        var newest = runCatching { nostr.pool.fetch(ctx.relays, listOf(f, Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(coordinator), tags = mapOf("d" to listOf(ctx.coord.identifier))))) }
-            .getOrNull()?.events?.maxOfOrNull { it.createdAt } ?: 0
-        newest = maxOf(newest, nostr.store.latest(Kinds.ROSTER, coordinator, ctx.coord.identifier)?.createdAt ?: 0)
+        // Only records naming this space: the legacy roster `d` is shared with same-named spaces (R-53).
+        val page0Ds = Roster.page0Ds(ctx.coordinate)
+        fun ours(e: NostrEvent) = e.tag("a")?.let { it == ctx.coordinate } ?: true
+        var newest = runCatching { nostr.pool.fetch(ctx.relays, listOf(f, Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(coordinator), tags = mapOf("d" to page0Ds)))) }
+            .getOrNull()?.events?.filter(::ours)?.maxOfOrNull { it.createdAt } ?: 0
+        newest = maxOf(newest, page0Ds.mapNotNull { nostr.store.latest(Kinds.ROSTER, coordinator, it) }.filter(::ours).maxOfOrNull { it.createdAt } ?: 0)
         return newest.takeIf { it > 0 }?.also { cache.put(owner, "coordseen:${ctx.coordinate}", Long.serializer(), it, it) }
     }
 
