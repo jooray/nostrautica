@@ -2231,15 +2231,20 @@ describe("audit B-1/B-2 — join ordering against the rest of the membership cha
     expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
   });
 
-  it("a genuine re-join AFTER a revoke is newer, so it enrolls again as pending", async () => {
-    // The guard must not become "revoked is forever": a fresh join is a newer
-    // membership command and wins honestly, landing back in the manual queue
-    // (never straight to approved — a re-join needs the organizer again).
+  it("a genuine re-join AFTER a self-withdrawal is newer, so it enrolls again as pending", async () => {
+    // The guard must not become "revoked is forever": a member who LEFT (21610, which
+    // records no organizer tombstone) and changes their mind is a newer membership
+    // command and wins honestly, landing back in the manual queue (never straight to
+    // approved — a re-join needs the organizer again). An ORGANIZER revoke is
+    // different now (audit 2026-10-22, R-01): only an organizer approve readmits.
     const h = await setup();
     const sk = generateSecretKey();
     const pk = await join(h, sk, "crypto");
     await h.coordinator.jobs.drain();
-    await admin(h, "revoke", { pubkey: pk });
+    h.clock.t += 60_000;
+    await withdraw(h, sk, { deleteData: false, createdAt: Math.floor(h.clock.t / 1000) });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    expect(h.store.isRevoked(h.coordinate, pk)).toBe(false);
 
     h.clock.t += 60_000;
     const inboxPk = getPublicKey(h.einboxSk);
@@ -7762,12 +7767,124 @@ describe("audit SB-124 — the approval policy is enforced", () => {
 
     h.clock.t += 60_000;
     await joinWith(h, sk, undefined, "again", Math.floor(h.clock.t / 1000));
-    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    // Audit 2026-10-22 (R-01): the organizer revocation is a durable tombstone, so a
+    // re-join no longer rewrites their row to `pending` — it is refused before the
+    // enrollment upsert, and their row keeps the status that records the removal.
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
     expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
 
     // The organizer can still let them back in by hand.
     await admin(h, "approve", { pubkey: pk });
     expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
+  /**
+   * Audit 2026-10-22 — R-01, the high finding of the four-model audit.
+   *
+   * Revocation used to be a `status` column that the join handler's own enrollment
+   * upsert overwrote with `pending`, and that no entitlement path consulted at all.
+   * So a member the organizer removed could re-admit themselves by re-sending the
+   * original invite code (`claimInvite`'s same-redeemer idempotency returns true for
+   * exactly that person) or their community `member_of` proof — and the grant carried
+   * the whole ECK list, including the version minted to shut them out.
+   *
+   * The fix is a durable tombstone (`member_revocations`) written by an organizer
+   * revoke, cleared only by an organizer approve, kept across the member's own
+   * `delete_data` purge, and checked before any grant.
+   */
+  describe("audit 2026-10-22 R-01 — revocation overrides every entitlement", () => {
+    it("invite: re-joining with the code they first joined with does not readmit", async () => {
+      const h = await setup(0, { approval: "invite" });
+      const sk = generateSecretKey();
+      const pk = await joinWith(h, sk, 0);
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+      await admin(h, "revoke", { pubkey: pk });
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+      expect(h.store.isRevoked(h.coordinate, pk)).toBe(true);
+      const grantsBefore = grantsTo(h, sk).length;
+
+      h.clock.t += 60_000;
+      // The same (now spent) code, presented by the very person it was issued to.
+      expect(await joinWith(h, sk, 0, "again", Math.floor(h.clock.t / 1000))).toBe(pk);
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+      expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
+    });
+
+    it("manual+invite: a revoked member re-joining with their original code stays revoked", async () => {
+      const h = await setup(0, { approval: "manual+invite" });
+      const sk = generateSecretKey();
+      const pk = await joinWith(h, sk, 0);
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+      await admin(h, "revoke", { pubkey: pk });
+      const grantsBefore = grantsTo(h, sk).length;
+
+      h.clock.t += 60_000;
+      await joinWith(h, sk, 0, "again", Math.floor(h.clock.t / 1000));
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+      expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
+    });
+
+    it("open: a SECOND code-less re-join is still refused (the status-overwrite bypass)", async () => {
+      const h = await setup(0, { approval: "open" });
+      const sk = generateSecretKey();
+      const pk = await joinWith(h, sk, undefined);
+      await admin(h, "revoke", { pubkey: pk });
+      const grantsBefore = grantsTo(h, sk).length;
+
+      h.clock.t += 60_000;
+      await joinWith(h, sk, undefined, "again", Math.floor(h.clock.t / 1000));
+      h.clock.t += 60_000;
+      await joinWith(h, sk, undefined, "again2", Math.floor(h.clock.t / 1000));
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+      expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
+    });
+
+    it("only an organizer approve readmits: it clears the tombstone and grants", async () => {
+      const h = await setup(0, { approval: "manual+invite" });
+      const sk = generateSecretKey();
+      const pk = await joinWith(h, sk, 0);
+      await admin(h, "revoke", { pubkey: pk });
+      const grantsBefore = grantsTo(h, sk).length;
+      h.clock.t += 60_000;
+      await joinWith(h, sk, 0, "again", Math.floor(h.clock.t / 1000));
+      expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
+
+      await admin(h, "approve", { pubkey: pk });
+      expect(h.store.isRevoked(h.coordinate, pk)).toBe(false);
+      expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+      expect(grantsTo(h, sk).length).toBeGreaterThan(grantsBefore);
+    });
+
+    it("cannot be laundered by withdrawing with delete_data (the tombstone survives the purge)", async () => {
+      const h = await setup(0, { approval: "manual+invite" });
+      const sk = generateSecretKey();
+      const pk = await joinWith(h, sk, 0);
+      await admin(h, "revoke", { pubkey: pk });
+
+      h.clock.t += 60_000;
+      await withdraw(h, sk, { deleteData: true, createdAt: Math.floor(h.clock.t / 1000) });
+      // delete_data removed their attendee row — the tombstone must not go with it.
+      expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+      expect(h.store.isRevoked(h.coordinate, pk)).toBe(true);
+
+      const grantsBefore = grantsTo(h, sk).length;
+      h.clock.t += 60_000;
+      await joinWith(h, sk, 0, "again", Math.floor(h.clock.t / 1000));
+      expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+      expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
+    });
+
+    it("grantAndPublish refuses a revoked member even if some caller reaches it directly", async () => {
+      const h = await setup(0, { approval: "manual+invite" });
+      const sk = generateSecretKey();
+      const pk = await joinWith(h, sk, 0);
+      await admin(h, "revoke", { pubkey: pk });
+      const grantsBefore = grantsTo(h, sk).length;
+      // The belt behind the join-handler brace: no path may hand out the ECK.
+      const state = (h.coordinator as any).events.get(h.coordinate);
+      await h.coordinator.grantAndPublish(state, pk);
+      expect(grantsTo(h, sk)).toHaveLength(grantsBefore);
+    });
   });
 
   it("a 31600 without an approval tag is treated as the NIP default, manual", async () => {

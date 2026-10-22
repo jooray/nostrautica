@@ -1727,3 +1727,68 @@ describe("purgeAttendeeArtifacts removes the subject's pipeline status", () => {
     store.close();
   });
 });
+
+/**
+ * Audit 2026-10-22 R-01 — durable organizer revocations.
+ *
+ * `attendees.status = 'revoked'` was the only record of a removal, and it was both
+ * overwritten by the join handler's enrollment upsert and deleted outright by a
+ * `delete_data` purge. The tombstone must outlive all of that, and die only with
+ * the event.
+ */
+describe("R-01 — member revocation tombstones", () => {
+  const C = "31923:aa:d";
+  const PK = "b".repeat(64);
+
+  it("survives the per-attendee purge (so withdrawing cannot launder a revocation)", () => {
+    const store = new Store();
+    store.upsertAttendee({ coordinate: C, pubkey: PK, status: "approved", now: 1 });
+    store.recordRevocation(C, PK, 1_700_000_000_000);
+    expect(store.isRevoked(C, PK)).toBe(true);
+
+    store.purgeAttendeeArtifacts(C, PK);
+    expect(store.getAttendee(C, PK)).toBeUndefined(); // delete_data removed the row…
+    expect(store.isRevoked(C, PK)).toBe(true); // …but not the removal decision
+
+    store.purgeEventArtifacts(C); // the event going away does clear it
+    expect(store.isRevoked(C, PK)).toBe(false);
+    store.close();
+  });
+
+  it("is cleared by an organizer approve and by nothing else", () => {
+    const store = new Store();
+    store.upsertAttendee({ coordinate: C, pubkey: PK, status: "revoked", now: 1 });
+    store.recordRevocation(C, PK, 2);
+    // A join writing a new status does not lift it…
+    store.upsertAttendee({ coordinate: C, pubkey: PK, status: "approved", now: 3 });
+    expect(store.isRevoked(C, PK)).toBe(true);
+    // …only the organizer's approve does.
+    store.clearRevocation(C, PK);
+    expect(store.isRevoked(C, PK)).toBe(false);
+    store.close();
+  });
+
+  it("backfills already-revoked rows when upgrading a v6 database", async () => {
+    const { mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const dir = mkdtempSync(join(tmpdir(), "nostrautica-r01-"));
+    const path = join(dir, "coordinator.sqlite");
+    try {
+      const store = new Store(path);
+      store.upsertAttendee({ coordinate: C, pubkey: PK, status: "revoked", now: 1_700_000_000_000 });
+      store.close();
+      // Rewind the file to the shape a pre-fix binary left behind.
+      const raw = new DatabaseSync(path);
+      raw.exec("DROP TABLE member_revocations");
+      raw.exec("PRAGMA user_version = 6");
+      raw.close();
+
+      const upgraded = new Store(path);
+      expect(upgraded.isRevoked(C, PK)).toBe(true);
+      upgraded.close();
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

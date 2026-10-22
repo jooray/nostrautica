@@ -73,7 +73,7 @@ const AT_REST_PACK_THRESHOLD = AT_REST_CHUNK;
  * boundary advances `user_version` through an ordered, transactional migration, and
  * an open refuses a database whose `user_version` exceeds this constant.
  */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 /** How many hourly `daemon_usage` buckets to keep (audit SEC-7). Comfortably more
  *  than the longest window a ceiling can ask for, so a rolling read never sees a
@@ -573,12 +573,54 @@ function applyDetachedEventsLedger(db: DatabaseSync): void {
   ).run(nowSec + DETACHED_NO_DEADLINE_GRACE_SEC, nowSec);
 }
 
+/**
+ * Durable, organizer-authored revocation tombstones (audit 2026-10-22, R-01).
+ *
+ * `attendees.status = 'revoked'` is NOT a revocation record: the join handler's own
+ * early enrollment upsert wrote `pending` over it, and a `delete_data` withdrawal
+ * deletes the row entirely — either one let a removed member walk back in on the
+ * original invite code or `member_of` proof, with the ECK version minted to exclude
+ * them. This table is written by an organizer revoke, cleared only by an organizer
+ * approve, and consulted before any grant whatever the entitlement path.
+ *
+ * Deliberately KEPT by the per-attendee `delete_data` purge: otherwise a revoked
+ * member could launder the removal by withdrawing with `delete_data: true` and
+ * re-joining as a new row (their code is still claimed under their pubkey). It is
+ * event-scoped security state, deleted with the event by `purgeEventArtifacts`.
+ *
+ * Backfill: every row an organizer already revoked — or that a withdrawal left
+ * `revoked` — starts requiring an organizer approve to return. That is the
+ * conservative direction; the alternative leaves already-removed members able to
+ * re-admit themselves on upgrade day. A withdrawal is an explicit "I am leaving",
+ * so requiring approval to come back is the intended semantic.
+ *
+ * Why a version boundary: an older binary would ignore the table and let a revoked
+ * member back in, so rolling the deploy back after a revocation must not silently
+ * reopen the hole without a matching database restore.
+ */
+function applyMemberRevocations(db: DatabaseSync): void {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS member_revocations (
+      coordinate TEXT NOT NULL,
+      pubkey TEXT NOT NULL,
+      revoked_at INTEGER NOT NULL,        -- unix seconds of the organizer revoke
+      PRIMARY KEY (coordinate, pubkey)
+    )
+  `);
+  db.exec(`
+    INSERT INTO member_revocations (coordinate, pubkey, revoked_at)
+      SELECT coordinate, pubkey, CAST(COALESCE(updated_at, 0) / 1000 AS INTEGER)
+        FROM attendees WHERE status = 'revoked'
+    ON CONFLICT(coordinate, pubkey) DO NOTHING
+  `);
+}
+
 const MIGRATIONS: Migration[] = [
-  { version: 2, up: applyRemediationDDL },
-  { version: 3, up: applyMembershipSubjectMerge },
+  { version: 2, up: applyRemediationDDL },  { version: 3, up: applyMembershipSubjectMerge },
   { version: 4, up: applyArtifactLegacyQuarantine },
   { version: 5, up: applyInviteUsagePerRedeemer },
   { version: 6, up: applyDetachedEventsLedger },
+  { version: 7, up: applyMemberRevocations },
 ];
 
 /**
@@ -2249,6 +2291,36 @@ export class Store {
       .all(coordinate) as any;
   }
 
+  // ── member revocations (audit 2026-10-22, R-01) ───────────────────────────
+  /**
+   * Record an organizer revocation. Durable across status rewrites (a re-join
+   * writes `pending`/`approved`) and across the attendee's own `delete_data`
+   * purge, so a removal cannot be undone by re-presenting the original invite or
+   * `member_of` proof, or by withdrawing to erase the row first.
+   */
+  recordRevocation(coordinate: string, pubkey: string, now: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO member_revocations (coordinate, pubkey, revoked_at) VALUES (?, ?, ?)
+         ON CONFLICT(coordinate, pubkey) DO UPDATE SET revoked_at = excluded.revoked_at`,
+      )
+      .run(coordinate, pubkey, Math.floor(now / 1000));
+  }
+
+  /** True while an organizer revocation stands (i.e. until an organizer approve). */
+  isRevoked(coordinate: string, pubkey: string): boolean {
+    return (
+      this.db
+        .prepare("SELECT 1 FROM member_revocations WHERE coordinate = ? AND pubkey = ?")
+        .get(coordinate, pubkey) !== undefined
+    );
+  }
+
+  /** An organizer approve is the only thing that lifts a revocation. */
+  clearRevocation(coordinate: string, pubkey: string): void {
+    this.db.prepare("DELETE FROM member_revocations WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+  }
+
   // ── transcripts (cache by blob sha256) ────────────────────────────────────
   getTranscript(blobSha256: string): string | undefined {
     const row = this.db
@@ -2927,6 +2999,9 @@ export class Store {
       this.db.prepare("DELETE FROM invite_usage WHERE coordinate = ?").run(coordinate);
       // Personal identifiers the pre-R12 purge missed:
       this.db.prepare("DELETE FROM command_watermarks WHERE coordinate = ?").run(coordinate);
+      // Revocation tombstones (audit 2026-10-22, R-01) die with the event. They are
+      // NOT deleted by the per-attendee purge, so withdrawing cannot launder one.
+      this.db.prepare("DELETE FROM member_revocations WHERE coordinate = ?").run(coordinate);
       // ALL job states (terminal/waiting too) — payloads carry attendee pubkeys.
       this.db
         .prepare("DELETE FROM jobs WHERE json_extract(payload, '$.coordinate') = ?")
