@@ -155,9 +155,15 @@ class Nip46Signer private constructor(
         const val RESTORE_TIMEOUT_MS = 12_000L
         const val AUTH_APPROVAL_TIMEOUT_MS = 180_000L
 
-        fun restore(pool: RelayPool, session: Session) = Nip46Signer(pool, session)
+        /** The stored relays go through the same filter as a paste: a session saved before it may hold any ws://. */
+        fun restore(pool: RelayPool, session: Session) = Nip46Signer(pool, session.copy(relays = Relays.accepted(session.relays)))
 
-        private fun relaysWith(extra: List<String>) = (Relays.NIP46 + extra).map(RelayPool::normalize).distinct()
+        /**
+         * Ours ∪ the pointer's, the pointer's only when [Relays.isAccepted] (relays.ts signerRelays,
+         * SB-08 / R-78): a phishing `bunker://` naming `ws://attacker.example` would otherwise get a
+         * plaintext socket carrying this session's client pubkey and request ids, persisted.
+         */
+        internal fun relaysWith(extra: List<String>) = (Relays.NIP46.map(RelayPool::normalize) + Relays.accepted(extra)).distinct()
 
         /** A `nostrconnect://` offer: show it as a QR code or hand it to a signer app. */
         class Offer(val uri: String, val clientSk: String, val secret: String, val relays: List<String>)
@@ -219,7 +225,7 @@ class Nip46Signer private constructor(
             val uri = Uri.parse(bunkerUri.trim())
             require(uri.scheme == "bunker") { "not a bunker:// link" }
             val signerPubkey = uri.host?.lowercase()?.takeIf { it.isHex32() } ?: throw IllegalArgumentException("the bunker link has no signer key")
-            val relays = relaysWith(uri.getQueryParameters("relay").filter { it.startsWith("wss://") || it.startsWith("ws://") })
+            val relays = relaysWith(uri.getQueryParameters("relay"))
             val secret = uri.getQueryParameter("secret")
             val sk = Bytes.toHex(today.cypherpunk.nostrautica.protocol.Secp.generateSecret())
             val probe = Nip46Signer(pool, Session(sk, signerPubkey, signerPubkey, relays, secret))

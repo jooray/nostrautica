@@ -105,14 +105,7 @@ object DmLogic {
 
     // ── Relays ──────────────────────────────────────────────────────────────
 
-    fun isAcceptedRelayUrl(url: String): Boolean {
-        val u = runCatching { java.net.URI(url.trim()) }.getOrNull() ?: return false
-        return when (u.scheme?.lowercase()) {
-            "wss" -> !u.host.isNullOrEmpty()
-            "ws" -> u.host in setOf("localhost", "127.0.0.1", "[::1]", "::1")
-            else -> false
-        }
-    }
+    fun isAcceptedRelayUrl(url: String): Boolean = Relays.isAccepted(url)
 
     fun relayUrlsFromDmList(tags: List<List<String>>): List<String> =
         tags.filter { it.size >= 2 && it[0] == "relay" && isAcceptedRelayUrl(it[1]) }.map { RelayPool.normalize(it[1]) }
