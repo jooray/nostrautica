@@ -6,6 +6,8 @@ import {
   loadDismissedStatuses,
   saveDismissedStatuses,
   purgeLegacyGlobalReviewState,
+  loadRevokedAt,
+  recordRevokedAt,
 } from "./review-state.js";
 import { setActiveCacheOwner, __resetPersistForTests } from "$lib/cache/persist.js";
 
@@ -97,5 +99,16 @@ describe("legacy global purge (audit U11)", () => {
     expect(map.has("nostrautica-coord-status-dismissed")).toBe(false);
     expect(map.has("nostrautica:keep-me")).toBe(true);
     vi.unstubAllGlobals();
+  });
+});
+
+describe("revoked-at persistence (R-13)", () => {
+  it("survives a reload, owner-scoped, and never moves backwards", () => {
+    recordRevokedAt(COORD, loadRevokedAt(COORD), A, 500);
+    expect(loadRevokedAt(COORD)[A]).toBe(500);
+    recordRevokedAt(COORD, loadRevokedAt(COORD), A, 400);
+    expect(loadRevokedAt(COORD)[A]).toBe(500);
+    setActiveCacheOwner(OWNER2);
+    expect(loadRevokedAt(COORD)).toEqual({});
   });
 });
