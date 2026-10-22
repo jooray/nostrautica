@@ -7,7 +7,7 @@
  * → no double-spend, never dropped → no loss).
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
@@ -219,6 +219,30 @@ describe("COORD-5 — Cashu request-failure + settle ordering", () => {
     const states = store.cashuNonterminal().map((e) => e.state);
     expect(states).toEqual(["ambiguous"]);
     store.close();
+  });
+
+  it("replaces the wallet file atomically and leaves no temp file behind (R-51)", () => {
+    const walletPath = tmpPath("wallet.json");
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: walletPath });
+    writeFileSync(`${walletPath}.tmp`, "stale leftover from a crash", { mode: 0o644 });
+    (payment as any).save({ mint: MINT, proofs: SENT });
+    // The old inode is replaced, not truncated in place: a reader holding the old
+    // file never sees a half-written one.
+    const before = statSync(walletPath).ino;
+    (payment as any).save({ mint: MINT, proofs: CHANGE });
+    expect(statSync(walletPath).ino).not.toBe(before);
+    expect(existsSync(`${walletPath}.tmp`)).toBe(false);
+    expect((payment as any).load().proofs).toEqual(CHANGE);
+    expect(statSync(walletPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses to treat a corrupt wallet file as empty, and names it (R-51)", () => {
+    const walletPath = tmpPath("wallet.json");
+    writeFileSync(walletPath, '{"mint":"https://mint.example","proofs":[{"am', { mode: 0o600 });
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: walletPath });
+    expect(() => (payment as any).load()).toThrow(walletPath);
+    // …and nothing overwrote the damaged original, which may still be recoverable.
+    expect(readFileSync(walletPath, "utf8")).toContain('"proofs":[{"am');
   });
 
   it("the wallet file is written owner-only (mode 0600)", () => {

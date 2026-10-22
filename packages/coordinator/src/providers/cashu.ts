@@ -9,7 +9,17 @@
  * fund the coordinator with Cashu tokens, pick a node + model, done.
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
+import { dirname } from "node:path";
 import {
   CashuMint,
   CashuWallet,
@@ -66,14 +76,46 @@ export class CashuPayment implements PaymentStrategy {
   }
 
   private load(): WalletFile {
-    if (existsSync(this.opts.walletDbPath)) {
-      return JSON.parse(readFileSync(this.opts.walletDbPath, "utf8")) as WalletFile;
+    const path = this.opts.walletDbPath;
+    if (!existsSync(path)) return { mint: this.opts.mintUrl, proofs: [] };
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as WalletFile;
+    } catch (e) {
+      // Never fall back to an empty wallet here: the next save() would overwrite
+      // the only copy of the retained proofs (audit R-51). Stop, and say where.
+      throw new Error(
+        `cashu wallet file ${path} is unreadable (${e instanceof Error ? e.message : e}); ` +
+          "it holds bearer proofs, so fix or restore it by hand before retrying",
+      );
     }
-    return { mint: this.opts.mintUrl, proofs: [] };
   }
   private save(file: WalletFile): void {
+    // Temp file + fsync + rename (audit R-51). The wallet file is the ONLY copy of
+    // the retained `keep` proofs — the journal covers proofs that left it — so a
+    // truncating in-place write interrupted by a crash or a full disk stranded the
+    // whole balance. rename() replaces the target atomically within the directory.
     // Bearer money at rest: owner-read/write only (audit COORD-5).
-    writeFileSync(this.opts.walletDbPath, JSON.stringify(file, null, 2), { mode: 0o600 });
+    const path = this.opts.walletDbPath;
+    const tmp = `${path}.tmp`;
+    rmSync(tmp, { force: true }); // a leftover from a crash may carry another mode
+    const fd = openSync(tmp, "wx", 0o600);
+    try {
+      writeSync(fd, JSON.stringify(file, null, 2));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+    try {
+      const dir = openSync(dirname(path), "r");
+      try {
+        fsyncSync(dir); // make the rename itself durable
+      } finally {
+        closeSync(dir);
+      }
+    } catch {
+      // Not every platform can fsync a directory; the data file is already synced.
+    }
   }
 
   private async ensureLoaded(): Promise<void> {
