@@ -75,6 +75,8 @@ export interface BlobFetchOptions {
   maxBytes?: number;
   /** Caller cancellation (audit R13): shutdown / per-event teardown. */
   signal?: AbortSignal;
+  /** Every body chunk's size, across every mirror tried and on failure too (audit R-18). */
+  onBytes?: (n: number) => void;
   /**
    * The guarded downloader, injectable for tests — the same shape every other
    * expensive dependency in this pipeline takes (`probeDuration`, `extractAudio`,
@@ -105,7 +107,7 @@ export async function fetchBlob(
   let allPermanent = urls.length > 0;
   for (const url of urls) {
     try {
-      const bytes = await get(url, { allowedOrigins: opts.allowedOrigins, maxBytes, signal: opts.signal });
+      const bytes = await get(url, { allowedOrigins: opts.allowedOrigins, maxBytes, signal: opts.signal, onBytes: opts.onBytes });
       if (sha256Hex(bytes) !== expectedSha256) {
         // The bytes arrived and are not the bytes the descriptor names. No number
         // of retries changes that; the blob is either corrupt or substituted.
@@ -234,15 +236,41 @@ export async function transcribeMedia(
   }
 
   deps.signal?.throwIfAborted();
+  // Audit R-18: every byte streamed is booked, whichever mirror sent it and
+  // whether or not the download then succeeded. Only the success path and two
+  // rejection branches used to book anything, so a body cut off mid-stream, one
+  // run past the cap, or one whose hash did not match cost real transfer that
+  // never reached the usage budget. And the cap is the descriptor's own `size`
+  // (bounded by the operator's per-blob limit), not the 250 MiB ceiling: `size`
+  // is what capMedia screened against the submission budget, so a blob larger
+  // than it declared is a policy rejection at `size + 1` bytes, not at 250 MiB.
+  let streamed = 0;
   const download =
     deps.fetchBlob ??
     ((urls: string[], sha: string) =>
-      fetchBlob(urls, sha, { allowedOrigins: deps.blossomOrigins, maxBytes: deps.maxMediaBytes, signal: deps.signal }));
-  const ciphertext = await download(descriptor.url, descriptor.x);
+      fetchBlob(urls, sha, {
+        allowedOrigins: deps.blossomOrigins,
+        maxBytes: Math.min(deps.maxMediaBytes ?? DEFAULT_MAX_MEDIA_BYTES, descriptor.size),
+        signal: deps.signal,
+        onBytes: (n) => {
+          streamed += n;
+        },
+      }));
+  let ciphertext: Uint8Array;
+  try {
+    ciphertext = await download(descriptor.url, descriptor.x);
+  } catch (e) {
+    if (streamed > 0) deps.onUsage?.({ bytes: streamed, durationSec: 0 });
+    throw e;
+  }
+  // Booked once, here, before anything below can reject or return: a decrypt
+  // failure and a legacy cache reuse spent the download too. An injected
+  // downloader reports no chunks; then the body itself is the measure.
+  deps.onUsage?.({ bytes: Math.max(streamed, ciphertext.length), durationSec: 0 });
 
   // H-3: the actual downloaded ciphertext length MUST equal the declared `size`.
   // A mismatch means the descriptor lied (a declared `size: 1` fronting a huge blob
-  // to duck the aggregate byte budget). Account the bytes actually spent, then
+  // to duck the aggregate byte budget). The bytes are already booked above;
   // reject this media (no decrypt/STT).
   //
   // Not cached (audit R-16). The verdict belongs to THIS descriptor, not to the
@@ -251,7 +279,6 @@ export async function transcribeMedia(
   // the cache hit short-circuited everything after it. A repeat costs a metered
   // download, and the job runner never retries a MediaPolicyError.
   if (ciphertext.length !== descriptor.size) {
-    deps.onUsage?.({ bytes: ciphertext.length, durationSec: 0 });
     throw new MediaPolicyError(
       `declared size ${descriptor.size} != actual ciphertext length ${ciphertext.length}`,
     );
@@ -292,18 +319,14 @@ export async function transcribeMedia(
     // a fact about this host at this moment, not about the media, and the branch
     // below would otherwise cache it as a permanent policy rejection: the recording
     // is never transcribed and re-submitting the identical blob hits the same
-    // cached empty transcript forever. Account the bytes we really spent
-    // downloading (abuse is metered even on failure) and rethrow so the job runner
-    // retries with backoff. Nothing is cached.
-    if (e instanceof ProbeUnavailableError) {
-      deps.onUsage?.({ bytes: ciphertext.length, durationSec: 0 });
-    }
+    // cached empty transcript forever. The bytes are already booked; rethrow so
+    // the job runner retries with backoff. Nothing is cached.
     throw e;
   }
   // Unknown is booked as 0 against the usage budget because there is nothing else
   // to book — which is precisely why an unknown duration must not also be allowed
   // to PASS the cap below (2026-09-04 audit).
-  deps.onUsage?.({ bytes: ciphertext.length, durationSec: realDurationSec ?? 0 });
+  deps.onUsage?.({ bytes: 0, durationSec: realDurationSec ?? 0 });
   if (deps.maxDurationSec) {
     // "Could not probe" used to read as 0 seconds and sail through this comparison.
     // ffprobe failing does not mean ffmpeg will: a container whose header ffprobe

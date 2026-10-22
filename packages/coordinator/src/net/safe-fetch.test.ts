@@ -164,6 +164,19 @@ describe("safeFetch", () => {
     ).rejects.toMatchObject({ retryable: false });
   });
 
+  it("reports the bytes it streamed before aborting an over-cap body (audit R-18)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(streamResponse(5000));
+    let seen = 0;
+    await expect(
+      safeFetch("https://1.1.1.1/big", {
+        allowedOrigins: ["https://1.1.1.1"],
+        maxBytes: 1000,
+        onBytes: (n) => (seen += n),
+      }),
+    ).rejects.toMatchObject({ retryable: false });
+    expect(seen).toBe(5000);
+  });
+
   it("rejects an over-cap declared Content-Length up front", async () => {
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       streamResponse(10, { "content-length": "999999999" }),

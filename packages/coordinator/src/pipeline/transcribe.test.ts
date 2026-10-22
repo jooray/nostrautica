@@ -17,6 +17,11 @@ import {
 import { ProbeUnavailableError, SubprocessError } from "./audio.js";
 import { MockStt } from "../providers/mock.js";
 
+/** Usage is booked in installments (bytes at download, duration after the probe). */
+function sumUsage(usage: { bytes: number; durationSec: number }[]) {
+  return usage.reduce((a, u) => ({ bytes: a.bytes + u.bytes, durationSec: a.durationSec + u.durationSec }), { bytes: 0, durationSec: 0 });
+}
+
 async function fixture(durationDeclared = 30) {
   const data = new Uint8Array(4096).map((_, i) => i % 251);
   const { ciphertext, descriptor } = await encryptMedia({
@@ -99,7 +104,7 @@ describe("H-3 — real decoded-duration enforcement", () => {
     ).rejects.toThrow(/decoded duration 600s exceeds the 60s/);
     expect(stt.calls).toBe(0); // rejected before STT
     // Real (probed) duration + actual bytes accounted, not the declared 30s.
-    expect(usage.at(-1)).toEqual({ bytes: ciphertext.length, durationSec: 600 });
+    expect(sumUsage(usage)).toEqual({ bytes: ciphertext.length, durationSec: 600 });
   });
 
   it("transcribes when the probed duration is within the limit, accounting real duration", async () => {
@@ -122,7 +127,7 @@ describe("H-3 — real decoded-duration enforcement", () => {
     );
     expect(r.text).toBe("ok");
     expect(stt.calls).toBe(1);
-    expect(usage.at(-1)).toEqual({ bytes: ciphertext.length, durationSec: 45 });
+    expect(sumUsage(usage)).toEqual({ bytes: ciphertext.length, durationSec: 45 });
   });
 });
 
@@ -175,7 +180,7 @@ describe("H-3 — an UNPROBEABLE duration is a rejection, not a pass", () => {
       ),
     ).rejects.toBeInstanceOf(MediaPolicyError);
     // Bytes actually downloaded are still metered on rejection.
-    expect(usage.at(-1)!.bytes).toBe(ciphertext.length);
+    expect(sumUsage(usage).bytes).toBe(ciphertext.length);
   });
 
   it("a probe that never ANSWERED is retryable and is NOT cached (PIPE-N-1)", async () => {
@@ -213,7 +218,7 @@ describe("H-3 — an UNPROBEABLE duration is a rejection, not a pass", () => {
     // NOT a MediaPolicyError: processAttendee rethrows this, so the job runner
     // retries with backoff instead of skipping the media for good.
     expect(stt.calls).toBe(0);
-    expect(usage.at(-1)!.bytes).toBe(ciphertext.length); // bytes really spent, metered
+    expect(sumUsage(usage).bytes).toBe(ciphertext.length); // bytes really spent, metered
     expect(store.getTranscriptRow(descriptor.x)).toBeUndefined(); // nothing cached
 
     // The retry, on a host that is no longer wedged, transcribes normally.
@@ -242,7 +247,7 @@ describe("H-3 — an UNPROBEABLE duration is a rejection, not a pass", () => {
       descriptor as any,
     );
     expect(r.text).toBe("ok");
-    expect(usage.at(-1)).toEqual({ bytes: ciphertext.length, durationSec: 0 });
+    expect(sumUsage(usage)).toEqual({ bytes: ciphertext.length, durationSec: 0 });
   });
 
   it("a probed 0 is still a real measurement and passes", async () => {
