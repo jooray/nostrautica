@@ -262,14 +262,12 @@ async function runDaemon(): Promise<void> {
     // list is worth looking at, so this is most of the wall-clock between walking
     // in and seeing matches.
     //
-    // Cashu is the exception, and it is not a style preference: CashuPayment keeps
-    // ONE in-flight reservation id and rewrites the whole wallet file around an
-    // await, so two overlapping requests mis-journal each other's change and can
-    // lose bearer money (the audit item for this is still open). A role routed to
-    // Routstr therefore stays strictly serial until that is fixed. Production
-    // routes every role to Venice, where the client is reentrant and payment is an
-    // API key.
-    scoreConcurrency: referencedProviders.has("routstr") ? 1 : 2,
+    // Cashu used to be the exception: CashuPayment kept ONE in-flight reservation id
+    // and rewrote the wallet file around an await, so overlapping requests could
+    // mis-journal each other's change. Reservations are now per-request handles and
+    // every wallet-file section is serialised (audit R-49), so Routstr gets the same
+    // two as Venice.
+    scoreConcurrency: 2,
     chatMls,
     // Install authorization + unsolicited-install caps (audit COORD-3).
     maxEvents: config.security.max_events,

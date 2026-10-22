@@ -17,7 +17,7 @@ import {
   getDecodedToken,
   type Proof,
 } from "@cashu/cashu-ts";
-import type { PaymentStrategy } from "./types.js";
+import type { PaymentReservation, PaymentStrategy } from "./types.js";
 import type { Store } from "../store/db.js";
 
 interface WalletFile {
@@ -44,8 +44,22 @@ export interface CashuPaymentOptions {
 export class CashuPayment implements PaymentStrategy {
   private wallet: CashuWallet;
   private loaded = false;
-  /** The reservation awaiting settle() for this in-flight request, if any. */
+  /** The reservation the LEGACY prepare()/settle()/fail() trio is tracking. */
   private pendingRequestId?: string;
+  /**
+   * Serialises every load → await → save of the wallet file (audit R-49). Two
+   * overlapping sections each read the same proofs, and the later save drops the
+   * earlier one's swap change. A section abandoned by its caller's deadline keeps
+   * the lock until its mint call actually ends, which is the point: the work is
+   * still running, so the next one must wait for it.
+   */
+  private walletLock: Promise<unknown> = Promise.resolve();
+
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.walletLock.then(fn, fn);
+    this.walletLock = run.catch(() => {});
+    return run;
+  }
 
   constructor(private readonly opts: CashuPaymentOptions) {
     this.wallet = new CashuWallet(new CashuMint(opts.mintUrl));
@@ -69,7 +83,23 @@ export class CashuPayment implements PaymentStrategy {
     }
   }
 
-  async prepare(req: { estimateTokens?: number }): Promise<Record<string, string>> {
+  /**
+   * One request's payment, with its own settle()/fail() (audit R-49). Prefer this
+   * over prepare(): the reservation id travels with the handle, so a prepare that
+   * completes after its caller gave up can never be settled by the next request.
+   */
+  async reserve(req: { estimateTokens?: number }): Promise<PaymentReservation> {
+    const { headers, requestId } = await this.exclusive(() => this.reserveLocked(req));
+    return {
+      headers,
+      settle: (h) => this.settleReservation(requestId, h),
+      fail: async () => this.failReservation(requestId),
+    };
+  }
+
+  private async reserveLocked(req: {
+    estimateTokens?: number;
+  }): Promise<{ headers: Record<string, string>; requestId?: string }> {
     await this.ensureLoaded();
     const file = this.load();
     const amount = Math.max(1, this.opts.defaultAmountSats ?? Math.ceil((req.estimateTokens ?? 1000) / 1000));
@@ -81,47 +111,59 @@ export class CashuPayment implements PaymentStrategy {
     // crash before settle() leaves an accountable `in_flight` record instead of a
     // silent loss (audit H8). Balance mode reuses one long-lived token, so there's
     // no per-request change to journal.
+    let requestId: string | undefined;
     if (this.opts.journal && this.opts.mode !== "balance") {
-      const requestId = randomUUID();
+      requestId = randomUUID();
       this.opts.journal.cashuReserve(requestId, this.opts.mintUrl, amount, send);
-      this.pendingRequestId = requestId;
     }
     file.proofs = keep;
     this.save(file);
 
     const token = getEncodedTokenV4({ mint: this.opts.mintUrl, proofs: send });
-    return this.opts.mode === "balance"
-      ? { Authorization: `Bearer ${token}` }
-      : { "X-Cashu": token };
+    const headers: Record<string, string> =
+      this.opts.mode === "balance" ? { Authorization: `Bearer ${token}` } : { "X-Cashu": token };
+    return { headers, requestId };
+  }
+
+  async prepare(req: { estimateTokens?: number }): Promise<Record<string, string>> {
+    const { headers, requestId } = await this.exclusive(() => this.reserveLocked(req));
+    this.pendingRequestId = requestId;
+    return headers;
   }
 
   async settle(responseHeaders: Headers): Promise<void> {
-    // settle() is only reached after the provider accepted the payment (res.ok),
-    // so the reserved proofs are now spent; bank any returned change.
     const requestId = this.pendingRequestId;
     this.pendingRequestId = undefined;
+    await this.settleReservation(requestId, responseHeaders);
+  }
+
+  private async settleReservation(requestId: string | undefined, responseHeaders: Headers): Promise<void> {
+    // settle() is only reached after the provider accepted the payment (res.ok),
+    // so the reserved proofs are now spent; bank any returned change.
     const changeToken = responseHeaders.get("X-Cashu");
 
     let banked: Proof[] = [];
     if (changeToken) {
-      await this.ensureLoaded();
-      try {
-        const decoded = getDecodedToken(changeToken);
-        // Journal the change proofs BEFORE redeeming them into the wallet file
-        // (audit COORD-5): a crash mid-receive then leaves the change accounted
-        // for in the durable journal instead of lost with the token string.
-        const changeProofs = (decoded.proofs ?? []) as Proof[];
-        if (requestId && this.opts.journal && changeProofs.length > 0) {
-          this.opts.journal.cashuSettle(requestId, changeProofs);
+      await this.exclusive(async () => {
+        await this.ensureLoaded();
+        try {
+          const decoded = getDecodedToken(changeToken);
+          // Journal the change proofs BEFORE redeeming them into the wallet file
+          // (audit COORD-5): a crash mid-receive then leaves the change accounted
+          // for in the durable journal instead of lost with the token string.
+          const changeProofs = (decoded.proofs ?? []) as Proof[];
+          if (requestId && this.opts.journal && changeProofs.length > 0) {
+            this.opts.journal.cashuSettle(requestId, changeProofs);
+          }
+          banked = await this.wallet.receive(decoded);
+          const file = this.load();
+          file.proofs = [...file.proofs, ...banked];
+          this.save(file);
+        } catch {
+          // Malformed / already-spent change — nothing to bank in the wallet; any
+          // change proofs journaled above stay recoverable there (COORD-5).
         }
-        banked = await this.wallet.receive(decoded);
-        const file = this.load();
-        file.proofs = [...file.proofs, ...banked];
-        this.save(file);
-      } catch {
-        // Malformed / already-spent change — nothing to bank in the wallet; any
-        // change proofs journaled above stay recoverable there (COORD-5).
-      }
+      });
     }
     // Close out the journal reservation (request completed). Idempotent: when the
     // change was already journaled above this is a no-op; it also covers the
@@ -141,6 +183,10 @@ export class CashuPayment implements PaymentStrategy {
   async fail(): Promise<void> {
     const requestId = this.pendingRequestId;
     this.pendingRequestId = undefined;
+    this.failReservation(requestId);
+  }
+
+  private failReservation(requestId: string | undefined): void {
     if (requestId && this.opts.journal) {
       this.opts.journal.cashuMarkAmbiguous(requestId);
     }
@@ -169,11 +215,13 @@ export class CashuPayment implements PaymentStrategy {
 
   /** Import a Cashu token to fund the wallet (operator top-up). */
   async fund(token: string): Promise<number> {
-    await this.ensureLoaded();
-    const received = await this.wallet.receive(getDecodedToken(token));
-    const file = this.load();
-    file.proofs = [...file.proofs, ...received];
-    this.save(file);
-    return file.proofs.reduce((sum, p) => sum + p.amount, 0);
+    return this.exclusive(async () => {
+      await this.ensureLoaded();
+      const received = await this.wallet.receive(getDecodedToken(token));
+      const file = this.load();
+      file.proofs = [...file.proofs, ...received];
+      this.save(file);
+      return file.proofs.reduce((sum, p) => sum + p.amount, 0);
+    });
   }
 }

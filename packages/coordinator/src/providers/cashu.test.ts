@@ -181,6 +181,46 @@ describe("COORD-5 — Cashu request-failure + settle ordering", () => {
     store.close();
   });
 
+  it("overlapping reservations never spend the same proofs or swap each other's ids (R-49)", async () => {
+    const store = new Store(":memory:");
+    const walletPath = tmpPath("w.json");
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: walletPath, journal: store, defaultAmountSats: 4 });
+    const wellFormed = ["s-sent-1", "s-sent-2", "s-change-1"].map((secret, i) => ({
+      ...CHANGE_ENC[0],
+      amount: 4,
+      secret,
+      C: `0${i}`.repeat(32),
+    }));
+    (payment as any).save({ mint: MINT, proofs: wellFormed });
+    (payment as any).loaded = true;
+    // A mint swap that the first caller abandons mid-flight: it is still running
+    // when the second reservation starts.
+    let releaseFirst!: () => void;
+    const seen: string[][] = [];
+    (payment as any).wallet = {
+      send: async (_amount: number, proofs: typeof wellFormed) => {
+        seen.push(proofs.map((p) => p.secret));
+        if (seen.length === 1) await new Promise<void>((r) => (releaseFirst = r));
+        return { send: [proofs[0]], keep: proofs.slice(1) };
+      },
+    };
+    const a = payment.reserve({});
+    const b = payment.reserve({});
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen).toHaveLength(1); // b waits for a's swap instead of reading the same file
+    releaseFirst();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(seen[1]).toEqual(["s-sent-2", "s-change-1"]); // a's spent proof is gone
+    expect(ra.headers["X-Cashu"]).not.toBe(rb.headers["X-Cashu"]);
+
+    // Each handle closes its own reservation.
+    await rb.settle(new Headers());
+    await ra.fail();
+    const states = store.cashuNonterminal().map((e) => e.state);
+    expect(states).toEqual(["ambiguous"]);
+    store.close();
+  });
+
   it("the wallet file is written owner-only (mode 0600)", () => {
     const walletPath = tmpPath("wallet.json");
     const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: walletPath });
