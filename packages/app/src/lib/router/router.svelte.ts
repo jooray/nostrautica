@@ -172,6 +172,15 @@ export class Router {
   private sync(): void {
     const next = parseHash(window.location.hash);
     const nextHash = buildHash(next);
+    // An unknown route had its credentials stripped by parseHash (audit R-35);
+    // take them out of the address bar and this history entry too.
+    if (next.name === "notFound" && next.hash !== window.location.hash) {
+      try {
+        window.history.replaceState(null, "", next.hash || "#/");
+      } catch {
+        /* no history API (tests, odd embeds): the route itself is already clean */
+      }
+    }
     if (this.goingBack) {
       this.goingBack = false;
     } else if (buildHash(this.route) !== nextHash) {
