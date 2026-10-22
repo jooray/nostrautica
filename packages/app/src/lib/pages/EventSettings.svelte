@@ -8,6 +8,7 @@
   import { connectNdk, isAcceptedRelayUrl } from "$lib/nostr/ndk.js";
   import { unionRelays, chatRelaysOf } from "$lib/nostr/relays.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
+  import { acceptedConfigAt } from "$lib/events/hierarchy.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
   import { receiveGrants } from "$lib/events/attendee.js";
   import {
@@ -439,6 +440,7 @@
     try {
       const blindingKey = await deriveBlindingKey(session.signer).catch(() => undefined);
       await attachCoordinator(session.signer, ctx, ctx.config.coordinator, blindingKey);
+      ctx = ownSave(ctx);
       resent = true;
       setTimeout(() => (resent = false), 2000);
     } catch (e) {
@@ -446,6 +448,12 @@
     } finally {
       resending = false;
     }
+  }
+
+  // After this page's own 31600 save: the newest config a relay accepted from us
+  // is the oldest one any later save may build on (audit R-29).
+  function ownSave(c: EventContext): EventContext {
+    return { ...c, configAt: Math.max(c.configAt ?? 0, acceptedConfigAt(c.coordinate)) };
   }
 
   async function detach() {
@@ -457,7 +465,7 @@
       const blindingKey = await deriveBlindingKey(session.signer).catch(() => undefined);
       await detachCoordinator(session.signer, ctx, blindingKey);
       // Reflect the detach locally so the UI returns to the attach flow.
-      ctx = { ...ctx, config: { ...ctx.config, coordinator: undefined } };
+      ctx = ownSave({ ...ctx, config: { ...ctx.config, coordinator: undefined } });
       coordAnnounce = undefined;
       coordLastSeen = undefined;
       await loadCoordinators();
@@ -492,7 +500,7 @@
     try {
       // Adopt the config as published: it was built on the newest 31600, so it
       // also carries whatever another device changed since this page loaded.
-      ctx = { ...ctx, config: await updateEventConfig(ctx, { talks: talksMode }) };
+      ctx = ownSave({ ...ctx, config: await updateEventConfig(ctx, { talks: talksMode }) });
       talksSaved = true;
       setTimeout(() => (talksSaved = false), 1500);
     } catch (e) {
@@ -521,7 +529,7 @@
     error = null;
     try {
       const chat: ("marmot")[] = chatEnabled ? ["marmot"] : [];
-      ctx = { ...ctx, config: await updateEventConfig(ctx, { chat }) };
+      ctx = ownSave({ ...ctx, config: await updateEventConfig(ctx, { chat }) });
       chatSaved = true;
       setTimeout(() => (chatSaved = false), 1500);
     } catch (e) {
@@ -563,7 +571,7 @@
     retentionSaved = false;
     error = null;
     try {
-      ctx = { ...ctx, config: await updateEventConfig(ctx, { retentionDays }) };
+      ctx = ownSave({ ...ctx, config: await updateEventConfig(ctx, { retentionDays }) });
       retentionSaved = true;
       setTimeout(() => (retentionSaved = false), 1500);
     } catch (e) {
@@ -620,7 +628,7 @@
       // accept only chat kinds, and showing them here invited an organizer to
       // treat them as event relays — which is how they ended up rejecting every
       // config/roster/deletion publish in the first place.
-      ctx = { ...ctx, config: await updateEventConfig(ctx, { relays }) };
+      ctx = ownSave({ ...ctx, config: await updateEventConfig(ctx, { relays }) });
       relaysInput = relays.join("\n");
       relaysSaved = true;
       setTimeout(() => (relaysSaved = false), 1500);

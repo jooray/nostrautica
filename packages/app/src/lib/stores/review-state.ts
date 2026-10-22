@@ -34,6 +34,37 @@ function dismissedKey(coordinate: string): string {
   return `coord-status-dismissed:${coordinate}`;
 }
 
+function revokedKey(coordinate: string): string {
+  return `revoked-at:${coordinate}`;
+}
+
+/**
+ * When this organizer revoked each attendee of an event, in seconds (audit R-13).
+ * Owner-scoped like the review map. The revoked member's own pre-revocation join
+ * request stays on the relays, and once the rotated roster no longer lists them
+ * a reload showed it as a NEW request, which Approve or "Approve all" turned
+ * straight back into a grant of the rotated key. A join sent AFTER the revoke is
+ * a genuine new request and is shown.
+ */
+export type RevokedAtMap = Record<string, number>;
+
+/** The persisted revoked-at map for an event (empty when none / logged out). */
+export function loadRevokedAt(coordinate: string): RevokedAtMap {
+  return cacheGet<RevokedAtMap>(revokedKey(coordinate))?.data ?? {};
+}
+
+/** Record that `pubkey` was revoked at `at` (seconds); returns the new map. */
+export function recordRevokedAt(
+  coordinate: string,
+  current: RevokedAtMap,
+  pubkey: string,
+  at: number = Math.floor(Date.now() / 1000),
+): RevokedAtMap {
+  const next: RevokedAtMap = { ...current, [pubkey]: Math.max(at, current[pubkey] ?? 0) };
+  cacheSet(revokedKey(coordinate), next, Math.floor(Date.now() / 1000));
+  return next;
+}
+
 /** Load the persisted review map for an event (empty when none / logged out). */
 export function loadReview(coordinate: string): ReviewMap {
   return cacheGet<ReviewMap>(reviewKey(coordinate))?.data ?? {};

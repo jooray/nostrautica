@@ -33,7 +33,13 @@ import {
 } from "@nostrautica/protocol";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { onlyVerified, onlyAddressed } from "$lib/nostr/verify.js";
-import { publishMonotonic } from "$lib/nostr/monotonic.js";
+import {
+  publishMonotonic,
+  publishWatermark,
+  acceptedWatermark,
+  eventAddress,
+} from "$lib/nostr/monotonic.js";
+import { hasPendingPublishFor } from "$lib/nostr/publish-queue.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
 import { loadEventKeys, listEventKeys } from "./keystore.js";
 import {
@@ -144,6 +150,19 @@ export async function fetchNewestConfig(
   relays: string[] = [],
   opts: { fresh?: boolean } = {},
 ): Promise<EventConfig | undefined> {
+  return (await fetchNewestSignedConfig(coordinate, relays, opts))?.config;
+}
+
+/**
+ * {@link fetchNewestConfig} plus the winning event's `created_at`, for the
+ * writers that must not re-sign something older than what they already know
+ * about (audit R-29, see {@link assertConfigNotStale}).
+ */
+export async function fetchNewestSignedConfig(
+  coordinate: string,
+  relays: string[] = [],
+  opts: { fresh?: boolean } = {},
+): Promise<{ config: EventConfig; createdAt: number } | undefined> {
   let coord;
   try {
     coord = parseCoordinate(coordinate);
@@ -159,10 +178,54 @@ export async function fetchNewestConfig(
   const latest = pickLatest(onlyAddressed(onlyVerified(events), KIND_EVENT_CONFIG, coord.pubkey, coord.identifier));
   if (!latest) return undefined;
   try {
-    return parseEventConfig(coord.pubkey, latest.tags);
+    return { config: parseEventConfig(coord.pubkey, latest.tags), createdAt: latest.created_at ?? 0 };
   } catch {
     return undefined;
   }
+}
+
+export const CONFIG_STALE =
+  "The relays answered with an older copy of this event's settings than this device has " +
+  "already seen, so nothing was published. Publishing from it would undo the newer change. " +
+  "Wait a moment and try again.";
+
+/**
+ * Refuse a config rewrite built on a 31600 older than one this client already
+ * knows exists (audit R-29). A relay that has not caught up with a detach or an
+ * inbox rotation answers with the previous config, and `publishMonotonic` then
+ * gives that stale content a winning created_at, re-attaching the old
+ * coordinator for everyone.
+ *
+ * The floor is the highest of:
+ *  - the page's own `knownAt` (`ctx.configAt`);
+ *  - the newest 31600 a relay has ACCEPTED from this client (always: that event
+ *    exists, so a relay serving something older is merely behind — the detach
+ *    then edit case);
+ *  - the monotonic watermark, ONLY while an unsent publish for the address is
+ *    still in the outbox. That watermark is bumped before the publish resolves,
+ *    so on its own it would remember a 31600 that never reached any relay —
+ *    discarded, or parked as failed — and refuse every later edit for good.
+ */
+export async function assertConfigNotStale(
+  coordinate: string,
+  createdAt: number,
+  knownAt = 0,
+): Promise<void> {
+  const { pubkey, identifier } = parseCoordinate(coordinate);
+  const address = eventAddress(KIND_EVENT_CONFIG, pubkey, identifier);
+  const pending = await hasPendingPublishFor(KIND_EVENT_CONFIG, pubkey, identifier);
+  const watermark = pending ? publishWatermark(address) : 0;
+  if (createdAt < Math.max(knownAt, acceptedWatermark(address), watermark)) throw new Error(CONFIG_STALE);
+}
+
+/**
+ * The newest 31600 a relay accepted from this client for `coordinate`, for a page
+ * to fold into `ctx.configAt` after its own save (R-29). Accepted only, so a save
+ * that merely queued never raises the page's floor above what exists anywhere.
+ */
+export function acceptedConfigAt(coordinate: string): number {
+  const { pubkey, identifier } = parseCoordinate(coordinate);
+  return acceptedWatermark(eventAddress(KIND_EVENT_CONFIG, pubkey, identifier));
 }
 
 // Link status is asked once per approval, and "Approve all" approves dozens in a
@@ -225,8 +288,10 @@ async function republishConfig(
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
     throw new Error("organizer E_id key not available");
   }
-  const current = await fetchNewestConfig(coordinate, relays, { fresh: true });
-  if (!current) throw new Error("Event config (31600) not found");
+  const read = await fetchNewestSignedConfig(coordinate, relays, { fresh: true });
+  if (!read) throw new Error("Event config (31600) not found");
+  await assertConfigNotStale(coordinate, read.createdAt);
+  const current = read.config;
   const next = mutate(current);
   const sameChildren = JSON.stringify(next.children ?? []) === JSON.stringify(current.children ?? []);
   if (sameChildren && next.parent === current.parent) return undefined; // nothing to change

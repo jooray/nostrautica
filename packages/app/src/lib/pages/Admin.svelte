@@ -25,8 +25,11 @@
     loadDismissedStatuses,
     saveDismissedStatuses,
     purgeLegacyGlobalReviewState,
+    loadRevokedAt,
+    recordRevokedAt,
     type ReviewMap,
     type ReviewState,
+    type RevokedAtMap,
   } from "$lib/stores/review-state.js";
   import {
     fetchPending,
@@ -143,6 +146,10 @@
   // transient "Revoked ✓" because the refresh moved the card first). Excluded
   // from pendingRequests for the same reason.
   let revokedSet = $state<Set<string>>(new Set());
+  // The durable half of that (audit R-13): when each person was revoked, kept
+  // owner-scoped across reloads, so their pre-revocation join request never
+  // returns to the queue (or to "Approve all") once the session set is gone.
+  let revokedAt = $state<RevokedAtMap>({});
   // Local admission review state (UX-A7): rejected requests drop from the queue
   // (local-only, no protocol action); deferred ones stay but stop looking new.
   let reviewMap = $state<ReviewMap>({});
@@ -151,7 +158,9 @@
   // The pending QUEUE view: known requests minus confirmed transitions (approved
   // in the roster / approved just now / revoked) and local rejections (UX-A7).
   // The merge never drops a known request (UX-A2).
-  const pendingRequests = $derived(visiblePending(pending, isApprovedNow, revokedSet, rejectedSet));
+  const pendingRequests = $derived(
+    visiblePending(pending, isApprovedNow, revokedSet, rejectedSet, revokedAt),
+  );
 
   // Community join requests that carry a `member_of` proof (§15.4): verified
   // against BOTH newest configs, the child's authorities and the signature, then
@@ -432,6 +441,7 @@
     roster = cachedRoster(coord) ?? roster;
     directory = cachedDirectory(coord) ?? directory;
     reviewMap = loadReview(coord); // UX-A7 / U11: owner-scoped reject/defer state
+    revokedAt = loadRevokedAt(coord); // R-13: owner-scoped, per coordinate
     dismissedStatuses = new Set(loadDismissedStatuses(coord)); // U11: owner-scoped
     rosterApproved = new Set(roster?.attendees.map((a) => a.pubkey) ?? [...rosterApproved]);
     pendingTalks = cachedPendingTalks(coord) ?? pendingTalks;
@@ -1082,18 +1092,36 @@
   // confirm state); the parent performs the revoke and updates its data model.
   async function revoke(pubkey: string, retried = false) {
     if (!ctx || !session.signer) return;
+    const coordinate = ctx.coordinate;
+    // Recorded once the removal is published OR queued: either way the organizer
+    // decided it, and a queued one goes out on its own (R-13).
+    // Built on the stored map, not the page state: the page may show another
+    // event by the time a slow revoke returns.
+    const noteRevoked = () => {
+      const next = recordRevokedAt(coordinate, loadRevokedAt(coordinate), pubkey);
+      if (ctx?.coordinate === coordinate) revokedAt = next;
+    };
     try {
       if (ctx.config.coordinator) {
         // Queued is not revoked (audit SB-03): until the coordinator acts, the
         // member still holds their chat leaf and roster place. Don't say "Revoked".
-        if ((await sendAdminCommand(ctx, "revoke", { pubkey })) === "queued") {
+        const sent = await sendAdminCommand(ctx, "revoke", { pubkey });
+        noteRevoked();
+        if (sent === "queued") {
           opStatus.queued(t("admin.command.revokeQueued"));
           return;
         }
       } else {
         // Pass the blinding key: revoke mints a new ECK, and without this the
         // rotated key never reaches the organizer's own 30078 backup.
-        await revokeAttendeeClient(session.signer, ctx, pubkey, await deriveBlindingKey(session.signer));
+        const outcome = await revokeAttendeeClient(session.signer, ctx, pubkey, await deriveBlindingKey(session.signer));
+        noteRevoked();
+        // Same rule as the coordinator branch (audit R-25): a rotation that only
+        // reached the outbox has not removed anyone yet. Don't say "Revoked ✓".
+        if (outcome === "queued") {
+          opStatus.queued(t("admin.revokeQueuedLocal"));
+          return;
+        }
       }
       revokedSet = new Set([...revokedSet, pubkey]);
       approvedSet = new Set([...approvedSet].filter((p) => p !== pubkey));

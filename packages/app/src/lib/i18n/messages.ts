@@ -1205,6 +1205,8 @@ export const messages = {
       "No connection right now. The approval is saved on this device and goes to the coordinator when you're back online. The request stays in the queue until then.",
     "admin.command.revokeQueued":
       "No connection right now. The removal is saved on this device and goes to the coordinator when you're back online. Until then this person still has access.",
+    "admin.revokeQueuedLocal":
+      "Not published yet. The removal and the new event key are saved on this device and go out when you're back online. Until then this person still has access.",
     "admin.keys.changedElsewhere":
       "This event's keys were changed on another device, and this device still has the old ones. Join requests and approvals from here may be missing or fail. Open the event on that device, or have it send this account a fresh organizer grant.",
     "admin.keys.collision":
@@ -2964,6 +2966,8 @@ export const messages = {
       "Momentálne nie ste pripojení. Schválenie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy žiadosť zostáva v poradí.",
     "admin.command.revokeQueued":
       "Momentálne nie ste pripojení. Odobratie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy má táto osoba stále prístup.",
+    "admin.revokeQueuedLocal":
+      "Zatiaľ neodoslané. Odobratie aj nový kľúč podujatia sú uložené v tomto zariadení a odošlú sa po obnovení pripojenia. Dovtedy má táto osoba stále prístup.",
     "admin.keys.changedElsewhere":
       "Kľúče tohto podujatia sa zmenili na inom zariadení a toto zariadenie má stále tie staré. Žiadosti o vstup a schvaľovanie odtiaľto môžu chýbať alebo zlyhať. Otvorte podujatie na tom zariadení alebo ho požiadajte, aby tomuto účtu poslalo nové organizátorské oprávnenie.",
     "admin.keys.collision":
@@ -4712,6 +4716,8 @@ export const messages = {
       "Momentálně nejste připojeni. Schválení je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby žádost zůstává ve frontě.",
     "admin.command.revokeQueued":
       "Momentálně nejste připojeni. Odebrání je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby má tato osoba stále přístup.",
+    "admin.revokeQueuedLocal":
+      "Zatím neodesláno. Odebrání i nový klíč akce jsou uložené v tomto zařízení a odešlou se po obnovení připojení. Do té doby má tato osoba stále přístup.",
     "admin.keys.changedElsewhere":
       "Klíče této akce se změnily na jiném zařízení a toto zařízení má pořád ty staré. Žádosti o vstup a schvalování odsud mohou chybět nebo selhat. Otevřete akci na tom zařízení, nebo ho požádejte, aby tomuto účtu poslalo nové organizátorské oprávnění.",
     "admin.keys.collision":
@@ -6456,6 +6462,8 @@ export const messages = {
       "Gerade keine Verbindung. Die Freigabe ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin bleibt die Anfrage in der Warteschlange.",
     "admin.command.revokeQueued":
       "Gerade keine Verbindung. Das Entfernen ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin hat diese Person weiterhin Zugriff.",
+    "admin.revokeQueuedLocal":
+      "Noch nicht veröffentlicht. Das Entfernen und der neue Event-Schlüssel sind auf diesem Gerät gespeichert und gehen raus, sobald du wieder online bist. Bis dahin hat diese Person weiterhin Zugriff.",
     "admin.keys.changedElsewhere":
       "Die Schlüssel dieses Events wurden auf einem anderen Gerät geändert, und dieses Gerät hat noch die alten. Beitrittsanfragen und Freigaben von hier können fehlen oder fehlschlagen. Öffne das Event auf jenem Gerät oder lass es diesem Konto eine neue Organisator-Freigabe schicken.",
     "admin.keys.collision":
@@ -8237,6 +8245,8 @@ export const messages = {
       "Ahora mismo no hay conexión. La aprobación está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces la solicitud sigue en la cola.",
     "admin.command.revokeQueued":
       "Ahora mismo no hay conexión. La retirada está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces esta persona sigue teniendo acceso.",
+    "admin.revokeQueuedLocal":
+      "Aún no publicado. La retirada y la nueva clave del evento están guardadas en este dispositivo y se enviarán cuando vuelvas a estar en línea. Hasta entonces esta persona sigue teniendo acceso.",
     "admin.keys.changedElsewhere":
       "Las claves de este evento se cambiaron en otro dispositivo y este todavía tiene las antiguas. Puede que falten solicitudes de acceso o que las aprobaciones desde aquí fallen. Abre el evento en ese dispositivo o pídele que envíe a esta cuenta una nueva concesión de organizador.",
     "admin.keys.collision":

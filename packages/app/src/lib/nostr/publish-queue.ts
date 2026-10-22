@@ -29,6 +29,7 @@ import type { VerifiedEvent } from "nostr-tools/pure";
 import { publishSigned, type RelayPublishOutcome } from "./ndk.js";
 import { isRetryableRelayFailure } from "./errors.js";
 import { activeCacheOwner } from "$lib/cache/persist.js";
+import { noteAcceptedEvent } from "./accepted-watermark.js";
 
 export interface QueuedItem {
   event: VerifiedEvent;
@@ -438,7 +439,12 @@ async function queueUndelivered(
     // it targets every relay anyway, and the store is keyed by event id, so
     // writing over it would narrow that publish to this partial relay set.
     if (existing && !existing.partial) return;
+    // Spread the existing row rather than rebuilding it from a field list: a
+    // rebuild dropped `lastAttemptAt`/`lastError`, so every re-publish of an
+    // event with a pending straggler reset that row's backoff clock and the next
+    // flush retried it immediately.
     await backend.put({
+      ...existing,
       event,
       relays: [...new Set([...(existing?.relays ?? []), ...missing])],
       queuedAt: existing?.queuedAt ?? Date.now(),
@@ -531,6 +537,11 @@ async function flushQueueSnapshot(backend: OutboxBackend): Promise<FlushResult> 
     if (!(await stillQueued(item.event.id))) continue;
     try {
       const missing = stillMissing(await publishSigned(item.event, item.relays));
+      // `publishSigned` resolved, so a relay took it: a queued 31600 (or any
+      // replaceable/addressable event) now exists, and readers that see an older
+      // one are looking at a relay that is behind (audit R-29). Under the
+      // account that queued it.
+      noteAcceptedEvent(item.event, item.owner);
       if (missing.length === 0) {
         await backend.delete(item.event.id);
         sent++;
@@ -640,6 +651,26 @@ export async function retryFailed(id: string): Promise<FlushResult> {
     }
   }
   return flushQueue();
+}
+
+/**
+ * Whether the active account still has an unsent publish queued for the
+ * addressable event `kind:author:d` (audit R-29). Partial redeliveries count:
+ * the relay that missed one may be exactly the relay a later read asks. Parked
+ * `failed` items do not, since nothing sends them unless the user retries, and a
+ * check built on this must never be held hostage by one the user abandoned.
+ */
+export async function hasPendingPublishFor(kind: number, author: string, d: string): Promise<boolean> {
+  if (!backend) return false;
+  const active = activeCacheOwner();
+  return (await backend.getAll().catch(() => [] as QueuedItem[])).some(
+    (i) =>
+      ownedBy(i, active) &&
+      !i.failed &&
+      i.event.kind === kind &&
+      i.event.pubkey === author &&
+      i.event.tags?.some((t) => t[0] === "d" && t[1] === d),
+  );
 }
 
 /** User action from the outbox UI: permanently drop a queued/failed item. */

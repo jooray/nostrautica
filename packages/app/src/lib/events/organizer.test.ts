@@ -82,10 +82,12 @@ import {
   sharedInviteExp,
   updateEventConfig,
   attachCoordinator,
+  detachCoordinator,
   loadRoster,
   sendAdminCommand,
   type PendingRequest,
   fetchPending,
+  cachedPending,
   addCoOrganizer,
   checkOrganizerKeys,
   repairEventKeys,
@@ -106,6 +108,7 @@ import {
 import type { EventContext } from "./event-context.js";
 import type { AppSigner } from "$lib/signer/types.js";
 import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
+import { __setOutboxBackend, discardQueued, type QueuedItem } from "$lib/nostr/publish-queue.js";
 
 const OWNER = "b".repeat(64);
 const EID_SK = generateSecretKey();
@@ -778,6 +781,34 @@ describe("roster read-modify-write safety", () => {
     expect(await loadEventKeys(COORD, OTHER_OWNER)).toBeUndefined();
   });
 
+  // Audit R-25: a rotation that only reached the outbox was reported, and
+  // promoted locally, as a completed revoke.
+  it("reports a revoke whose roster only reached the outbox as queued, keeping the key staged", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+    vi.stubGlobal("navigator", { onLine: false }); // publishOrQueue queues at once
+
+    expect(await revokeAttendeeClient({} as AppSigner, ctx, BOB)).toBe("queued");
+    const keys = (await loadEventKeys(COORD))!;
+    expect(keys.eck.map((v) => v.id)).toEqual([1]);
+    expect(keys.pendingEck?.map((v) => v.id)).toEqual([2]);
+  });
+
+  it("reports a revoke whose roster reached a relay as published", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+    expect(await revokeAttendeeClient({} as AppSigner, ctx, BOB)).toBe("published");
+    expect((await loadEventKeys(COORD))!.eck.map((v) => v.id)).toEqual([1, 2]);
+  });
+
   it("reads every remaining member's directory entry in one request", async () => {
     fetchEventsRelayOnly.mockResolvedValue([
       rosterEvent([
@@ -1311,6 +1342,24 @@ describe("fetchPending surfaces withdrawals", () => {
     expect(second).toEqual(first);
   });
 
+  // Audit R-32: the decrypted queue was written into whichever identity was
+  // active when the (often detached) scan finished, not the one that started it.
+  it("never files the queue under an account that became active mid-scan", async () => {
+    const NEXT = "d".repeat(64);
+    const keys = (await loadEventKeys(COORD))!;
+    fetchEventsRelayOnly.mockImplementation(async () => {
+      setActiveCacheOwner(NEXT); // account switch while the relays answer
+      return [joinWrap(100)];
+    });
+
+    const pending = await fetchPending(inboxCtx, keys);
+    expect(pending.map((p) => p.attendeePubkey)).toEqual([ATTENDEE]);
+    expect(cachedPending(COORD)).toBeUndefined();
+    setActiveCacheOwner(OWNER);
+    // Dropped for the starting owner too: the switch bumped the generation.
+    expect(cachedPending(COORD)).toBeUndefined();
+  });
+
   it("does not let a stale withdrawal shadow a later re-join", async () => {
     fetchEventsRelayOnly.mockResolvedValue([withdrawWrap(100, true), joinWrap(200)]);
 
@@ -1407,6 +1456,55 @@ describe("updateEventConfig relay editing", () => {
       "wss://nostr.cypherpunk.today",
       "wss://relay.primal.net",
     ]);
+  });
+
+  // Audit R-29: a lagging relay's older 31600 was re-signed with a winning
+  // created_at, undoing a detach or inbox rotation this client already knew of.
+  it("refuses to rebuild on a config older than the one the page loaded", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    const ctx = { ...ctxWith({}), configAt: 2000 } as EventContext; // relays serve 1000
+    await expect(updateEventConfig(ctx, { retentionDays: 30 })).rejects.toThrow(/older copy/);
+    expect(publishSigned).not.toHaveBeenCalled();
+  });
+
+  it("refuses to rebuild on a config older than this client's own still-queued publish", async () => {
+    const outbox = new Map<string, QueuedItem>();
+    __setOutboxBackend({
+      getAll: async () => [...outbox.values()],
+      put: async (i) => void outbox.set(i.event.id, i),
+      delete: async (id) => void outbox.delete(id),
+    });
+    await saveEventKeys(organizerKeys(), OWNER);
+    const ctx = ctxWith({});
+    vi.stubGlobal("navigator", { onLine: false });
+    await updateEventConfig(ctx, { retentionDays: 30 }); // queued, stamped above 1000
+    expect(outbox.size).toBe(1);
+    vi.stubGlobal("navigator", { onLine: true });
+    // Back online, the relay that answers has not got it and still serves 1000.
+    await expect(updateEventConfig(ctx, { retentionDays: 60 })).rejects.toThrow(/older copy/);
+    expect(publishSigned).not.toHaveBeenCalled();
+    __setOutboxBackend(null);
+  });
+
+  // The watermark outlives a publish that never landed; without the outbox gate a
+  // discarded 31600 would refuse every later edit on this device.
+  it("does not lock config edits once the queued publish is discarded", async () => {
+    const outbox = new Map<string, QueuedItem>();
+    __setOutboxBackend({
+      getAll: async () => [...outbox.values()],
+      put: async (i) => void outbox.set(i.event.id, i),
+      delete: async (id) => void outbox.delete(id),
+    });
+    await saveEventKeys(organizerKeys(), OWNER);
+    const ctx = ctxWith({});
+    vi.stubGlobal("navigator", { onLine: false });
+    await updateEventConfig(ctx, { retentionDays: 30 });
+    for (const id of [...outbox.keys()]) await discardQueued(id);
+    vi.stubGlobal("navigator", { onLine: true });
+
+    await updateEventConfig(ctx, { retentionDays: 60 });
+    expect(publishSigned).toHaveBeenCalledTimes(1);
+    __setOutboxBackend(null);
   });
 
   it("leaves relays untouched when only another field is edited (no silent migration)", async () => {
@@ -1515,6 +1613,36 @@ describe("updateEventConfig relay editing", () => {
         .map((c) => c[0] as { kind: number; tags: string[][] })
         .find((e) => e.kind === KIND_EVENT_CONFIG)!;
       expect(cfg.tags.find((t) => t[0] === "coordinator")).toEqual(["coordinator", coordinator, "5"]);
+    });
+
+    // Audit R-29: after a detach a relay acked, a relay still serving the
+    // coordinator-bearing config must not be the base of the next settings edit,
+    // which would re-sign it with a winning created_at and re-attach the old
+    // coordinator. Nothing is queued here, so only the accepted watermark knows.
+    it("refuses an edit built on a lagging relay's pre-detach config", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const oldCoordinator = getPublicKey(generateSecretKey());
+      const ctx = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK), coordinator: oldCoordinator, coordinatorGen: 1 });
+      const preDetach = await fetchEventsRelayOnly({ kinds: [KIND_EVENT_CONFIG] });
+      fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[] }) =>
+        filter.kinds?.includes(KIND_EVENT_CONFIG) ? preDetach : [],
+      );
+      const pageCtx = { ...ctx, config: { ...ctx.config, coordinator: oldCoordinator } } as EventContext;
+
+      await detachCoordinator({} as AppSigner, pageCtx);
+      const configPublishes = () =>
+        publishSigned.mock.calls.filter((c) => (c[0] as { kind: number }).kind === KIND_EVENT_CONFIG).length;
+      expect(configPublishes()).toBe(1);
+
+      // The relay answering the next read never got the detach.
+      const { coordinator: _drop, ...detachedPage } = pageCtx.config;
+      void _drop;
+      await expect(
+        updateEventConfig({ ...pageCtx, config: detachedPage } as EventContext, { retentionDays: 30 }),
+      ).rejects.toThrow(/older copy/);
+      expect(configPublishes()).toBe(1);
     });
 
     /** The 21603 the attach sealed to `coordinatorSk`'s pubkey. */

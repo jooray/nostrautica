@@ -98,8 +98,13 @@ import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { withMutationLock } from "$lib/nostr/mutation-lock.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
-import { cacheGet, cacheSet } from "$lib/cache/persist.js";
-import { grantParentField, fetchNewestConfig } from "./hierarchy.js";
+import { activeCacheOwner, cacheGeneration, cacheGet, cacheSet } from "$lib/cache/persist.js";
+import {
+  grantParentField,
+  fetchNewestConfig,
+  fetchNewestSignedConfig,
+  assertConfigNotStale,
+} from "./hierarchy.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
 // paints instantly and refreshes in parallel (CACHING-PLAN §2.11). Wiped on
@@ -300,7 +305,14 @@ export async function fetchPending(
   // holds, so history stays readable across a detach/replace.
   const inboxSks = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])].map((h) => hexToBytes(h));
   const inboxPubkeys = inboxSks.map((sk) => getPublicKey(sk));
-  const state = cacheGet<PendingScanState>(pendingStateKey(ctx.coordinate))?.data;
+  // Scope and generation as of NOW (audit R-32). The relay read below runs for
+  // seconds, often detached (prefetch), and an account switch in that window
+  // used to file this identity's decrypted queue under whoever was active when
+  // it finished. Writes go to the captured owner, fenced on the generation, so
+  // a switch or logout since drops them.
+  const cacheOwner = activeCacheOwner() ?? undefined;
+  const gen = cacheGeneration();
+  const state = cacheGet<PendingScanState>(pendingStateKey(ctx.coordinate), cacheOwner)?.data;
   const scanStartedAt = Math.floor(Date.now() / 1000);
   const { wraps, complete } = await readInboxWraps(ctx, inboxPubkeys, state?.cursor);
 
@@ -427,7 +439,7 @@ export async function fetchPending(
     subs: Object.fromEntries(submissions),
     withdrawals: Object.fromEntries(withdrawals),
   };
-  cacheSet(pendingStateKey(ctx.coordinate), nextState, scanStartedAt);
+  if (cacheOwner) cacheSet(pendingStateKey(ctx.coordinate), nextState, scanStartedAt, cacheOwner, gen);
 
   // Fold submissions into their requests.
   for (const [pubkey, sub] of submissions) {
@@ -482,7 +494,7 @@ export async function fetchPending(
     return ia < ib ? -1 : ia > ib ? 1 : 0;
   });
   const newestAt = result.reduce((m, r) => Math.max(m, r.rumorCreatedAt), 0);
-  cacheSet(pendingKey(ctx.coordinate), result, newestAt);
+  if (cacheOwner) cacheSet(pendingKey(ctx.coordinate), result, newestAt, cacheOwner, gen);
   return result;
 }
 
@@ -1427,7 +1439,7 @@ export async function revokeAttendeeClient(
    * below.
    */
   blindingKey?: Uint8Array,
-): Promise<void> {
+): Promise<PublishOutcome> {
   // One roster authority (SB-91): with a coordinator attached the removal is a
   // 21604 and the coordinator rotates; a client rotation here would be a second
   // roster author and a second, colliding ECK mint (SB-86).
@@ -1540,10 +1552,20 @@ export async function revokeAttendeeClient(
       "[organizer] revoke rotated the ECK with no blinding key — the new key exists only on this device",
     );
   }
-  await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
-  await promotePending(keys, newEck, owner);
-  // Co-organizers hold custody but are not attendees: hand them the new key (SB-90).
-  await reissueOrganizerGrants(organizer, ctx, keys);
+  // Queued is not revoked (audit R-25, the client twin of SB-03): until the new
+  // roster and the deletion reach a relay, the removed member is still listed
+  // under the key they hold. So the version stays STAGED — loadRoster promotes
+  // it the moment it reads a live roster that uses it — and the caller is told.
+  const outcome = await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
+  if (outcome === "published") await promotePending(keys, newEck, owner);
+  // Co-organizers hold custody but are not attendees: hand them the new key
+  // (SB-90). The version the queued roster uses, too, or they could not read it.
+  await reissueOrganizerGrants(
+    organizer,
+    ctx,
+    outcome === "published" ? keys : { ...keys, eck: unionEck(keys.eck, [newEck]) },
+  );
+  return outcome;
 }
 
 /**
@@ -1692,15 +1714,17 @@ async function publishRekeyed(
   extra: VerifiedEvent[],
   rekeyed: Rekeyed,
   rosterEvents: VerifiedEvent[],
-): Promise<void> {
-  await Promise.all([
-    ...extra.map((e) => publishOrQueue(e, ctx.config.relays)),
-    ...rekeyed.entries.map((e) => publishOrQueue(e, ctx.config.relays)),
-    ...rekeyed.grants.map((g) => publishAccountGiftWrap(g.wrap as any, g.to, ctx.config.relays)),
+): Promise<PublishOutcome> {
+  const [authoritative] = await Promise.all([
+    // The roster (and `extra`, a revoke's directory deletion) decides who is in;
+    // every one of them has to have reached a relay for the change to be live.
     // No `previous` in rosterEvents: every entry's blinded `d` was re-derived
     // under the NEW ECK, so every page genuinely changed.
-    ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
+    Promise.all([...extra, ...rosterEvents].map((e) => publishOrQueue(e, ctx.config.relays))),
+    ...rekeyed.entries.map((e) => publishOrQueue(e, ctx.config.relays)),
+    ...rekeyed.grants.map((g) => publishAccountGiftWrap(g.wrap as any, g.to, ctx.config.relays)),
   ]);
+  return toOutcome(authoritative.every(Boolean));
 }
 
 /**
@@ -1862,12 +1886,15 @@ const CONFIG_UNREADABLE =
  * could not read is exactly the write that destroys something.
  */
 async function freshConfig(ctx: EventContext): Promise<EventConfig> {
-  const cfg = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(
+  const read = await fetchNewestSignedConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(
     () => undefined,
   );
-  if (!cfg) throw new Error(CONFIG_UNREADABLE);
-  noteFreshConfig(ctx.coordinate, cfg);
-  return cfg;
+  if (!read) throw new Error(CONFIG_UNREADABLE);
+  // Newest on THESE relays is not newest: one that missed a detach answers with
+  // the config from before it (audit R-29). Not noted for the SB-91 guard either.
+  await assertConfigNotStale(ctx.coordinate, read.createdAt, ctx.configAt);
+  noteFreshConfig(ctx.coordinate, read.config);
+  return read.config;
 }
 
 // ── One roster authority (audit SB-91) ───────────────────────────────────────
