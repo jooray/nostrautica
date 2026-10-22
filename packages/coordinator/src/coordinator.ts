@@ -2337,11 +2337,16 @@ export class Coordinator {
       } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
         const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
         log(`[submission] from ${short(rumor.pubkey)} — rev ${content.rev}, ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
-        await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
-          rev: content.rev,
-          createdAt: effectiveCreatedAt, // §3.3 ordering key → the clamped value
-          rumorId: rumor.id,
-        });
+        // Under the member's lock (audit 2026-10-21, R-08), so a `delete_data`
+        // withdrawal cannot interleave with it — and per ATTEMPT, so a retry runs
+        // after a withdrawal that landed in between and sees the row it purged gone.
+        await this.withSubjectLock(state.coordinate, `member:${rumor.pubkey}`, () =>
+          this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
+            rev: content.rev,
+            createdAt: effectiveCreatedAt, // §3.3 ordering key → the clamped value
+            rumorId: rumor.id,
+          }),
+        );
       } else if (rumor.kind === KIND_PROFILE_CORRECTION) {
         const content = profileCorrectionContentSchema.parse(JSON.parse(rumor.content));
         // The subject is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor — an
@@ -3037,8 +3042,19 @@ export class Coordinator {
     // left with the original shape: matching-OFF (where `enqueueProcess` returns
     // immediately, so the directory publish is the only effect) and every path
     // where the retry happens after the row is written. Re-applying is idempotent.
+    //
+    // The enrollment gate in handleInboxWrap runs once, OUTSIDE the retry (audit
+    // 2026-10-21, R-08). If a `delete_data` withdrawal purged the row between that
+    // check and this attempt, the upsert below — which INSERTs — recreated the
+    // withdrawn member with the profile they had asked to have deleted. Re-checked
+    // here, under the member lock the caller holds, the submission is dropped.
+    const enrolled = this.deps.store.getAttendee(state.coordinate, pubkey);
+    if (!enrolled) {
+      log(`[submission] dropped from ${short(pubkey)}: their enrollment row is gone (withdrew with delete_data)`);
+      return;
+    }
     if (order) {
-      const cur = this.deps.store.getAttendee(state.coordinate, pubkey);
+      const cur = enrolled;
       if (cur?.profile_rev != null && cur.profile_rumor_id !== order.rumorId) {
         const current = { rev: cur.profile_rev, created_at: cur.profile_created_at ?? 0, id: cur.profile_rumor_id ?? "" };
         const candidate = { rev: order.rev, created_at: order.createdAt, id: order.rumorId };

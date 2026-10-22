@@ -8002,3 +8002,37 @@ describe("audit 2026-10-21 R-07 — no pipeline publish for a revoked member", (
     expect(directoryEntries(h, from)).toHaveLength(0);
   });
 });
+
+/**
+ * Audit 2026-10-21 R-08 — a retried submission cannot recreate a purged member.
+ *
+ * The enrollment gate ran once, outside the retry, and `upsertAttendee` INSERTs. A
+ * submission whose first attempt failed on a relay publish, with a `delete_data`
+ * withdrawal landing before the retry, re-created the withdrawn member's row with
+ * the profile they had just asked the coordinator to delete.
+ */
+describe("audit 2026-10-21 R-08 — a retried submission after a delete_data withdrawal", () => {
+  it("is dropped instead of re-creating the purged row", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    let withdrawing: Promise<void> | undefined;
+    h.transport.onPublish = async (e) => {
+      if (withdrawing || e.kind !== KIND_DIRECTORY_ENTRY) return;
+      // The submission's directory publish: the withdrawal arrives now. Give it the
+      // chance to finish (it can only if nothing serializes it against the
+      // submission), then fail this publish so the submission is retried.
+      withdrawing = withdraw(h, sk, { deleteData: true });
+      await Promise.race([withdrawing, new Promise((r) => setTimeout(r, 100))]);
+      throw new Error("simulated relay outage");
+    };
+    await resubmitIntro(h, sk, "crypto");
+    await withdrawing;
+    h.transport.onPublish = undefined;
+
+    expect(withdrawing).toBeDefined();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+});
