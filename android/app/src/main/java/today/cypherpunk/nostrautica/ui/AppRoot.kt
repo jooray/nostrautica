@@ -77,7 +77,10 @@ fun AppRoot(container: AppContainer, incoming: MutableStateFlow<Pair<Route, Stri
     }
     // A restored NIP-46 session is adopted from storage; confirm the bunker still signs for it (SB-19).
     LaunchedEffect(Unit) {
+        val restored = container.session.account.value?.pubkey
         if (!container.session.verifyRestoredSigner()) {
+            // Signed out: drop that owner's data like any logout, minus the lock (R-72, see endSession).
+            restored?.let { today.cypherpunk.nostrautica.ui.screens.endSession(container, it) }
             today.cypherpunk.nostrautica.ui.shell.Toasts.show(strings.t("signin.identityChanged"))
         }
     }
