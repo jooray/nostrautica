@@ -38,6 +38,7 @@ import today.cypherpunk.nostrautica.ui.components.Body
 import today.cypherpunk.nostrautica.ui.components.Card
 import today.cypherpunk.nostrautica.ui.components.Dim
 import today.cypherpunk.nostrautica.ui.components.EventWash
+import today.cypherpunk.nostrautica.ui.components.Notice
 import today.cypherpunk.nostrautica.ui.components.Pill
 import today.cypherpunk.nostrautica.ui.components.PrimaryButton
 import today.cypherpunk.nostrautica.ui.components.SecondaryButton
@@ -55,6 +56,7 @@ import today.cypherpunk.nostrautica.ui.shell.EventScaffold
 import today.cypherpunk.nostrautica.ui.shell.EventState
 import today.cypherpunk.nostrautica.ui.shell.LocalEvent
 import today.cypherpunk.nostrautica.ui.shell.Page
+import today.cypherpunk.nostrautica.ui.shell.VisitorPreview
 import today.cypherpunk.nostrautica.ui.theme.DisplayFont
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 import java.text.DateFormat
@@ -193,8 +195,16 @@ fun EventHomeScreen(naddr: String) {
             item { LogisticsBlock(ev) }
             // Space hierarchy (§15): "Part of <community>" and the one-tap offer for a member who never answered.
             if (ev.ctx.cfg.parent != null) item { CommunityHeader(ev) }
+            // The exit bar of the visitor preview (spec §13). Everything gated on the role
+            // below already reads the effective (visitor) role.
+            if (ev.previewing) item {
+                Notice(s.t("event.viewAsVisitor.active")) {
+                    SmallButton(s.t("event.viewAsVisitor.exit"), { VisitorPreview.toggle(ev.coordinate) })
+                }
+            }
             when (ev.role) {
-                Role.VISITOR -> item {
+                // The web hides the readiness journey, and with it the Join CTA, while previewing.
+                Role.VISITOR -> if (!ev.previewing) item {
                     Card {
                         SectionTitle(s.tc("event.join", ev.isCommunity))
                         Dim(s.tc("event.join.body", ev.isCommunity))
@@ -220,7 +230,7 @@ fun EventHomeScreen(naddr: String) {
             if (ev.isMember) item { MemberActions(ev) }
             // Organizers get admin/duplicate; a signed-in non-member gets the
             // organizer-key recovery offer (a fresh device), so the slot decides.
-            if (ev.isOrganizer || (account != null && !ev.isMember)) item { OrganizerCard(ev) }
+            if (ev.isOrganizer || (account != null && !ev.isMember && !ev.previewing)) item { OrganizerCard(ev) }
             item { EventPageSections(ev) }
             ev.ctx.cfg.retentionDays?.let { days -> item { Dim(s.t("event.retention.line", "days" to days), size = 13) } }
         }

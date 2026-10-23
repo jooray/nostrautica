@@ -64,6 +64,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import today.cypherpunk.nostrautica.domain.EventContext
 import today.cypherpunk.nostrautica.domain.EventKeys
 import today.cypherpunk.nostrautica.domain.Role
@@ -86,12 +88,39 @@ object Toasts {
     fun show(text: String) { flow.tryEmit(text) }
 }
 
-/** The role-and-config gates of the event shell (stores/event-shell.svelte.ts). */
+/**
+ * "View as visitor" (stores/visitor-preview.svelte.ts, spec §13): an organizer sees
+ * the event as a non-member would, without leaving their own key. Scoped to one
+ * coordinate so it can't bleed into another event; kept for the app session.
+ */
+object VisitorPreview {
+    private val _coordinate = MutableStateFlow<String?>(null)
+    val coordinate: StateFlow<String?> get() = _coordinate
+    fun isActive(coordinate: String?) = coordinate != null && _coordinate.value == coordinate
+    fun toggle(coordinate: String) { _coordinate.value = if (isActive(coordinate)) null else coordinate }
+
+    /**
+     * previewedRole(): the role to render. Only an organizer can preview, so a stale
+     * flag never demotes anyone else (an attendee is already the member view).
+     */
+    fun effectiveRole(real: Role, coordinate: String, previewCoordinate: String?): Role =
+        if (real == Role.ORGANIZER && previewCoordinate == coordinate) Role.VISITOR else real
+}
+
+/**
+ * The role-and-config gates of the event shell (stores/event-shell.svelte.ts).
+ * [role] is the effective role, the one every gate reads: VISITOR while the
+ * organizer previews the public view. [realRole] is who the user actually is.
+ */
 data class EventState(
     val ctx: EventContext,
     val role: Role,
     val keys: EventKeys?,
+    val realRole: Role = role,
 ) {
+    val previewing get() = realRole != role
+    /** The organizer may enter the visitor preview (not while already in it). */
+    val canPreview get() = realRole == Role.ORGANIZER && !previewing
     val isOrganizer get() = role == Role.ORGANIZER
     val isMember get() = role == Role.ATTENDEE || role == Role.ORGANIZER
     val isPending get() = role == Role.PENDING
@@ -248,10 +277,12 @@ fun EventScaffold(naddr: String, back: Pair<String, () -> Unit>? = null, content
                 }
             }
     }
-    val state = remember(ctx, account, keysVersion, membershipVersion) {
+    val previewCoordinate by VisitorPreview.coordinate.collectAsState()
+    val state = remember(ctx, account, keysVersion, membershipVersion, previewCoordinate) {
         ctx?.let { cx ->
             val owner = account?.pubkey
-            EventState(cx, c.membership.role(owner, cx.coordinate), owner?.let { c.eventKeys.get(it, cx.coordinate) })
+            val real = c.membership.role(owner, cx.coordinate)
+            EventState(cx, VisitorPreview.effectiveRole(real, cx.coordinate, previewCoordinate), owner?.let { c.eventKeys.get(it, cx.coordinate) }, real)
         }
     }
     LaunchedEffect(state?.ctx?.cfg?.lang, account) {
