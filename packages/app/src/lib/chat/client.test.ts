@@ -1538,3 +1538,37 @@ describe("MarmotChat — retiring the pre-0.7.0 KeyPackage slot", () => {
     expect(shared.calls).not.toContain("legacy:cleared");
   });
 });
+
+describe("MarmotChat device kind-0 relays (NIP §10.3, audit R-38)", () => {
+  const kind0Relays = async (): Promise<string[][]> => {
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+    return vi
+      .mocked(publishSigned)
+      .mock.calls.filter(([ev]) => (ev as unknown as { kind: number }).kind === 0)
+      .map(([, relays]) => relays as string[]);
+  };
+
+  it("publishes the device kind-0 to the chat relay set only, never the general relays", async () => {
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+    vi.mocked(publishSigned).mockClear();
+    const chatCtx = {
+      config: { relays: ["wss://general"], chatRelays: ["wss://chat"], coordinator: COORD },
+      coordinate: "31923:" + "f".repeat(64) + ":chat-relays",
+    } as never;
+    const chat = await MarmotChat.create({ accountSigner, ctx: chatCtx });
+    await chat.ensurePublished();
+    const sent = await kind0Relays();
+    expect(sent.length).toBeGreaterThan(0);
+    for (const relays of sent) expect(relays).toEqual(["wss://chat"]);
+  });
+
+  it("uses the general set for an event without chat_relay tags (its chat relay set)", async () => {
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+    vi.mocked(publishSigned).mockClear();
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.ensurePublished();
+    const sent = await kind0Relays();
+    expect(sent.length).toBeGreaterThan(0);
+    for (const relays of sent) expect(relays).toEqual(["wss://r"]);
+  });
+});

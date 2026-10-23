@@ -103,4 +103,19 @@ describe.runIf(hasBuild)("PWA manifest artifact (audit U6) — built output", ()
     expect(sw).toMatch(/index\.html/);
     expect(sw).toMatch(/NavigationRoute/);
   });
+
+  it("the immutable-chunk route is same-origin and never caches opaque responses (R-40)", () => {
+    const sw = read("build/sw.js");
+    const route = sw.match(/registerRoute\(\(\{[^}]*\}\)=>[^,]*_app\/immutable[^)]*\)/)?.[0] ?? "";
+    expect(route, "no /_app/immutable/ route in sw.js").toMatch(/sameOrigin/);
+    expect(sw).not.toMatch(/statuses:\[0,200\]/);
+  });
+});
+
+describe("service-worker runtime caching (audit R-40) — source", () => {
+  it("caches /_app/immutable/ chunks from this origin only, and only 200s", () => {
+    const cfg = read("vite.config.ts");
+    expect(cfg).toMatch(/sameOrigin\s*&&\s*url\.pathname\.includes\("\/_app\/immutable\/"\)/);
+    expect(cfg).toMatch(/cacheName:\s*"app-immutable"[\s\S]*?statuses:\s*\[200\]/);
+  });
 });

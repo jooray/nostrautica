@@ -347,8 +347,10 @@ Sent by the organizer (manual approval) or the coordinator (invite auto-approval
 ```
 content: {"v":2, "a": <coordinate>, "gen": <int>, "inbox_nsec":"<hex>",
           "eck":[…], "config_relays":["wss://…"],
-          "prev_coordinator": "<hex pubkey>"}   // optional, only on a replace
+          "prev_coordinator": "<hex pubkey>",   // optional, only on a replace
+          "revoked": ["<hex pubkey>", …]}      // optional, ≤500
 ```
+`revoked` lists the members the organizer revoked and has not approved since (NIP 21603). The coordinator records them as revocations before it replays `E_inbox`, so a member revoked while no coordinator was attached is not re-admitted from their original join, and a handover roster that still lists them is not adopted for them.
 `prev_coordinator` names the coordinator this install replaces. The new coordinator rebuilds the approved set from a prior roster (NIP §3.7 handover), and it accepts that roster only from `E_id` or from the coordinator named here, never from whoever can decrypt it (a throwaway key holding the ECK could otherwise mint itself an organizer). Without the field, only an `E_id`-authored roster is used.
 Sealed by `E_id` (like 21604): the coordinator authenticates the install by requiring the gift wrap's seal author to equal the coordinate's `E_id` pubkey, **and** requires this grant's `gen` to match the `gen` the newest fetchable 31600 currently names it at, a config that can't be fetched is retryable, never treated as authorization. A `gen` at or below any generation this coordinator has ever installed or detached for the event is rejected outright, so a replayed historical grant can never re-install (§9).
 
@@ -398,7 +400,7 @@ content(ECK): {"v":2, "pubkey": <attendee-hex>,
   "updated_at": <unix>}
 ```
 
-**kind 31604: Roster** (author = coordinator/organizer; ECK; `d` = event-d)
+**kind 31604: Roster** (author = coordinator/organizer; ECK; `d` = `spaceRecordsD(coordinate)` for the coordinator, event-d for E_id; NIP §6.2.2)
 ```
 content(ECK): {"v":2, "eck_current":1,
   "nostr_group_id":"<optional active Marmot group id>",
@@ -417,7 +419,7 @@ content(nip44→recipient): {"v":2, "computed_at":<unix>, "matches":[
 ```
 `icebreakers` is optional: up to 3 short (≤ 280 char) conversation starters the coordinator derives alongside the directional reasoning (§9.3). Clients without support simply ignore the field.
 
-**kind 31606: Match Matrix** (only when `match_visibility:"event"`; ECK; `d` = event-d): `{"v":2,"computed_at":…,"pairs":[{"a":<pk>,"b":<pk>,"score":…}]}` (scores only; reasoning stays pairwise).
+**kind 31606: Match Matrix** (only when `match_visibility:"event"`; ECK; `d` = `spaceRecordsD(coordinate)`, NIP §6.2.2): `{"v":2,"computed_at":…,"pairs":[{"a":<pk>,"b":<pk>,"score":…}]}` (scores only; reasoning stays pairwise).
 
 **kind 31610: Talk** (author = coordinator, or `E_id` when there's no coordinator; content encrypted under ECK; `d` blinded per speaker + talk)
 ```
@@ -437,7 +439,7 @@ A talk carries **exactly one** video source: a `kind:"talk"` **`media`** descrip
 **kind 30078: user-private settings** (NIP-78; NIP-44 self-encrypted content)
 - `d = "nostrautica:settings"`: theme, language, relay prefs.
 - `d = "nostrautica:ev:<blinded>"`: per event: `{"v":2,"favorites":[…],"want_to_meet":[…],"met":[…],"notes":{<pubkey>:"…"},"clock":{…},"base":<ms>}`. Every device of the account writes the same address, so every write is **read-merge-write** (the DM read state's model). `clock.<field>[<pubkey>]` is the ms time of that entry's last change; a pubkey stamped in `clock.favorites` but absent from `favorites` is a removal (tombstone, at most 200 kept per field); `base` stamps every entry the clock does not name. Merge is per entry: newer stamp wins, an add beats a removal on a tie, the greater note text on a full tie, so devices converge in any order. `clock`/`base` are additive: a client that predates them reads the four lists unchanged and writes them back without a clock, and such a clock-less payload is read as a whole-document write made at its event's `created_at` (the last-writer-wins those clients always had).
-- `d = "nostrautica:eventkeys:<blinded>"` (organizer): `E_id`/`E_inbox` nsecs, ECK versions, and the last coordinator install `gen` the organizer used (§9), backup. `pending_eck` (optional) holds versions a rotation minted and persisted before its publishes were confirmed: custody, but not current. A client makes one current only once it reads the 31604 written under it (the roster names its key in its `eck` tag, NIP §4.1), so an interrupted rotation never leaves a device encrypting under a key nobody was granted, and never loses a key that something was already published under. `prior_einbox_nsecs` (optional) holds retired inbox secrets. Every device of the account writes this one address, so a write is **read-merge-write**: ECK versions unioned by `(id, key)` (NIP §4.1), the higher `coordinator_gen`, and every inbox secret kept, the one the newest 31600 names as current (else the writer's own) and the rest as prior. A backup that exists but will not decrypt is not overwritten. `co_organizers` (optional) lists the other accounts this one handed custody to (21605), so any of the account's devices re-issues custody to them on a rotation (NIP 21605 "Re-issue on rotation").
+- `d = "nostrautica:eventkeys:<blinded>"` (organizer): `E_id`/`E_inbox` nsecs, ECK versions, and the last coordinator install `gen` the organizer used (§9), backup. `pending_eck` (optional) holds versions a rotation minted and persisted before its publishes were confirmed: custody, but not current. A client makes one current only once it reads the 31604 written under it (the roster names its key in its `eck` tag, NIP §4.1), so an interrupted rotation never leaves a device encrypting under a key nobody was granted, and never loses a key that something was already published under. `prior_einbox_nsecs` (optional) holds retired inbox secrets. Every device of the account writes this one address, so a write is **read-merge-write**: ECK versions unioned by `(id, key)` (NIP §4.1), the higher `coordinator_gen`, and every inbox secret kept, the one the newest 31600 names as current (else the writer's own) and the rest as prior. A backup that exists but will not decrypt is not overwritten. `co_organizers` (optional) lists the other accounts this one handed custody to (21605), so any of the account's devices re-issues custody to them on a rotation (NIP 21605 "Re-issue on rotation"). `revoked` (optional) lists the members this organizer revoked, unioned across devices, so any device can name them in the next 21603.
 
 ### 7.4 Event page customization: theme, menu & layout, members-only posts (author `E_id`)
 
@@ -735,9 +737,11 @@ model = "free"
 ```
 
 An announced coordinator (`coordinator.announce = true`) that accepts installs
-from any identity (`security.allowed_eid_pubkeys` empty) and sets every
-`daemon_*_per_window` to 0 **refuses to start**: that combination offers the
-operator's provider key to whoever reads the announcement. Override with
+from any identity (`security.allowed_eid_pubkeys` empty) and sets
+`daemon_calls_per_window` to 0 **refuses to start**: that combination offers the
+operator's provider key to whoever reads the announcement. The bytes and
+duration ceilings do not count here, because text-only work (text joins,
+matching, translation) decodes no media and never trips them. Override with
 `security.allow_unbounded_spend = true` when the spend cap lives at the provider
 instead.
 

@@ -197,29 +197,44 @@ class ChatSessionStore {
           }
         },
         onLeaderState: (coordinate, messages) => {
-          // Follower render: adopt the leader's de-duped, sorted list wholesale.
-          if (tok !== this.token || coordinate !== ctx.coordinate) return;
-          this.messages = messages;
+          if (tok !== this.token) return;
+          // BEFORE the coordinate filter (audit R-31): a leader that moved to
+          // another event announces it with exactly the broadcast filtered out
+          // below, and returning first left this follower interactive, proxying
+          // its sends into the other event's group.
           this.recomputeReadOnly();
+          // Follower render: adopt the leader's de-duped, sorted list wholesale.
+          if (coordinate !== ctx.coordinate) return;
+          this.messages = messages;
           if (this.phase !== "ready") this.phase = "ready";
         },
         onLeaderMembers: (coordinate, members) => {
+          if (tok !== this.token) return;
+          this.recomputeReadOnly(); // same reason as onLeaderState (R-31)
           // Real MLS membership, computed by the tab that holds the client. A
           // follower has no group state of its own, so without this its member
           // list would silently fall back to the roster — the very thing this
           // whole path replaces.
-          if (tok !== this.token || coordinate !== ctx.coordinate) return;
+          if (coordinate !== ctx.coordinate) return;
           this.memberDevices = members;
         },
-        onSendRequest: async (text) => {
-          // Leader executes a follower's proxied send on the real client.
+        onSendRequest: async (text, coordinate) => {
+          // Leader executes a follower's proxied send on the real client — only
+          // for the event that client serves (R-31). A request with no coordinate
+          // comes from a tab on the previous build and keeps the old behaviour.
           if (!this.chat) throw new Error("no chat session");
+          if (coordinate && coordinate !== this.ctx?.coordinate) {
+            throw new Error("the active tab is in a different event's chat");
+          }
           await this.chat.send(text);
         },
-        onRejoinRequest: async (force) => {
+        onRejoinRequest: async (force, coordinate) => {
           // Leader performs a follower's rejoin: MLS state has a single writer, so
           // the tab that owns the client is the only one that may re-enrol.
           if (!this.chat) throw new Error("no chat session");
+          if (coordinate && coordinate !== this.ctx?.coordinate) {
+            throw new Error("the active tab is in a different event's chat");
+          }
           await this.rejoin({ force });
         },
         onSyncRequest: () => {
@@ -448,7 +463,7 @@ class ChatSessionStore {
     // Interactive follower proxies the send to the leader tab (Web Locks path only).
     const c = this.coordinator;
     if (c && c.role === "follower" && !this.readOnly) {
-      await c.proxySend(text);
+      await c.proxySend(text, this.ctx?.coordinate);
       return;
     }
     throw new Error("no chat session");
@@ -498,7 +513,7 @@ class ChatSessionStore {
       }
       const c = this.coordinator;
       if (c && c.role === "follower" && !this.readOnly) {
-        await c.proxyRejoin(opts?.force ?? false);
+        await c.proxyRejoin(opts?.force ?? false, this.ctx?.coordinate);
         return;
       }
       throw new Error("no chat session");

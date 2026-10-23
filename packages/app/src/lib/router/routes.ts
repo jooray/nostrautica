@@ -41,11 +41,39 @@ function split(body: string): { segments: string[]; query: URLSearchParams } {
   return { segments, query };
 }
 
+/** Query parameters that carry a secret in this app's links: an account key, an invite code. */
+const FRAGMENT_CREDENTIALS = ["nsec", "code"] as const;
+
+/**
+ * `hash` with every credential query parameter removed (audit R-35).
+ *
+ * Only the two routes that consume a credential keep it in their Route (`login`'s
+ * nsec, `join`'s code) and both strip it once read. An UNKNOWN route kept its raw
+ * hash verbatim, so a mistyped or truncated recovery or invite link put the
+ * secret into the router's back stack, into sessionStorage (the DM return hash)
+ * and, through `buildHash`, back into the address bar on Back.
+ */
+export function stripFragmentCredentials(hash: string): string {
+  const qIndex = hash.indexOf("?");
+  if (qIndex < 0) return hash;
+  const params = new URLSearchParams(hash.slice(qIndex + 1));
+  if (!FRAGMENT_CREDENTIALS.some((k) => params.has(k))) return hash;
+  for (const k of FRAGMENT_CREDENTIALS) params.delete(k);
+  const rest = params.toString();
+  return rest ? `${hash.slice(0, qIndex)}?${rest}` : hash.slice(0, qIndex);
+}
+
 /**
  * Parse a `location.hash` (e.g. "#/e/naddr1.../attendees?foo=bar") into a Route.
- * A leading "#" and/or "/" are tolerated. Unknown paths → notFound.
+ * A leading "#" and/or "/" are tolerated. Unknown paths → notFound, with any
+ * credential parameter stripped from the hash it keeps.
  */
 export function parseHash(hash: string): Route {
+  const route = parseRawHash(hash);
+  return route.name === "notFound" ? { name: "notFound", hash: stripFragmentCredentials(route.hash) } : route;
+}
+
+function parseRawHash(hash: string): Route {
   let body = hash.startsWith("#") ? hash.slice(1) : hash;
   if (body.startsWith("/")) body = body.slice(1);
   const { segments, query } = split(body);

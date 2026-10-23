@@ -35,6 +35,9 @@ export const messages = {
     "update.action": "Update now",
     "update.deferred":
       "An update is ready and will apply automatically as soon as you finish what you're typing.",
+    // The update watchdog's banner (audit R-84): this tab is not moving to new builds.
+    "update.stuck": "This tab may still be running an old version of the app and is not updating itself.",
+    "update.registerFailed": "Automatic updates aren't working in this tab.",
     "logout.encryptFailed":
       "Logout couldn't lock some of your keys on this device (your signer was unreachable), so they were left in place rather than risked. Log in again to finish securing them.",
     "logout.dismiss": "Dismiss",
@@ -242,15 +245,18 @@ export const messages = {
     // Create event
     "create.title": "Create an event or community",
     "create.created": "Event created",
+    "create.created.community": "Community created",
     "create.receipt.ok": "Done",
     "create.receipt.failed": "Failed",
     "create.receipt.pending": "Pending",
     "create.receipt.event": "Event published",
+    "create.receipt.event.community": "Community published",
     "create.receipt.enrolled": "You're enrolled as a participant",
     "create.receipt.grant": "Coordinator grant published",
     "create.receipt.backup": "Organizer key backed up",
     "create.receipt.backup.pending.body": "Back up your organizer key below: without it you can't recover admin access.",
     "create.step.share": "Share the event",
+    "create.step.share.community": "Share the community",
     "create.copyLink": "Copy link",
     "create.copied": "Copied ✓",
     "create.share": "Share…",
@@ -262,8 +268,12 @@ export const messages = {
       "It starts building matches and processing intros within a few minutes. You can change or remove it later from the admin screen.",
     "create.step.coordinator.failed": "AI coordinator attach didn't complete",
     "create.step.coordinator.failed.body": "Your event was created, but publishing the coordinator grant failed. Retry here, or attach it later from the admin screen.",
+    "create.step.coordinator.failed.body.community":
+      "Your community was created, but publishing the coordinator grant failed. Retry here, or attach it later from the admin screen.",
     "create.step.enroll.failed": "Adding you to the roster didn't complete",
     "create.step.enroll.failed.body": "Your event was created, but enrolling you as a participant failed. Retry so People isn't empty for the first attendee.",
+    "create.step.enroll.failed.body.community":
+      "Your community was created, but adding you as a member failed. Retry so People isn't empty for the first member.",
     "create.retry": "Retry",
     "create.retrying": "Retrying…",
     "create.step.approve": "Approve people as they ask to join",
@@ -271,12 +281,16 @@ export const messages = {
       "Requests appear on the admin screen (invite links can skip this).",
     "create.openAdmin": "Open organizer admin",
     "create.viewEvent": "View event page",
+    "create.viewEvent.community": "View community page",
     "create.backupOrganizer": "Back up your organizer identity",
     "create.backupOrganizer.body": "This key controls your event. Don't lose it.",
+    "create.backupOrganizer.body.community": "This key controls your community. Don't lose it.",
     "create.organizerName": "Your name",
     "create.organizerName.placeholder": "How should attendees know you?",
+    "create.organizerName.placeholder.community": "How should members know you?",
     "create.organizerName.body":
       "Your organizer identity is created with the event, no signup needed.",
+    "create.organizerName.body.community": "Your organizer identity is created with the community, no signup needed.",
     "create.field.title": "Title",
     "create.field.kind": "What are you making?",
     "create.kind.event": "An event",
@@ -292,21 +306,31 @@ export const messages = {
     "create.field.location": "Location",
     "create.field.location.placeholder": "Bratislava",
     "create.field.language": "Event language",
+    "create.field.language.community": "Community language",
     "create.field.language.body":
       "Sets the attendee interface and the language of AI match reasoning and profile summaries. Attendees can still write in any language.",
+    "create.field.language.body.community":
+      "Sets the member interface and the language of AI match reasoning and profile summaries. Members can still write in any language.",
     "create.advanced": "Advanced: images, video length",
     "create.field.images": "Event images",
+    "create.field.images.community": "Community images",
     "create.field.images.optional": "(both optional)",
     "create.iconAlt": "event icon preview",
+    "create.iconAlt.community": "community icon preview",
     "create.bannerAlt": "event banner preview",
+    "create.bannerAlt.community": "community banner preview",
     "create.icon": "Icon",
     "create.banner": "Banner",
     "create.iconPick": "Choose an event icon image",
+    "create.iconPick.community": "Choose a community icon image",
     "create.bannerPick": "Choose an event banner image",
+    "create.bannerPick.community": "Choose a community banner image",
     "create.reset": "Reset",
     "create.imageUrl": "From URL",
     "create.imageUrl.pickIcon": "Use an image URL for the event icon",
+    "create.imageUrl.pickIcon.community": "Use an image URL for the community icon",
     "create.imageUrl.pickBanner": "Use an image URL for the event banner",
+    "create.imageUrl.pickBanner.community": "Use an image URL for the community banner",
     "create.imageUrl.labelIcon": "Icon image URL",
     "create.imageUrl.labelBanner": "Banner image URL",
     "create.imageUrl.placeholder": "https://example.com/banner.jpg",
@@ -328,6 +352,8 @@ export const messages = {
     "create.field.enrollSelf": "Join as a participant yourself",
     "create.enrollSelf.body":
       "You'll appear in the People list like any attendee, so the first person who joins isn't alone. Your profile name and bio are visible to approved attendees only.",
+    "create.enrollSelf.body.community":
+      "You'll appear in the People list like any member, so the first person who joins isn't alone. Your profile name and bio are visible to members only.",
     "create.field.talks": "Prerecorded talks",
     "create.field.talks.body":
       "Let attendees submit talks that others can watch. Off keeps the event as a normal meetup.",
@@ -340,6 +366,8 @@ export const messages = {
     "create.coordinator.optional": "(optional)",
     "create.coordinator.body":
       "Attach one now to enable matchmaking, talks, and instant invite-link approval from the moment your event goes live. You can also skip this and attach one later from the admin screen.",
+    "create.coordinator.body.community":
+      "Attach one now to enable matchmaking and instant invite-link approval from the moment your community goes live. You can also skip this and attach one later from the admin screen.",
     "create.coordinator.selected": "Selected ✓",
     "create.coordinator.clear": "Clear",
     "create.coordinator.use": "Use this coordinator",
@@ -350,6 +378,7 @@ export const messages = {
     "create.submit": "Create event",
     "create.submit.community": "Create community",
     "create.error.titleRequired": "Title and start time are required.",
+    "create.error.titleRequired.community": "A title is required.",
     "create.error.endBeforeStart": "End time must be after the start time.",
     "create.error.nameRequired": "Please enter your name.",
     "create.error.startRequired": "Please choose a start date and time.",
@@ -360,7 +389,10 @@ export const messages = {
     "op.talkSubmitted": "Your talk was submitted to the coordinator.",
     "op.talkAwaitingModeration": "Your talk was sent. It's awaiting the organizer's review.",
     "op.eventCreated": "Your event was created and published.",
+    "op.eventCreated.community": "Your community was created and published.",
     "op.eventCreateQueued": "Saved, your event will publish when you're back online. It isn't visible to others yet.",
+    "op.eventCreateQueued.community":
+      "Saved, your community will publish when you're back online. It isn't visible to others yet.",
     "op.eventUpdated": "Your event details were updated and published.",
     "op.eventUpdateQueued": "Saved, your changes will publish when you're back online. Attendees still see the old details.",
     "op.postPublished": "Your post was published.",
@@ -1205,6 +1237,8 @@ export const messages = {
       "No connection right now. The approval is saved on this device and goes to the coordinator when you're back online. The request stays in the queue until then.",
     "admin.command.revokeQueued":
       "No connection right now. The removal is saved on this device and goes to the coordinator when you're back online. Until then this person still has access.",
+    "admin.revokeQueuedLocal":
+      "Not published yet. The removal and the new event key are saved on this device and go out when you're back online. Until then this person still has access.",
     "admin.keys.changedElsewhere":
       "This event's keys were changed on another device, and this device still has the old ones. Join requests and approvals from here may be missing or fail. Open the event on that device, or have it send this account a fresh organizer grant.",
     "admin.keys.collision":
@@ -1380,6 +1414,8 @@ export const messages = {
     "chat.cmd.willSend": "Enter sends a private message to {name} and opens it",
     "chat.cmd.willOpen": "Enter opens a private conversation with {name}",
     "chat.cmd.noSuchPerson": "Nobody in this chat matches that name.",
+    "chat.mention.pick": "Mention someone",
+    "chat.mention.tagging": "This message mentions",
     "chat.send": "Send",
     "chat.checking": "Checking your access…",
     "chat.sendFailed": "Couldn't send: this device is no longer in the chat. Ask to be added again.",
@@ -1709,6 +1745,8 @@ export const messages = {
     "event.duplicate": "Duplicate event",
     "event.duplicate.copyOf": "Copy of {title}",
     "create.duplicatedFrom": "Starting from a copy of “{title}”. A brand-new event with fresh keys will be created.",
+    "create.duplicatedFrom.community":
+      "Starting from a copy of “{title}”. A brand-new community with fresh keys will be created.",
     "admin.invites.printSheet": "Print invite sheet",
     "admin.inviteSheet.title": "Invite sheet",
     "admin.inviteSheet.print": "Print",
@@ -1811,6 +1849,8 @@ export const messages = {
     "update.action": "Aktualizovať",
     "update.deferred":
       "Aktualizácia je pripravená a použije sa automaticky hneď, ako dokončíte to, čo píšete.",
+    "update.stuck": "Táto karta možno stále beží na starej verzii aplikácie a sama sa neaktualizuje.",
+    "update.registerFailed": "Automatické aktualizácie v tejto karte nefungujú.",
     "logout.encryptFailed":
       "Pri odhlásení sa na tomto zariadení nepodarilo uzamknúť niektoré vaše kľúče (podpisovač bol nedostupný), takže zostali na mieste, aby sa neriskovalo ich poškodenie. Prihláste sa znova a dokončite ich zabezpečenie.",
     "logout.dismiss": "Zavrieť",
@@ -2002,15 +2042,18 @@ export const messages = {
     // Create event
     "create.title": "Vytvoriť podujatie alebo komunitu",
     "create.created": "Podujatie vytvorené",
+    "create.created.community": "Komunita vytvorená",
     "create.receipt.ok": "Hotovo",
     "create.receipt.failed": "Zlyhalo",
     "create.receipt.pending": "Čaká sa",
     "create.receipt.event": "Podujatie zverejnené",
+    "create.receipt.event.community": "Komunita zverejnená",
     "create.receipt.enrolled": "Ste zapísaný ako účastník",
     "create.receipt.grant": "Grant pre koordinátora zverejnený",
     "create.receipt.backup": "Kľúč organizátora zálohovaný",
     "create.receipt.backup.pending.body": "Zálohujte si kľúč organizátora nižšie: bez neho nezískate späť prístup správcu.",
     "create.step.share": "Zdieľajte podujatie",
+    "create.step.share.community": "Zdieľajte komunitu",
     "create.copyLink": "Kopírovať odkaz",
     "create.copied": "Skopírované ✓",
     "create.share": "Zdieľať…",
@@ -2022,8 +2065,12 @@ export const messages = {
       "Do niekoľkých minút začne vytvárať spojenia a spracúvať predstavenia. Neskôr ho môžete zmeniť alebo odstrániť v administrácii.",
     "create.step.coordinator.failed": "Pripojenie AI koordinátora sa nedokončilo",
     "create.step.coordinator.failed.body": "Vaše podujatie bolo vytvorené, ale zverejnenie grantu koordinátora zlyhalo. Skúste znova tu alebo ho pripojte neskôr v správcovskej obrazovke.",
+    "create.step.coordinator.failed.body.community":
+      "Vaša komunita bola vytvorená, ale zverejnenie grantu koordinátora zlyhalo. Skúste znova tu alebo ho pripojte neskôr v správcovskej obrazovke.",
     "create.step.enroll.failed": "Pridanie vás do zoznamu sa nedokončilo",
     "create.step.enroll.failed.body": "Vaše podujatie bolo vytvorené, ale vaše prihlásenie ako účastníka zlyhalo. Skúste znova, aby Ľudia neboli pre prvého účastníka prázdni.",
+    "create.step.enroll.failed.body.community":
+      "Vaša komunita bola vytvorená, ale vaše pridanie medzi členov zlyhalo. Skúste znova, aby Ľudia neboli pre prvého člena prázdni.",
     "create.retry": "Skúsiť znova",
     "create.retrying": "Skúšam znova…",
     "create.step.approve": "Schvaľujte ľudí, keď žiadajú o pripojenie",
@@ -2031,12 +2078,17 @@ export const messages = {
       "Žiadosti sa zobrazia v administrácii (pozývacie odkazy to môžu preskočiť).",
     "create.openAdmin": "Otvoriť administráciu organizátora",
     "create.viewEvent": "Zobraziť stránku podujatia",
+    "create.viewEvent.community": "Zobraziť stránku komunity",
     "create.backupOrganizer": "Zálohujte si organizátorskú identitu",
     "create.backupOrganizer.body": "Tento kľúč ovláda vaše podujatie. Nestraťte ho.",
+    "create.backupOrganizer.body.community": "Tento kľúč ovláda vašu komunitu. Nestraťte ho.",
     "create.organizerName": "Vaše meno",
     "create.organizerName.placeholder": "Ako vás majú účastníci poznať?",
+    "create.organizerName.placeholder.community": "Ako vás majú členovia poznať?",
     "create.organizerName.body":
       "Vaša organizátorská identita sa vytvorí spolu s podujatím, bez registrácie.",
+    "create.organizerName.body.community":
+      "Vaša organizátorská identita sa vytvorí spolu s komunitou, bez registrácie.",
     "create.field.title": "Názov",
     "create.field.kind": "Čo zakladáte?",
     "create.kind.event": "Podujatie",
@@ -2052,21 +2104,31 @@ export const messages = {
     "create.field.location": "Miesto",
     "create.field.location.placeholder": "Bratislava",
     "create.field.language": "Jazyk podujatia",
+    "create.field.language.community": "Jazyk komunity",
     "create.iconPick": "Vyberte obrázok ikony podujatia",
+    "create.iconPick.community": "Vyberte obrázok ikony komunity",
     "create.bannerPick": "Vyberte obrázok bannera podujatia",
+    "create.bannerPick.community": "Vyberte obrázok bannera komunity",
     "create.field.language.body":
       "Nastaví rozhranie pre účastníkov a jazyk odôvodnení AI párovania aj profilových zhrnutí. Účastníci môžu naďalej písať v ľubovoľnom jazyku.",
+    "create.field.language.body.community":
+      "Nastaví rozhranie pre členov a jazyk odôvodnení AI párovania aj profilových zhrnutí. Členovia môžu naďalej písať v ľubovoľnom jazyku.",
     "create.advanced": "Rozšírené: obrázky, dĺžka videa",
     "create.field.images": "Obrázky podujatia",
+    "create.field.images.community": "Obrázky komunity",
     "create.field.images.optional": "(oba voliteľné)",
     "create.iconAlt": "náhľad ikony podujatia",
+    "create.iconAlt.community": "náhľad ikony komunity",
     "create.bannerAlt": "náhľad bannera podujatia",
+    "create.bannerAlt.community": "náhľad bannera komunity",
     "create.icon": "Ikona",
     "create.banner": "Banner",
     "create.reset": "Vynulovať",
     "create.imageUrl": "Z URL",
     "create.imageUrl.pickIcon": "Použiť URL obrázka ako ikonu podujatia",
+    "create.imageUrl.pickIcon.community": "Použiť URL obrázka ako ikonu komunity",
     "create.imageUrl.pickBanner": "Použiť URL obrázka ako banner podujatia",
+    "create.imageUrl.pickBanner.community": "Použiť URL obrázka ako banner komunity",
     "create.imageUrl.labelIcon": "URL obrázka ikony",
     "create.imageUrl.labelBanner": "URL obrázka bannera",
     "create.imageUrl.placeholder": "https://example.com/banner.jpg",
@@ -2096,10 +2158,14 @@ export const messages = {
     "create.field.enrollSelf": "Pridať sa medzi účastníkov",
     "create.enrollSelf.body":
       "Zobrazíte sa v zozname ľudí ako každý iný účastník, takže prvý prihlásený nebude sám. Vaše meno a bio z profilu vidia iba schválení účastníci.",
+    "create.enrollSelf.body.community":
+      "Zobrazíte sa v zozname ľudí ako každý iný člen, takže prvý, kto sa pridá, nebude sám. Vaše meno a bio z profilu vidia iba členovia.",
     "create.coordinator.title": "AI koordinátor",
     "create.coordinator.optional": "(voliteľné)",
     "create.coordinator.body":
       "Pripojte ho hneď a od spustenia podujatia získate párovanie, prednášky a okamžité schvaľovanie cez pozývacie odkazy. Môžete to aj preskočiť a koordinátora pripojiť neskôr v administrácii.",
+    "create.coordinator.body.community":
+      "Pripojte ho hneď a od spustenia komunity získate párovanie a okamžité schvaľovanie cez pozývacie odkazy. Môžete to aj preskočiť a koordinátora pripojiť neskôr v administrácii.",
     "create.coordinator.selected": "Vybraté ✓",
     "create.coordinator.clear": "Zrušiť",
     "create.coordinator.use": "Použiť tohto koordinátora",
@@ -2110,6 +2176,7 @@ export const messages = {
     "create.submit": "Vytvoriť podujatie",
     "create.submit.community": "Vytvoriť komunitu",
     "create.error.titleRequired": "Názov a čas začiatku sú povinné.",
+    "create.error.titleRequired.community": "Názov je povinný.",
     "create.error.endBeforeStart": "Čas konca musí byť po čase začiatku.",
     "create.error.nameRequired": "Zadajte, prosím, svoje meno.",
     "create.error.startRequired": "Vyberte, prosím, dátum a čas začiatku.",
@@ -2120,7 +2187,9 @@ export const messages = {
     "op.talkSubmitted": "Vaša prednáška bola odoslaná koordinátorovi.",
     "op.talkAwaitingModeration": "Vaša prednáška bola odoslaná. Čaká na schválenie organizátorom.",
     "op.eventCreated": "Vaše podujatie bolo vytvorené a zverejnené.",
+    "op.eventCreated.community": "Vaša komunita bola vytvorená a zverejnená.",
     "op.eventCreateQueued": "Uložené, podujatie sa zverejní po pripojení. Ostatní ho zatiaľ nevidia.",
+    "op.eventCreateQueued.community": "Uložené, komunita sa zverejní po pripojení. Ostatní ju zatiaľ nevidia.",
     "op.eventUpdated": "Údaje podujatia boli aktualizované a zverejnené.",
     "op.eventUpdateQueued": "Uložené, zmeny sa zverejnia po pripojení. Účastníci zatiaľ vidia pôvodné údaje.",
     "op.postPublished": "Váš príspevok bol zverejnený.",
@@ -2964,6 +3033,8 @@ export const messages = {
       "Momentálne nie ste pripojení. Schválenie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy žiadosť zostáva v poradí.",
     "admin.command.revokeQueued":
       "Momentálne nie ste pripojení. Odobratie je uložené v tomto zariadení a koordinátorovi sa odošle po obnovení pripojenia. Dovtedy má táto osoba stále prístup.",
+    "admin.revokeQueuedLocal":
+      "Zatiaľ neodoslané. Odobratie aj nový kľúč podujatia sú uložené v tomto zariadení a odošlú sa po obnovení pripojenia. Dovtedy má táto osoba stále prístup.",
     "admin.keys.changedElsewhere":
       "Kľúče tohto podujatia sa zmenili na inom zariadení a toto zariadenie má stále tie staré. Žiadosti o vstup a schvaľovanie odtiaľto môžu chýbať alebo zlyhať. Otvorte podujatie na tom zariadení alebo ho požiadajte, aby tomuto účtu poslalo nové organizátorské oprávnenie.",
     "admin.keys.collision":
@@ -3130,6 +3201,8 @@ export const messages = {
     "chat.cmd.willSend": "Enter odošle súkromnú správu pre {name} a otvorí ju",
     "chat.cmd.willOpen": "Enter otvorí súkromnú konverzáciu s {name}",
     "chat.cmd.noSuchPerson": "Tomuto menu nezodpovedá nikto v tomto chate.",
+    "chat.mention.pick": "Spomenúť niekoho",
+    "chat.mention.tagging": "Táto správa spomína",
     "chat.send": "Odoslať",
     "chat.checking": "Overujeme váš prístup…",
     "chat.sendFailed": "Správu sa nepodarilo odoslať: toto zariadenie už nie je v chate. Požiadajte o opätovné pridanie.",
@@ -3460,6 +3533,7 @@ export const messages = {
     "event.duplicate": "Duplikovať podujatie",
     "event.duplicate.copyOf": "Kópia: {title}",
     "create.duplicatedFrom": "Vychádzate z kópie „{title}“. Vytvorí sa úplne nové podujatie s novými kľúčmi.",
+    "create.duplicatedFrom.community": "Vychádzate z kópie „{title}“. Vytvorí sa úplne nová komunita s novými kľúčmi.",
     "admin.invites.printSheet": "Tlačiť hárok pozvánok",
     "admin.inviteSheet.title": "Hárok pozvánok",
     "admin.inviteSheet.print": "Tlačiť",
@@ -3562,6 +3636,8 @@ export const messages = {
     "update.action": "Aktualizovat",
     "update.deferred":
       "Aktualizace je připravena a použije se automaticky hned, jakmile dokončíte to, co píšete.",
+    "update.stuck": "Tato karta možná stále běží na staré verzi aplikace a sama se neaktualizuje.",
+    "update.registerFailed": "Automatické aktualizace v této kartě nefungují.",
     "logout.encryptFailed":
       "Při odhlášení se na tomto zařízení nepodařilo uzamknout některé vaše klíče (podepisovač byl nedostupný), takže zůstaly na místě, aby se neriskovalo jejich poškození. Přihlaste se znovu a dokončete jejich zabezpečení.",
     "logout.dismiss": "Zavřít",
@@ -3752,15 +3828,18 @@ export const messages = {
     // Vytvoření akce
     "create.title": "Vytvořit akci nebo komunitu",
     "create.created": "Akce vytvořena",
+    "create.created.community": "Komunita vytvořena",
     "create.receipt.ok": "Hotovo",
     "create.receipt.failed": "Selhalo",
     "create.receipt.pending": "Čeká se",
     "create.receipt.event": "Akce zveřejněna",
+    "create.receipt.event.community": "Komunita zveřejněna",
     "create.receipt.enrolled": "Jste zapsán jako účastník",
     "create.receipt.grant": "Grant pro koordinátora zveřejněn",
     "create.receipt.backup": "Klíč organizátora zálohován",
     "create.receipt.backup.pending.body": "Zálohujte si klíč organizátora níže: bez něj nezískáte zpět přístup správce.",
     "create.step.share": "Sdílejte akci",
+    "create.step.share.community": "Sdílejte komunitu",
     "create.copyLink": "Kopírovat odkaz",
     "create.copied": "Zkopírováno ✓",
     "create.share": "Sdílet…",
@@ -3772,8 +3851,12 @@ export const messages = {
       "Během několika minut začne vytvářet spojení a zpracovávat představení. Později ho můžete změnit nebo odebrat v administraci.",
     "create.step.coordinator.failed": "Připojení AI koordinátora se nedokončilo",
     "create.step.coordinator.failed.body": "Vaše událost byla vytvořena, ale zveřejnění grantu koordinátora selhalo. Zkuste to znovu zde nebo jej připojte později ve správcovské obrazovce.",
+    "create.step.coordinator.failed.body.community":
+      "Vaše komunita byla vytvořena, ale zveřejnění grantu koordinátora selhalo. Zkuste to znovu zde nebo jej připojte později ve správcovské obrazovce.",
     "create.step.enroll.failed": "Přidání vás do seznamu se nedokončilo",
     "create.step.enroll.failed.body": "Vaše událost byla vytvořena, ale vaše přihlášení jako účastníka selhalo. Zkuste to znovu, aby Lidé nebyli pro prvního účastníka prázdní.",
+    "create.step.enroll.failed.body.community":
+      "Vaše komunita byla vytvořena, ale vaše přidání mezi členy selhalo. Zkuste to znovu, aby Lidé nebyli pro prvního člena prázdní.",
     "create.retry": "Zkusit znovu",
     "create.retrying": "Zkouším znovu…",
     "create.step.approve": "Schvalujte lidi, jakmile žádají o připojení",
@@ -3781,12 +3864,16 @@ export const messages = {
       "Žádosti se zobrazí v administraci (pozvánkové odkazy to mohou přeskočit).",
     "create.openAdmin": "Otevřít administraci organizátora",
     "create.viewEvent": "Zobrazit stránku akce",
+    "create.viewEvent.community": "Zobrazit stránku komunity",
     "create.backupOrganizer": "Zazálohujte si organizátorskou identitu",
     "create.backupOrganizer.body": "Tento klíč ovládá vaši akci. Neztraťte ho.",
+    "create.backupOrganizer.body.community": "Tento klíč ovládá vaši komunitu. Neztraťte ho.",
     "create.organizerName": "Vaše jméno",
     "create.organizerName.placeholder": "Jak vás mají účastníci znát?",
+    "create.organizerName.placeholder.community": "Jak vás mají členové znát?",
     "create.organizerName.body":
       "Vaše organizátorská identita se vytvoří spolu s akcí, bez registrace.",
+    "create.organizerName.body.community": "Vaše organizátorská identita se vytvoří spolu s komunitou, bez registrace.",
     "create.field.title": "Název",
     "create.field.kind": "Co zakládáte?",
     "create.kind.event": "Akci",
@@ -3802,21 +3889,31 @@ export const messages = {
     "create.field.location": "Místo",
     "create.field.location.placeholder": "Bratislava",
     "create.field.language": "Jazyk akce",
+    "create.field.language.community": "Jazyk komunity",
     "create.iconPick": "Vyberte obrázek ikony akce",
+    "create.iconPick.community": "Vyberte obrázek ikony komunity",
     "create.bannerPick": "Vyberte obrázek banneru akce",
+    "create.bannerPick.community": "Vyberte obrázek banneru komunity",
     "create.field.language.body":
       "Nastaví rozhraní pro účastníky a jazyk odůvodnění AI spojení i profilových shrnutí. Účastníci mohou nadále psát v libovolném jazyce.",
+    "create.field.language.body.community":
+      "Nastaví rozhraní pro členy a jazyk odůvodnění AI spojení i profilových shrnutí. Členové mohou nadále psát v libovolném jazyce.",
     "create.advanced": "Pokročilé: obrázky, délka videa",
     "create.field.images": "Obrázky akce",
+    "create.field.images.community": "Obrázky komunity",
     "create.field.images.optional": "(obojí volitelné)",
     "create.iconAlt": "náhled ikony akce",
+    "create.iconAlt.community": "náhled ikony komunity",
     "create.bannerAlt": "náhled banneru akce",
+    "create.bannerAlt.community": "náhled banneru komunity",
     "create.icon": "Ikona",
     "create.banner": "Banner",
     "create.reset": "Resetovat",
     "create.imageUrl": "Z URL",
     "create.imageUrl.pickIcon": "Použít URL obrázku jako ikonu akce",
+    "create.imageUrl.pickIcon.community": "Použít URL obrázku jako ikonu komunity",
     "create.imageUrl.pickBanner": "Použít URL obrázku jako banner akce",
+    "create.imageUrl.pickBanner.community": "Použít URL obrázku jako banner komunity",
     "create.imageUrl.labelIcon": "URL obrázku ikony",
     "create.imageUrl.labelBanner": "URL obrázku banneru",
     "create.imageUrl.placeholder": "https://example.com/banner.jpg",
@@ -3838,6 +3935,8 @@ export const messages = {
     "create.field.enrollSelf": "Přidat se mezi účastníky",
     "create.enrollSelf.body":
       "Zobrazíte se v seznamu lidí jako každý jiný účastník, takže první příchozí nebude sám. Vaše jméno a bio z profilu vidí jen schválení účastníci.",
+    "create.enrollSelf.body.community":
+      "Zobrazíte se v seznamu lidí jako každý jiný člen, takže první příchozí nebude sám. Vaše jméno a bio z profilu vidí jen členové.",
     "create.field.talks": "Přednatočené přednášky",
     "create.field.talks.body":
       "Umožněte účastníkům přidávat přednášky, které si ostatní mohou pustit. Vypnuto ponechá akci jako běžné setkání.",
@@ -3850,6 +3949,8 @@ export const messages = {
     "create.coordinator.optional": "(volitelné)",
     "create.coordinator.body":
       "Připojte ho hned a od spuštění akce získáte párování, přednášky a okamžité schvalování přes pozvánkové odkazy. Můžete to i přeskočit a koordinátora připojit později v administraci.",
+    "create.coordinator.body.community":
+      "Připojte ho hned a od spuštění komunity získáte párování a okamžité schvalování přes pozvánkové odkazy. Můžete to i přeskočit a koordinátora připojit později v administraci.",
     "create.coordinator.selected": "Vybráno ✓",
     "create.coordinator.clear": "Zrušit",
     "create.coordinator.use": "Použít tohoto koordinátora",
@@ -3860,6 +3961,7 @@ export const messages = {
     "create.submit": "Vytvořit akci",
     "create.submit.community": "Vytvořit komunitu",
     "create.error.titleRequired": "Název a čas začátku jsou povinné.",
+    "create.error.titleRequired.community": "Název je povinný.",
     "create.error.endBeforeStart": "Čas konce musí být po čase začátku.",
     "create.error.nameRequired": "Zadejte prosím své jméno.",
     "create.error.startRequired": "Vyberte prosím datum a čas začátku.",
@@ -3870,7 +3972,9 @@ export const messages = {
     "op.talkSubmitted": "Vaše přednáška byla odeslána koordinátorovi.",
     "op.talkAwaitingModeration": "Vaše přednáška byla odeslána. Čeká na schválení organizátorem.",
     "op.eventCreated": "Vaše akce byla vytvořena a zveřejněna.",
+    "op.eventCreated.community": "Vaše komunita byla vytvořena a zveřejněna.",
     "op.eventCreateQueued": "Uloženo, akce se zveřejní po připojení. Ostatní ji zatím nevidí.",
+    "op.eventCreateQueued.community": "Uloženo, komunita se zveřejní po připojení. Ostatní ji zatím nevidí.",
     "op.eventUpdated": "Údaje akce byly aktualizovány a zveřejněny.",
     "op.eventUpdateQueued": "Uloženo, změny se zveřejní po připojení. Účastníci zatím vidí původní údaje.",
     "op.postPublished": "Váš příspěvek byl zveřejněn.",
@@ -4712,6 +4816,8 @@ export const messages = {
       "Momentálně nejste připojeni. Schválení je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby žádost zůstává ve frontě.",
     "admin.command.revokeQueued":
       "Momentálně nejste připojeni. Odebrání je uložené v tomto zařízení a koordinátorovi se odešle po obnovení připojení. Do té doby má tato osoba stále přístup.",
+    "admin.revokeQueuedLocal":
+      "Zatím neodesláno. Odebrání i nový klíč akce jsou uložené v tomto zařízení a odešlou se po obnovení připojení. Do té doby má tato osoba stále přístup.",
     "admin.keys.changedElsewhere":
       "Klíče této akce se změnily na jiném zařízení a toto zařízení má pořád ty staré. Žádosti o vstup a schvalování odsud mohou chybět nebo selhat. Otevřete akci na tom zařízení, nebo ho požádejte, aby tomuto účtu poslalo nové organizátorské oprávnění.",
     "admin.keys.collision":
@@ -4886,6 +4992,8 @@ export const messages = {
     "chat.cmd.willSend": "Enter odešle soukromou zprávu pro {name} a otevře ji",
     "chat.cmd.willOpen": "Enter otevře soukromou konverzaci s {name}",
     "chat.cmd.noSuchPerson": "Tomuto jménu neodpovídá nikdo v tomto chatu.",
+    "chat.mention.pick": "Zmínit někoho",
+    "chat.mention.tagging": "Tato zpráva zmiňuje",
     "chat.send": "Odeslat",
     "chat.checking": "Kontrola vašeho přístupu…",
     "chat.sendFailed": "Odeslání se nezdařilo: toto zařízení už není v chatu. Požádejte o opětovné přidání.",
@@ -5219,6 +5327,7 @@ export const messages = {
     "event.duplicate": "Duplikovat akci",
     "event.duplicate.copyOf": "Kopie: {title}",
     "create.duplicatedFrom": "Vycházíte z kopie „{title}“. Vytvoří se zcela nová akce s novými klíči.",
+    "create.duplicatedFrom.community": "Vycházíte z kopie „{title}“. Vytvoří se zcela nová komunita s novými klíči.",
     "admin.invites.printSheet": "Tisk archu pozvánek",
     "admin.inviteSheet.title": "Arch pozvánek",
     "admin.inviteSheet.print": "Tisk",
@@ -5322,6 +5431,8 @@ export const messages = {
     "update.action": "Jetzt aktualisieren",
     "update.deferred":
       "Ein Update ist bereit und wird automatisch angewendet, sobald du fertig getippt hast.",
+    "update.stuck": "Dieser Tab läuft womöglich noch mit einer alten Version der App und aktualisiert sich nicht von selbst.",
+    "update.registerFailed": "Automatische Updates funktionieren in diesem Tab nicht.",
     "logout.encryptFailed":
       "Beim Abmelden konnten einige deiner Schlüssel auf diesem Gerät nicht gesperrt werden (dein Signer war nicht erreichbar), deshalb wurden sie unverändert gelassen, statt sie zu riskieren. Melde dich erneut an, um sie vollständig zu sichern.",
     "logout.dismiss": "Schließen",
@@ -5529,15 +5640,18 @@ export const messages = {
     // Event erstellen
     "create.title": "Event oder Community erstellen",
     "create.created": "Event erstellt",
+    "create.created.community": "Community erstellt",
     "create.receipt.ok": "Fertig",
     "create.receipt.failed": "Fehlgeschlagen",
     "create.receipt.pending": "Ausstehend",
     "create.receipt.event": "Event veröffentlicht",
+    "create.receipt.event.community": "Community veröffentlicht",
     "create.receipt.enrolled": "Du bist eingetragen",
     "create.receipt.grant": "Coordinator-Berechtigung veröffentlicht",
     "create.receipt.backup": "Organisator-Schlüssel gesichert",
     "create.receipt.backup.pending.body": "Sichere deinen Organisator-Schlüssel unten: ohne ihn kannst du den Admin-Zugriff nicht wiederherstellen.",
     "create.step.share": "Event teilen",
+    "create.step.share.community": "Community teilen",
     "create.copyLink": "Link kopieren",
     "create.copied": "Kopiert ✓",
     "create.share": "Teilen…",
@@ -5549,8 +5663,12 @@ export const messages = {
       "Er beginnt innerhalb weniger Minuten, Matches zu erstellen und Intros zu verarbeiten. Du kannst ihn später über die Admin-Ansicht ändern oder entfernen.",
     "create.step.coordinator.failed": "Anhängen des KI-Coordinators nicht abgeschlossen",
     "create.step.coordinator.failed.body": "Dein Event wurde erstellt, aber das Veröffentlichen der Coordinator-Berechtigung ist fehlgeschlagen. Versuche es hier erneut, oder hänge ihn später über die Admin-Ansicht an.",
+    "create.step.coordinator.failed.body.community":
+      "Deine Community wurde erstellt, aber das Veröffentlichen der Coordinator-Berechtigung ist fehlgeschlagen. Versuche es hier erneut, oder hänge ihn später über die Admin-Ansicht an.",
     "create.step.enroll.failed": "Aufnahme in die Teilnehmerliste nicht abgeschlossen",
     "create.step.enroll.failed.body": "Dein Event wurde erstellt, aber deine Eintragung in die Teilnehmerliste ist fehlgeschlagen. Versuche es erneut, damit „Personen“ nicht leer ist, wenn die erste Person beitritt.",
+    "create.step.enroll.failed.body.community":
+      "Deine Community wurde erstellt, aber deine Eintragung als Mitglied ist fehlgeschlagen. Versuche es erneut, damit „Personen“ nicht leer ist, wenn die erste Person beitritt.",
     "create.retry": "Erneut versuchen",
     "create.retrying": "Wird erneut versucht…",
     "create.step.approve": "Personen genehmigen, sobald sie beitreten möchten",
@@ -5558,12 +5676,17 @@ export const messages = {
       "Anfragen erscheinen in der Admin-Ansicht (Einladungslinks können dies überspringen).",
     "create.openAdmin": "Organisator-Admin öffnen",
     "create.viewEvent": "Event-Seite ansehen",
+    "create.viewEvent.community": "Community-Seite ansehen",
     "create.backupOrganizer": "Sichere deine Organisator-Identität",
     "create.backupOrganizer.body": "Dieser Schlüssel kontrolliert dein Event. Verliere ihn nicht.",
+    "create.backupOrganizer.body.community": "Dieser Schlüssel kontrolliert deine Community. Verliere ihn nicht.",
     "create.organizerName": "Dein Name",
     "create.organizerName.placeholder": "Wie sollen die Teilnehmenden dich kennen?",
+    "create.organizerName.placeholder.community": "Wie sollen die Mitglieder dich kennen?",
     "create.organizerName.body":
       "Deine Organisator-Identität wird zusammen mit dem Event erstellt, keine Registrierung nötig.",
+    "create.organizerName.body.community":
+      "Deine Organisator-Identität wird zusammen mit der Community erstellt, keine Registrierung nötig.",
     "create.field.title": "Titel",
     "create.field.kind": "Was erstellst du?",
     "create.kind.event": "Ein Event",
@@ -5579,21 +5702,31 @@ export const messages = {
     "create.field.location": "Ort",
     "create.field.location.placeholder": "Bratislava",
     "create.field.language": "Event-Sprache",
+    "create.field.language.community": "Community-Sprache",
     "create.field.language.body":
       "Legt die Oberfläche für Teilnehmende sowie die Sprache der KI-Begründungen für Matches und Profilzusammenfassungen fest. Teilnehmende können weiterhin in jeder Sprache schreiben.",
+    "create.field.language.body.community":
+      "Legt die Oberfläche für Mitglieder sowie die Sprache der KI-Begründungen für Matches und Profilzusammenfassungen fest. Mitglieder können weiterhin in jeder Sprache schreiben.",
     "create.advanced": "Erweitert: Bilder, Videolänge",
     "create.field.images": "Event-Bilder",
+    "create.field.images.community": "Community-Bilder",
     "create.field.images.optional": "(beide optional)",
     "create.iconAlt": "Vorschau des Event-Icons",
+    "create.iconAlt.community": "Vorschau des Community-Icons",
     "create.bannerAlt": "Vorschau des Event-Banners",
+    "create.bannerAlt.community": "Vorschau des Community-Banners",
     "create.icon": "Icon",
     "create.banner": "Banner",
     "create.iconPick": "Bild für das Event-Icon auswählen",
+    "create.iconPick.community": "Bild für das Community-Icon auswählen",
     "create.bannerPick": "Bild für das Event-Banner auswählen",
+    "create.bannerPick.community": "Bild für das Community-Banner auswählen",
     "create.reset": "Zurücksetzen",
     "create.imageUrl": "Von URL",
     "create.imageUrl.pickIcon": "Eine Bild-URL für das Event-Icon verwenden",
+    "create.imageUrl.pickIcon.community": "Eine Bild-URL für das Community-Icon verwenden",
     "create.imageUrl.pickBanner": "Eine Bild-URL für das Event-Banner verwenden",
+    "create.imageUrl.pickBanner.community": "Eine Bild-URL für das Community-Banner verwenden",
     "create.imageUrl.labelIcon": "Bild-URL des Icons",
     "create.imageUrl.labelBanner": "Bild-URL des Banners",
     "create.imageUrl.placeholder": "https://example.com/banner.jpg",
@@ -5615,6 +5748,8 @@ export const messages = {
     "create.field.enrollSelf": "Selbst teilnehmen",
     "create.enrollSelf.body":
       "Du erscheinst wie jede andere Person in der Personenliste, damit die erste beitretende Person nicht allein dasteht. Dein Profilname und deine Bio sind nur für genehmigte Teilnehmende sichtbar.",
+    "create.enrollSelf.body.community":
+      "Du erscheinst wie jedes andere Mitglied in der Personenliste, damit die erste beitretende Person nicht allein dasteht. Dein Profilname und deine Bio sind nur für Mitglieder sichtbar.",
     "create.field.talks": "Vorab aufgezeichnete Talks",
     "create.field.talks.body":
       "Lässt Teilnehmende Talks einreichen, die andere ansehen können. Aus lässt das Event ein normales Meetup bleiben.",
@@ -5627,6 +5762,8 @@ export const messages = {
     "create.coordinator.optional": "(optional)",
     "create.coordinator.body":
       "Hänge jetzt einen an, um Matchmaking, Talks und sofortige Genehmigung über Einladungslinks zu aktivieren, sobald dein Event live geht. Du kannst das auch überspringen und später einen über die Admin-Ansicht anhängen.",
+    "create.coordinator.body.community":
+      "Hänge jetzt einen an, um Matchmaking und sofortige Genehmigung über Einladungslinks zu aktivieren, sobald deine Community live geht. Du kannst das auch überspringen und später einen über die Admin-Ansicht anhängen.",
     "create.coordinator.selected": "Ausgewählt ✓",
     "create.coordinator.clear": "Entfernen",
     "create.coordinator.use": "Diesen Coordinator verwenden",
@@ -5637,6 +5774,7 @@ export const messages = {
     "create.submit": "Event erstellen",
     "create.submit.community": "Community erstellen",
     "create.error.titleRequired": "Titel und Startzeit sind erforderlich.",
+    "create.error.titleRequired.community": "Ein Titel ist erforderlich.",
     "create.error.endBeforeStart": "Die Endzeit muss nach der Startzeit liegen.",
     "create.error.nameRequired": "Bitte gib deinen Namen ein.",
     "create.error.startRequired": "Bitte wähle ein Startdatum und eine Startzeit.",
@@ -5647,7 +5785,10 @@ export const messages = {
     "op.talkSubmitted": "Dein Talk wurde an den Coordinator übermittelt.",
     "op.talkAwaitingModeration": "Dein Talk wurde gesendet. Er wartet auf die Prüfung durch den Organisator.",
     "op.eventCreated": "Dein Event wurde erstellt und veröffentlicht.",
+    "op.eventCreated.community": "Deine Community wurde erstellt und veröffentlicht.",
     "op.eventCreateQueued": "Gespeichert, dein Event wird veröffentlicht, sobald du wieder online bist. Es ist für andere noch nicht sichtbar.",
+    "op.eventCreateQueued.community":
+      "Gespeichert, deine Community wird veröffentlicht, sobald du wieder online bist. Sie ist für andere noch nicht sichtbar.",
     "op.eventUpdated": "Deine Event-Details wurden aktualisiert und veröffentlicht.",
     "op.eventUpdateQueued": "Gespeichert, deine Änderungen werden veröffentlicht, sobald du wieder online bist. Teilnehmende sehen noch die alten Details.",
     "op.postPublished": "Dein Beitrag wurde veröffentlicht.",
@@ -6456,6 +6597,8 @@ export const messages = {
       "Gerade keine Verbindung. Die Freigabe ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin bleibt die Anfrage in der Warteschlange.",
     "admin.command.revokeQueued":
       "Gerade keine Verbindung. Das Entfernen ist auf diesem Gerät gespeichert und geht an den Coordinator, sobald du wieder online bist. Bis dahin hat diese Person weiterhin Zugriff.",
+    "admin.revokeQueuedLocal":
+      "Noch nicht veröffentlicht. Das Entfernen und der neue Event-Schlüssel sind auf diesem Gerät gespeichert und gehen raus, sobald du wieder online bist. Bis dahin hat diese Person weiterhin Zugriff.",
     "admin.keys.changedElsewhere":
       "Die Schlüssel dieses Events wurden auf einem anderen Gerät geändert, und dieses Gerät hat noch die alten. Beitrittsanfragen und Freigaben von hier können fehlen oder fehlschlagen. Öffne das Event auf jenem Gerät oder lass es diesem Konto eine neue Organisator-Freigabe schicken.",
     "admin.keys.collision":
@@ -6630,6 +6773,8 @@ export const messages = {
     "chat.cmd.willSend": "Enter sendet eine private Nachricht an {name} und öffnet sie",
     "chat.cmd.willOpen": "Enter öffnet eine private Unterhaltung mit {name}",
     "chat.cmd.noSuchPerson": "Niemand in diesem Chat passt zu diesem Namen.",
+    "chat.mention.pick": "Jemanden erwähnen",
+    "chat.mention.tagging": "Diese Nachricht erwähnt",
     "chat.send": "Senden",
     "chat.checking": "Dein Zugriff wird geprüft…",
     "chat.sendFailed": "Senden fehlgeschlagen: dieses Gerät ist nicht mehr im Chat. Bitte darum, wieder hinzugefügt zu werden.",
@@ -6959,6 +7104,8 @@ export const messages = {
     "event.duplicate": "Event duplizieren",
     "event.duplicate.copyOf": "Kopie von {title}",
     "create.duplicatedFrom": "Du startest von einer Kopie von „{title}“. Es wird ein brandneues Event mit neuen Schlüsseln erstellt.",
+    "create.duplicatedFrom.community":
+      "Du startest von einer Kopie von „{title}“. Es wird eine brandneue Community mit neuen Schlüsseln erstellt.",
     "admin.invites.printSheet": "Einladungsblatt drucken",
     "admin.inviteSheet.title": "Einladungsblatt",
     "admin.inviteSheet.print": "Drucken",
@@ -7063,6 +7210,8 @@ export const messages = {
     "update.action": "Actualizar ahora",
     "update.deferred":
       "Hay una actualización lista y se aplicará automáticamente en cuanto termines de escribir.",
+    "update.stuck": "Es posible que esta pestaña siga usando una versión antigua de la app y no se esté actualizando sola.",
+    "update.registerFailed": "Las actualizaciones automáticas no funcionan en esta pestaña.",
     "logout.encryptFailed":
       "Cerrar sesión no pudo bloquear algunas de tus claves en este dispositivo (tu firmador no respondió), así que se dejaron como estaban en vez de arriesgarlas. Inicia sesión de nuevo para terminar de protegerlas.",
     "logout.dismiss": "Descartar",
@@ -7273,15 +7422,18 @@ export const messages = {
     // Crear evento
     "create.title": "Crear un evento o comunidad",
     "create.created": "Evento creado",
+    "create.created.community": "Comunidad creada",
     "create.receipt.ok": "Listo",
     "create.receipt.failed": "Falló",
     "create.receipt.pending": "Pendiente",
     "create.receipt.event": "Evento publicado",
+    "create.receipt.event.community": "Comunidad publicada",
     "create.receipt.enrolled": "Te uniste como participante",
     "create.receipt.grant": "Permiso del coordinador publicado",
     "create.receipt.backup": "Clave del organizador respaldada",
     "create.receipt.backup.pending.body": "Haz una copia de seguridad de la clave del organizador más abajo: sin ella, no puedes recuperar el acceso de administrador.",
     "create.step.share": "Comparte el evento",
+    "create.step.share.community": "Comparte la comunidad",
     "create.copyLink": "Copiar enlace",
     "create.copied": "Copiado ✓",
     "create.share": "Compartir…",
@@ -7293,8 +7445,12 @@ export const messages = {
       "Empieza a generar coincidencias y procesar presentaciones en pocos minutos. Puedes cambiarlo o quitarlo después desde la pantalla de administración.",
     "create.step.coordinator.failed": "No se completó la conexión del coordinador de IA",
     "create.step.coordinator.failed.body": "Tu evento se creó, pero no se pudo publicar el permiso del coordinador. Vuelve a intentarlo aquí, o agrégalo después desde la pantalla de administración.",
+    "create.step.coordinator.failed.body.community":
+      "Tu comunidad se creó, pero no se pudo publicar el permiso del coordinador. Vuelve a intentarlo aquí, o agrégalo después desde la pantalla de administración.",
     "create.step.enroll.failed": "No se completó tu inclusión en la lista de asistentes",
     "create.step.enroll.failed.body": "Tu evento se creó, pero no se pudo inscribirte como participante. Vuelve a intentarlo para que la lista de personas no esté vacía para el primer asistente.",
+    "create.step.enroll.failed.body.community":
+      "Tu comunidad se creó, pero no se pudo agregarte como miembro. Vuelve a intentarlo para que la lista de personas no esté vacía para el primer miembro.",
     "create.retry": "Reintentar",
     "create.retrying": "Reintentando…",
     "create.step.approve": "Aprueba a las personas a medida que piden unirse",
@@ -7302,12 +7458,17 @@ export const messages = {
       "Las solicitudes aparecen en la pantalla de administración (los enlaces de invitación pueden saltarse esto).",
     "create.openAdmin": "Abrir administración del organizador",
     "create.viewEvent": "Ver página del evento",
+    "create.viewEvent.community": "Ver página de la comunidad",
     "create.backupOrganizer": "Haz una copia de seguridad de tu identidad de organizador",
     "create.backupOrganizer.body": "Esta clave controla tu evento. No la pierdas.",
+    "create.backupOrganizer.body.community": "Esta clave controla tu comunidad. No la pierdas.",
     "create.organizerName": "Tu nombre",
     "create.organizerName.placeholder": "¿Cómo quieres que te conozcan los asistentes?",
+    "create.organizerName.placeholder.community": "¿Cómo quieres que te conozcan los miembros?",
     "create.organizerName.body":
       "Tu identidad de organizador se crea junto con el evento, sin necesidad de registro.",
+    "create.organizerName.body.community":
+      "Tu identidad de organizador se crea junto con la comunidad, sin necesidad de registro.",
     "create.field.title": "Título",
     "create.field.kind": "¿Qué estás creando?",
     "create.kind.event": "Un evento",
@@ -7323,21 +7484,31 @@ export const messages = {
     "create.field.location": "Ubicación",
     "create.field.location.placeholder": "Bratislava",
     "create.field.language": "Idioma del evento",
+    "create.field.language.community": "Idioma de la comunidad",
     "create.field.language.body":
       "Define el idioma de la interfaz para los asistentes, y el de los razonamientos de coincidencias y resúmenes de perfil que genera la IA. Los asistentes igual pueden escribir en cualquier idioma.",
+    "create.field.language.body.community":
+      "Define el idioma de la interfaz para los miembros, y el de los razonamientos de coincidencias y resúmenes de perfil que genera la IA. Los miembros igual pueden escribir en cualquier idioma.",
     "create.advanced": "Avanzado: imágenes, duración del video",
     "create.field.images": "Imágenes del evento",
+    "create.field.images.community": "Imágenes de la comunidad",
     "create.field.images.optional": "(ambas opcionales)",
     "create.iconAlt": "vista previa del ícono del evento",
+    "create.iconAlt.community": "vista previa del ícono de la comunidad",
     "create.bannerAlt": "vista previa del banner del evento",
+    "create.bannerAlt.community": "vista previa del banner de la comunidad",
     "create.icon": "Ícono",
     "create.banner": "Banner",
     "create.iconPick": "Elige una imagen para el ícono del evento",
+    "create.iconPick.community": "Elige una imagen para el ícono de la comunidad",
     "create.bannerPick": "Elige una imagen para el banner del evento",
+    "create.bannerPick.community": "Elige una imagen para el banner de la comunidad",
     "create.reset": "Restablecer",
     "create.imageUrl": "Desde una URL",
     "create.imageUrl.pickIcon": "Usa una URL de imagen para el ícono del evento",
+    "create.imageUrl.pickIcon.community": "Usa una URL de imagen para el ícono de la comunidad",
     "create.imageUrl.pickBanner": "Usa una URL de imagen para el banner del evento",
+    "create.imageUrl.pickBanner.community": "Usa una URL de imagen para el banner de la comunidad",
     "create.imageUrl.labelIcon": "URL de la imagen del ícono",
     "create.imageUrl.labelBanner": "URL de la imagen del banner",
     "create.imageUrl.placeholder": "https://example.com/banner.jpg",
@@ -7359,6 +7530,8 @@ export const messages = {
     "create.field.enrollSelf": "Únete tú también como participante",
     "create.enrollSelf.body":
       "Aparecerás en la lista de personas como cualquier asistente, para que la primera persona que se una no esté sola. El nombre y la biografía de tu perfil solo son visibles para los asistentes aprobados.",
+    "create.enrollSelf.body.community":
+      "Aparecerás en la lista de personas como cualquier miembro, para que la primera persona que se una no esté sola. El nombre y la biografía de tu perfil solo son visibles para los miembros.",
     "create.field.talks": "Charlas pregrabadas",
     "create.field.talks.body":
       "Permite que los asistentes envíen charlas que otras personas puedan ver. Desactivado deja el evento como una reunión normal.",
@@ -7371,6 +7544,8 @@ export const messages = {
     "create.coordinator.optional": "(opcional)",
     "create.coordinator.body":
       "Agrega uno ahora para activar el emparejamiento, las charlas y la aprobación instantánea por enlace de invitación desde el momento en que tu evento se publique. También puedes saltarte esto y agregar uno después desde la pantalla de administración.",
+    "create.coordinator.body.community":
+      "Agrega uno ahora para activar el emparejamiento y la aprobación instantánea por enlace de invitación desde el momento en que tu comunidad se publique. También puedes saltarte esto y agregar uno después desde la pantalla de administración.",
     "create.coordinator.selected": "Seleccionado ✓",
     "create.coordinator.clear": "Borrar",
     "create.coordinator.use": "Usar este coordinador",
@@ -7381,6 +7556,7 @@ export const messages = {
     "create.submit": "Crear evento",
     "create.submit.community": "Crear comunidad",
     "create.error.titleRequired": "El título y la hora de inicio son obligatorios.",
+    "create.error.titleRequired.community": "El título es obligatorio.",
     "create.error.endBeforeStart": "La hora de fin debe ser posterior a la hora de inicio.",
     "create.error.nameRequired": "Por favor, ingresa tu nombre.",
     "create.error.startRequired": "Por favor, elige una fecha y hora de inicio.",
@@ -7391,7 +7567,10 @@ export const messages = {
     "op.talkSubmitted": "Tu charla se envió al coordinador.",
     "op.talkAwaitingModeration": "Tu charla se envió. Está esperando la revisión del organizador.",
     "op.eventCreated": "Tu evento se creó y se publicó.",
+    "op.eventCreated.community": "Tu comunidad se creó y se publicó.",
     "op.eventCreateQueued": "Guardado, tu evento se publicará cuando vuelvas a estar en línea. Todavía no es visible para otras personas.",
+    "op.eventCreateQueued.community":
+      "Guardado, tu comunidad se publicará cuando vuelvas a estar en línea. Todavía no es visible para otras personas.",
     "op.eventUpdated": "Los detalles de tu evento se actualizaron y se publicaron.",
     "op.eventUpdateQueued": "Guardado, tus cambios se publicarán cuando vuelvas a estar en línea. Los asistentes todavía ven los detalles anteriores.",
     "op.postPublished": "Tu publicación se publicó.",
@@ -8237,6 +8416,8 @@ export const messages = {
       "Ahora mismo no hay conexión. La aprobación está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces la solicitud sigue en la cola.",
     "admin.command.revokeQueued":
       "Ahora mismo no hay conexión. La retirada está guardada en este dispositivo y se enviará al coordinador cuando vuelvas a estar en línea. Hasta entonces esta persona sigue teniendo acceso.",
+    "admin.revokeQueuedLocal":
+      "Aún no publicado. La retirada y la nueva clave del evento están guardadas en este dispositivo y se enviarán cuando vuelvas a estar en línea. Hasta entonces esta persona sigue teniendo acceso.",
     "admin.keys.changedElsewhere":
       "Las claves de este evento se cambiaron en otro dispositivo y este todavía tiene las antiguas. Puede que falten solicitudes de acceso o que las aprobaciones desde aquí fallen. Abre el evento en ese dispositivo o pídele que envíe a esta cuenta una nueva concesión de organizador.",
     "admin.keys.collision":
@@ -8411,6 +8592,8 @@ export const messages = {
     "chat.cmd.willSend": "Enter envía un mensaje directo a {name} y lo abre",
     "chat.cmd.willOpen": "Enter abre una conversación directa con {name}",
     "chat.cmd.noSuchPerson": "Nadie en este chat coincide con ese nombre.",
+    "chat.mention.pick": "Mencionar a alguien",
+    "chat.mention.tagging": "Este mensaje menciona a",
     "chat.send": "Enviar",
     "chat.checking": "Comprobando tu acceso…",
     "chat.sendFailed": "No se pudo enviar: este dispositivo ya no está en el chat. Pide que te agreguen de nuevo.",
@@ -8741,6 +8924,8 @@ export const messages = {
     "event.duplicate": "Duplicar evento",
     "event.duplicate.copyOf": "Copia de {title}",
     "create.duplicatedFrom": "Partiendo de una copia de “{title}”. Se creará un evento nuevo, con sus propias claves.",
+    "create.duplicatedFrom.community":
+      "Partiendo de una copia de “{title}”. Se creará una comunidad nueva, con sus propias claves.",
     "admin.invites.printSheet": "Imprimir hoja de invitación",
     "admin.inviteSheet.title": "Hoja de invitación",
     "admin.inviteSheet.print": "Imprimir",

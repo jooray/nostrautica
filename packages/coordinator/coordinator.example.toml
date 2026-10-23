@@ -167,8 +167,10 @@ max_events = 50                   # reject installs beyond this many simultaneou
                                   # while a role has require_private set
 # allow_unbounded_spend = true     # escape hatch (default false = fail CLOSED):
                                   # boot even when this daemon is announced
-                                  # publicly, accepts any installer, AND has every
-                                  # daemon-wide budget below set to 0. Set it only
+                                  # publicly, accepts any installer, AND has
+                                  # budgets.daemon_calls_per_window set to 0 (the
+                                  # media ceilings don't bound text-only calls,
+                                  # so they don't count). Set it only
                                   # if your spend cap lives at the provider (a
                                   # prepaid key, a fixed Cashu balance).
 

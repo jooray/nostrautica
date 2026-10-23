@@ -203,6 +203,22 @@ export interface PaymentStrategy {
    * re-credit them or quarantine the reservation as ambiguous for reconcile.
    */
   fail?(): Promise<void>;
+  /**
+   * Per-request form of prepare/settle/fail (audit R-49). The reservation carries
+   * its own settle()/fail(), so a prepare() whose awaiter gave up (an
+   * uncancellable deadline fired) and completes LATE cannot claim the next
+   * request's settle — the instance-level prepare/settle pair has no way to tell
+   * two overlapping requests apart. Strategies holding per-request state
+   * implement this; callers prefer it when present.
+   */
+  reserve?(req: { estimateTokens?: number }): Promise<PaymentReservation>;
+}
+
+/** One request's payment, from {@link PaymentStrategy.reserve}. */
+export interface PaymentReservation {
+  headers: Record<string, string>;
+  settle(responseHeaders: Headers): Promise<void>;
+  fail(): Promise<void>;
 }
 
 /** Which provider + model to use for a given role (spec §9.4 model routing). */
@@ -234,9 +250,10 @@ export interface RoleRoute {
   /** Provider instance id, e.g. "venice" | "routstr". */
   provider: string;
   requirePrivate: boolean;
-  /** Verified at startup from the provider catalogue; falls back to intent when a
-   *  model can't be found in the catalogue (e.g. embeddings on a separate endpoint). */
-  privacy: "private" | "non-private";
+  /** Verified at startup from the provider catalogue. `"unverified"` when a
+   *  private-required role's model could not be confirmed there (audit R-52) —
+   *  never `"private"` by assertion. */
+  privacy: "private" | "non-private" | "unverified";
 }
 
 /** Per-role resolved routes threaded through the whole matching pipeline (H-1). */

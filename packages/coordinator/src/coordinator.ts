@@ -72,6 +72,10 @@ import {
   rosterPageD,
   rosterPageDs,
   rosterContinuationDs,
+  rosterPage0Ds,
+  isRosterPageFor,
+  spaceRecordsD,
+  legacyRosterDCollidesWithDerived,
   KIND_CHAT_KEY_ATTESTATION,
   isMarmotChatEnabled,
   CHAT_INTEROP_RELAYS,
@@ -162,6 +166,7 @@ import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
 import { profilePicture } from "./chat/avatar.js";
 import { sanitizeRelayUrls, type RelayPolicy } from "./net/relay-urls.js";
+import { sanitizeLogText } from "./log-line.js";
 import {
   sanitizeLlmText,
   sanitizeAiProfile,
@@ -211,12 +216,31 @@ const MAX_MEDIA_FILE_BYTES = PROTOCOL_MAX_MEDIA_FILE_BYTES;
 const MAX_TALKS_PER_SPEAKER = 10;
 
 /**
- * Event-wide attendee-population cap (audit C3). The 31604 roster protocol cap is
- * 2,000, so the coordinator must never grow its attendee set (pending + approved +
- * revoked) past it and then FAIL to publish the roster. A join that would create a
- * NEW attendee beyond this is refused.
+ * Event-wide member cap (audit C3). The 31604 roster protocol cap is 2,000, so the
+ * coordinator must never grow its APPROVED set past it and then FAIL to publish the
+ * roster. A join that would create a NEW attendee beyond this is refused.
+ *
+ * Counts approved rows only (audit 2026-10-21, R-03). It used to count pending and
+ * revoked rows too, so 2,000 anonymous join requests closed a manual-approval
+ * event's door for good: pending rows never expired, a revoke freed nothing, and
+ * there was no reject. Pending requests have their own bounded queue below.
  */
 const MAX_ATTENDEES_PER_EVENT = 2000;
+/**
+ * Bound on an event's queue of PENDING join requests (R-03). Past it, a join that
+ * no invite or membership proof admits is refused rather than queued; an entitled
+ * join is still admitted. Sized well above a real door rush (a few hundred people
+ * at once), small enough that the queue stays something an organizer can read.
+ */
+const MAX_PENDING_JOINS_PER_EVENT = 1000;
+/**
+ * A pending request untouched (no new join, no submission) for this long is
+ * evicted when the queue is full, so a flood can close the queue only for as long
+ * as it keeps refreshing every row. Matches the gift-wrap rescan horizon: past it
+ * the coordinator could not have recovered the request's lost wraps anyway, and the
+ * organizer can still approve an evicted person by hand (an approve creates the row).
+ */
+const PENDING_JOIN_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 
 /** Durable inbox rate accounting (audit C3): fixed 60s window. */
 const INBOX_RATE_WINDOW_MS = 60_000;
@@ -254,6 +278,8 @@ const INBOX_RESCAN_INTERVAL_MS = 120_000;
  * people's relay budget to shave minutes off something nobody is waiting on.
  */
 const PROFILE_REFRESH_INTERVAL_MS = 3_600_000;
+/** Retry cadence for an R-53 roster address upgrade that a relay refused or timed out. */
+const ROSTER_MIGRATION_RETRY_MS = 600_000;
 /**
  * How long after an event ends the sweep keeps watching its attendees' profiles.
  *
@@ -465,7 +491,9 @@ const short = (pk: string) => pk.slice(0, 8);
 const MAX_UNDECRYPTABLE_MEMO = 10_000;
 function log(msg: string): void {
   const t = new Date().toISOString().slice(11, 19);
-  console.log(`[${t}] ${msg}`);
+  // One choke point for attendee-controlled text (names, titles, skills): it must
+  // never start a new line, least of all a forged readiness marker (audit R-48).
+  console.log(`[${t}] ${sanitizeLogText(msg)}`);
 }
 
 /** Stable identity of a relay set for subscription re-keying (audit COORD-8). */
@@ -493,6 +521,24 @@ function relayKey(relays: string[]): string {
  * or an inbox, so there is nothing left for them to race over.
  */
 const RESTORE_CONCURRENCY = 4;
+
+/**
+ * Whether the roster is also published at its pre-R-53 address, the bare event
+ * `d` (PROTOCOL-NIP.md §6.2.2), next to the derived {@link spaceRecordsD} one.
+ *
+ * The alias exists for clients that predate the derived address (app and
+ * Android before 0.14): without it they would read no roster at all from an
+ * upgraded coordinator. It keeps R-53 alive for exactly those clients, since the
+ * alias is still shared between same-named spaces, so it is a transition
+ * measure: a later release drops it once old clients are expected to have
+ * updated. Never for an identifier shaped like a derived address, whose alias
+ * could BE another space's derived page.
+ */
+const PUBLISH_LEGACY_ROSTER_ALIAS = true;
+
+function publishesLegacyRosterAlias(identifier: string): boolean {
+  return PUBLISH_LEGACY_ROSTER_ALIAS && !legacyRosterDCollidesWithDerived(identifier);
+}
 
 /**
  * Delays, in order, of the bounded chat-enrolment re-check that follows an
@@ -530,6 +576,14 @@ async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) =>
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
+
+/**
+ * Thrown by a handler whose target exists but cannot act right now (audit
+ * 2026-10-21, R-05): an organizer 21604 for an event that is installed but
+ * suspended. `processRumorWithRetry` neither retries it in memory nor marks it
+ * seen, so the coordinator-inbox rescan replays it once the event is live again.
+ */
+class DeferredRumorError extends Error {}
 
 /**
  * Wall-clock accounting for the boot path, so "startup is slow" can be answered
@@ -1342,6 +1396,8 @@ export class Coordinator {
      * bootstrap then adopts an E_id-authored roster only.
      */
     prevCoordinator?: string;
+    /** The E_id-sealed 21603's `revoked` set (NIP §3.5, R-04): seeded as tombstones. */
+    revoked?: string[];
   }): Promise<void> {
     const { kind: spaceKind, pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
@@ -1565,6 +1621,13 @@ export class Coordinator {
     // Record the install generation (NIP §3.5): bump the high-water mark and clear
     // any prior detach tombstone (a fresh grant with a higher gen re-installs).
     this.deps.store.recordInstalledGen(grant.coordinate, gen);
+    // The organizer's revocations (the 21603 `revoked` set, audit 2026-10-21 R-04),
+    // seeded as tombstones BEFORE the inbox subscription and the full backfill below.
+    // A revoke made while no coordinator was attached — or recorded only by the
+    // outgoing one — was otherwise just absence from the roster, and the backfill
+    // replayed the member's original join and re-approved them on its invite code,
+    // with the ECK minted to exclude them.
+    if (source === "grant" && grant.revoked?.length) this.seedRevocations(grant.coordinate, grant.revoked);
 
     const state: EventState = {
       coordinate: grant.coordinate,
@@ -1663,6 +1726,27 @@ export class Coordinator {
     this.completedInstallGen.set(grant.coordinate, gen);
   }
 
+  /**
+   * Record the organizer's revocations carried by a 21603 (R-04). Additive: a grant
+   * never lifts a tombstone, only an organizer approve does. A row this store still
+   * holds as approved (a re-attach after a detach that kept the rows) is demoted so
+   * no re-grant or roster republish reaches it; the organizer's client already
+   * rotated the ECK and deleted the entry when it revoked.
+   */
+  private seedRevocations(coordinate: string, pubkeys: string[]): void {
+    let demoted = 0;
+    for (const pk of new Set(pubkeys)) {
+      this.deps.store.recordRevocation(coordinate, pk, this.now());
+      if (this.deps.store.getAttendee(coordinate, pk)?.status === "approved") {
+        this.deps.store.upsertAttendee({ coordinate, pubkey: pk, status: "revoked", now: this.now() });
+        this.deps.store.clearPairsInvolving(coordinate, pk);
+        this.deps.store.cancelSubjectPipelineJobs(coordinate, pk, { allStates: false });
+        demoted++;
+      }
+    }
+    log(`[install] ${coordinate}: the grant names ${pubkeys.length} organizer-revoked member(s)${demoted ? ` — ${demoted} demoted from approved` : ""}`);
+  }
+
   /** Suspend an event whose config is unfetchable (NIP §3.5, P0-5): record it for a
    *  backoff retry and ensure it is NOT live. Idempotent. */
   private suspendEvent(
@@ -1708,6 +1792,7 @@ export class Coordinator {
    */
   async retrySuspendedEvents(): Promise<void> {
     const now = this.now();
+    let resumed = false;
     for (const [coordinate, s] of [...this.suspended]) {
       if (s.retryAt > now) continue;
       await this.installEvent({
@@ -1719,7 +1804,11 @@ export class Coordinator {
         backfill: "recent",
         source: "restore",
       });
+      if (this.events.has(coordinate)) resumed = true;
     }
+    // Replay the organizer commands deferred while it was suspended (R-05) now,
+    // rather than at the next periodic rescan.
+    if (resumed) await this.rescanCoordinatorInbox();
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
@@ -1865,6 +1954,10 @@ export class Coordinator {
           return;
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          if (e instanceof DeferredRumorError) {
+            log(`[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) deferred — left unseen: ${msg.slice(0, 160)}`);
+            return;
+          }
           // Permanent failures — the payload can never parse (schema) or is not
           // JSON at all — are marked seen instead of looping on every rescan.
           if (e instanceof ZodError || e instanceof SyntaxError) {
@@ -2090,16 +2183,32 @@ export class Coordinator {
    * Durable inbox rate gate (audit C3): accept at most MAX_RUMORS_PER_SENDER_WINDOW
    * rumors from one sender, and MAX_RUMORS_PER_EVENT_WINDOW per event, per window.
    * Returns true when the rumor is WITHIN budget (process it); false when over (drop).
+   *
+   * A sender already over its own cap is refused BEFORE the shared bucket is
+   * charged (audit 2026-10-21, R-12). Charging first let one flooding identity
+   * spend the whole inbox's budget with rumors its own cap was going to drop
+   * anyway — and since drops stay unseen, every rescan replayed the backlog and
+   * spent it again. The check is a read, not a bump, so a distinct-sender flood
+   * still stops creating per-sender rows once the shared bucket is exhausted.
+   *
+   * `organizer` (an installed event's E_id sending admin commands, see
+   * {@link isInstalledEventIdentity}) is not charged to the shared bucket at all:
+   * it has its own per-E_id bucket of the same size, so strangers flooding the
+   * coordinator's public inbox can no longer starve the organizer's approvals.
    */
-  private inboxRateAllows(coordinate: string, senderPubkey: string, exemptSenderCap = false): boolean {
+  private inboxRateAllows(coordinate: string, senderPubkey: string, organizer = false): boolean {
     const now = this.now();
+    if (organizer) {
+      const own = this.deps.store.bumpInboxRate(`${coordinate}:organizer`, senderPubkey, now, INBOX_RATE_WINDOW_MS);
+      return own <= MAX_RUMORS_PER_EVENT_WINDOW;
+    }
+    if (this.deps.store.peekInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS) >= MAX_RUMORS_PER_SENDER_WINDOW) {
+      return false;
+    }
     const eventCount = this.deps.store.bumpInboxRate(coordinate, "", now, INBOX_RATE_WINDOW_MS);
     if (eventCount > this.eventRumorBudget(coordinate)) return false;
-    // Always bump the sender's counter, exempt or not: the accounting is what the
-    // per-window budget is computed from, and an exemption is a decision about
-    // whether to REFUSE, not a licence to stop counting.
     const senderCount = this.deps.store.bumpInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS);
-    return exemptSenderCap || senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+    return senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
   }
 
   /**
@@ -2143,6 +2252,21 @@ export class Coordinator {
    * pending rows, which is the point: joins create them, so the budget rises
    * with the crowd during the burst instead of after it.
    */
+  /**
+   * Is the event's pending join queue at its bound (audit 2026-10-21, R-03)? Only
+   * when it is, evict requests idle past {@link PENDING_JOIN_TTL_MS} first, oldest
+   * first, through the per-attendee purge (which keeps any revocation tombstone).
+   * The TTL is past the rescan's gift-wrap window, so the evicted request's own
+   * join is no longer replayed to recreate it.
+   */
+  private pendingQueueFull(coordinate: string): boolean {
+    if (this.deps.store.pendingAttendeeCount(coordinate) < MAX_PENDING_JOINS_PER_EVENT) return false;
+    const stale = this.deps.store.stalePendingPubkeys(coordinate, this.now() - PENDING_JOIN_TTL_MS);
+    for (const pk of stale) this.deps.store.purgeAttendeeArtifacts(coordinate, pk);
+    if (stale.length) log(`[join] ${coordinate}: pending queue full — evicted ${stale.length} request(s) idle for over ${PENDING_JOIN_TTL_MS / 86_400_000} days`);
+    return this.deps.store.pendingAttendeeCount(coordinate) >= MAX_PENDING_JOINS_PER_EVENT;
+  }
+
   private eventRumorBudget(coordinate: string): number {
     if (coordinate === COORD_INBOX_RATE_KEY) return MAX_RUMORS_PER_EVENT_WINDOW;
     const enrolled = this.deps.store.attendeeCount(coordinate);
@@ -2228,6 +2352,7 @@ export class Coordinator {
           backfill: known ? "recent" : "full",
           source: "grant",
           prevCoordinator: grant.prev_coordinator,
+          revoked: grant.revoked,
         });
       } else if (rumor.kind === KIND_ADMIN_COMMAND) {
         const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
@@ -2337,11 +2462,16 @@ export class Coordinator {
       } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
         const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
         log(`[submission] from ${short(rumor.pubkey)} — rev ${content.rev}, ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
-        await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
-          rev: content.rev,
-          createdAt: effectiveCreatedAt, // §3.3 ordering key → the clamped value
-          rumorId: rumor.id,
-        });
+        // Under the member's lock (audit 2026-10-21, R-08), so a `delete_data`
+        // withdrawal cannot interleave with it — and per ATTEMPT, so a retry runs
+        // after a withdrawal that landed in between and sees the row it purged gone.
+        await this.withSubjectLock(state.coordinate, `member:${rumor.pubkey}`, () =>
+          this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
+            rev: content.rev,
+            createdAt: effectiveCreatedAt, // §3.3 ordering key → the clamped value
+            rumorId: rumor.id,
+          }),
+        );
       } else if (rumor.kind === KIND_PROFILE_CORRECTION) {
         const content = profileCorrectionContentSchema.parse(JSON.parse(rumor.content));
         // The subject is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor — an
@@ -2464,9 +2594,33 @@ export class Coordinator {
         return;
       }
       log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
-      // The public effect chain is identical to an organizer revoke (idempotent, and
-      // its ECK rotation resumes idempotently via the same operation progress).
-      await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      // Only an APPROVED member's departure rotates the ECK (audit 2026-10-21, R-06).
+      // A pending or already-revoked row holds no current key, no directory entry and
+      // no roster seat, yet its withdrawal used to mint a new ECK version and re-grant
+      // the whole (unbounded) list to every member — so anyone able to send a join
+      // could grow every member's grant and the coordinator's republish work on
+      // demand. Such a row is just marked revoked (or purged below). A rotation this
+      // operation already recorded still resumes, so a retry after a crash
+      // mid-revoke finishes the republish instead of skipping it on the now
+      // `revoked` row.
+      const rotating =
+        existing.status === "approved" ||
+        this.deps.store.getCommandOpProgress(state.coordinate, subject).eckRotation !== undefined;
+      if (rotating) {
+        // The public effect chain is identical to an organizer revoke (idempotent, and
+        // its ECK rotation resumes idempotently via the same operation progress).
+        await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      } else if (existing.status === "pending") {
+        // Withdrawing a pending request cancels it: the row goes entirely, whatever
+        // `delete_data` says (nothing was processed for it — the pipeline runs only
+        // for approved members — so there is no spend to preserve). Keeping it as
+        // `revoked` would let join-then-withdraw cycles grow rows that neither the
+        // member cap nor the pending queue counts (R-03).
+        this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
+        log(`[withdraw] ${short(pubkey)} cancelled their pending request — no ECK rotation`);
+      } else {
+        log(`[withdraw] ${short(pubkey)} was already '${existing.status}' — no ECK rotation`);
+      }
       if (content.delete_data) {
         // Ownership token recheck (audit R1, belt to the mutex): don't purge if a
         // newer membership command superseded this withdrawal mid-flight.
@@ -2754,11 +2908,14 @@ export class Coordinator {
     // Population cap (audit C3): a NEW attendee beyond the 2,000 roster protocol cap
     // is refused — the coordinator must never grow its attendee set past what the
     // 31604 roster can carry and then fail to publish it. Existing rows (re-delivered
-    // joins) are unaffected.
-    if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+    // joins) are unaffected. Approved members only (R-03, see the constant).
+    if (!existing && this.deps.store.approvedAttendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
       log(`[join] REJECTED ${short(attendeePubkey)}: event ${state.coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
       return;
     }
+    // Pending-queue bound (R-03): with the queue full, a NEW joiner gets no early
+    // enrollment row, and is refused below unless an entitlement admits them.
+    const queueFull = !existing && this.pendingQueueFull(state.coordinate);
 
     const inviteTag = tags.find((t) => t[0] === "invite");
     const invite = inviteTag && inviteTag[1] && inviteTag[2]
@@ -2795,13 +2952,19 @@ export class Coordinator {
     // the real one. C3's threat model is untouched: the gate exists so an unknown
     // sender can't create a row by SUBMITTING A PROFILE, and this row is created
     // by an authenticated join request, which is exactly what does that.
-    this.deps.store.upsertAttendee({
-      coordinate: state.coordinate,
-      pubkey: attendeePubkey,
-      status: "pending",
-      displayName: name.trim() || null,
-      now: this.now(),
-    });
+    //
+    // Skipped while the pending queue is full (R-03): a refused join must leave no
+    // row. The race above then costs only a delay — a submission that arrives
+    // first is left unseen and applied by the next inbox rescan once they are in.
+    if (!queueFull) {
+      this.deps.store.upsertAttendee({
+        coordinate: state.coordinate,
+        pubkey: attendeePubkey,
+        status: "pending",
+        displayName: name.trim() || null,
+        now: this.now(),
+      });
+    }
 
     // `approval: "manual"` (audit SB-124): every join waits for the organizer — a
     // valid invite included, which is the whole difference from `manual+invite`.
@@ -2835,6 +2998,10 @@ export class Coordinator {
         return;
       }
       const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+      if (!decision.grant && !current && queueFull) {
+        log(`[join] REJECTED ${short(attendeePubkey)}: the ${MAX_PENDING_JOINS_PER_EVENT}-request pending queue is full`);
+        return;
+      }
       this.deps.store.upsertAttendee({
         coordinate: state.coordinate,
         pubkey: attendeePubkey,
@@ -2959,6 +3126,12 @@ export class Coordinator {
       return;
     }
     const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+    if (!decision.grant && !current && queueFull) {
+      log(
+        `[join] REJECTED ${short(attendeePubkey)}: the ${MAX_PENDING_JOINS_PER_EVENT}-request pending queue is full (${decision.reason})`,
+      );
+      return;
+    }
     const status = decision.grant ? "approved" : (current?.status ?? "pending");
     if (!decision.grant && current && current.status !== "pending") {
       log(
@@ -3037,8 +3210,19 @@ export class Coordinator {
     // left with the original shape: matching-OFF (where `enqueueProcess` returns
     // immediately, so the directory publish is the only effect) and every path
     // where the retry happens after the row is written. Re-applying is idempotent.
+    //
+    // The enrollment gate in handleInboxWrap runs once, OUTSIDE the retry (audit
+    // 2026-10-21, R-08). If a `delete_data` withdrawal purged the row between that
+    // check and this attempt, the upsert below — which INSERTs — recreated the
+    // withdrawn member with the profile they had asked to have deleted. Re-checked
+    // here, under the member lock the caller holds, the submission is dropped.
+    const enrolled = this.deps.store.getAttendee(state.coordinate, pubkey);
+    if (!enrolled) {
+      log(`[submission] dropped from ${short(pubkey)}: their enrollment row is gone (withdrew with delete_data)`);
+      return;
+    }
     if (order) {
-      const cur = this.deps.store.getAttendee(state.coordinate, pubkey);
+      const cur = enrolled;
       if (cur?.profile_rev != null && cur.profile_rumor_id !== order.rumorId) {
         const current = { rev: cur.profile_rev, created_at: cur.profile_created_at ?? 0, id: cur.profile_rumor_id ?? "" };
         const candidate = { rev: order.rev, created_at: order.createdAt, id: order.rumorId };
@@ -3298,16 +3482,16 @@ export class Coordinator {
     state: EventState,
     author: string,
     pages: number,
+    base: string,
   ): Promise<RosterContent[] | undefined> {
-    const { identifier } = parseCoordinate(state.coordinate);
-    const ds = rosterContinuationDs(identifier, pages);
+    const ds = rosterContinuationDs(base, pages);
     const events = await this.deps.transport.fetch(
       { kinds: [KIND_ROSTER], authors: [author], "#d": ds },
       state.configRelays,
     );
     const out: RosterContent[] = [];
     for (let page = 1; page < pages; page++) {
-      const d = rosterPageD(identifier, page);
+      const d = rosterPageD(base, page);
       const candidates = events
         .filter(
           (e) =>
@@ -3334,7 +3518,9 @@ export class Coordinator {
   }
 
   private async bootstrapHandover(state: EventState, prevCoordinator?: string): Promise<void> {
-    const { identifier } = parseCoordinate(state.coordinate);
+    // Both page-0 addresses (PROTOCOL-NIP.md §6.2.2): the outgoing coordinator may
+    // predate the derived one, and E_id always writes the event `d`.
+    const page0Ds = rosterPage0Ds(state.coordinate);
     // ROSTER AUTHORITY, NOT DECRYPTABILITY (NIP §3.7, audit SB-122). 31604's `d`
     // is the event's PUBLIC `d`, so anyone can publish there, and the ECK is held
     // by every approved attendee — `tryEckDecrypt` walks every version we hold, so
@@ -3365,7 +3551,7 @@ export class Coordinator {
     let rosterEvents: NostrEvent[];
     try {
       rosterEvents = await this.deps.transport.fetch(
-        { kinds: [KIND_ROSTER], authors: [...authorities], "#d": [identifier] },
+        { kinds: [KIND_ROSTER], authors: [...authorities], "#d": page0Ds },
         state.configRelays,
       );
     } catch {
@@ -3374,13 +3560,15 @@ export class Coordinator {
     const nowSec = Math.floor(this.now() / 1000);
     let roster: RosterContent | undefined;
     let rosterAuthor: string | undefined;
+    let rosterBase: string | undefined;
     // §3.1 order (created_at desc, then LOWEST id) via the shared comparator — a
     // created_at-only sort left two same-second rosters to relay arrival order, so
     // two coordinators bootstrapping the same handover could adopt different ones.
     for (const ev of [...rosterEvents].sort(compareLatest)) {
       // Re-checked here, never trusted to the relay's `authors`/`#d` filter.
       if (!authorities.has(ev.pubkey)) continue;
-      if (!ev.tags.some((t) => t[0] === "d" && t[1] === identifier)) continue;
+      // …and the `a` tag: another space's record can sit at the shared legacy `d`.
+      if (!isRosterPageFor(state.coordinate, page0Ds, ev.tags)) continue;
       // A roster dated in the future is a bid to win newest-wins against every
       // legitimate one. Same 15-minute tolerance the rumor path already applies.
       if ((ev.created_at ?? 0) > nowSec + 900) {
@@ -3392,19 +3580,20 @@ export class Coordinator {
       try {
         roster = rosterContentSchema.parse(JSON.parse(json));
         rosterAuthor = ev.pubkey;
+        rosterBase = ev.tags.find((t) => t[0] === "d")![1];
         break;
       } catch {
         /* malformed — try an older roster */
       }
     }
-    if (!roster || !rosterAuthor || roster.attendees.length === 0) return;
+    if (!roster || !rosterAuthor || rosterBase === undefined || roster.attendees.length === 0) return;
     // A paginated roster (PROTOCOL-NIP.md §6.2) has the rest of its membership on
     // `<d>:1`…`<d>:N-1`. Bootstrapping from page 0 alone would silently adopt a
     // fraction of the event and — because everyone missing is never re-granted —
     // lock the remainder out of the directory. So: all pages, from the SAME
     // author, or nothing.
     if ((roster.pages ?? 1) > 1) {
-      const rest = await this.fetchRosterPages(state, rosterAuthor, roster.pages!).catch(() => undefined);
+      const rest = await this.fetchRosterPages(state, rosterAuthor, roster.pages!, rosterBase).catch(() => undefined);
       if (!rest) {
         log(
           `[handover] ${state.coordinate}: ABORTING — the roster from ${short(rosterAuthor)} is paginated (${roster.pages} pages) and not every page was readable`,
@@ -3437,10 +3626,17 @@ export class Coordinator {
     for (const a of roster.attendees) {
       const existing = this.deps.store.getAttendee(state.coordinate, a.pubkey);
       if (existing?.status === "approved") continue; // already reconstructed from E_inbox backfill
+      // An organizer revocation outranks the roster (audit 2026-10-21, R-04): an
+      // outgoing coordinator's roster, or an E_id roster older than the revoke, may
+      // still list the member the grant's `revoked` set names.
+      if (this.deps.store.isRevoked(state.coordinate, a.pubkey)) {
+        log(`[handover] ${state.coordinate}: not adopting ${short(a.pubkey)} — revoked by the organizer`);
+        continue;
+      }
       // The same population cap a join is held to (audit SB-123): the E_inbox
       // backfill may already have enrolled people, so the merged-roster check above
       // is not enough on its own.
-      if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+      if (this.deps.store.approvedAttendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
         log(
           `[handover] ${state.coordinate}: stopped seeding at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap; the rest of the roster was not adopted`,
         );
@@ -3821,10 +4017,18 @@ export class Coordinator {
     const key = state.coordinate;
     const published = [...(this.rosterPagesPublished.get(key) ?? [])];
     const wire = pages.map((p) => JSON.stringify(p));
+    const legacy = publishesLegacyRosterAlias(state.identifier);
     for (const [i, page] of pages.entries()) {
       if (published[i] === wire[i]) continue;
       const event = buildRoster(this.publishKeys(state), key, page, this.nextCreatedAt, i);
       await this.publish(event, state.configRelays);
+      // The same page at the pre-R-53 address, for clients that predate the
+      // derived one (PROTOCOL-NIP.md §6.2.2). Readers that know the derived
+      // address check the `a` tag, so a colliding space at this alias can no
+      // longer withhold anything from them; it only still can from old clients.
+      if (legacy) {
+        await this.publish(buildRoster(this.publishKeys(state), key, page, this.nextCreatedAt, i, "legacy"), state.configRelays);
+      }
       // Record per page, not once at the end: a publish that throws halfway must
       // leave the pages it did NOT reach marked unpublished, so the next run
       // retries exactly those.
@@ -3838,6 +4042,67 @@ export class Coordinator {
     if (pages.length > 1) {
       log(`[roster] ${key}: ${roster.attendees.length} members across ${pages.length} pages`);
     }
+  }
+
+  /** Settles when the boot-time R-53 address upgrade has finished. Tests await it. */
+  rosterAddressMigration?: Promise<void>;
+
+  /**
+   * Upgrade step for the derived roster/matrix address (audit R-53,
+   * PROTOCOL-NIP.md §6.2.2). A coordinator that predates it published every
+   * roster at the bare event `d` only, and nothing republishes a roster until
+   * its membership next changes, so after the upgrade an updated client would
+   * find nothing at the derived address and fall back to the shared legacy one
+   * for as long as the event stays quiet. So, once per event: if this daemon has
+   * never written the derived page 0 (the durable publish watermark says so),
+   * republish the roster now, which writes it there and refreshes the alias,
+   * and likewise the 31606 for an event that has published one.
+   *
+   * Once per event, not once per boot: the watermark makes every later boot a
+   * handful of SQLite lookups. Sequential, because it is background work and
+   * the relays it publishes to are the same ones the live paths are using.
+   */
+  private async migrateRosterAddresses(stopped: () => boolean): Promise<number> {
+    let republished = 0;
+    let failed = 0;
+    for (const state of [...this.events.values()]) {
+      if (stopped()) return failed;
+      if (state.retentionExpired || this.events.get(state.coordinate) !== state) continue;
+      const derived = spaceRecordsD(state.coordinate);
+      // Per event: on the first production boot every relay timed out under the
+      // startup burst, and one throw used to abandon every event after it until
+      // the next restart. A failure leaves the watermark unset, so a later pass
+      // picks the event up again.
+      //
+      // Done-ness is its own marker, written only after a relay took the publish.
+      // The address watermark cannot serve: it is written when the event is BUILT,
+      // so on that boot the timed-out event was left looking upgraded for good.
+      const rosterDone = `r53-upgraded:${KIND_ROSTER}:${derived}`;
+      const matrixDone = `r53-upgraded:${KIND_MATCH_MATRIX}:${derived}`;
+      try {
+        if (
+          !this.deps.store.hasPublishWatermark(rosterDone) &&
+          this.deps.store.approvedAttendees(state.coordinate).length > 0
+        ) {
+          await this.publishRosterCoalesced(state);
+          this.deps.store.nextPublishCreatedAt(rosterDone, Math.floor(this.now() / 1000));
+          republished++;
+        }
+        if (
+          state.matchVisibility === "event" &&
+          this.deps.store.hasPublishWatermark(`${KIND_MATCH_MATRIX}:${state.identifier}`) &&
+          !this.deps.store.hasPublishWatermark(matrixDone)
+        ) {
+          await this.publishMatrix(state);
+          this.deps.store.nextPublishCreatedAt(matrixDone, Math.floor(this.now() / 1000));
+        }
+      } catch (e) {
+        failed++;
+        log(`[roster] address upgrade failed for ${state.coordinate}: ${e instanceof Error ? e.message : e}`);
+      }
+    }
+    if (republished > 0) log(`[roster] republished ${republished} roster(s) at the derived address (R-53 upgrade)`);
+    return failed;
   }
 
   // ── pipeline jobs ──────────────────────────────────────────────────────────
@@ -3858,7 +4123,13 @@ export class Coordinator {
     // any STT/LLM spend.
     await this.assertSpendAllowed(coordinate, pubkey);
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
-    if (!attendee) return false;
+    // Only an APPROVED member is processed (audit 2026-10-21, R-07). A job queued
+    // before a revoke used to run anyway and `publishDirectory` (which never reads
+    // status) republished the removed member's entry under the ROTATED ECK.
+    if (attendee?.status !== "approved") {
+      if (attendee) log(`[pipeline] ${short(pubkey)}: skipped — attendee is '${attendee.status}', not approved`);
+      return false;
+    }
     const { profile, media, introText } = this.parseStoredProfile(attendee);
     // Server-side media caps (audit COORD-4): per-descriptor duration cap (the
     // event's configured max) and a total-download budget per submission —
@@ -3934,6 +4205,12 @@ export class Coordinator {
     signal?.throwIfAborted();
     if (!this.eventStillLive(coordinate, state.gen)) {
       log(`[pipeline] ${short(pubkey)}: event no longer live (detached/expired) — discarding result`);
+      return false;
+    }
+    // …and the member is still approved (R-07): a revoke or withdrawal that landed
+    // while STT/LLM ran must not be followed by a commit and a directory publish.
+    if (this.deps.store.getAttendee(coordinate, pubkey)?.status !== "approved") {
+      log(`[pipeline] ${short(pubkey)}: no longer approved (revoked/withdrawn during processing) — discarding result`);
       return false;
     }
     // Conditional commit (audit C2): write the ai_profile ONLY if the attendee's
@@ -4046,6 +4323,11 @@ export class Coordinator {
       log(`[talk] process_talk skipped for ${short(pubkey)}: talks are off for this event`);
       return;
     }
+    // A removed speaker's queued talk is not transcribed (audit 2026-10-21, R-07).
+    if (this.deps.store.getAttendee(coordinate, pubkey)?.status !== "approved") {
+      log(`[talk] process_talk skipped for ${short(pubkey)}: no longer an approved attendee`);
+      return;
+    }
     // Spend gate (spec §8/§9): billing block OR exceeded budget parks talk STT.
     await this.assertSpendAllowed(coordinate, pubkey);
     const talk = this.deps.store.getTalk(coordinate, pubkey, talkD);
@@ -4076,6 +4358,10 @@ export class Coordinator {
               this.deps.store.addUsage(coordinate, pubkey, { bytes, durationSec }, this.now()),
             // Shutdown / per-event teardown (audit R13): unwind blocked STT/ffmpeg.
             signal,
+            // Ownership ref (audit R-15): without it a talk whose media a later
+            // revision replaced left this transcript owned by nothing, so neither
+            // delete_data nor the retention purge could ever reach it.
+            owner: { coordinate, pubkey },
             now: this.now,
           },
           d,
@@ -4772,13 +5058,51 @@ export class Coordinator {
     log(`[match] published 31606 matrix — ${pairs.length} pair(s)`);
   }
 
+  /**
+   * The pre-R-53 31604 page addresses (`<event-d>`, `<event-d>:1`…) this space may
+   * still NIP-09 delete: every one that no OTHER live space on this coordinator
+   * also occupies (PROTOCOL-NIP.md §6.2.2). Those aliases are shared by
+   * construction — two spaces named `summit` publish at the same legacy `d` — so
+   * deleting them unfiltered was one space's retention sweep erasing another's
+   * roster (audit R-53). Leaving a shared alias in place costs only an old
+   * client's copy; the space's own derived addresses are always deleted.
+   * Empty for an identifier whose alias could be a derived address, since this
+   * coordinator never published that alias in the first place.
+   */
+  private legacyRosterDsToDelete(state: EventState): string[] {
+    // The shape check only, not PUBLISH_LEGACY_ROSTER_ALIAS: a release that stops
+    // publishing the alias must still delete the ones earlier releases published.
+    if (legacyRosterDCollidesWithDerived(state.identifier)) return [];
+    const others = new Set<string>();
+    for (const coordinate of this.deps.store.liveEventCoordinates()) {
+      if (coordinate === state.coordinate) continue;
+      let identifier: string;
+      try {
+        identifier = parseCoordinate(coordinate).identifier;
+      } catch {
+        continue;
+      }
+      for (const d of rosterPageDs(identifier, MAX_ROSTER_PAGES)) others.add(d);
+    }
+    return rosterPageDs(state.identifier, MAX_ROSTER_PAGES).filter((d) => !others.has(d));
+  }
+
+  /** The 31606 addresses a matrix deletion covers: the derived one, plus the legacy one when no other space shares it. */
+  private matrixAddressesToDelete(state: EventState): string[] {
+    const out = [`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${spaceRecordsD(state.coordinate)}`];
+    if (this.legacyRosterDsToDelete(state).includes(state.identifier)) {
+      out.push(`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`);
+    }
+    return out;
+  }
+
   /** Delete the published 31606 matrix (visibility changed away from "event", H4/H5). */
   private async deleteMatrix(state: EventState): Promise<void> {
     const deletion = finalizeEvent(
       {
         kind: KIND_DELETION,
         created_at: Math.floor(this.now() / 1000),
-        tags: [["a", `${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`], ["k", String(KIND_MATCH_MATRIX)]],
+        tags: this.matrixAddressesToDelete(state).flatMap((a) => [["a", a], ["k", String(KIND_MATCH_MATRIX)]]),
         content: "match_visibility changed",
       },
       this.deps.coordSk,
@@ -4819,7 +5143,22 @@ export class Coordinator {
     order?: { createdAt: number; rumorId: string; expires: number },
   ): Promise<void> {
     const state = this.events.get(coordinate);
-    if (!state) return;
+    if (!state) {
+      // Not live is not the same as unknown (audit 2026-10-21, R-05). A suspended
+      // event keeps its store rows and resumes later, but returning here let the
+      // wrapper mark the command seen — so an organizer's revoke sent while the
+      // event's config was briefly unfetchable was consumed and never applied.
+      // Defer it (left unseen; the rescan after resume replays it) when the event is
+      // held, not detached, and the command really is from its E_id.
+      if (
+        this.suspended.has(coordinate) &&
+        !this.deps.store.isInstallTombstoned(coordinate) &&
+        from === parseCoordinate(coordinate).pubkey
+      ) {
+        throw new DeferredRumorError(`"${cmd}" for ${coordinate}: the event is suspended, not live`);
+      }
+      return;
+    }
     // Only the organizer (E_id) may command the coordinator.
     if (from !== state.eidPubkey) return;
 
@@ -4869,7 +5208,7 @@ export class Coordinator {
       // person's profile submission, held back by the enrollment gate, is picked up
       // by the periodic inbox rescan.
       if (!attendee && /^[0-9a-f]{64}$/.test(pubkey)) {
-        if (this.deps.store.attendeeCount(coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+        if (this.deps.store.approvedAttendeeCount(coordinate) >= MAX_ATTENDEES_PER_EVENT) {
           log(`[approve] REFUSED ${short(pubkey)}: event ${coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
           return;
         }
@@ -5110,9 +5449,16 @@ export class Coordinator {
     // …and the match list published TO them (audit DS41-046): it holds other
     // attendees' pubkeys, scores and private reasoning, and was replaced for
     // everyone else by the rotation. Its d is blinded under whichever ECK was
-    // current when it was published, so every pre-rotation version is named.
+    // current when it was published, so every pre-rotation version it was
+    // ACTUALLY published under is named (audit R-59): naming every version handed
+    // anyone still holding a long-retired ECK a public test of whether this pubkey
+    // joined after they lost access. The prev version is always named; whoever
+    // holds it is a current member and can read the roster anyway.
     const matchListDs = new Set(
-      state.eck.filter((v) => v.id !== newId).map((v) => blindedD(base64ToBytes(v.key), state.coordinate, removedPubkey)),
+      state.eck
+        .filter((v) => v.id !== newId)
+        .map((v) => blindedD(base64ToBytes(v.key), state.coordinate, removedPubkey))
+        .filter((d) => this.deps.store.everPublished(`${KIND_MATCH_LIST}:${d}`)),
     );
     matchListDs.add(blindedD(prevBytes, state.coordinate, removedPubkey));
     const deletion = finalizeEvent(
@@ -5131,8 +5477,11 @@ export class Coordinator {
     );
     await this.deps.transport.publish(deletion, state.configRelays);
 
-    // 2. Mark removed (idempotent).
+    // 2. Mark removed (idempotent), and drop their not-yet-started pipeline work
+    //    (audit 2026-10-21, R-07): it would otherwise spend on, and republish, a
+    //    member who is gone. A running job rechecks status before it commits.
     this.deps.store.upsertAttendee({ coordinate: state.coordinate, pubkey: removedPubkey, status: "revoked", now: this.now() });
+    this.deps.store.cancelSubjectPipelineJobs(state.coordinate, removedPubkey, { allStates: false });
 
     // 3. Drop every cached pair that involves the removed attendee so remaining
     //    lists/matrix don't reference them after rotation (audit H3).
@@ -5586,29 +5935,48 @@ export class Coordinator {
     // rotation republishes under the new blinded d without deleting the old one on
     // every relay). Delete across ALL historical ECK versions (audit C5) so a
     // pre-rotation directory/match record is not left readable after retention.
+    //
+    // ALL historical versions, but only the addresses actually published under
+    // them (audit R-59): this kind-5 is public, and naming a member's blinded d
+    // under a version retired before they joined told anyone holding that old ECK
+    // that they joined later. A subject with no recorded publish at all (a record
+    // from before the watermark existed, 2026-07-22) keeps the old every-version
+    // naming, because missing a real record is worse than the leak.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
-      for (const ver of state.eck) {
+      const addrs = state.eck.flatMap((ver) => {
         const d = blindedD(base64ToBytes(ver.key), state.coordinate, a.pubkey);
-        pushAddr(`${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${d}`, String(KIND_DIRECTORY_ENTRY));
-        pushAddr(`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST));
+        return [KIND_DIRECTORY_ENTRY, KIND_MATCH_LIST].map((kind) => ({ kind, d }));
+      });
+      const published = addrs.filter(({ kind, d }) => this.deps.store.everPublished(`${kind}:${d}`));
+      for (const { kind, d } of published.length ? published : addrs) {
+        pushAddr(`${kind}:${this.coordPubkey}:${d}`, String(kind));
       }
     }
-    // 31604 roster + 31606 matrix keyed on the event `d` (not blinded). The
+    // 31604 roster + 31606 matrix, at addresses that are not blinded. The
     // roster may have paginated (PROTOCOL-NIP.md §6.2), and a roster that later
     // SHRANK leaves stale higher pages on relays that nothing reads but that
     // still hold member pubkeys. Nothing durably records how many pages this
     // event ever had, so retention deletes every address pagination could have
     // used: deleting one that was never published costs a tag pair and is a
     // no-op at the relay, whereas missing one leaves member data behind.
-    for (const d of rosterPageDs(state.identifier, MAX_ROSTER_PAGES)) {
+    //
+    // Both address families (PROTOCOL-NIP.md §6.2.2): the derived one is this
+    // space's alone; the legacy alias only where no other live space shares it
+    // (audit R-53 — see legacyRosterDsToDelete).
+    for (const d of rosterPageDs(spaceRecordsD(state.coordinate), MAX_ROSTER_PAGES)) {
       pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${d}`, String(KIND_ROSTER));
     }
-    pushAddr(`${KIND_MATCH_MATRIX}:${this.coordPubkey}:${state.identifier}`, String(KIND_MATCH_MATRIX));
+    for (const d of this.legacyRosterDsToDelete(state)) {
+      pushAddr(`${KIND_ROSTER}:${this.coordPubkey}:${d}`, String(KIND_ROSTER));
+    }
+    for (const a of this.matrixAddressesToDelete(state)) pushAddr(a, String(KIND_MATCH_MATRIX));
     // Published 31610 talks: delete under every historical ECK version (audit C5),
     // not only the one recorded on the row, so a rotated-away talk address is cleaned.
+    // Same published-only rule as the member records above (audit R-59).
     for (const talk of this.deps.store.publishedTalksForEvent(state.coordinate)) {
-      for (const ver of state.eck) {
-        const d = talkBlindedD(base64ToBytes(ver.key), state.coordinate, talk.pubkey, talk.talk_d);
+      const ds = state.eck.map((ver) => talkBlindedD(base64ToBytes(ver.key), state.coordinate, talk.pubkey, talk.talk_d));
+      const published = ds.filter((d) => this.deps.store.everPublished(`${KIND_TALK}:${d}`));
+      for (const d of published.length ? published : ds) {
         pushAddr(`${KIND_TALK}:${this.coordPubkey}:${d}`, String(KIND_TALK));
       }
     }
@@ -6123,6 +6491,28 @@ export class Coordinator {
     const retentionTimer = setInterval(() => void this.retentionSweep().catch(() => {}), 3_600_000);
     if (typeof (retentionTimer as any).unref === "function") (retentionTimer as any).unref();
     this.closers.add(() => clearInterval(retentionTimer));
+    // R-53 address upgrade: in the background, AFTER the retention sweep (so an
+    // event it just expired is not republished) and never on the readiness path.
+    let migrationStopped = false;
+    this.closers.add(() => {
+      migrationStopped = true;
+    });
+    // Retried every 10 minutes until a pass completes with no failure: it is
+    // background work, and a relay that timed out at boot usually answers later.
+    let migrationTimer: ReturnType<typeof setTimeout> | undefined;
+    this.closers.add(() => clearTimeout(migrationTimer));
+    const migrate = (): Promise<void> =>
+      this.migrateRosterAddresses(() => migrationStopped)
+        .catch((e) => {
+          log(`[roster] address upgrade failed: ${e instanceof Error ? e.message : e}`);
+          return 1;
+        })
+        .then((failed) => {
+          if (failed === 0 || migrationStopped) return;
+          migrationTimer = setTimeout(() => void migrate(), ROSTER_MIGRATION_RETRY_MS);
+          if (typeof (migrationTimer as any).unref === "function") (migrationTimer as any).unref();
+        });
+    this.rosterAddressMigration = migrate();
     // Profile-refresh sweep: pick up kind-0 bios edited outside Nostrautica (see
     // {@link profileRefreshSweep} for the user report this fixes).
     //
@@ -6587,6 +6977,22 @@ export class Coordinator {
     for (const { w } of ordered) await this.handleInboxWrap(state.coordinate, w as unknown as GiftWrap);
   }
 
+  /** Replay the coordinator's own inbox over the gift-wrap window (see rescanInboxes). */
+  private async rescanCoordinatorInbox(): Promise<void> {
+    const since = giftwrapSince(Math.floor(this.now() / 1000));
+    try {
+      const wraps = await this.deps.transport.fetch(
+        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since },
+        this.deps.defaultRelays,
+      );
+      const unseen = wraps.filter((w) => !this.deps.store.isRumorSeen(w.id)).length;
+      if (unseen > 0) log(`[rescan] coordinator inbox: ${unseen} unseen wrap(s) of ${wraps.length} in the window`);
+      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
+    } catch (e) {
+      log(`[rescan] coordinator-inbox rescan failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   /**
    * Periodic rescan of every live inbox (P1 #14, open since July).
    *
@@ -6610,17 +7016,7 @@ export class Coordinator {
    */
   async rescanInboxes(): Promise<void> {
     const since = giftwrapSince(Math.floor(this.now() / 1000));
-    try {
-      const wraps = await this.deps.transport.fetch(
-        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since },
-        this.deps.defaultRelays,
-      );
-      const unseen = wraps.filter((w) => !this.deps.store.isRumorSeen(w.id)).length;
-      if (unseen > 0) log(`[rescan] coordinator inbox: ${unseen} unseen wrap(s) of ${wraps.length} in the window`);
-      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
-    } catch (e) {
-      log(`[rescan] coordinator-inbox rescan failed: ${e instanceof Error ? e.message : e}`);
-    }
+    await this.rescanCoordinatorInbox();
     // Snapshot: an event can detach (or a config handover can repoint relays)
     // while this loop is awaiting, and `eventStillLive` re-checks per iteration.
     for (const coordinate of [...this.events.keys()]) {

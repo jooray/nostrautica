@@ -51,6 +51,8 @@ describe("isBlockedAddress", () => {
     for (const ip of [
       "64:ff9b::7f00:1", // NAT64 (64:ff9b::/96) of 127.0.0.1
       "64:ff9b::ffff:a00:1", // NAT64 shape within the /96
+      "64:ff9b:1::7f00:1", // RFC 8215 local-use NAT64 (64:ff9b:1::/48) of 127.0.0.1 (R-56)
+      "64:ff9b:1:ffff::a9fe:a9fe", // …and of cloud metadata
       "2002:0a00:0001::1", // 6to4 of 10.0.0.1
       "2002:7f00:0001::", // 6to4 of 127.0.0.1
       "2001:0000:4136:e378:8000:63bf:3fff:fdd2", // Teredo
@@ -162,6 +164,19 @@ describe("safeFetch", () => {
     await expect(
       safeFetch("https://1.1.1.1/big", { allowedOrigins: ["https://1.1.1.1"], maxBytes: 1000 }),
     ).rejects.toMatchObject({ retryable: false });
+  });
+
+  it("reports the bytes it streamed before aborting an over-cap body (audit R-18)", async () => {
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(streamResponse(5000));
+    let seen = 0;
+    await expect(
+      safeFetch("https://1.1.1.1/big", {
+        allowedOrigins: ["https://1.1.1.1"],
+        maxBytes: 1000,
+        onBytes: (n) => (seen += n),
+      }),
+    ).rejects.toMatchObject({ retryable: false });
+    expect(seen).toBe(5000);
   });
 
   it("rejects an over-cap declared Content-Length up front", async () => {

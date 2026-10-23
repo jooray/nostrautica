@@ -107,6 +107,33 @@ class BlossomClientTest {
         assertFalse(client.delete(signer, base(a), "bb".repeat(32)))
     }
 
+    @Test fun aReplyUrlIsOnlyTakenForOurBlobOnTheServerWeAsked() {
+        // R-21: the hash anywhere in the URL was enough, on any host.
+        val sha = "ab".repeat(32)
+        val server = "https://blossom.example/"
+        val fallback = "https://blossom.example/$sha"
+        assertEquals("https://blossom.example/$sha.mp4", BlossomClient.boundReplyUrl(server, sha, "https://blossom.example/$sha.mp4"))
+        assertEquals("https://BLOSSOM.example:443/$sha", BlossomClient.boundReplyUrl(server, sha, "https://BLOSSOM.example:443/$sha"))
+        assertEquals(fallback, BlossomClient.boundReplyUrl(server, sha, "https://evil.example/?x=$sha"))
+        assertEquals(fallback, BlossomClient.boundReplyUrl(server, sha, "https://evil.example/$sha"))
+        assertEquals(fallback, BlossomClient.boundReplyUrl(server, sha, "https://blossom.example/?x=$sha"))
+        assertEquals(fallback, BlossomClient.boundReplyUrl(server, sha, "https://blossom.example/$sha/../other"))
+        assertEquals(fallback, BlossomClient.boundReplyUrl(server, sha, "http://blossom.example/$sha"))
+        assertEquals(fallback, BlossomClient.boundReplyUrl(server, sha, null))
+    }
+
+    @Test fun noUserinfoAndNoHostOnThePhoneOrItsNetwork() {
+        // R-71: peer-named URLs must not turn the phone into a LAN probe.
+        for (bad in listOf(
+            "https://user:pw@blossom.band/x", "https://localhost/x", "https://127.0.0.1/x", "https://10.0.0.5/x",
+            "https://172.20.1.1/x", "https://192.168.1.1:8443/x", "https://169.254.169.254/x", "https://100.64.0.1/x",
+            "https://[::1]/x", "https://[fe80::1]/x", "https://[fd00::1]/x", "https://[::ffff:192.168.1.1]/x", "https://printer.local/x",
+        )) assertFalse(bad, BlossomClient.isAcceptedBlossomUrl(bad))
+        assertTrue(BlossomClient.isAcceptedBlossomUrl("https://blossom.band:8443/x"))
+        assertTrue(BlossomClient.isAcceptedBlossomUrl("https://172.32.0.1/x"))
+        assertTrue(BlossomClient.isAcceptedBlossomUrl("https://[2001:db8::1]/x"))
+    }
+
     @Test fun onlyHttpsServersAreAccepted() {
         assertTrue(BlossomClient.isAcceptedBlossomUrl("https://blossom.band"))
         assertFalse(BlossomClient.isAcceptedBlossomUrl("http://blossom.band"))

@@ -418,6 +418,38 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
     }
   });
 
+  it("gives every relay, and every resubscribe, its own filter object (audit R-45)", async () => {
+    // nostr-tools writes `since = lastEmitted + 1` into the filter object it was
+    // handed when a relay reconnects; one relay's far-future event must not move
+    // the `since` of any other relay's subscription, or of the caller's filter.
+    vi.useFakeTimers();
+    try {
+      const client = new NostrClient([]);
+      const filters: Record<string, unknown>[] = [];
+      const subs: FakeSub[] = [];
+      (client as any).pool = {
+        subscribe(relays: string[], f: Record<string, unknown>, params: FakeSub["params"]) {
+          filters.push(f);
+          const sub: FakeSub = { url: relays[0]!, params, closed: false };
+          subs.push(sub);
+          return { close: () => (sub.closed = true) };
+        },
+        close() {},
+      };
+      const callerFilter = { kinds: [31600], authors: ["a".repeat(64)] };
+      client.subscribe(callerFilter, () => {}, ["wss://evil", "wss://good"]);
+      filters[0]!.since = 4_000_000_000; // what the pool does after evil's reconnect
+      expect(filters[1]!.since).toBeUndefined();
+      expect((callerFilter as Record<string, unknown>).since).toBeUndefined();
+      subs[1]!.params.onclose([{ url: "", reason: "connection failed" }]);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(filters[2]).not.toBe(filters[0]);
+      expect(filters[2]!.since).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("dedupes by event id across relays (the group subscribe used to do this)", () => {
     const client = new NostrClient([]);
     const subs = fakePool(client);

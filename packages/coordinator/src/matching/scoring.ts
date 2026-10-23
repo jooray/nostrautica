@@ -172,6 +172,20 @@ export function pairInputsHash(hashA: string, hashB: string, modelKey = ""): str
   return sha256Hex(utf8ToBytes(`${x}|${y}|${matchPromptRevision()}|${modelKey}`));
 }
 
+/**
+ * An attendee's display name as it may appear anywhere in a prompt (audit R-75):
+ * fenced like every other attendee-authored value, and folded onto one line. A
+ * name is interpolated into scaffolding lines as well as `Name:` lines (the
+ * reverse batch's writer directory and per-entry bindings), and there a raw
+ * newline let a display name end the line it sat in and open a forged
+ * `SHARED PERSON` section of its own. One spelling everywhere, too, so the name
+ * the model echoes back is compared against what it was actually shown.
+ */
+function promptName(name: string | undefined): string | undefined {
+  const folded = name ? fenceUntrusted(name).replace(/\s+/g, " ").trim() : "";
+  return folded || undefined;
+}
+
 function profileText(p: AiProfile, name?: string): string {
   // Every value below is attendee-authored, and it is being pasted between the
   // delimiters this prompt asks the model to trust — `--- CANDIDATE n ---`,
@@ -179,10 +193,11 @@ function profileText(p: AiProfile, name?: string): string {
   // its own and invent a candidate, or forge a boundary and steal the target's
   // work. The prompt scaffolding itself is untouched: BP3 is benchmark-validated.
   const f = fenceUntrusted;
+  const shownName = promptName(name);
   return [
     // B1: without a Name line the model cannot address anyone correctly and
     // falls back to inventing one (it copied "Elena" from the prompt example).
-    ...(name ? [`Name: ${f(name)}`] : []),
+    ...(shownName ? [`Name: ${shownName}`] : []),
     `Summary: ${f(p.summary)}`,
     `Skills: ${fenceUntrustedList(p.skills).join(", ")}`,
     `Interests: ${fenceUntrustedList(p.interests).join(", ")}`,
@@ -488,10 +503,11 @@ function resolveEntry<T extends BatchCandidate>(
 ): { subject: T; corrected?: string } | undefined {
   const atIndex = ordered[idx - 1]!;
   const echo = foldName(echoed);
-  const expected = foldName(atIndex.name);
+  // Compared against the name as PRINTED (promptName), not the raw one.
+  const expected = foldName(promptName(atIndex.name));
   // Nothing to check against: no name printed, or the model returned no echo.
   if (!echo || !expected || echo === expected) return { subject: atIndex };
-  const named = ordered.filter((c) => foldName(c.name) === echo);
+  const named = ordered.filter((c) => foldName(promptName(c.name)) === echo);
   if (named.length === 1) {
     return {
       subject: named[0]!,
@@ -909,8 +925,8 @@ export function buildReverseBatchUserBlock(
   // Names when we have them, positional labels when we do not (pre-migration rows
   // and profiles without a display name): the directory is useless if half its
   // lines say "undefined".
-  const recipient = sharedName?.trim() || "the shared person";
-  const writer = (c: BatchCandidate, i: number) => c.name?.trim() || `TARGET ${i + 1}`;
+  const recipient = promptName(sharedName) ?? "the shared person";
+  const writer = (c: BatchCandidate, i: number) => promptName(c.name) ?? `TARGET ${i + 1}`;
   return [
     ...eventBlock(event),
     "",

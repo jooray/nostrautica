@@ -48,6 +48,13 @@ describe("event-keys backup union (audit SB-89)", () => {
     expect(promoted.eck).toContainEqual(v2);
   });
 
+  it("keeps every device's revocations, newest last, within the cap (R-04)", () => {
+    const m = mergeEventKeysBackups(base({ revoked: [hex("a"), hex("b")] }), base({ revoked: [hex("b"), hex("c")] }));
+    expect(new Set(m.revoked)).toEqual(new Set([hex("a"), hex("b"), hex("c")]));
+    expect(eventKeysBackupSchema.safeParse(m).success).toBe(true);
+    expect(mergeEventKeysBackups(base({}), base({})).revoked).toBeUndefined();
+  });
+
   it("reads a backup written before these fields existed", () => {
     const old = { v: 2, eid_nsec: hex("1"), einbox_nsec: hex("2"), eck: [{ id: 1, key: k(1) }] };
     const m = mergeEventKeysBackups(eventKeysBackupSchema.parse(old), base({ coordinator_gen: 3 }));

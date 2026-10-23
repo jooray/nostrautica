@@ -7,6 +7,23 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MediaRulesTest {
+    @Test fun aPickedStreamIsReadOnlyUpToTheCap() {
+        // The provider's declared size never enters into it: the stream's own length does (R-74).
+        val out = java.io.ByteArrayOutputStream()
+        assertTrue(Bounded.copy(ByteArray(100_000).inputStream(), out, 100_000))
+        assertEquals(100_000, out.size())
+        assertFalse(Bounded.copy(ByteArray(100_001).inputStream(), java.io.ByteArrayOutputStream(), 100_000))
+        assertEquals(10, Bounded.readBytes(ByteArray(10).inputStream(), 10)?.size)
+        assertNull(Bounded.readBytes(ByteArray(11).inputStream(), 10))
+    }
+
+    @Test fun aPickedFileIsTypedByItsTracksNotItsProvider() {
+        assertEquals("video/mp4", Precheck.pickedMime("video", hasVideo = true))
+        assertEquals("audio/mp4", Precheck.pickedMime("video", hasVideo = false))
+        // Audio mode drops a video track rather than uploading it as-is.
+        assertEquals("audio/mp4", Precheck.pickedMime("audio", hasVideo = true))
+    }
+
     @Test fun precheck() {
         assertNull(Precheck.check(1000, 80.0, 90))
         assertEquals(Precheck.Violation("duration", 90, 91), Precheck.check(1000, 91.2, 90))

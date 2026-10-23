@@ -46,6 +46,9 @@ import { pickLatest } from "@nostrautica/protocol";
 import { fetchEventsRelayOnly } from "./ndk.js";
 import { publishOrQueue } from "./publish-queue.js";
 import { cacheGet, cacheSet, activeCacheOwner, ANON } from "$lib/cache/persist.js";
+import { eventAddress, acceptedWatermark, noteAccepted } from "./accepted-watermark.js";
+
+export { eventAddress, acceptedWatermark };
 
 // ── Per-address serialization (R6) ───────────────────────────────────────────
 
@@ -95,10 +98,6 @@ async function withAddressLock<T>(name: string, fn: () => Promise<T>): Promise<T
   return withInProcessLock(name, fn);
 }
 
-/** The address a replaceable/addressable event occupies: `kind:pubkey[:d]`. */
-export function eventAddress(kind: number, author: string, identifier?: string): string {
-  return identifier !== undefined ? `${kind}:${author}:${identifier}` : `${kind}:${author}`;
-}
 
 function watermarkKey(address: string): string {
   return `mono:${address}`;
@@ -194,5 +193,7 @@ export async function publishMonotonic(input: MonotonicInput): Promise<Monotonic
   // is enough; holding the lock across a slow WSS publish would needlessly stall
   // the next same-address reservation.
   const published = await publishOrQueue(event, input.relays);
+  // A queued one is noted by the outbox flush when it is finally delivered.
+  if (published) noteAccepted(address, createdAt, owner);
   return { published, createdAt };
 }

@@ -53,6 +53,7 @@ import today.cypherpunk.nostrautica.domain.join.JoinFlow
 import today.cypherpunk.nostrautica.domain.join.introMedia
 import today.cypherpunk.nostrautica.domain.join.joinFlow
 import today.cypherpunk.nostrautica.domain.media.AudioTake
+import today.cypherpunk.nostrautica.domain.media.Bounded
 import today.cypherpunk.nostrautica.domain.media.CameraTake
 import today.cypherpunk.nostrautica.domain.media.CaptureClock
 import today.cypherpunk.nostrautica.domain.media.ExternalUrl
@@ -358,15 +359,19 @@ private fun RecordBody(ev: EventState, r: Route.Record, p: androidx.compose.foun
             // A provider query is IPC into another app (Photos, Drive): never on the main thread.
             val size = withContext(Dispatchers.IO) { runCatching { cr.query(uri, arrayOf(OpenableColumns.SIZE), null, null, null)?.use { if (it.moveToFirst()) it.getLong(0) else -1L } ?: -1L }.getOrDefault(-1L) }
             if (size > Precheck.MAX_UPLOAD_BYTES) { rejectOverLimits(size, 0.0); return@launch }
-            val probe = withContext(Dispatchers.IO) { shrinker.probe(uri) }
-            val duration = probe?.durationSec ?: 0.0
+            // Unreadable here means it can't be rewritten without its metadata at submit either.
+            val probe = withContext(Dispatchers.IO) { shrinker.probe(uri) } ?: run { error = s.t("record.android.cantStrip"); return@launch }
+            val duration = probe.durationSec
             // A clip over the length limit is rejected before any copy or upload.
             if (rejectOverLimits(maxOf(size, 0), duration)) return@launch
-            val mime = withContext(Dispatchers.IO) { cr.getType(uri) } ?: if (mode == "audio") "audio/mp4" else "video/mp4"
+            val mime = Precheck.pickedMime(mode, probe.hasVideo)
             val ext = if (mime.startsWith("audio/")) "m4a" else "mp4"
             val dest = File(File(ctx.cacheDir, "recordings").apply { mkdirs() }, "${java.util.UUID.randomUUID()}.$ext")
-            val copied = runCatching { withContext(Dispatchers.IO) { cr.openInputStream(uri)?.use { i -> dest.outputStream().use { o -> i.copyTo(o) } } } }.isSuccess
-            if (!copied || dest.length() == 0L) { dest.delete(); error = s.t("record.deviceError.unknown.camera"); return@launch }
+            // The provider's SIZE is advisory (-1 when absent, or simply wrong): the copy itself
+            // stops at the cap instead of filling the cache with whatever the stream yields (R-74).
+            val within = runCatching { withContext(Dispatchers.IO) { cr.openInputStream(uri)?.use { i -> dest.outputStream().use { o -> Bounded.copy(i, o, Precheck.MAX_UPLOAD_BYTES) } } } }.getOrNull()
+            if (within == false) { dest.delete(); rejectOverLimits(Precheck.MAX_UPLOAD_BYTES + 1, duration); return@launch }
+            if (within == null || dest.length() == 0L) { dest.delete(); error = s.t("record.deviceError.unknown.camera"); return@launch }
             if (rejectOverLimits(dest.length(), duration)) { dest.delete(); return@launch }
             camera.release(); cameraOn = false; meter.stop(); micOn = false
             recorded?.file?.delete()
@@ -428,10 +433,20 @@ private fun RecordBody(ev: EventState, r: Route.Record, p: androidx.compose.foun
         runBusy {
             var file = take.file
             var mime = take.mime
-            if (mime.startsWith("video/")) {
+            if (recordedPicked) {
+                // A picked file is always rewritten, audio too, so its location and tags never
+                // publish (R-22). Fail closed: if it can't be rewritten, the original isn't sent.
+                val video = mime.startsWith("video/")
                 compressPct = 0
-                // Our own takes are already 720p; a picked file is always re-muxed to drop its location.
-                shrinker.shrink(Uri.fromFile(take.file), always = recordedPicked) { compressPct = it }?.let { file = it; mime = "video/mp4" }
+                val stripped = shrinker.strip(Uri.fromFile(take.file), audioOnly = !video) { compressPct = it }
+                compressPct = null
+                if (stripped == null) { error = s.t("record.android.cantStrip"); return@runBusy }
+                file = stripped
+                mime = if (video) "video/mp4" else "audio/mp4"
+            } else if (mime.startsWith("video/")) {
+                compressPct = 0
+                // Our own takes carry no location; they are only shrunk when over the limits.
+                shrinker.shrink(Uri.fromFile(take.file), always = false) { compressPct = it }?.let { file = it; mime = "video/mp4" }
                 compressPct = null
             }
             val bytes = withContext(Dispatchers.IO) { file.readBytes() }

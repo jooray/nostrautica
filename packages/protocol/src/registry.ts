@@ -126,9 +126,9 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "rosterContentSchema",
     sealing: "eck",
     author: "Coordinator, or `E_id` without one",
-    protection: "ECK-encrypted; `d` = event `d` (page N at `<event-d>:N`)",
+    protection: "ECK-encrypted; coordinator `d` = `spaceRecordsD(coordinate)` (legacy alias: event `d`), `E_id` `d` = event `d`; page N at `<base>:N`",
     notes:
-      "Approved-attendee index, current ECK version, per-device `chat_keys`, and the active Marmot `nostr_group_id` when chat is on. Latest valid roster wins; `nostr_group_id` is the authoritative event→group binding. A roster too large for one NIP-44 payload is paginated across `<event-d>:1`… with a `pages` count on page 0 and `v:3` (§6.2.1); one that fits keeps `v:2` and its single address.",
+      "Approved-attendee index, current ECK version, per-device `chat_keys`, and the active Marmot `nostr_group_id` when chat is on. Latest valid roster wins; `nostr_group_id` is the authoritative event→group binding. A roster too large for one NIP-44 payload is paginated across `<base>:1`… with a `pages` count on page 0 and `v:3` (§6.2.1); one that fits keeps `v:2` and its single address.",
   },
   {
     constant: "KIND_MATCH_LIST",
@@ -150,7 +150,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     schemaExport: "matchMatrixContentSchema",
     sealing: "eck",
     author: "Coordinator",
-    protection: "ECK-encrypted; `d` = event `d`",
+    protection: "ECK-encrypted; `d` = `spaceRecordsD(coordinate)`",
     notes:
       "Event-wide score-only matrix; published only when `match_visibility: event`. Deleted when visibility changes away from it.",
   },
@@ -266,7 +266,7 @@ export const CUSTOM_KIND_REGISTRY: readonly CustomKindEntry[] = [
     sealing: "gift-wrap",
     author: "`E_id` → coordinator",
     notes:
-      "Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5. Optional `prev_coordinator` names the replaced coordinator, the only non-`E_id` roster author the handover may adopt (§3.7).",
+      "Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5. Optional `prev_coordinator` names the replaced coordinator, the only non-`E_id` roster author the handover may adopt (§3.7). Optional `revoked` lists organizer-revoked members the coordinator records before replaying `E_inbox`.",
   },
   {
     constant: "KIND_ADMIN_COMMAND",

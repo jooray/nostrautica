@@ -59,19 +59,27 @@ export function mergePending(
  * transition out of pending (approved — in the roster or just now — or revoked)
  * or been locally rejected (UX-A7, no protocol action). Removal happens HERE,
  * never in `mergePending`.
+ *
+ * `revokedAt` is the persisted per-event revocation time (R-13): a request no
+ * newer than the person's revocation is the one they were revoked over, not a
+ * new ask, and must not come back as approvable after a reload.
  */
 export function visiblePending(
   known: PendingRequest[],
   isApproved: (pubkey: string) => boolean,
   revoked: Set<string>,
   rejected: Set<string> = new Set(),
+  revokedAt: Readonly<Record<string, number>> = {},
 ): PendingRequest[] {
-  return known.filter(
-    (r) =>
+  return known.filter((r) => {
+    const at = revokedAt[r.attendeePubkey];
+    return (
       !isApproved(r.attendeePubkey) &&
       !revoked.has(r.attendeePubkey) &&
-      !rejected.has(r.attendeePubkey),
-  );
+      !rejected.has(r.attendeePubkey) &&
+      !(at !== undefined && r.rumorCreatedAt <= at)
+    );
+  });
 }
 
 /** Operational state of an approved person, derived from 21606 statuses. */

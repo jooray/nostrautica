@@ -253,7 +253,15 @@ export class NostrClient {
 
     const subscribeOne = (url: string, attempt: number): void => {
       if (closingDeliberately) return;
-      const sub = this.pool.subscribe([url], filter as any, {
+      // A fresh copy per relay and per resubscribe (audit R-45). nostr-tools keeps
+      // the object it is given as `sub.filters` and, on a reconnect, writes
+      // `filters[f].since = lastEmitted + 1` into it, where `lastEmitted` advances
+      // on every EVENT frame, including ones that fail verification or the filter.
+      // With one shared object, a single relay sending a far-future `created_at`
+      // and then dropping the socket set `since` for EVERY relay's subscription,
+      // and nostr-tools' own matchFilter then discarded live events from all of
+      // them. The `since` a relay earns now stays on that relay's copy.
+      const sub = this.pool.subscribe([url], { ...filter } as any, {
         onevent: (e: NostrEvent) => {
           // The pool deduped across the group for us; per-relay subs must do it
           // themselves or the same wrap is handled once per relay.
@@ -420,7 +428,9 @@ export class NostrClient {
         }
         resolve(events);
       };
-      const sub = this.pool.subscribe(this.usable(relays), filter as any, {
+      // Copied for the same reason as in subscribe() (audit R-45): the pool may
+      // write `since` into it, and the caller's filter is not ours to edit.
+      const sub = this.pool.subscribe(this.usable(relays), { ...filter } as any, {
         onevent: (e: NostrEvent) => {
           if (!seen.has(e.id)) {
             seen.add(e.id);

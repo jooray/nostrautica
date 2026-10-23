@@ -32,6 +32,10 @@ import { isCliSubcommand, runCli } from "./cli.js";
 import { releaseSummary, coordinatorRelease, provenanceIsKnown } from "./release.js";
 import { installExitLogging } from "./lifecycle.js";
 
+/** Background retry of a failed boot-time 31611 announce: every 10 minutes, at most 12 times. */
+const ANNOUNCE_RETRY_MS = 600_000;
+const ANNOUNCE_RETRY_LIMIT = 12;
+
 async function runDaemon(): Promise<void> {
   // Exit forensics FIRST, before anything that can throw (production outage
   // 2026-07-25: the daemon died 3 minutes after a deploy and logged nothing at
@@ -129,7 +133,7 @@ async function runDaemon(): Promise<void> {
     ? {
         payment: new ApiKeyPayment(apiKey),
         baseUrl: config.providers.venice?.base_url,
-        // Privacy is enforced PER ROLE by verifyModelPrivacy() below (a role may
+        // Privacy is enforced PER ROLE by resolveRoleRoutes() below (a role may
         // relax it via models.<role>.require_private = false, spec §16.2), so the
         // adapter must return the unfiltered list here.
         requirePrivate: false,
@@ -175,6 +179,8 @@ async function runDaemon(): Promise<void> {
       ...(r.amount_sats ? { defaultAmountSats: r.amount_sats } : {}),
       // Durable journal (audit H8): reservations survive a crash mid-request.
       journal: store,
+      // Mint traffic gets the same DNS pinning as every provider request (R-50).
+      net: providerNet,
     });
     // Reconcile interrupted reservations from a previous run (audit COORD-5):
     // reserved-but-unsettled proofs are quarantined as ambiguous, never lost.
@@ -262,14 +268,12 @@ async function runDaemon(): Promise<void> {
     // list is worth looking at, so this is most of the wall-clock between walking
     // in and seeing matches.
     //
-    // Cashu is the exception, and it is not a style preference: CashuPayment keeps
-    // ONE in-flight reservation id and rewrites the whole wallet file around an
-    // await, so two overlapping requests mis-journal each other's change and can
-    // lose bearer money (the audit item for this is still open). A role routed to
-    // Routstr therefore stays strictly serial until that is fixed. Production
-    // routes every role to Venice, where the client is reentrant and payment is an
-    // API key.
-    scoreConcurrency: referencedProviders.has("routstr") ? 1 : 2,
+    // Cashu used to be the exception: CashuPayment kept ONE in-flight reservation id
+    // and rewrote the wallet file around an await, so overlapping requests could
+    // mis-journal each other's change. Reservations are now per-request handles and
+    // every wallet-file section is serialised (audit R-49), so Routstr gets the same
+    // two as Venice.
+    scoreConcurrency: 2,
     chatMls,
     // Install authorization + unsolicited-install caps (audit COORD-3).
     maxEvents: config.security.max_events,
@@ -301,19 +305,36 @@ async function runDaemon(): Promise<void> {
   // this coordinator instead of pasting its npub (docs/COORDINATOR-DISCOVERY-PLAN.md).
   // Replaceable — republished on every boot so config edits propagate.
   if (config.coordinator.announce) {
-    try {
-      const content = buildAnnounceContent(config, disclosureFromRoutes(roles));
-      // Release provenance (§13.9): the announce wire schema has no version field,
-      // so surface the release id in the existing `about` text (bounded at 2000).
-      const relTag = `nostrautica ${coordinatorRelease().releaseId}`;
-      content.about = (content.about ? `${content.about}\n\n${relTag}` : relTag).slice(0, 2000);
-      const announce = buildCoordinatorAnnounce(coordSk, content);
-      await client.publish(announce as any, config.relays.default);
-      console.log(
-        `[coordinator] announced as "${config.coordinator.name}" (kind 31611, pricing=${config.pricing.model})`,
-      );
-    } catch (e) {
-      console.warn("[coordinator] announce publish failed:", e instanceof Error ? e.message : e);
+    // Retried in the background: on the 0.14.0 production boot every relay timed
+    // out under the startup burst, which left the previous release's announcement
+    // (and its privacy disclosure) live until the next restart. Rebuilt per attempt
+    // so a retry carries a fresh created_at.
+    const announceOnce = async (): Promise<boolean> => {
+      try {
+        const content = buildAnnounceContent(config, disclosureFromRoutes(roles));
+        // Release provenance (§13.9): the announce wire schema has no version field,
+        // so surface the release id in the existing `about` text (bounded at 2000).
+        const relTag = `nostrautica ${coordinatorRelease().releaseId}`;
+        content.about = (content.about ? `${content.about}\n\n${relTag}` : relTag).slice(0, 2000);
+        const announce = buildCoordinatorAnnounce(coordSk, content);
+        await client.publish(announce as any, config.relays.default);
+        console.log(
+          `[coordinator] announced as "${config.coordinator.name}" (kind 31611, pricing=${config.pricing.model})`,
+        );
+        return true;
+      } catch (e) {
+        console.warn("[coordinator] announce publish failed:", e instanceof Error ? e.message : e);
+        return false;
+      }
+    };
+    if (!(await announceOnce())) {
+      let attempts = 0;
+      const retry = setInterval(() => {
+        void announceOnce().then((ok) => {
+          if (ok || ++attempts >= ANNOUNCE_RETRY_LIMIT) clearInterval(retry);
+        });
+      }, ANNOUNCE_RETRY_MS);
+      retry.unref();
     }
   }
 

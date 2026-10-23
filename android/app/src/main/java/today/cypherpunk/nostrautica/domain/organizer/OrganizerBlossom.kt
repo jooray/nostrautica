@@ -21,7 +21,7 @@ import today.cypherpunk.nostrautica.protocol.Bytes
 import today.cypherpunk.nostrautica.protocol.JsJson
 import today.cypherpunk.nostrautica.protocol.Kinds
 import today.cypherpunk.nostrautica.protocol.NostrSigner
-import today.cypherpunk.nostrautica.protocol.isHttpsUrl
+import today.cypherpunk.nostrautica.domain.media.BlossomClient
 import today.cypherpunk.nostrautica.protocol.jsonObjectOf
 import today.cypherpunk.nostrautica.protocol.nowSec
 import java.util.concurrent.TimeUnit
@@ -67,9 +67,8 @@ class OrganizerBlossom(http: OkHttpClient, private val nostr: Nostr, private val
         client.newCall(req).execute().use { res ->
             if (!res.isSuccessful) throw UploadFailed("Upload to $server failed: ${res.code} ${res.header("X-Reason") ?: res.message}")
             val body = res.body?.string().orEmpty()
-            // Take the server's URL only if it points at OUR blob (audit MED-9).
-            val url = (jsonObjectOf(body)?.get("url") as? JsonPrimitive)?.content?.takeIf { sha in it }
-            url ?: "${trim(server)}/$sha"
+            // The reply's URL only when it is our blob on this server (MED-9, R-21).
+            BlossomClient.boundReplyUrl(server, sha, (jsonObjectOf(body)?.get("url") as? JsonPrimitive)?.content)
         }
     }
 
@@ -83,7 +82,7 @@ class OrganizerBlossom(http: OkHttpClient, private val nostr: Nostr, private val
                     .build()
                 client.newCall(req).execute().use { res ->
                     if (!res.isSuccessful) null
-                    else (jsonObjectOf(res.body?.string().orEmpty())?.get("url") as? JsonPrimitive)?.content?.takeIf { sha in it } ?: "${trim(server)}/$sha"
+                    else BlossomClient.boundReplyUrl(server, sha, (jsonObjectOf(res.body?.string().orEmpty())?.get("url") as? JsonPrimitive)?.content)
                 }
             }
         }.getOrNull()
@@ -91,7 +90,7 @@ class OrganizerBlossom(http: OkHttpClient, private val nostr: Nostr, private val
 
     /** Upload a public image; returns its first URL. Event servers first, then the user's, then defaults. */
     suspend fun uploadPublicImage(signer: NostrSigner, bytes: ByteArray, mime: String = "image/jpeg", eventBlossom: List<String> = emptyList()): String {
-        val servers = (eventBlossom + userServers(signer.pubkey) + Relays.BLOSSOM).map(::trim).distinct().filter(::isHttpsUrl)
+        val servers = (eventBlossom + userServers(signer.pubkey) + Relays.BLOSSOM).map(::trim).distinct().filter(BlossomClient::isAcceptedBlossomUrl)
         if (servers.isEmpty()) throw UploadFailed("no Blossom servers configured")
         val sha = Bytes.sha256Hex(bytes)
         val errors = mutableListOf<String>()

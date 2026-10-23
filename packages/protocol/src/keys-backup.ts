@@ -17,11 +17,12 @@
  *   pubkey); otherwise `a`'s (the caller passes its own copy first). Every other
  *   secret goes to `prior_einbox_nsecs`, where it still reads old submissions.
  * - `co_organizers`: the union (SB-90).
+ * - `revoked`: the union, capped at the newest {@link MAX_REVOKED} (R-04).
  */
 import { getPublicKey } from "nostr-tools/pure";
 import { hexToBytes } from "@noble/hashes/utils";
 import { unionEck } from "./eck-identity.js";
-import { MAX_ORGANIZERS, MAX_PRIOR_INBOXES, PROTOCOL_VERSION, type EventKeysBackup } from "./schemas.js";
+import { MAX_ORGANIZERS, MAX_PRIOR_INBOXES, MAX_REVOKED, PROTOCOL_VERSION, type EventKeysBackup } from "./schemas.js";
 
 function inboxPubkey(secretHex: string): string | undefined {
   try {
@@ -50,6 +51,10 @@ export function mergeEventKeysBackups(
   const prior = inboxes.filter((s) => s !== current).slice(-MAX_PRIOR_INBOXES);
   const gen = Math.max(a.coordinator_gen ?? 0, b.coordinator_gen ?? 0);
   const coOrganizers = [...new Set([...(a.co_organizers ?? []), ...(b.co_organizers ?? [])])].sort().slice(0, MAX_ORGANIZERS);
+  // A union, newest kept when the cap bites. A member one device re-approved may
+  // come back from the other copy; attach filters the list against the current
+  // roster, so that costs nothing but an entry here.
+  const revoked = [...new Set([...(b.revoked ?? []), ...(a.revoked ?? [])])].slice(-MAX_REVOKED);
   return {
     v: PROTOCOL_VERSION,
     ...((a.a ?? b.a) ? { a: a.a ?? b.a } : {}),
@@ -60,5 +65,6 @@ export function mergeEventKeysBackups(
     ...(pending.length > 0 ? { pending_eck: pending } : {}),
     ...(prior.length > 0 ? { prior_einbox_nsecs: prior } : {}),
     ...(coOrganizers.length > 0 ? { co_organizers: coOrganizers } : {}),
+    ...(revoked.length > 0 ? { revoked } : {}),
   };
 }

@@ -7,6 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { KIND_DM, KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 import type { VerifiedEvent } from "nostr-tools/pure";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 
 const { fetchEvents, publishOrQueue, streamEvents, signerWrap, signerUnwrap } = vi.hoisted(() => ({
   fetchEvents: vi.fn(),
@@ -42,6 +43,8 @@ vi.mock("./giftwrap.js", () => ({
 
 import {
   relayUrlsFromDmList,
+  latestDmRelayList,
+  fetchDmRelays,
   selectDmRelays,
   sendDm,
   fetchDms,
@@ -76,18 +79,52 @@ function memPersist(): PersistBackend {
   };
 }
 
-const RECIPIENT = "b".repeat(64);
-const ME = "a".repeat(64);
-
-function dmListEvent(pubkey: string, urls: string[]): Partial<VerifiedEvent> {
-  return {
-    kind: KIND_DM_RELAY_LIST,
-    pubkey,
-    created_at: 1,
-    tags: urls.map((u) => ["relay", u]),
-    content: "",
-  };
+// Real keys: the 10050 readers verify signatures and pin the author (R-83), so
+// a fixture has to be an event its pubkey actually signed.
+const secretKeys = new Map<string, Uint8Array>();
+function account(): string {
+  const sk = generateSecretKey();
+  const pk = getPublicKey(sk);
+  secretKeys.set(pk, sk);
+  return pk;
 }
+const RECIPIENT = account();
+const ME = account();
+
+function dmListEvent(pubkey: string, urls: string[], createdAt = 1): Partial<VerifiedEvent> {
+  return finalizeEvent(
+    { kind: KIND_DM_RELAY_LIST, created_at: createdAt, tags: urls.map((u) => ["relay", u]), content: "" },
+    secretKeys.get(pubkey)!,
+  );
+}
+
+describe("latestDmRelayList — author pinning (audit R-83)", () => {
+  it("ignores a newer, validly signed 10050 by someone else that a relay slipped in", () => {
+    const own = dmListEvent(RECIPIENT, ["wss://recipient-inbox"], 10);
+    const foreign = dmListEvent(account(), ["wss://attacker.example"], 20);
+    expect(latestDmRelayList([own, foreign] as never[], RECIPIENT)).toBe(own);
+  });
+
+  it("ignores a forged 10050 claiming the author's pubkey", () => {
+    const own = dmListEvent(RECIPIENT, ["wss://recipient-inbox"], 10);
+    // The author's own signature, transplanted onto attacker-chosen tags (a
+    // JSON copy, so nostr-tools' cached "verified" symbol does not come along).
+    const forged = {
+      ...JSON.parse(JSON.stringify(own)),
+      created_at: 20,
+      tags: [["relay", "wss://attacker.example"]],
+    };
+    expect(latestDmRelayList([own, forged] as never[], RECIPIENT)).toBe(own);
+  });
+
+  it("fetchDmRelays routes by the author's own list only", async () => {
+    fetchEvents.mockResolvedValueOnce([
+      dmListEvent(RECIPIENT, ["wss://recipient-inbox"], 10),
+      dmListEvent(account(), ["wss://attacker.example"], 20),
+    ]);
+    expect(await fetchDmRelays(RECIPIENT)).toEqual(["wss://recipient-inbox"]);
+  });
+});
 
 describe("relayUrlsFromDmList (pure)", () => {
   it("keeps only well-formed [\"relay\", url] tags", () => {
@@ -205,7 +242,7 @@ describe("scanDmGiftWraps ciphertext routing and history", () => {
   });
 
   it("reads incoming wraps from the owner's custom kind-10050 inbox union defaults", async () => {
-    const owner = "1".repeat(64);
+    const owner = account();
     setActiveCacheOwner(owner);
     fetchEvents.mockResolvedValue([dmListEvent(owner, ["wss://my-private-inbox.example"])]);
     streamEvents.mockReturnValue({ ready: Promise.resolve([]), stop: () => {}, allAnswered: () => true });

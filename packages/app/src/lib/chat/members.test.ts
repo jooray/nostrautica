@@ -93,6 +93,9 @@ describe("chatMembers", () => {
     const newcomer = "e1".padEnd(64, "0");
     const { members } = chatMembers(roster, { groupDevices: [aPhone, newcomer] });
     expect(members.some((m) => m.account === newcomer)).toBe(true);
+    // …flagged, because that "account" is a device key (audit R-30).
+    expect(members.find((m) => m.account === newcomer)?.unattested).toBe(true);
+    expect(members.find((m) => m.account !== newcomer)?.unattested).toBeUndefined();
   });
 
   it("leaves the coordinator's own admin leaf out of the people list", () => {

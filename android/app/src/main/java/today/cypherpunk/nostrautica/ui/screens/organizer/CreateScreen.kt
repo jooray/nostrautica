@@ -69,6 +69,7 @@ import today.cypherpunk.nostrautica.ui.shell.GlobalScaffold
 import today.cypherpunk.nostrautica.ui.shell.Page
 import today.cypherpunk.nostrautica.ui.shell.Toasts
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
+import today.cypherpunk.nostrautica.ui.components.safeImageSrc
 
 /** The generated default artwork (media/image.ts defaultEventIcon/Banner): a seeded gradient. */
 @Composable
@@ -85,7 +86,7 @@ fun ImagePreview(url: String, held: ByteArray?, seed: String, banner: Boolean) {
     else Modifier.size(64.dp).clip(RoundedCornerShape(14.dp))
     Box(m) {
         GradientArt(seed, Modifier.fillMaxSize())
-        val model: Any? = held ?: url.takeIf { it.isNotBlank() && allow }
+        val model: Any? = held ?: safeImageSrc(url, allow)
         if (model != null) AsyncImage(model, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
     }
 }

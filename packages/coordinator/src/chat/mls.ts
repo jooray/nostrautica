@@ -25,7 +25,7 @@ import type { NostrNetworkInterface } from "@internet-privacy/marmot-ts/client";
 import { bytesToHex } from "@nostrautica/protocol";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { Store } from "../store/db.js";
-import { makeMarmotStores, purgeGroupState } from "./stores.js";
+import { makeMarmotStores, purgeGroupState, expireStalePreparedWrappers } from "./stores.js";
 import { makeCoordinatorSigner } from "./signer.js";
 
 const { proposeRemoveUser, proposeUpdateMetadata } = Proposals;
@@ -140,6 +140,9 @@ export interface ChatMls {
   retireGroup?(mlsGroupIdHex: string): Promise<void>;
 }
 
+/** How often one group's unsettled ingest evidence is swept (audit R-44). */
+const INGEST_SWEEP_EVERY_MS = 10 * 60 * 1000;
+
 /** marmot_kv row holding the coordinator's own KeyPackage slot id. */
 const SLOT_NAMESPACE = "client_meta";
 const SLOT_KEY = "key_package_slot";
@@ -186,7 +189,12 @@ export function createMarmotClientMls(deps: {
     clientId: deps.clientId ?? coordinatorKeyPackageSlot(deps.store),
   });
   return {
-    mls: new MarmotClientMls(client, getPublicKey(deps.coordSk), (id) => purgeGroupState(deps.store, id)),
+    mls: new MarmotClientMls(
+      client,
+      getPublicKey(deps.coordSk),
+      (id) => purgeGroupState(deps.store, id),
+      (id) => expireStalePreparedWrappers(deps.store, id, Date.now()),
+    ),
     client,
   };
 }
@@ -198,7 +206,12 @@ export class MarmotClientMls implements ChatMls {
     private readonly selfPubkey?: string,
     /** Raw removal of one group's persisted state, for state that will not load. */
     private readonly purgeStoredGroup?: (mlsGroupIdHex: string) => void,
+    /** Age out ingest evidence that will never settle (audit R-44); returns rows removed. */
+    private readonly sweepIngestEvidence?: (mlsGroupIdHex: string) => number,
   ) {}
+
+  /** When each group's ingest evidence was last swept (see {@link ingest}). */
+  private readonly lastIngestSweep = new Map<string, number>();
 
   /**
    * Per-group serialization of every STATE-MUTATING MLS op (invite / remove /
@@ -363,6 +376,19 @@ export class MarmotClientMls implements ChatMls {
 
   async ingest(mlsGroupIdHex: string, events: AnyEvent[]): Promise<void> {
     await this.serialize(mlsGroupIdHex, async () => {
+      // Bound the durable `prepared` wrapper rows unreadable 445s leave behind
+      // (audit R-44), under the group lock and at most every INGEST_SWEEP_EVERY_MS:
+      // the sweep decrypts each wrapper row to read its state.
+      const now = Date.now();
+      if (this.sweepIngestEvidence && now - (this.lastIngestSweep.get(mlsGroupIdHex) ?? 0) >= INGEST_SWEEP_EVERY_MS) {
+        this.lastIngestSweep.set(mlsGroupIdHex, now);
+        try {
+          const removed = this.sweepIngestEvidence(mlsGroupIdHex);
+          if (removed > 0) console.warn(`[chat] aged out ${removed} unsettled 445 wrapper row(s) for group ${mlsGroupIdHex.slice(0, 8)}`);
+        } catch (e) {
+          console.warn(`[chat] ingest evidence sweep failed: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
       // Drive the async ingest generator to completion; commits advance the epoch.
       for await (const _ of this.client.groups.ingest(mlsGroupIdHex, events as never)) {
         void _;

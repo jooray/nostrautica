@@ -56,6 +56,7 @@ import today.cypherpunk.nostrautica.ui.nav.Route
 import today.cypherpunk.nostrautica.ui.shell.GlobalScaffold
 import today.cypherpunk.nostrautica.ui.shell.Page
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
+import today.cypherpunk.nostrautica.ui.components.safeImageSrc
 
 data class HomeEvent(val coordinate: String, val naddr: String, val ctx: EventContext?, val role: Role, val pendingKey: Boolean, val at: Long, val partOf: String? = null)
 
@@ -244,8 +245,9 @@ private fun EventRow(e: HomeEvent, onClick: () -> Unit) {
 @Composable
 fun EventIcon(coordinate: String, icon: String?, title: String, size: Int = 44) {
     val allow by LocalContainer.current.prefs.externalImages.collectAsState()
-    if (icon != null && allow) {
-        AsyncImage(icon, null, contentScale = ContentScale.Crop, modifier = Modifier.size(size.dp).clip(RoundedCornerShape(11.dp)))
+    val src = safeImageSrc(icon, allow)
+    if (src != null) {
+        AsyncImage(src, null, contentScale = ContentScale.Crop, modifier = Modifier.size(size.dp).clip(RoundedCornerShape(11.dp)))
     } else {
         EventWash(coordinate, Modifier.size(size.dp)) {}
     }

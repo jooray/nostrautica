@@ -6,8 +6,6 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.filterIsInstance
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -61,9 +59,8 @@ class Nip46Signer private constructor(
     private val pendingLock = Mutex()
     private var listener: Job? = null
 
-    private val _authUrls = MutableSharedFlow<String>(extraBufferCapacity = 4)
-    /** A bunker asking the user to approve in a browser (NIP-46 `auth_url`). */
-    val authUrls: SharedFlow<String> get() = _authUrls
+    /** Requests a bunker answered with `auth_url`: they get [AUTH_APPROVAL_TIMEOUT_MS] more to settle. */
+    private val awaitingApproval = HashSet<String>()
 
     private fun ensureListening() {
         if (listener?.isActive == true) return
@@ -81,7 +78,14 @@ class Nip46Signer private constructor(
         val id = (msg["id"] as? JsonPrimitive)?.content ?: return
         val result = (msg["result"] as? JsonPrimitive)?.content
         if (result == "auth_url") {
-            (msg["error"] as? JsonPrimitive)?.content?.let { _authUrls.tryEmit(it) }
+            // Not the reply: the real one follows on the same id once the user approves.
+            // Only for a request still waiting, so a late challenge can't resurrect the banner.
+            val url = (msg["error"] as? JsonPrimitive)?.content?.let(Nip46Approvals::safeAuthUrl) ?: return
+            pendingLock.withLock {
+                if (id !in pending) return
+                awaitingApproval += id
+                Nip46Approvals.open(id, url) // under the lock, so it can't land after call()'s settle
+            }
             return
         }
         pendingLock.withLock { pending.remove(id) }?.complete(msg)
@@ -110,9 +114,13 @@ class Nip46Signer private constructor(
             // withTimeoutOrNull, not withTimeout: a TimeoutCancellationException is a
             // CancellationException, which callers treat as "the user left" and
             // swallow (or rethrow, ending an enclosing scan).
-            withTimeoutOrNull(timeoutMs) { d.await() } ?: throw SignerUnavailable("the signer did not answer")
+            withTimeoutOrNull(timeoutMs) { d.await() }
+                // Approving in a browser takes longer than a signer app's tap.
+                ?: (if (pendingLock.withLock { id in awaitingApproval }) withTimeoutOrNull(AUTH_APPROVAL_TIMEOUT_MS) { d.await() } else null)
+                ?: throw SignerUnavailable("the signer did not answer")
         } finally {
-            pendingLock.withLock { pending.remove(id) }
+            pendingLock.withLock { pending.remove(id); awaitingApproval.remove(id) }
+            Nip46Approvals.settle(id)
         }
         (reply["error"] as? JsonPrimitive)?.content?.takeIf { it.isNotBlank() }?.let { throw SignerRejected(it) }
         return reply["result"]?.jsonPrimitive?.content ?: throw SignerRejected("empty reply")
@@ -145,10 +153,17 @@ class Nip46Signer private constructor(
         const val CONNECT_TIMEOUT_MS = 45_000L
         const val NOSTRCONNECT_TIMEOUT_MS = 120_000L
         const val RESTORE_TIMEOUT_MS = 12_000L
+        const val AUTH_APPROVAL_TIMEOUT_MS = 180_000L
 
-        fun restore(pool: RelayPool, session: Session) = Nip46Signer(pool, session)
+        /** The stored relays go through the same filter as a paste: a session saved before it may hold any ws://. */
+        fun restore(pool: RelayPool, session: Session) = Nip46Signer(pool, session.copy(relays = Relays.accepted(session.relays)))
 
-        private fun relaysWith(extra: List<String>) = (Relays.NIP46 + extra).map(RelayPool::normalize).distinct()
+        /**
+         * Ours ∪ the pointer's, the pointer's only when [Relays.isAccepted] (relays.ts signerRelays,
+         * SB-08 / R-78): a phishing `bunker://` naming `ws://attacker.example` would otherwise get a
+         * plaintext socket carrying this session's client pubkey and request ids, persisted.
+         */
+        internal fun relaysWith(extra: List<String>) = (Relays.NIP46.map(RelayPool::normalize) + Relays.accepted(extra)).distinct()
 
         /** A `nostrconnect://` offer: show it as a QR code or hand it to a signer app. */
         class Offer(val uri: String, val clientSk: String, val secret: String, val relays: List<String>)
@@ -210,7 +225,7 @@ class Nip46Signer private constructor(
             val uri = Uri.parse(bunkerUri.trim())
             require(uri.scheme == "bunker") { "not a bunker:// link" }
             val signerPubkey = uri.host?.lowercase()?.takeIf { it.isHex32() } ?: throw IllegalArgumentException("the bunker link has no signer key")
-            val relays = relaysWith(uri.getQueryParameters("relay").filter { it.startsWith("wss://") || it.startsWith("ws://") })
+            val relays = relaysWith(uri.getQueryParameters("relay"))
             val secret = uri.getQueryParameter("secret")
             val sk = Bytes.toHex(today.cypherpunk.nostrautica.protocol.Secp.generateSecret())
             val probe = Nip46Signer(pool, Session(sk, signerPubkey, signerPubkey, relays, secret))

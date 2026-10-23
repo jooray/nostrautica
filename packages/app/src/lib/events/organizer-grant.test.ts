@@ -17,7 +17,7 @@
  *    (attendee.receiveGrants) reads DEFAULT_RELAYS.
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { bytesToHex, makeCoordinate, KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 
 const { fetchEvents, fetchEventsRelayOnly, publishSigned } = vi.hoisted(() => ({
@@ -262,7 +262,8 @@ describe("addCoOrganizer publishes where the receiver actually reads", () => {
     coordinate: COORD,
     config: { relays: ["wss://relay.private.example"] },
   } as unknown as EventContext;
-  const coOrganizer = getPublicKey(generateSecretKey());
+  const coOrganizerSk = generateSecretKey();
+  const coOrganizer = getPublicKey(coOrganizerSk);
 
   it("unions the event's relays with the app defaults", async () => {
     // The grant used to go only to ctx.config.relays while receiveGrants scans
@@ -283,12 +284,13 @@ describe("addCoOrganizer publishes where the receiver actually reads", () => {
   it("includes the co-organizer's kind-10050 inbox", async () => {
     vi.stubGlobal("navigator", { onLine: true });
     publishSigned.mockResolvedValue(undefined);
-    fetchEvents.mockResolvedValue([{
+    // Really signed: 10050 reads are signature- and author-pinned (R-83).
+    fetchEvents.mockResolvedValue([finalizeEvent({
       kind: KIND_DM_RELAY_LIST,
-      pubkey: coOrganizer,
       created_at: 1,
       tags: [["relay", "wss://co-organizer-inbox.example"]],
-    }]);
+      content: "",
+    }, coOrganizerSk)]);
     await saveEventKeys(organizerKeys(), OWNER);
 
     await addCoOrganizer({} as AppSigner, ctx, coOrganizer);
@@ -329,8 +331,10 @@ describe("addCoOrganizer publishes where the receiver actually reads", () => {
 });
 
 describe("account-addressed organizer wraps", () => {
-  const attendee = getPublicKey(generateSecretKey());
-  const coordinator = getPublicKey(generateSecretKey());
+  const attendeeSk = generateSecretKey();
+  const coordinatorSk = generateSecretKey();
+  const attendee = getPublicKey(attendeeSk);
+  const coordinator = getPublicKey(coordinatorSk);
   const ctx = {
     coordinate: COORD,
     config: {
@@ -345,12 +349,16 @@ describe("account-addressed organizer wraps", () => {
   beforeEach(() => {
     vi.stubGlobal("navigator", { onLine: true });
     publishSigned.mockResolvedValue(undefined);
-    fetchEvents.mockImplementation(async (filter: { authors?: string[] }) => [{
-      kind: KIND_DM_RELAY_LIST,
-      pubkey: filter.authors?.[0],
-      created_at: 1,
-      tags: [["relay", `wss://${filter.authors?.[0] === attendee ? "attendee" : "coordinator"}-inbox.example`]],
-    }]);
+    // Really signed by the asked-for author: 10050 reads are pinned (R-83).
+    fetchEvents.mockImplementation(async (filter: { authors?: string[] }) => {
+      const isAttendee = filter.authors?.[0] === attendee;
+      return [finalizeEvent({
+        kind: KIND_DM_RELAY_LIST,
+        created_at: 1,
+        tags: [["relay", `wss://${isAttendee ? "attendee" : "coordinator"}-inbox.example`]],
+        content: "",
+      }, isAttendee ? attendeeSk : coordinatorSk)];
+    });
   });
 
   it("routes an initial attendee ECK grant to the attendee inbox plus event/default relays", async () => {

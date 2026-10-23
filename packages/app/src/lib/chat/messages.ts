@@ -15,6 +15,7 @@ import {
   serializeApplicationRumor,
   deserializeApplicationData,
 } from "@internet-privacy/marmot-ts/core";
+import { mentionPTags } from "./mentions.js";
 
 /** Marmot application-message kinds (§7). */
 export const CHAT_KIND_TEXT = 9;
@@ -61,13 +62,22 @@ export function rumorToChatMessage(rumor: RumorLike): ChatMessage {
 /**
  * Build a kind-9 chat rumor authored by `pubkey` and the send intent for it.
  * Drive the intent through `client.groups.send(groupId, intent)`.
+ *
+ * People mentioned in `content` get a `["p", hex]` tag each, appended after any
+ * caller tags, exactly as MDK's inner-event builder does for White Noise
+ * (mentions.ts). Derived here rather than by the composer so a follower tab's
+ * proxied send, which carries only text, tags them too.
  */
 export function buildChatSend(
   pubkey: string,
   content: string,
   tags?: string[][],
 ): { rumor: ReturnType<typeof createChatRumor>; intent: ReturnType<typeof createApplicationMessageIntent> } {
-  const rumor = createChatRumor({ pubkey, content, ...(tags ? { tags } : {}) });
+  const all = [...(tags ?? [])];
+  for (const p of mentionPTags(content)) {
+    if (!all.some((t) => t[0] === "p" && t[1] === p[1])) all.push(p);
+  }
+  const rumor = createChatRumor({ pubkey, content, ...(all.length ? { tags: all } : {}) });
   return { rumor, intent: createApplicationMessageIntent(rumor) };
 }
 

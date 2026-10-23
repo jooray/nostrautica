@@ -75,6 +75,15 @@ describe("visiblePending (confirmed-transition removal)", () => {
     const visible = visiblePending(known, () => false, new Set(), rejected);
     expect(visible.map((r) => r.attendeePubkey)).toEqual([pk("b")]);
   });
+
+  // Audit R-13: after a reload the session revoked set is empty, and the revoked
+  // member's pre-revocation join came back as a new, approvable request.
+  it("drops a request no newer than the persisted revocation, keeps a later re-join", () => {
+    const known = [req(pk("a"), 100), req(pk("b"), 300), req(pk("c"), 50)];
+    const revokedAt = { [pk("a")]: 200, [pk("b")]: 200 };
+    const visible = visiblePending(known, () => false, new Set(), new Set(), revokedAt);
+    expect(visible.map((r) => r.attendeePubkey)).toEqual([pk("b"), pk("c")]);
+  });
 });
 
 describe("buildApprovedPeople (UX-A1: roster is the source of truth)", () => {

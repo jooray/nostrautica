@@ -54,8 +54,10 @@ type Wire =
   | { t: "sync"; scope: string }
   | { t: "state"; scope: string; coordinate: string; messages: ChatMessage[] }
   | { t: "members"; scope: string; coordinate: string; members: string[] }
-  | { t: "send"; scope: string; reqId: string; text: string }
-  | { t: "rejoin"; scope: string; reqId: string; force?: boolean }
+  // `coordinate`: the event the FOLLOWER is in (audit R-31). Optional so a tab
+  // still running the previous build interoperates until it reloads.
+  | { t: "send"; scope: string; reqId: string; text: string; coordinate?: string }
+  | { t: "rejoin"; scope: string; reqId: string; force?: boolean; coordinate?: string }
   | { t: "ack"; scope: string; reqId: string; ok: boolean; error?: string };
 
 export interface TabCoordinatorOptions {
@@ -72,9 +74,9 @@ export interface TabCoordinatorOptions {
   /** Follower: the leader broadcast a fresh membership set for `coordinate`. */
   onLeaderMembers?(coordinate: string, members: string[]): void;
   /** Leader: a follower proxied a send; resolve to ack ok, throw to ack error. */
-  onSendRequest?(text: string): Promise<void>;
+  onSendRequest?(text: string, coordinate?: string): Promise<void>;
   /** Leader: a follower asked for a chat re-enrolment; resolve/throw to ack. */
-  onRejoinRequest?(force: boolean): Promise<void>;
+  onRejoinRequest?(force: boolean, coordinate?: string): Promise<void>;
   /** Leader: a freshly-joined follower asked for the current state — re-broadcast it. */
   onSyncRequest?(): void;
   /** Election ping window (ms) when Web Locks is unavailable. */
@@ -297,11 +299,11 @@ export class ChatTabCoordinator {
         }
         return;
       case "send":
-        if (this.role === "leader") void this.handleSendRequest(msg.reqId, msg.text);
+        if (this.role === "leader") void this.handleSendRequest(msg.reqId, msg.text, msg.coordinate);
         return;
       case "rejoin":
         if (this.role === "leader") {
-          void this.runForFollower(msg.reqId, () => this.opts.onRejoinRequest?.(msg.force ?? false));
+          void this.runForFollower(msg.reqId, () => this.opts.onRejoinRequest?.(msg.force ?? false, msg.coordinate));
         }
         return;
       case "ack": {
@@ -316,8 +318,8 @@ export class ChatTabCoordinator {
     }
   }
 
-  private handleSendRequest(reqId: string, text: string): Promise<void> {
-    return this.runForFollower(reqId, () => this.opts.onSendRequest?.(text));
+  private handleSendRequest(reqId: string, text: string, coordinate?: string): Promise<void> {
+    return this.runForFollower(reqId, () => this.opts.onSendRequest?.(text, coordinate));
   }
 
   /** Leader: run one follower-proxied operation and ack its outcome. */
@@ -377,9 +379,9 @@ export class ChatTabCoordinator {
    * Follower: proxy a send to the leader, resolving when it acks. Only supported on
    * the Web Locks path (single-writer guaranteed); off it, followers are read-only.
    */
-  proxySend(text: string): Promise<void> {
+  proxySend(text: string, coordinate?: string): Promise<void> {
     return this.proxy(
-      (reqId) => ({ t: "send", scope: this.scope, reqId, text }),
+      (reqId) => ({ t: "send", scope: this.scope, reqId, text, coordinate }),
       this.ackTimeoutMs,
       "timed out waiting for the active tab to send",
     );
@@ -390,9 +392,9 @@ export class ChatTabCoordinator {
    * single-writer constraint as {@link proxySend} — only the leader owns MLS state,
    * so a read-only follower (no Web Locks) can't have one performed on its behalf.
    */
-  proxyRejoin(force = false): Promise<void> {
+  proxyRejoin(force = false, coordinate?: string): Promise<void> {
     return this.proxy(
-      (reqId) => ({ t: "rejoin", scope: this.scope, reqId, force }),
+      (reqId) => ({ t: "rejoin", scope: this.scope, reqId, force, coordinate }),
       this.rejoinTimeoutMs,
       "timed out waiting for the active tab to rejoin",
     );

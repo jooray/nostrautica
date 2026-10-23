@@ -1,6 +1,9 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   uploadAndMirror,
+  acceptedBlobUrl,
+  isFetchableMediaUrl,
+  mirror,
   downloadBlob,
   preflight,
   upload,
@@ -112,6 +115,118 @@ describe("upload descriptor URL is verified against our own hash", () => {
 
   it("falls back when the server answers 200 with no usable descriptor", async () => {
     expect(await uploadWithServerUrl(undefined)).toBe(`https://s.example/${sha256Hex(data)}`);
+  });
+
+  // R-20: "contains the hash" pinned the content address but not the origin.
+  it("replaces a reply on another origin, or with the hash only in the query", async () => {
+    const sha = sha256Hex(data);
+    expect(await uploadWithServerUrl(`https://evil.example/${sha}`)).toBe(`https://s.example/${sha}`);
+    expect(await uploadWithServerUrl(`https://s.example/other?x=${sha}`)).toBe(`https://s.example/${sha}`);
+    expect(await uploadWithServerUrl(`http://s.example/${sha}`)).toBe(`https://s.example/${sha}`);
+  });
+});
+
+describe("Blossom reply URLs are bound to https + origin + content address (audit R-20)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const data = new Uint8Array([9, 9, 9]);
+  const sha = sha256Hex(data);
+
+  it("acceptedBlobUrl keeps only a same-origin https URL whose last segment is the hash", () => {
+    expect(acceptedBlobUrl(`https://s.example/${sha}.mp4`, "https://s.example/", sha)).toBe(
+      `https://s.example/${sha}.mp4`,
+    );
+    expect(acceptedBlobUrl(`https://s.example/${sha}/x`, "https://s.example", sha)).toBe(`https://s.example/${sha}`);
+    expect(acceptedBlobUrl(`https://s.example/${sha}` + "a".repeat(3000), "https://s.example", sha)).toBe(
+      `https://s.example/${sha}`,
+    );
+    expect(acceptedBlobUrl(`https://s.example/${sha}`, "http://s.example", sha)).toBeUndefined();
+  });
+
+  it("a mirror replying with a bad URL is bound to its content address, not published verbatim", async () => {
+    const signer = LocalSigner.generate();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url === "https://primary.example/upload") return jsonResponse({ url: `https://primary.example/${sha}` });
+        if (url === "https://m1.example/mirror") return jsonResponse({ url: `http://m1.example/${sha}` });
+        if (url === "https://m2.example/mirror") return jsonResponse({ url: "https://tracker.example/pixel" });
+        throw new Error(`unexpected fetch ${url}`);
+      }),
+    );
+    const r = await uploadAndMirror(
+      signer,
+      ["https://primary.example", "https://m1.example", "https://m2.example"],
+      data,
+      "application/octet-stream",
+    );
+    expect(r.urls).toEqual([
+      `https://primary.example/${sha}`,
+      `https://m1.example/${sha}`,
+      `https://m2.example/${sha}`,
+    ]);
+  });
+
+  it("a non-https mirror is dropped instead of failing the whole upload", async () => {
+    const signer = LocalSigner.generate();
+    const fetchMock = vi.fn(async () => jsonResponse({ url: `https://primary.example/${sha}` }));
+    vi.stubGlobal("fetch", fetchMock);
+    expect(await mirror(signer, "http://plain.example", `https://primary.example/${sha}`, sha)).toBeNull();
+    expect(fetchMock).not.toHaveBeenCalled();
+    const r = await uploadAndMirror(signer, ["http://plain.example", "https://primary.example"], data, "x");
+    expect(r.urls).toEqual([`https://primary.example/${sha}`]);
+  });
+});
+
+describe("downloadBlob request hygiene (audit R-19)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const data = new Uint8Array([4, 2]);
+  const sha = sha256Hex(data);
+
+  it("refuses userinfo, non-https, and loopback/private/link-local literals", () => {
+    for (const bad of [
+      `https://user:pw@cdn.example/${sha}`,
+      `http://cdn.example/${sha}`,
+      `https://127.0.0.1:8080/${sha}`,
+      `https://localhost/${sha}`,
+      `https://10.0.0.1/${sha}`,
+      `https://192.168.1.1/${sha}`,
+      `https://172.20.0.5/${sha}`,
+      `https://169.254.169.254/${sha}`,
+      `https://[::1]/${sha}`,
+      `https://[fd00::1]/${sha}`,
+      `https://[fe80::1]/${sha}`,
+      `https://router.local/${sha}`,
+    ]) {
+      expect(isFetchableMediaUrl(bad), bad).toBe(false);
+    }
+    expect(isFetchableMediaUrl(`https://blossom.example/${sha}`)).toBe(true);
+    expect(isFetchableMediaUrl(`https://172.32.0.1/${sha}`)).toBe(true);
+  });
+
+  it("allows a local Blossom when the app itself runs locally (dev/e2e)", () => {
+    vi.stubGlobal("location", { hostname: "localhost" });
+    expect(isFetchableMediaUrl(`https://localhost:3443/${sha}`)).toBe(true);
+  });
+
+  it("skips a refused mirror without a request, and fetches the rest with no referrer and no credentials", async () => {
+    const fetchMock = vi.fn(async (_url: string, _init?: RequestInit) => new Response(data));
+    vi.stubGlobal("fetch", fetchMock);
+    const out = await downloadBlob([`https://192.168.0.1/${sha}`, `https://cdn.example/${sha}`], sha);
+    expect(out).toEqual(data);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(fetchMock.mock.calls[0]![0]).toBe(`https://cdn.example/${sha}`);
+    expect(fetchMock.mock.calls[0]![1]).toMatchObject({ referrerPolicy: "no-referrer", credentials: "omit" });
+  });
+
+  it("rejects a response that redirected onto a non-public host", async () => {
+    const res = new Response(data);
+    Object.defineProperty(res, "redirected", { value: true });
+    Object.defineProperty(res, "url", { value: `https://127.0.0.1/${sha}` });
+    vi.stubGlobal("fetch", vi.fn(async () => res));
+    await expect(downloadBlob([`https://cdn.example/${sha}`], sha)).rejects.toThrow(/non-public/);
   });
 });
 
@@ -463,7 +578,7 @@ describe("upload progress budgets (XHR path)", () => {
 
     const body = new Uint8Array(steps * 2);
     FakeXhr.addr = sha256Hex(body);
-    const p = upload(signer, "https://slow.example", body);
+    const p = upload(signer, "https://good.example", body);
     await vi.advanceTimersByTimeAsync(gap * steps + 1);
     await expect(p).resolves.toMatchObject({ url: `https://good.example/${FakeXhr.addr}` });
   });
@@ -511,7 +626,7 @@ describe("upload progress budgets (XHR path)", () => {
       xhr.onload?.();
     });
 
-    const p = upload(signer, "https://slow-store.example", body);
+    const p = upload(signer, "https://good.example", body);
     await vi.advanceTimersByTimeAsync(UPLOAD_STALL_TIMEOUT_MS * 2 + 1);
     await expect(p).resolves.toMatchObject({ url: `https://good.example/${FakeXhr.addr}` });
   });

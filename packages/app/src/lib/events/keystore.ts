@@ -50,6 +50,12 @@ export interface EventKeys {
    * not an attendee and receives nothing else. Organizer only.
    */
   coOrganizers?: string[];
+  /**
+   * Members this organizer revoked, oldest first (audit 2026-10-21, R-04). Sent in
+   * the next 21603 so a newly attached coordinator does not re-admit them from
+   * their original join. An organizer approve removes the entry. Organizer only.
+   */
+  revoked?: string[];
 }
 
 /** On-disk shape: an EventKeys record scoped to the identity that owns it. */
@@ -127,6 +133,7 @@ function toPublic(r: StoredEventKeys): EventKeys {
     coordinatorGen: r.coordinatorGen,
     ...(r.pendingEck?.length ? { pendingEck: r.pendingEck } : {}),
     ...(r.coOrganizers?.length ? { coOrganizers: r.coOrganizers } : {}),
+    ...(r.revoked?.length ? { revoked: r.revoked } : {}),
   };
 }
 
@@ -547,6 +554,10 @@ function mergeEventKeys(primary: EventKeys, fallback: EventKeys): EventKeys {
     ...(() => {
       const co = [...new Set([...(primary.coOrganizers ?? []), ...(fallback.coOrganizers ?? [])])];
       return co.length > 0 ? { coOrganizers: co } : {};
+    })(),
+    ...(() => {
+      const revoked = [...new Set([...(fallback.revoked ?? []), ...(primary.revoked ?? [])])];
+      return revoked.length > 0 ? { revoked } : {};
     })(),
   };
 }

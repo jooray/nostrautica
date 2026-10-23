@@ -5,7 +5,8 @@
  * to overwrite without --force.
  */
 import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync, statSync } from "node:fs";
+import { DatabaseSync } from "node:sqlite";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
@@ -162,6 +163,47 @@ describe("coordinator backup/restore (§13.2)", () => {
     expect(reopened.installedEventCount()).toBe(2);
     expect(reopened.verifyProtectedRowsDecrypt()).toBe(2);
     reopened.close();
+  });
+
+  it("restore --force keeps the replaced database, WAL included, and leaves no temp file (R-82)", () => {
+    const { dir, dest, sk, pubkey } = backupFixture(2);
+    const target = join(dir, "live.sqlite");
+    // A live database whose committed rows sit only in its WAL, as a daemon that
+    // died un-checkpointed leaves it: copy main + -wal while the writer is open.
+    // The old code deleted both before it even started copying the snapshot.
+    const src = join(dir, "writer.sqlite");
+    const live = new DatabaseSync(src);
+    live.exec("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;");
+    live.exec("CREATE TABLE marker (v TEXT); INSERT INTO marker VALUES ('the old database');");
+    writeFileSync(target, readFileSync(src));
+    writeFileSync(`${target}-wal`, readFileSync(`${src}-wal`));
+    live.close();
+
+    const v = restoreBackup({ filePath: dest, targetPath: target, identitySk: sk, expectedPubkey: pubkey, force: true });
+    expect(v.preRestorePath).toBeDefined();
+    expect(existsSync(`${target}.restore-tmp`)).toBe(false);
+    expect(existsSync(`${target}-wal`)).toBe(false); // no stale journal merged into the snapshot
+
+    // The replaced database opens as itself from its kept path.
+    const old = new DatabaseSync(v.preRestorePath!, { readOnly: true });
+    expect(old.prepare("SELECT v FROM marker").get()).toEqual({ v: "the old database" });
+    old.close();
+    const restored = new Store(target, sk);
+    expect(restored.installedEventCount()).toBe(2);
+    restored.close();
+  });
+
+  it("a restore that fails while staging the snapshot leaves the live database untouched (R-82)", () => {
+    const { dir, sk, pubkey, dest } = backupFixture(1);
+    const target = join(dir, "live.sqlite");
+    writeFileSync(target, readFileSync(dest)); // any existing database
+    const before = readFileSync(target);
+    // Make staging fail: the temp path is occupied by a directory it cannot replace.
+    mkdirSync(`${target}.restore-tmp`);
+    expect(() =>
+      restoreBackup({ filePath: dest, targetPath: target, identitySk: sk, expectedPubkey: pubkey, force: true }),
+    ).toThrow();
+    expect(readFileSync(target).equals(before)).toBe(true);
   });
 
   it("createBackup refuses to overwrite an existing dest", () => {

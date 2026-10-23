@@ -8,7 +8,8 @@
 import { NDKEvent } from "@nostr-dev-kit/ndk";
 import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
 import { getNdk, relaySet, fetchEvents, type Filter } from "$lib/nostr/ndk.js";
-import { KIND_DM_RELAY_LIST, pickLatest } from "@nostrautica/protocol";
+import { KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
+import { latestDmRelayList, relayUrlsFromDmList } from "$lib/events/dm.js";
 
 /** A per-relay publish result (marmot's `PublishResponse`). */
 interface PublishResponse {
@@ -92,11 +93,10 @@ export function createMarmotNetwork(): MarmotNetwork {
       // NIP-17 kind-10050 inbox relay list: where this user receives gift-wrapped
       // welcomes (the transport target for a 444/1059 to them).
       const events = await fetchEvents({ kinds: [KIND_DM_RELAY_LIST], authors: [pubkey], limit: 1 });
-      const latest = pickLatest(events);
-      if (!latest) return [];
-      return latest.tags
-        .filter((t) => t[0] === "relay" && typeof t[1] === "string")
-        .map((t) => t[1] as string);
+      // Author-pinned, and through the same scheme filter + cap as DMs (audit
+      // R-83): this list decides where a welcome to this user is sent.
+      const latest = latestDmRelayList(events, pubkey);
+      return latest ? relayUrlsFromDmList(latest.tags) : [];
     },
   };
 }

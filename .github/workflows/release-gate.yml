@@ -19,6 +19,12 @@ name: Release gate
 on:
   workflow_call:
 
+# Read-only token, and never left in .git/config (audit R-64): every job here runs
+# repo code (`pnpm install` lifecycle scripts, the test suites, e2e), and the
+# default token may be write-scoped. Nothing in the gate pushes, comments or tags.
+permissions:
+  contents: read
+
 jobs:
   # Guardrail (audit Q14): fail on inconsistent Node majors or mutable infra tags,
   # so runtime/image declarations can't silently drift apart again.
@@ -26,6 +32,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - name: Assert one Node major and no mutable infrastructure tags
         run: node .github/scripts/check-pins.mjs
       # The vendored MLS/Marmot engine is committed BUILT OUTPUT with no source and
@@ -40,9 +48,10 @@ jobs:
     needs: pins
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
+          persist-credentials: false
+      # No version: here. package.json's packageManager is the exact pin (audit R-80).
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
@@ -51,6 +60,16 @@ jobs:
       - run: pnpm --filter @nostrautica/protocol build
       - run: pnpm check
       - run: pnpm --filter @nostrautica/app build
+      # Hand THIS build (base "/", the nsite shape) to the nsite publish job (audit
+      # R-63), so what gets published is the bytes this gate tested, not a second
+      # build in the job that holds the signing credential. Uploaded before the
+      # BASE_PATH=/app build below overwrites the same directory.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pwa-build
+          path: packages/app/build
+          if-no-files-found: error
+          retention-days: 3
       # Build the app AGAIN the way production builds it (audit CI-1). The step
       # above builds at base "/", which is the local-preview shape; the deployed
       # site is served from a subdirectory and the post-receive hook on the build
@@ -105,9 +124,10 @@ jobs:
       E2E_RELAY_IMPL: local
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
+          persist-credentials: false
+      # No version: here. package.json's packageManager is the exact pin (audit R-80).
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
@@ -139,9 +159,10 @@ jobs:
     needs: pins
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
         with:
-          version: 11
+          persist-credentials: false
+      # No version: here. package.json's packageManager is the exact pin (audit R-80).
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
           node-version: "22"
@@ -160,6 +181,8 @@ jobs:
     needs: pins
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       # Clean-context coordinator image build (audit O1). `git archive` strips the
       # working tree AND `.git`, proving the Dockerfile resolves everything it needs
       # from committed sources alone — the exact release-verification build in

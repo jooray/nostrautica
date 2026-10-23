@@ -30,6 +30,8 @@ import { warmRouteModules, CRITICAL_PARTICIPANT_ROUTES } from "$lib/router/route
 import { ensureEntryShellCached } from "$lib/pwa/offline-shell.js";
 import { UpdateHealth } from "$lib/pwa/update-health.js";
 import { RELEASE_MANIFEST } from "$lib/release.js";
+import { updateStuck, autoRecoverFromDrift } from "$lib/stores/update-stuck.svelte.js";
+import { servedRevision } from "$lib/pwa/update-health.js";
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
 
 /**
@@ -83,9 +85,13 @@ export function registerPwa(): void {
   // initial install claim (App-1) and deferring while unsaved work is in
   // progress (App-2).
   const latch = new ControllerLatch(!!navigator.serviceWorker.controller);
+  // The ONE way this module reloads for an update: through the guard, which
+  // reloads at once when nothing is dirty and otherwise the moment the last
+  // unsaved-work holder clears. Never a bare reload, never a stuck tab.
+  const reloadForUpdate = () => refreshGuard.requestRefresh(() => window.location.reload());
   navigator.serviceWorker.addEventListener("controllerchange", () => {
     if (latch.shouldReload()) {
-      refreshGuard.requestRefresh(() => window.location.reload());
+      reloadForUpdate();
     }
     // A newly-acquired controller can now cache runtime fetches — warm the
     // critical participant chunks (U7). Skipped when the change triggers a reload.
@@ -96,6 +102,15 @@ export function registerPwa(): void {
 
   const updateSW = registerSW({
     immediate: true,
+    // In autoUpdate mode the plugin's client reloads the tab ITSELF on the new
+    // worker's `activated` event — `window.location.reload()` unless this hook
+    // is given (audit R-34). That bare reload raced the guarded controllerchange
+    // path above and won, destroying exactly the drafts and recordings the guard
+    // exists to protect. Route it through the guard too; when nothing is dirty
+    // it still reloads immediately, so the update is never delayed.
+    onNeedReload() {
+      reloadForUpdate();
+    },
     onRegisteredSW(swUrl: string, registration: ServiceWorkerRegistration | undefined) {
       if (!registration) return;
 
@@ -128,7 +143,15 @@ export function registerPwa(): void {
           // check, means the update path is wedged — a stale proxy/cache answer,
           // or a worker that cannot activate — and that is exactly the state
           // that used to persist for days in total silence.
-          health.observeServiceWorkerSource(await res.text().catch(() => ""));
+          const source = await res.text().catch(() => "");
+          health.observeServiceWorkerSource(source);
+          // Tell the user, not just the console (audit R-84) — and take the
+          // banner down again once the served worker matches.
+          updateStuck.set(health.driftDetected ? "drift" : null);
+          // …but never DEPEND on the user: a confirmed stuck build moves itself
+          // once per served revision (the banner stays as the fallback when that
+          // attempt is spent and the tab is still stuck).
+          if (health.driftDetected) autoRecoverFromDrift(servedRevision(source));
           await registration.update();
         } catch (e) {
           // Offline is normal and expected (the `online` listener below retries);
@@ -155,6 +178,7 @@ export function registerPwa(): void {
       // Without this the registration silently failed and NOTHING polled for the
       // rest of the page's life — no update checks, no offline shell, no signal.
       health.noteRegisterFailed(error);
+      updateStuck.set("register");
       (window as unknown as Record<string, unknown>).__nostrauticaPwaError = error;
     },
     onNeedRefresh() {

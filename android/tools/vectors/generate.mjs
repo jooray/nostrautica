@@ -25,6 +25,7 @@ const out = {
   communityNaddr: P.coordinateToNaddr(P.makeCoordinate(pk, "c1", 31612)),
   blindedD: P.blindedD(eck, coord, pk),
   blindedLibrary: P.blindedDLiteral(eck, "library"),
+  spaceRecordsD: P.spaceRecordsD(coord),
   selfConversationKey: bytesToHex(P.selfConversationKey(sk)),
   eckCiphertext: nip44.encrypt("hello members", eck, hexToBytes("22".repeat(32))),
   inviteHash: P.inviteHash(pk),

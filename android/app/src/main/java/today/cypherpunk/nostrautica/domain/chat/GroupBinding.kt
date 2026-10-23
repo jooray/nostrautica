@@ -35,12 +35,27 @@ object GroupBinding {
         data class Bound(val group: GroupInfo) : Result
     }
 
+    /**
+     * No coordinator and an unreadable member list fail CLOSED (audit R-70): either used
+     * to pass, leaving the roster's group id, a value any member can put on a group, as
+     * the only binding. A known welcomer must be the coordinator.
+     *
+     * An UNKNOWN welcomer still passes, on purpose. MDK 0.13.0 does not guarantee one for
+     * an accepted group: the GroupJoined path records it (cgka-engine group_lifecycle.rs,
+     * `welcomer: Some(welcome_sender_id)`), but when the app projection reconciles an
+     * engine group it lacks (marmot-app client/projection.rs, `add_group` with
+     * `GroupConfirmationProjection::Accepted` from the reconcile loop) the record is built
+     * fresh with `welcomer_account_id_hex: None` (groups.rs). Rows from before the column
+     * existed are NULL too (projection.rs `ensure_column`). Failing closed there would
+     * leave a real event chat stuck on "setting up" after a projection rebuild.
+     */
     fun select(groups: List<GroupInfo>, rosterGroupId: String?, coordinator: String?): Result {
         val want = rosterGroupId?.lowercase()?.takeIf { it.isNotEmpty() } ?: return Result.Unverified
+        val coord = coordinator?.lowercase()?.takeIf { it.isNotEmpty() } ?: return Result.Unverified
         val candidates = groups.filter { g ->
             g.nostrGroupIdHex.lowercase() == want &&
-                (coordinator == null || g.welcomer == null || g.welcomer == coordinator) &&
-                (coordinator == null || g.members == null || coordinator in g.members)
+                (g.welcomer == null || g.welcomer.lowercase() == coord) &&
+                g.members?.any { it.lowercase() == coord } == true
         }
         // Removed and re-added leaves two states under one id; route to the live one.
         val pick = candidates.firstOrNull { it.selfMember } ?: candidates.firstOrNull() ?: return Result.NotJoined

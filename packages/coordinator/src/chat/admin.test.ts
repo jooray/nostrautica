@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { Store } from "../store/db.js";
 import { MarmotAdmin, HELD_KEY_PACKAGE_TTL_MS, MAX_HELD_KEY_PACKAGES } from "./admin.js";
 import type { ChatMls } from "./mls.js";
@@ -202,6 +202,11 @@ function attest(
   const deviceSk = "deviceSk" in opts ? opts.deviceSk : DEVICE_SK;
   const proof = deviceSk ? makeChatDeviceProof(deviceSk, COORD, account, CREATED_AT) : undefined;
   return { ...base, label: opts.label ?? "Test device", ...(proof ? { proof } : {}) };
+}
+
+/** A kind-445 event signed by a throwaway key, as Marmot's ephemeral senders do. */
+function groupEvent(tags: string[][], kind = 445) {
+  return finalizeEvent({ kind, created_at: 1_700_000_000, tags, content: "ciphertext" }, generateSecretKey()) as unknown as AnyEvent;
 }
 
 describe("MarmotAdmin — group lifecycle & chat-off inertness", () => {
@@ -1143,9 +1148,29 @@ describe("MarmotAdmin — remove on revoke (§4.2) & ingest", () => {
     const mls = new FakeMls();
     const admin = makeAdmin(store, mls);
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
-    const evs = [{ id: "m1", pubkey: "x".repeat(64), kind: 445, tags: [["h", "ng-1"]] }];
+    const evs = [groupEvent([["h", "ng-1"]]), groupEvent([["h", "ng-1"], ["expiration", "1999999999"]])];
     await admin.ingest(COORD, evs);
     expect(mls.ingested).toEqual([evs]);
+  });
+
+  it("drops 445 events that fail the connect() trust boundary before MLS sees them (audit R-44)", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    const good = groupEvent([["h", "ng-1"]]);
+    const bad = [
+      { ...JSON.parse(JSON.stringify(groupEvent([["h", "ng-1"]]))), content: "tampered" }, // signature no longer covers it (as off the wire)
+      groupEvent([["h", "ng-1"], ["h", "ng-2"]]), // h not a singleton
+      groupEvent([["h", "ng-2"]]), // another group's routing id
+      groupEvent([["h", "ng-1"], ["p", "a".repeat(64)]]), // a tag outside the kind-445 set
+      groupEvent([["h", "ng-1"], ["expiration", "1"], ["expiration", "2"]]),
+      groupEvent([["h", "ng-1"]], 1059),
+    ];
+    await admin.ingest(COORD, [...bad, good]);
+    expect(mls.ingested).toEqual([[good]]);
+    await admin.ingest(COORD, bad);
+    expect(mls.ingested).toEqual([[good]]); // an all-junk batch never reaches the MLS layer
   });
 });
 });

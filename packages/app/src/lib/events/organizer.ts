@@ -30,7 +30,11 @@ import {
   MAX_ROSTER,
   splitRoster,
   mergeRosterPages,
+  parsePayloadSafe,
+  rosterContentSchema,
   rosterContinuationDs,
+  rosterPage0Ds,
+  isRosterPageFor,
   rosterPageD,
   KIND_MATCH_LIST,
   KIND_MATCH_MATRIX,
@@ -85,6 +89,7 @@ import {
   eventKeysBackupSchema,
   MAX_ORGANIZERS,
   MAX_PRIOR_INBOXES,
+  MAX_REVOKED,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -98,8 +103,13 @@ import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { withMutationLock } from "$lib/nostr/mutation-lock.js";
 import { chatInteropRelays, chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
 import { publishAccountGiftWrap } from "$lib/nostr/giftwrap-routing.js";
-import { cacheGet, cacheSet } from "$lib/cache/persist.js";
-import { grantParentField, fetchNewestConfig } from "./hierarchy.js";
+import { activeCacheOwner, cacheGeneration, cacheGet, cacheSet } from "$lib/cache/persist.js";
+import {
+  grantParentField,
+  fetchNewestConfig,
+  fetchNewestSignedConfig,
+  assertConfigNotStale,
+} from "./hierarchy.js";
 
 // Admin surfaces cache their decrypted/derived results owner-scoped so the page
 // paints instantly and refreshes in parallel (CACHING-PLAN §2.11). Wiped on
@@ -300,7 +310,14 @@ export async function fetchPending(
   // holds, so history stays readable across a detach/replace.
   const inboxSks = [keys.einboxNsecHex, ...(keys.priorEinboxNsecs ?? [])].map((h) => hexToBytes(h));
   const inboxPubkeys = inboxSks.map((sk) => getPublicKey(sk));
-  const state = cacheGet<PendingScanState>(pendingStateKey(ctx.coordinate))?.data;
+  // Scope and generation as of NOW (audit R-32). The relay read below runs for
+  // seconds, often detached (prefetch), and an account switch in that window
+  // used to file this identity's decrypted queue under whoever was active when
+  // it finished. Writes go to the captured owner, fenced on the generation, so
+  // a switch or logout since drops them.
+  const cacheOwner = activeCacheOwner() ?? undefined;
+  const gen = cacheGeneration();
+  const state = cacheGet<PendingScanState>(pendingStateKey(ctx.coordinate), cacheOwner)?.data;
   const scanStartedAt = Math.floor(Date.now() / 1000);
   const { wraps, complete } = await readInboxWraps(ctx, inboxPubkeys, state?.cursor);
 
@@ -427,7 +444,7 @@ export async function fetchPending(
     subs: Object.fromEntries(submissions),
     withdrawals: Object.fromEntries(withdrawals),
   };
-  cacheSet(pendingStateKey(ctx.coordinate), nextState, scanStartedAt);
+  if (cacheOwner) cacheSet(pendingStateKey(ctx.coordinate), nextState, scanStartedAt, cacheOwner, gen);
 
   // Fold submissions into their requests.
   for (const [pubkey, sub] of submissions) {
@@ -482,7 +499,7 @@ export async function fetchPending(
     return ia < ib ? -1 : ia > ib ? 1 : 0;
   });
   const newestAt = result.reduce((m, r) => Math.max(m, r.rumorCreatedAt), 0);
-  cacheSet(pendingKey(ctx.coordinate), result, newestAt);
+  if (cacheOwner) cacheSet(pendingKey(ctx.coordinate), result, newestAt, cacheOwner, gen);
   return result;
 }
 
@@ -609,6 +626,7 @@ export async function approveAttendee(
     publishOrQueue(entryEvent, ctx.config.relays),
     ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
   ]);
+  await recordOrganizerRevocation(ctx.coordinate, req.attendeePubkey, false);
 }
 
 /**
@@ -717,21 +735,27 @@ export async function loadRoster(
   held: Uint8Array | EventKeys,
   owner?: string,
 ): Promise<RosterRead> {
-  const { identifier } = splitCoordinate(ctx.coordinate);
   // Ask for every author we would ACCEPT, not only the current publisher (SB-91),
   // matching attendee.ts `fetchRoster`. With a coordinator attached the request
   // named only the coordinator, so an E_id-authored roster (one this organizer
   // published from a page that had not yet seen the attach) was invisible to its
   // own next read: "absent" on a device that has seen a roster, i.e. every later
   // approve/revoke refused, while attendees were reading that very roster.
+  // At both page-0 addresses (PROTOCOL-NIP.md §6.2.2, audit R-53).
+  const page0Ds = rosterPage0Ds(ctx.coordinate);
   const events = await fetchEventsRelayOnly(
-    { kinds: [KIND_ROSTER], authors: acceptedRecordAuthors(ctx), "#d": [identifier] },
+    { kinds: [KIND_ROSTER], authors: acceptedRecordAuthors(ctx), "#d": page0Ds },
     ctx.config.relays,
   );
   // Authority boundary (audit APPK-1) + record-authority pinning (NIP §3.7):
-  // re-verify and keep only the currently accepted authors before the §3.1
-  // latest-wins pick — the same read attendee.ts `fetchRoster` performs.
-  const latest = pickLatest(onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)));
+  // re-verify and keep only the currently accepted authors, and only records
+  // naming this space, before the §3.1 latest-wins pick — the same read
+  // attendee.ts `fetchRoster` performs.
+  const latest = pickLatest(
+    onlyByAuthors(onlyVerified(events), acceptedRecordAuthors(ctx)).filter((e) =>
+      isRosterPageFor(ctx.coordinate, page0Ds, e.tags),
+    ),
+  );
   if (!latest) {
     return { state: "absent", suspect: hasSeenPublished(ctx.coordinate, "roster") };
   }
@@ -759,7 +783,13 @@ export async function loadRoster(
     eckBytes = base64ToBytes(used.key);
   }
   try {
-    const page0 = JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent;
+    // Through the schema, not a cast (audit R-54): `pages` below sizes the
+    // continuation request, and an unvalidated `pages: 1e9` from any ECK holder's
+    // forgery was an allocation of gigabytes. A payload the schema refuses (newer
+    // version included) is one we cannot safely rewrite: `unreadable`.
+    const parsed0 = parsePayloadSafe(rosterContentSchema, JSON.parse(eckDecrypt(eckBytes, latest.content)));
+    if (!parsed0.ok) return { state: "unreadable", at };
+    const page0 = parsed0.value;
     let roster = page0;
     // A paginated roster (PROTOCOL-NIP.md §6.2) keeps the rest of its membership
     // on `<event-d>:1`… A rewrite path that read only page 0 would republish the
@@ -768,7 +798,8 @@ export async function loadRoster(
     // So an unreadable continuation page is `unreadable`, not a smaller roster.
     const pages = page0.pages ?? 1;
     if (pages > 1) {
-      const rest = await loadRosterPages(ctx, eckBytes, latest.pubkey!, pages);
+      const base = latest.tags?.find((t) => t[0] === "d")?.[1] ?? page0Ds[0]!;
+      const rest = await loadRosterPages(ctx, eckBytes, latest.pubkey!, pages, base);
       if (!rest) return { state: "unreadable", at };
       roster = mergeRosterPages([page0, ...rest.pages]);
       // The republish must beat the newest page it read, not just page 0.
@@ -808,11 +839,12 @@ async function loadRosterPages(
   eckBytes: Uint8Array,
   author: string,
   pages: number,
+  /** Page 0's own `d`: the pages follow whichever address family it came from. */
+  base: string,
 ): Promise<{ pages: RosterContent[]; at: number } | undefined> {
   const { eckDecrypt } = await import("@nostrautica/protocol");
-  const { identifier } = splitCoordinate(ctx.coordinate);
   const events = await fetchEventsRelayOnly(
-    { kinds: [KIND_ROSTER], authors: [author], "#d": rosterContinuationDs(identifier, pages) },
+    { kinds: [KIND_ROSTER], authors: [author], "#d": rosterContinuationDs(base, pages) },
     ctx.config.relays,
   );
   // Same authority boundary as page 0, plus the `a` tag: page N's address could
@@ -823,11 +855,13 @@ async function loadRosterPages(
   const out: RosterContent[] = [];
   let at = 0;
   for (let page = 1; page < pages; page++) {
-    const d = rosterPageD(identifier, page);
+    const d = rosterPageD(base, page);
     const latest = pickLatest(usable.filter((e) => e.tags?.some((t) => t[0] === "d" && t[1] === d)));
     if (!latest) return undefined;
     try {
-      out.push(JSON.parse(eckDecrypt(eckBytes, latest.content)) as RosterContent);
+      const parsed = parsePayloadSafe(rosterContentSchema, JSON.parse(eckDecrypt(eckBytes, latest.content)));
+      if (!parsed.ok) return undefined;
+      out.push(parsed.value);
     } catch {
       return undefined;
     }
@@ -980,7 +1014,34 @@ export async function sendAdminCommand(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd, args, expires },
   });
-  return toOutcome(await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays));
+  const outcome = toOutcome(await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays));
+  // A queued command still goes out, so it is recorded either way.
+  if ((cmd === "revoke" || cmd === "approve") && typeof args.pubkey === "string") {
+    await recordOrganizerRevocation(ctx.coordinate, args.pubkey, cmd === "revoke");
+  }
+  return outcome;
+}
+
+/**
+ * Keep the organizer's revoked set (`EventKeys.revoked`, audit 2026-10-21 R-04):
+ * add on a revoke, drop on an approve. It is the only durable record of a
+ * revocation the NEXT coordinator can be told about — a client-side revoke leaves
+ * nothing else behind, and the current coordinator's tombstone does not travel.
+ * `attachCoordinator` sends it in the 21603. Best-effort: a failed write only
+ * means the next attach cannot name this person.
+ */
+async function recordOrganizerRevocation(coordinate: string, pubkey: string, revoked: boolean): Promise<void> {
+  const owner = activeKeystoreOwner() ?? undefined;
+  try {
+    const keys = await loadEventKeys(coordinate, owner);
+    if (!keys || keys.role !== "organizer") return;
+    const next = (keys.revoked ?? []).filter((p) => p !== pubkey);
+    if (revoked) next.push(pubkey);
+    keys.revoked = next.length > 0 ? next.slice(-MAX_REVOKED) : undefined;
+    await saveEventKeys(keys, owner);
+  } catch (e) {
+    console.warn("[organizer] could not record the revocation for a later coordinator attach:", e);
+  }
 }
 
 /**
@@ -1177,7 +1238,6 @@ export async function fetchCoordinatorLastSeen(
   ctx: EventContext,
 ): Promise<number | undefined> {
   if (!ctx.config.coordinator) return undefined;
-  const { identifier } = splitCoordinate(ctx.coordinate);
   const events = await fetchEvents(
     {
       kinds: [KIND_DIRECTORY_ENTRY, KIND_ROSTER, KIND_MATCH_LIST, KIND_MATCH_MATRIX],
@@ -1186,17 +1246,22 @@ export async function fetchCoordinatorLastSeen(
     },
     ctx.config.relays,
   ).catch(() => []);
-  // Roster carries #d=identifier but per-attendee entries/matches use blinded d's;
-  // filtering by #a (the event coordinate) catches them all.
+  // The roster carries a coordinate-derived d but per-attendee entries/matches use
+  // blinded d's; filtering by #a (the event coordinate) catches them all.
   let newest = 0;
   for (const e of events) if ((e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
-  // Fall back to the roster #d query in case a relay ignores #a on some kinds.
+  // Fall back to the roster #d query in case a relay ignores #a on some kinds —
+  // keeping only records that name this space, since the legacy alias is shared
+  // with any same-named space on this coordinator (audit R-53).
   if (newest === 0) {
+    const page0Ds = rosterPage0Ds(ctx.coordinate);
     const roster = await fetchEvents(
-      { kinds: [KIND_ROSTER], authors: [ctx.config.coordinator], "#d": [identifier] },
+      { kinds: [KIND_ROSTER], authors: [ctx.config.coordinator], "#d": page0Ds },
       ctx.config.relays,
     ).catch(() => []);
-    for (const e of roster) if ((e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
+    for (const e of roster) {
+      if (isRosterPageFor(ctx.coordinate, page0Ds, e.tags) && (e.created_at ?? 0) > newest) newest = e.created_at ?? 0;
+    }
   }
   const seen = newest || undefined;
   if (seen !== undefined) cacheSet(coordSeenKey(ctx.coordinate), seen, seen);
@@ -1427,7 +1492,7 @@ export async function revokeAttendeeClient(
    * below.
    */
   blindingKey?: Uint8Array,
-): Promise<void> {
+): Promise<PublishOutcome> {
   // One roster authority (SB-91): with a coordinator attached the removal is a
   // 21604 and the coordinator rotates; a client rotation here would be a second
   // roster author and a second, colliding ECK mint (SB-86).
@@ -1517,6 +1582,12 @@ export async function revokeAttendeeClient(
   });
   const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
 
+  // The only lasting record of this revoke that a later coordinator can be told
+  // (21603 `revoked`, audit 2026-10-21 R-04): without it the next attach's E_inbox
+  // backfill re-admitted the member on their original join. Set before the staged
+  // save and the backup write below, so both carry it. Recorded even if a publish
+  // below fails; attach drops anyone the current roster still lists.
+  keys.revoked = [...(keys.revoked ?? []).filter((p) => p !== removedPubkey), removedPubkey].slice(-MAX_REVOKED);
   await stageEck(keys, newEck, owner);
   // The new ECK must reach the DURABLE backup, not just this device.
   //
@@ -1540,10 +1611,20 @@ export async function revokeAttendeeClient(
       "[organizer] revoke rotated the ECK with no blinding key — the new key exists only on this device",
     );
   }
-  await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
-  await promotePending(keys, newEck, owner);
-  // Co-organizers hold custody but are not attendees: hand them the new key (SB-90).
-  await reissueOrganizerGrants(organizer, ctx, keys);
+  // Queued is not revoked (audit R-25, the client twin of SB-03): until the new
+  // roster and the deletion reach a relay, the removed member is still listed
+  // under the key they hold. So the version stays STAGED — loadRoster promotes
+  // it the moment it reads a live roster that uses it — and the caller is told.
+  const outcome = await publishRekeyed(ctx, [deletion], rekeyed, rosterEvents);
+  if (outcome === "published") await promotePending(keys, newEck, owner);
+  // Co-organizers hold custody but are not attendees: hand them the new key
+  // (SB-90). The version the queued roster uses, too, or they could not read it.
+  await reissueOrganizerGrants(
+    organizer,
+    ctx,
+    outcome === "published" ? keys : { ...keys, eck: unionEck(keys.eck, [newEck]) },
+  );
+  return outcome;
 }
 
 /**
@@ -1692,15 +1773,17 @@ async function publishRekeyed(
   extra: VerifiedEvent[],
   rekeyed: Rekeyed,
   rosterEvents: VerifiedEvent[],
-): Promise<void> {
-  await Promise.all([
-    ...extra.map((e) => publishOrQueue(e, ctx.config.relays)),
-    ...rekeyed.entries.map((e) => publishOrQueue(e, ctx.config.relays)),
-    ...rekeyed.grants.map((g) => publishAccountGiftWrap(g.wrap as any, g.to, ctx.config.relays)),
+): Promise<PublishOutcome> {
+  const [authoritative] = await Promise.all([
+    // The roster (and `extra`, a revoke's directory deletion) decides who is in;
+    // every one of them has to have reached a relay for the change to be live.
     // No `previous` in rosterEvents: every entry's blinded `d` was re-derived
     // under the NEW ECK, so every page genuinely changed.
-    ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
+    Promise.all([...extra, ...rosterEvents].map((e) => publishOrQueue(e, ctx.config.relays))),
+    ...rekeyed.entries.map((e) => publishOrQueue(e, ctx.config.relays)),
+    ...rekeyed.grants.map((g) => publishAccountGiftWrap(g.wrap as any, g.to, ctx.config.relays)),
   ]);
+  return toOutcome(authoritative.every(Boolean));
 }
 
 /**
@@ -1862,12 +1945,15 @@ const CONFIG_UNREADABLE =
  * could not read is exactly the write that destroys something.
  */
 async function freshConfig(ctx: EventContext): Promise<EventConfig> {
-  const cfg = await fetchNewestConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(
+  const read = await fetchNewestSignedConfig(ctx.coordinate, ctx.config.relays, { fresh: true }).catch(
     () => undefined,
   );
-  if (!cfg) throw new Error(CONFIG_UNREADABLE);
-  noteFreshConfig(ctx.coordinate, cfg);
-  return cfg;
+  if (!read) throw new Error(CONFIG_UNREADABLE);
+  // Newest on THESE relays is not newest: one that missed a detach answers with
+  // the config from before it (audit R-29). Not noted for the SB-91 guard either.
+  await assertConfigNotStale(ctx.coordinate, read.createdAt, ctx.configAt);
+  noteFreshConfig(ctx.coordinate, read.config);
+  return read.config;
 }
 
 // ── One roster authority (audit SB-91) ───────────────────────────────────────
@@ -2139,6 +2225,13 @@ export async function attachCoordinator(
   //    re-attaching the same one) does not rotate — there is no departing custodian.
   const previous = ctx.config.coordinator;
   const replacing = !!previous && previous !== coordinatorPubkey;
+  // The members this organizer revoked, for the grant's `revoked` set (NIP §3.5,
+  // audit 2026-10-21 R-04), read BEFORE any rotation below. Anyone the current
+  // roster lists is dropped from it: the set is a union across devices, and a
+  // member one device re-approved must not be shut out by another's older record.
+  // Best-effort — an unreadable roster sends the set unfiltered, which errs
+  // toward keeping a removal in force (an organizer approve lifts it).
+  const revoked = await revokedForGrant(ctx, keys, owner);
   let einboxNsecHex = keys.einboxNsecHex;
   let einboxPubkey = ctx.config.inbox;
   let eck = keys.eck;
@@ -2188,6 +2281,7 @@ export async function attachCoordinator(
       // named here, so naming it is what lets the outgoing coordinator's approvals
       // carry over; a forged roster under any other key is ignored.
       ...(replacing ? { prev_coordinator: previous } : {}),
+      ...(revoked.length > 0 ? { revoked } : {}),
     },
   });
 
@@ -2222,6 +2316,15 @@ export async function attachCoordinator(
   }
 }
 
+/** The grant's `revoked` set: the recorded revocations minus the current roster (R-04). */
+async function revokedForGrant(ctx: EventContext, keys: EventKeys, owner: string | undefined): Promise<string[]> {
+  const recorded = keys.revoked ?? [];
+  if (recorded.length === 0) return [];
+  const read = await loadRoster(ctx, keys, owner).catch(() => undefined);
+  const listed = new Set(read?.state === "ok" ? read.roster.attendees.map((a) => a.pubkey) : []);
+  return recorded.filter((p) => !listed.has(p)).slice(-MAX_REVOKED);
+}
+
 /** This device's custody for one event, in the 30078 backup's shape. */
 function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: number): EventKeysBackup {
   return {
@@ -2234,6 +2337,7 @@ function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: numbe
     ...(keys.pendingEck?.length ? { pending_eck: keys.pendingEck } : {}),
     ...(keys.priorEinboxNsecs?.length ? { prior_einbox_nsecs: keys.priorEinboxNsecs.slice(-MAX_PRIOR_INBOXES) } : {}),
     ...(keys.coOrganizers?.length ? { co_organizers: keys.coOrganizers.slice(0, MAX_ORGANIZERS) } : {}),
+    ...(keys.revoked?.length ? { revoked: keys.revoked.slice(-MAX_REVOKED) } : {}),
   };
 }
 
@@ -2242,7 +2346,7 @@ function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: numbe
  * anything changed, i.e. whether the other copy held custody this device lacked.
  */
 function foldBackupIntoKeys(keys: EventKeys, merged: EventKeysBackup): boolean {
-  const snap = () => JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0, keys.coOrganizers ?? []]);
+  const snap = () => JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0, keys.coOrganizers ?? [], keys.revoked ?? []]);
   const before = snap();
   keys.eck = unionEck(keys.eck, merged.eck);
   const pending = unionEck(keys.pendingEck ?? [], merged.pending_eck ?? []).filter(
@@ -2258,6 +2362,8 @@ function foldBackupIntoKeys(keys: EventKeys, merged: EventKeysBackup): boolean {
   keys.coordinatorGen = Math.max(keys.coordinatorGen ?? 0, merged.coordinator_gen ?? 0) || undefined;
   const co = [...new Set([...(keys.coOrganizers ?? []), ...(merged.co_organizers ?? [])])];
   keys.coOrganizers = co.length > 0 ? co : undefined;
+  const revoked = [...new Set([...(merged.revoked ?? []), ...(keys.revoked ?? [])])].slice(-MAX_REVOKED);
+  keys.revoked = revoked.length > 0 ? revoked : undefined;
   return before !== snap();
 }
 

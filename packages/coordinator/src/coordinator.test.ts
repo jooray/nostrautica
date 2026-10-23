@@ -40,6 +40,7 @@ import {
   rosterContentSchema,
   mergeRosterPages,
   rosterPageD,
+  spaceRecordsD,
   MAX_ROSTER,
   MAX_ROSTER_PAGES,
   NIP44_MAX_PLAINTEXT_BYTES,
@@ -1768,9 +1769,12 @@ describe("31604 roster pagination", () => {
     }
   }
 
-  /** Every 31604 the coordinator published, newest per page `d`, in page order. */
-  function rosterPages(h: Harness): NostrEvent[] {
-    const identifier = h.coordinate.split(":").slice(2).join(":");
+  /**
+   * Every 31604 the coordinator published, newest per page `d`, in page order,
+   * under `base` (the derived address by default; the event `d` for the alias).
+   */
+  function rosterPages(h: Harness, base = spaceRecordsD(h.coordinate)): NostrEvent[] {
+    const identifier = base;
     const byD = new Map<string, NostrEvent>();
     for (const e of h.transport.published.filter((e) => e.kind === KIND_ROSTER)) {
       const d = e.tags.find((t) => t[0] === "d")?.[1];
@@ -1830,16 +1834,18 @@ describe("31604 roster pagination", () => {
 
     await approve();
 
-    const published = h.transport.published.filter((e) => e.kind === KIND_ROSTER).length - before;
-    // One publish, not `pageCount` of them. This is the difference between an
-    // approval costing one relay round trip and costing N for the whole event.
-    expect(published).toBe(1);
+    const published = h.transport.published.filter((e) => e.kind === KIND_ROSTER).slice(before);
+    // One page, not `pageCount` of them: the difference between an approval
+    // costing one relay round trip and costing N for the whole event. It goes out
+    // twice, at the derived address and at the legacy alias (PROTOCOL-NIP.md §6.2.2).
     const identifier = h.coordinate.split(":").slice(2).join(":");
-    const last = h.transport.published.filter((e) => e.kind === KIND_ROSTER).at(-1)!;
-    expect(last.tags.find((t) => t[0] === "d")?.[1]).toBe(rosterPageD(identifier, pageCount - 1));
+    expect(published.map((e) => e.tags.find((t) => t[0] === "d")?.[1])).toEqual([
+      rosterPageD(spaceRecordsD(h.coordinate), pageCount - 1),
+      rosterPageD(identifier, pageCount - 1),
+    ]);
   });
 
-  it("a roster that still fits publishes exactly one 31604, at the event d, with v:2", async () => {
+  it("a roster that still fits publishes one v:2 page, at the derived address and at the event d", async () => {
     const h = await setup();
     const sk = generateSecretKey();
     const pk = await join(h, sk, "crypto");
@@ -1847,10 +1853,15 @@ describe("31604 roster pagination", () => {
     const identifier = h.coordinate.split(":").slice(2).join(":");
     const pages = rosterPages(h);
     expect(pages).toHaveLength(1);
-    expect(pages[0]!.tags.find((t) => t[0] === "d")?.[1]).toBe(identifier);
+    expect(pages[0]!.tags.find((t) => t[0] === "d")?.[1]).toBe(spaceRecordsD(h.coordinate));
     const roster = rosterContentSchema.parse(JSON.parse(eckDecrypt(h.eck, pages[0]!.content)));
     expect(roster.v).toBe(2);
     expect(roster.pages).toBeUndefined();
+    // The legacy alias carries the same roster, for clients that predate the
+    // derived address.
+    const alias = rosterPages(h, identifier);
+    expect(alias).toHaveLength(1);
+    expect(JSON.parse(eckDecrypt(h.eck, alias[0]!.content))).toEqual(roster);
   });
 
   it("retention deletes every address pagination could have used, not just page 0", async () => {
@@ -1871,7 +1882,175 @@ describe("31604 roster pagination", () => {
     const coordPk = getPublicKey(h.coordSk);
     for (let i = 0; i < MAX_ROSTER_PAGES; i++) {
       expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD(identifier, i)}`), `page ${i}`).toBe(true);
+      expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD(spaceRecordsD(h.coordinate), i)}`), `derived page ${i}`).toBe(true);
     }
+    expect(addrs.has(`${KIND_MATCH_MATRIX}:${coordPk}:${spaceRecordsD(h.coordinate)}`)).toBe(true);
+    expect(addrs.has(`${KIND_MATCH_MATRIX}:${coordPk}:${identifier}`)).toBe(true);
+  });
+});
+
+/**
+ * Audit R-53: one coordinator signs for every space it serves, so its roster and
+ * matrix addresses are `(kind, coordinator, d)`. With `d` the bare identifier,
+ * two spaces named `cypherpunk` shared one roster address: the later publish
+ * withheld the other's roster, and one space's retention sweep deleted the
+ * other's. The derived `d` (spaceRecordsD) hashes the whole coordinate.
+ */
+describe("audit R-53 — same-named spaces on one coordinator get their own addresses", () => {
+  /** Install a second space, under a different E_id, with the SAME identifier. */
+  async function installSameNamedSpace(
+    h: Harness,
+    opts: { retentionDays?: number; eventEndSec?: number } = {},
+  ): Promise<Harness> {
+    const eidSk = generateSecretKey();
+    const eidPubkey = getPublicKey(eidSk);
+    const einboxSk = generateSecretKey();
+    const eck = generateEck();
+    const d = "cypherpunk";
+    const coordinate = makeCoordinate(eidPubkey, d, KIND_CALENDAR_EVENT);
+    const coordPubkey = getPublicKey(h.coordSk);
+    h.transport.seed.push(
+      { kind: KIND_CALENDAR_EVENT, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["title", "Another Assembly"], ...(opts.eventEndSec !== undefined ? [["end", String(opts.eventEndSec)]] : [])], content: "", id: `b1-${eidPubkey}`, sig: "" } as any,
+      { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", d], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["matching", "on"], ["match_visibility", "pair"], ["coordinator", coordPubkey, "1"], ["approval", "manual"], ...(opts.retentionDays !== undefined ? [["retention", String(opts.retentionDays)]] : [])], content: "", id: `b2-${eidPubkey}`, sig: "" } as any,
+      { kind: 31601, pubkey: eidPubkey, created_at: 1, tags: [["d", d]], content: JSON.stringify({ v: 2, invites: [] }), id: `b3-${eidPubkey}`, sig: "" } as any,
+    );
+    await h.coordinator.installEvent({
+      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: [{ id: 1, key: bytesToBase64(eck) }], configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+    expect(h.store.getEvent(coordinate)).toBeDefined();
+    return { ...h, eidSk, einboxSk, coordinate, eck, invites: [], nextInvite: 0 };
+  }
+
+  async function approveOne(h: Harness): Promise<string> {
+    const pk = getPublicKey(generateSecretKey());
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "pending", now: h.clock.t });
+    await admin(h, "approve", { pubkey: pk });
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    return pk;
+  }
+
+  /** The newest coordinator-signed 31604 at `d`. */
+  function newestAt(h: Harness, d: string): NostrEvent | undefined {
+    return h.transport.published
+      .filter((e) => e.kind === KIND_ROSTER && e.tags.some((t) => t[0] === "d" && t[1] === d))
+      .at(-1);
+  }
+
+  it("a same-named space's later publish no longer displaces the other's roster", async () => {
+    const a = await setup();
+    const alice = await approveOne(a);
+    const b = await installSameNamedSpace(a);
+    await approveOne(b);
+
+    expect(spaceRecordsD(a.coordinate)).not.toBe(spaceRecordsD(b.coordinate));
+    // A's derived page 0 is still A's, readable under A's ECK, after B published.
+    const pageA = newestAt(a, spaceRecordsD(a.coordinate))!;
+    expect(pageA.tags.find((t) => t[0] === "a")?.[1]).toBe(a.coordinate);
+    const rosterA = rosterContentSchema.parse(JSON.parse(eckDecrypt(a.eck, pageA.content)));
+    expect(rosterA.attendees.map((x) => x.pubkey)).toEqual([alice]);
+    // The shared legacy alias is exactly what the bug was: B's publish is newest there.
+    expect(newestAt(a, "cypherpunk")!.tags.find((t) => t[0] === "a")?.[1]).toBe(b.coordinate);
+  });
+
+  it("one space's retention sweep leaves a same-named space's roster alone", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const a = await setup(); // no retention policy: never swept
+    await approveOne(a);
+    const b = await installSameNamedSpace(a, { retentionDays: 7, eventEndSec: nowSec - 30 * 86_400 });
+    await approveOne(b);
+
+    await a.coordinator.retentionSweep();
+
+    const deletion = a.transport.published.filter((e) => e.kind === KIND_DELETION).at(-1)!;
+    expect(deletion.content).toBe("retention window elapsed");
+    const addrs = new Set(deletion.tags.filter((t) => t[0] === "a").map((t) => t[1]));
+    const coordPk = getPublicKey(a.coordSk);
+    // B's own derived addresses go…
+    expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${spaceRecordsD(b.coordinate)}`)).toBe(true);
+    expect(addrs.has(`${KIND_MATCH_MATRIX}:${coordPk}:${spaceRecordsD(b.coordinate)}`)).toBe(true);
+    // …and nothing A occupies: neither A's derived pages nor the legacy alias the
+    // two share (that sweep used to delete A's roster outright).
+    for (let i = 0; i < MAX_ROSTER_PAGES; i++) {
+      expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD(spaceRecordsD(a.coordinate), i)}`)).toBe(false);
+      expect(addrs.has(`${KIND_ROSTER}:${coordPk}:${rosterPageD("cypherpunk", i)}`)).toBe(false);
+    }
+    expect(addrs.has(`${KIND_MATCH_MATRIX}:${coordPk}:cypherpunk`)).toBe(false);
+  });
+
+  it("an upgraded coordinator republishes an existing roster at the derived address once", async () => {
+    const h = await setup();
+    // What an older coordinator left behind: an approved member, a roster at the
+    // legacy address only, and no derived-address watermark.
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: getPublicKey(generateSecretKey()), status: "approved", now: h.clock.t });
+    const derived = spaceRecordsD(h.coordinate);
+    expect(newestAt(h, derived)).toBeUndefined();
+    try {
+      await h.coordinator.start();
+      await h.coordinator.rosterAddressMigration;
+      expect(newestAt(h, derived)).toBeDefined();
+      expect(newestAt(h, "cypherpunk")).toBeDefined();
+    } finally {
+      h.coordinator.stop();
+    }
+    // A later boot finds the watermark and publishes nothing more.
+    const count = h.transport.published.filter((e) => e.kind === KIND_ROSTER).length;
+    try {
+      await h.coordinator.start();
+      await h.coordinator.rosterAddressMigration;
+    } finally {
+      h.coordinator.stop();
+    }
+    expect(h.transport.published.filter((e) => e.kind === KIND_ROSTER).length).toBe(count);
+  });
+
+  it("a failed address upgrade does not abandon the other events, and a later pass finishes it", async () => {
+    // Production, first boot of 0.14.0: every relay timed out under the startup
+    // burst, and the one throw ended the whole pass until the next restart.
+    const a = await setup();
+    const b = await installSameNamedSpace(a);
+    try {
+      await a.coordinator.start();
+      await a.coordinator.rosterAddressMigration;
+      for (const h of [a, b]) {
+        h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: getPublicKey(generateSecretKey()), status: "approved", now: h.clock.t });
+      }
+      const migrate = () => (a.coordinator as any).migrateRosterAddresses(() => false) as Promise<number>;
+      a.transport.failPublishes = 99;
+      // Both events no longer hold a derived watermark only if neither had members
+      // at boot; whichever did not is attempted, and neither failure stops the pass.
+      const failed = await migrate();
+      expect(failed).toBeGreaterThan(0);
+      a.transport.failPublishes = 0;
+      expect(await migrate()).toBe(0);
+      expect(newestAt(a, spaceRecordsD(a.coordinate))).toBeDefined();
+      expect(newestAt(a, spaceRecordsD(b.coordinate))).toBeDefined();
+    } finally {
+      a.coordinator.stop();
+    }
+  });
+
+  it("never publishes the legacy alias for an identifier shaped like a derived address", async () => {
+    // Such a space's alias (`<hex64>`, `<hex64>:N`) could BE another space's
+    // derived page, which the alias would then overwrite.
+    const h = await setup();
+    const victim = spaceRecordsD(h.coordinate);
+    const eidSk = generateSecretKey();
+    const eidPubkey = getPublicKey(eidSk);
+    const einboxSk = generateSecretKey();
+    const eck = generateEck();
+    const coordinate = makeCoordinate(eidPubkey, victim, KIND_CALENDAR_EVENT);
+    const coordPubkey = getPublicKey(h.coordSk);
+    h.transport.seed.push(
+      { kind: KIND_CALENDAR_EVENT, pubkey: eidPubkey, created_at: 1, tags: [["d", victim], ["title", "Squatter"]], content: "", id: "sq1", sig: "" } as any,
+      { kind: 31600, pubkey: eidPubkey, created_at: 1, tags: [["d", victim], ["v", "2"], ["inbox", getPublicKey(einboxSk)], ["coordinator", coordPubkey, "1"], ["approval", "manual"]], content: "", id: "sq2", sig: "" } as any,
+    );
+    await h.coordinator.installEvent({
+      coordinate, inboxSkHex: bytesToHex(einboxSk), eck: [{ id: 1, key: bytesToBase64(eck) }], configRelays: ["wss://test"], gen: 1, source: "grant", backfill: "full",
+    });
+    await approveOne({ ...h, eidSk, einboxSk, coordinate, eck });
+
+    expect(newestAt(h, spaceRecordsD(coordinate))).toBeDefined();
+    expect(newestAt(h, victim)).toBeUndefined();
   });
 });
 
@@ -2900,6 +3079,52 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
     // Serving again: a fresh join is processed.
     const p2 = await joinOnly(h, generateSecretKey(), "design");
     expect(h.store.getAttendee(h.coordinate, p2.pubkey)).toBeDefined();
+  });
+
+  // Audit 2026-10-21 R-05: `handleAdmin` returned on a missing live state, and the
+  // wrapper marked the command seen — so a revoke sent while the event was
+  // suspended was consumed and never applied, and the member kept their access.
+  it("an organizer revoke sent while the event is SUSPENDED is applied once it resumes (R-05)", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    h.transport.blockConfig = true;
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "restore",
+    });
+
+    const createdAt = Math.floor(h.clock.t / 1000);
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: pk }, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+    h.transport.seed.push(wrap as any); // it is on the relay, for the rescan
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false); // deferred, not consumed
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+
+    h.transport.blockConfig = false;
+    h.clock.t += 60_000;
+    await h.coordinator.retrySuspendedEvents();
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    expect(h.store.isRevoked(h.coordinate, pk)).toBe(true);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+  });
+
+  it("a command for an event this daemon does not hold is still consumed (R-05)", async () => {
+    const h = await setup();
+    const other = makeCoordinate(getPublicKey(h.eidSk), "not-installed", KIND_CALENDAR_EVENT);
+    const createdAt = Math.floor(h.clock.t / 1000);
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: other, cmd: "recompute", args: {}, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
   });
 
   /**
@@ -4717,13 +4942,13 @@ function secondCoordinator(h: Harness, coordSkB: Uint8Array): { coordinator: Coo
 async function handOverTo(
   h: Harness,
   coordSkB: Uint8Array,
-  opts: { prev?: string; cfgId?: string } = {},
+  opts: { prev?: string; cfgId?: string; revoked?: string[]; approval?: string } = {},
 ): Promise<{ coordinator: Coordinator; store: Store }> {
   const identifier = h.coordinate.split(":").slice(2).join(":");
   const coordPkB = getPublicKey(coordSkB);
   h.transport.seed.push({
     kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: opts.cfgId ?? "cfg-b", sig: "", content: "",
-    tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
+    tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"], ...(opts.approval ? [["approval", opts.approval]] : [])],
   } as any);
   const b = secondCoordinator(h, coordSkB);
   const grantWrap = wrapRumor(h.eidSk, coordPkB, {
@@ -4736,6 +4961,7 @@ async function handOverTo(
       eck: [{ id: 1, key: bytesToBase64(h.eck) }],
       config_relays: ["wss://test"],
       ...(opts.prev ? { prev_coordinator: opts.prev } : {}),
+      ...(opts.revoked ? { revoked: opts.revoked } : {}),
     },
   });
   await b.coordinator.handleCoordinatorWrap(grantWrap as any);
@@ -5563,6 +5789,42 @@ describe("audit R4 — the coordinator's own inbox is rate-gated before durable 
     const wraps = flood(h, h.eidSk); // the E_id of an event this daemon has installed
     for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
     expect(wraps.every((w) => h.store.isRumorSeen((w as any).id))).toBe(true);
+  });
+
+  // Audit 2026-10-21 R-12: the shared bucket was charged BEFORE the sender cap was
+  // tested, so one flooding identity's already-over-cap rumors spent the whole
+  // inbox's budget, and a rescan replaying them spent it again.
+  it("an over-cap sender's excess does not spend the inbox budget everyone shares (R-12)", async () => {
+    const h = await setup();
+    const coordPub = getPublicKey(h.coordSk);
+    const baseSec = Math.floor(h.clock.t / 1000);
+    const flooder = generateSecretKey();
+    for (let i = 0; i < 640; i++) {
+      const w = wrapRumor(flooder, coordPub, {
+        kind: KIND_ADMIN_COMMAND,
+        content: { v: 2, a: h.coordinate, cmd: "recompute" },
+        created_at: baseSec - i,
+      });
+      await h.coordinator.handleCoordinatorWrap(w as any);
+    }
+    const bystander = wrapRumor(generateSecretKey(), coordPub, {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "recompute" },
+    });
+    await h.coordinator.handleCoordinatorWrap(bystander as any);
+    expect(h.store.isRumorSeen((bystander as any).id)).toBe(true);
+  });
+
+  it("strangers exhausting the shared bucket cannot starve the organizer's commands (R-12)", async () => {
+    const h = await setup();
+    // A distinct-sender flood has used up the coordinator inbox's shared budget.
+    for (let i = 0; i < 700; i++) h.store.bumpInboxRate("coordinator-inbox", "", h.clock.t, 60_000);
+    const stranger = flood(h, generateSecretKey())[0]!;
+    await h.coordinator.handleCoordinatorWrap(stranger as any);
+    expect(h.store.isRumorSeen((stranger as any).id)).toBe(false); // the bucket still binds them
+    const organizer = flood(h, h.eidSk)[0]!;
+    await h.coordinator.handleCoordinatorWrap(organizer as any);
+    expect(h.store.isRumorSeen((organizer as any).id)).toBe(true);
   });
 });
 
@@ -6665,8 +6927,10 @@ describe("audit C3 — public inbox is population-bounded", () => {
 
   it("refuses a new attendee beyond the 2,000 roster population cap", async () => {
     const h = await setup();
+    // APPROVED members: since R-03 (2026-10-21) only they count toward the cap;
+    // pending requests have their own bounded queue.
     for (let i = 0; i < 2000; i++) {
-      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "seed" + i, status: "pending", now: 1 });
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "seed" + i, status: "approved", now: 1 });
     }
     expect(h.store.attendeeCount(h.coordinate)).toBe(2000);
     // A fresh join (even with a valid invite) is refused — the roster never grows
@@ -7499,6 +7763,55 @@ describe("audit DS41-046 — revoke deletes the match list published to the remo
   });
 });
 
+/**
+ * Audit R-59: kind-5 deletions are public. Naming a member's blinded d under an
+ * ECK version retired before they joined let anyone still holding that version
+ * test whether a given pubkey joined after they lost access.
+ */
+describe("audit R-59 — deletions name only addresses that were published", () => {
+  it("revoke and retention skip ECK versions a later joiner was never published under", async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const h = await setup(0, { retentionDays: 7, eventEndSec: nowSec + 86_400 });
+    const early = await join(h, generateSecretKey(), "crypto");
+    await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    await admin(h, "revoke", { pubkey: early }); // rotates ECK v1 → v2
+    await h.coordinator.jobs.drain();
+    const eck = (h.coordinator as any).events.get(h.coordinate).eck as { id: number; key: string }[];
+    expect(eck.length).toBe(2);
+    const v1 = base64ToBytes(eck[0]!.key);
+    const v2 = base64ToBytes(eck[1]!.key);
+
+    const lateSk = generateSecretKey();
+    const late = await join(h, lateSk, "crypto");
+    const later = await join(h, generateSecretKey(), "design");
+    await h.coordinator.jobs.drain();
+    const coordPub = getPublicKey(h.coordSk);
+    const named = (from: number) =>
+      new Set(
+        h.transport.published
+          .slice(from)
+          .filter((e) => e.kind === KIND_DELETION)
+          .flatMap((e) => e.tags.filter((t) => t[0] === "a").map((t) => t[1])),
+      );
+
+    let before = h.transport.published.length;
+    await admin(h, "revoke", { pubkey: late }); // rotates v2 → v3
+    await h.coordinator.jobs.drain();
+    let a = named(before);
+    expect(a.has(`${KIND_MATCH_LIST}:${coordPub}:${blindedD(v2, h.coordinate, late)}`)).toBe(true);
+    expect(a.has(`${KIND_MATCH_LIST}:${coordPub}:${blindedD(v1, h.coordinate, late)}`)).toBe(false);
+
+    h.clock.t += 30 * 86_400_000; // past end + retention
+    before = h.transport.published.length;
+    await h.coordinator.retentionSweep();
+    a = named(before);
+    expect(a.has(`${KIND_DIRECTORY_ENTRY}:${coordPub}:${blindedD(v2, h.coordinate, later)}`)).toBe(true);
+    expect(a.has(`${KIND_DIRECTORY_ENTRY}:${coordPub}:${blindedD(v1, h.coordinate, later)}`)).toBe(false);
+    expect(a.has(`${KIND_MATCH_LIST}:${coordPub}:${blindedD(v1, h.coordinate, later)}`)).toBe(false);
+  });
+});
+
 /** Audit DS41-042 / SB-98: a forward and a reverse batch for one directed pair both paid. */
 describe("audit SB-98 — one directed pair is scored once, however many batches hold it", () => {
   it("concurrent forward + reverse batches make one provider call", async () => {
@@ -7954,5 +8267,263 @@ describe("audit DS41-041 — an event-context edit suggests a recompute", () => 
     metaSub(h).onEvent(meta(h, 30, [["title", "Renamed early"], ["t", "cypherpunk"], ["end", "9000"]]));
     await new Promise((r) => setTimeout(r, 10));
     expect(contextNotices(h)).toHaveLength(0);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-07 — a revoked member's pipeline work never republishes them.
+ *
+ * `processAttendeeJob` checked only that a row existed, `publishDirectory` never
+ * reads status, and the revoke cancelled no jobs. So a `process_attendee` queued
+ * before the revoke (the normal state right after a submission) ran afterwards and
+ * published the removed member's directory entry under the ROTATED ECK — the key
+ * minted to exclude them, readable by everyone who stayed.
+ */
+describe("audit 2026-10-21 R-07 — no pipeline publish for a revoked member", () => {
+  const directoryEntries = (h: Harness, from: number) =>
+    h.transport.published.slice(from).filter((e) => e.kind === KIND_DIRECTORY_ENTRY);
+
+  it("a process job queued before the revoke is cancelled and never runs", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    await admin(h, "revoke", { pubkey: pk });
+    const from = h.transport.published.length;
+    const sttBefore = h.stt.calls;
+
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, pk)?.ai_profile_json ?? null).toBeNull();
+    expect(h.stt.calls).toBe(sttBefore); // no paid work for someone who is gone
+    expect(directoryEntries(h, from)).toHaveLength(0);
+  });
+
+  it("a job already running when the revoke lands discards its result", async () => {
+    let onTranscribe: (() => Promise<void>) | undefined;
+    const h = await setup(0, { beforeTranscribe: async () => { await onTranscribe?.(); } });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    let from = 0;
+    onTranscribe = async () => {
+      onTranscribe = undefined;
+      await admin(h, "revoke", { pubkey: pk });
+      from = h.transport.published.length;
+    };
+
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    expect(h.store.getAttendee(h.coordinate, pk)?.ai_profile_json ?? null).toBeNull();
+    expect(from).toBeGreaterThan(0); // the revoke really landed mid-run
+    expect(directoryEntries(h, from)).toHaveLength(0);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-08 — a retried submission cannot recreate a purged member.
+ *
+ * The enrollment gate ran once, outside the retry, and `upsertAttendee` INSERTs. A
+ * submission whose first attempt failed on a relay publish, with a `delete_data`
+ * withdrawal landing before the retry, re-created the withdrawn member's row with
+ * the profile they had just asked the coordinator to delete.
+ */
+describe("audit 2026-10-21 R-08 — a retried submission after a delete_data withdrawal", () => {
+  it("is dropped instead of re-creating the purged row", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    let withdrawing: Promise<void> | undefined;
+    h.transport.onPublish = async (e) => {
+      if (withdrawing || e.kind !== KIND_DIRECTORY_ENTRY) return;
+      // The submission's directory publish: the withdrawal arrives now. Give it the
+      // chance to finish (it can only if nothing serializes it against the
+      // submission), then fail this publish so the submission is retried.
+      withdrawing = withdraw(h, sk, { deleteData: true });
+      await Promise.race([withdrawing, new Promise((r) => setTimeout(r, 100))]);
+      throw new Error("simulated relay outage");
+    };
+    await resubmitIntro(h, sk, "crypto");
+    await withdrawing;
+    h.transport.onPublish = undefined;
+
+    expect(withdrawing).toBeDefined();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-06 — a withdrawal from a row that holds no key rotates nothing.
+ *
+ * The 21610 handler ran the full revoke chain for any existing row, so a pending
+ * (never-approved) sender could mint a new ECK version per distinct withdrawal and
+ * make the coordinator re-grant the whole, ever-growing list to every member.
+ */
+describe("audit 2026-10-21 R-06 — only an approved member's withdrawal rotates the ECK", () => {
+  const eckIds = (h: Harness): number[] =>
+    ((h.coordinator as any).events.get(h.coordinate).eck as { id: number }[]).map((v) => v.id);
+
+  it("a pending member withdrawing (twice) leaves the ECK and every grant untouched", async () => {
+    const h = await setup(0, { approval: "manual" });
+    const member = await join(h, generateSecretKey(), "design");
+    await admin(h, "approve", { pubkey: member });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    const before = eckIds(h);
+    const from = h.transport.published.length;
+
+    h.clock.t += 60_000;
+    await withdraw(h, sk, { deleteData: false, createdAt: Math.floor(h.clock.t / 1000) });
+    // A pending request withdrawn is a request cancelled (R-03): no row is left.
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    h.clock.t += 60_000;
+    await join(h, sk, "crypto");
+    await withdraw(h, sk, { deleteData: true, createdAt: Math.floor(h.clock.t / 1000) });
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+
+    expect(eckIds(h)).toEqual(before);
+    expect(h.transport.published.slice(from).filter((e) => e.kind === 1059)).toHaveLength(0);
+  });
+
+  it("an approved member withdrawing still rotates (R-06)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    await join(h, sk, "crypto");
+    const before = eckIds(h);
+    await withdraw(h, sk, { deleteData: false });
+    expect(eckIds(h).length).toBe(before.length + 1);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-03 — an anonymous join flood cannot close an event's door.
+ *
+ * The 2,000 cap counted every row, pending and revoked included, and pending rows
+ * never expired: 2,000 code-less joins to a manual-approval event refused every
+ * later join for good, invited guests included.
+ */
+describe("audit 2026-10-21 R-03 — member cap vs. pending join queue", () => {
+  const codeless = async (h: Harness, sk: Uint8Array): Promise<string> => {
+    const pk = getPublicKey(sk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, getPublicKey(h.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "x", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+      }) as any,
+    );
+    return pk;
+  };
+  const fill = (h: Harness, n: number, status: string, at: number) => {
+    for (let i = 0; i < n; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "a" + i.toString(16).padStart(63, "0"), status, now: at });
+    }
+  };
+
+  it("pending and revoked rows do not count toward the 2,000-member cap", async () => {
+    const h = await setup();
+    fill(h, 2000, "pending", h.clock.t);
+    for (let i = 0; i < 10; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "b" + i.toString(16).padStart(63, "0"), status: "revoked", now: h.clock.t });
+    }
+    const pk = await join(h, generateSecretKey(), "crypto"); // a valid invite
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
+  it("a full pending queue refuses a code-less join (no row) but still admits an invited guest", async () => {
+    const h = await setup();
+    fill(h, 1000, "pending", h.clock.t);
+    const stranger = await codeless(h, generateSecretKey());
+    expect(h.store.getAttendee(h.coordinate, stranger)).toBeUndefined();
+    expect(h.store.pendingAttendeeCount(h.coordinate)).toBe(1000);
+
+    const guest = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, guest)?.status).toBe("approved");
+  });
+
+  it("withdrawing a pending request cancels it, leaving no row to count", async () => {
+    const h = await setup(0, { approval: "manual" });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    await withdraw(h, sk, { deleteData: false });
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+
+  it("requests idle past the TTL are evicted when the queue is full", async () => {
+    const h = await setup();
+    fill(h, 1000, "pending", h.clock.t - 4 * 24 * 3600 * 1000);
+    const pk = await codeless(h, generateSecretKey());
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(h.store.pendingAttendeeCount(h.coordinate)).toBe(1);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-04 — a revocation the new coordinator never saw survives the attach.
+ *
+ * A revoke made while no coordinator was attached (or recorded only by the outgoing
+ * one) was nothing but absence from the roster. A newly attached coordinator's full
+ * E_inbox backfill replayed the member's ORIGINAL join, its invite code verified
+ * against an empty claims table, and the member was re-approved and granted the ECK
+ * minted to exclude them. The 21603 now carries the organizer's `revoked` set, and
+ * the coordinator seeds it as tombstones before the backfill.
+ */
+describe("audit 2026-10-21 R-04 — the 21603 `revoked` set on a fresh attach", () => {
+  /** A join with invite `idx` that sits on the relay at E_inbox, for B's backfill. */
+  const seedJoin = (h: Harness, sk: Uint8Array, idx: number): string => {
+    const pk = getPublicKey(sk);
+    const inviteSk = h.invites[idx]!;
+    h.transport.seed.push(
+      wrapRumor(sk, getPublicKey(h.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "revoked one", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), makeInviteProof(inviteSk, h.coordinate, pk).sig]],
+      }) as any,
+    );
+    return pk;
+  };
+
+  it("control: without the set, the backfill re-approves the member on their original invite", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const b = await handOverTo(h, generateSecretKey(), { approval: "manual+invite" });
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
+  it("with the set, the replayed join is refused and the member gets no grant from B", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const coordSkB = generateSecretKey();
+    const before = wrapsTo(h, pk).length;
+    const b = await handOverTo(h, coordSkB, { revoked: [pk], approval: "manual+invite" });
+    expect(b.store.isRevoked(h.coordinate, pk)).toBe(true);
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+    expect(wrapsTo(h, pk).filter((w) => !h.transport.published.slice(0, before).includes(w))).toHaveLength(0);
+  });
+
+  it("bootstrapHandover does not promote a revoked member an older roster still lists", async () => {
+    const h = await setup();
+    const pk = getPublicKey(generateSecretKey());
+    seedRoster(h, getPublicKey(h.eidSk), [{ pubkey: pk, role: "attendee" }], { id: "stale-roster" });
+    const b = await handOverTo(h, generateSecretKey(), { revoked: [pk], approval: "manual+invite" });
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+  });
+
+  it("an organizer approve on the new coordinator still readmits them", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const coordSkB = generateSecretKey();
+    const b = await handOverTo(h, coordSkB, { revoked: [pk], approval: "manual+invite" });
+    const createdAt = Math.floor(h.clock.t / 1000) + 5;
+    await b.coordinator.handleCoordinatorWrap(
+      wrapRumor(h.eidSk, getPublicKey(coordSkB), {
+        kind: KIND_ADMIN_COMMAND,
+        content: { v: 2, a: h.coordinate, cmd: "approve", args: { pubkey: pk }, expires: createdAt + 172_800 },
+        created_at: createdAt,
+      }) as any,
+    );
+    expect(b.store.isRevoked(h.coordinate, pk)).toBe(false);
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
   });
 });

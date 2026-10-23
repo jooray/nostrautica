@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { getPublicKey, generateSecretKey } from "nostr-tools/pure";
+import { npubEncode } from "nostr-tools/nip19";
 import {
   buildChatSend,
   rumorToChatMessage,
@@ -47,5 +48,19 @@ describe("chat message mapping", () => {
     const { rumor } = buildChatSend(pubkey, "authentic");
     const tampered = { ...rumor, content: "forged" }; // id no longer matches
     expect(() => roundTripChatRumor(tampered)).toThrow();
+  });
+
+  it("tags mentioned people the way MDK does for White Noise, and keeps them over the wire", () => {
+    const mentioned = getPublicKey(generateSecretKey());
+    const content = `ahoj @${npubEncode(mentioned)} and nostr:${npubEncode(mentioned)}`;
+    const reply: string[][] = [["e", "f".repeat(64)]];
+    const { rumor } = buildChatSend(pubkey, content, reply);
+    // Caller tags first, then one p per distinct person (MDK mention_p_tags).
+    expect(rumor.tags).toEqual([["e", "f".repeat(64)], ["p", mentioned]]);
+    expect(roundTripChatRumor(rumor).tags).toEqual(rumor.tags);
+    // A p the caller already supplied is not duplicated.
+    expect(buildChatSend(pubkey, content, [["p", mentioned]]).rumor.tags).toEqual([["p", mentioned]]);
+    // No mention, no tags at all: plain messages stay byte-identical to before.
+    expect(buildChatSend(pubkey, "plain").rumor.tags).toEqual([]);
   });
 });

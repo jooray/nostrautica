@@ -36,10 +36,17 @@ import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
-import { loadEventKeys, currentEck } from "./keystore.js";
+import { loadEventKeys, currentEck, activeKeystoreOwner } from "./keystore.js";
 import { fetchRoster } from "./attendee.js";
 import type { EventContext } from "./event-context.js";
-import { cacheGet, cacheSet, cacheDelete, activeCacheOwner, ANON } from "$lib/cache/persist.js";
+import {
+  cacheGet,
+  cacheSet,
+  cacheDelete,
+  activeCacheOwner,
+  cacheGeneration,
+  ANON,
+} from "$lib/cache/persist.js";
 
 export type PostSource = "event" | "attendees" | "external";
 export type PostVisibility = "public" | "members";
@@ -204,6 +211,28 @@ function postsKey(coordinate: string, slot: PostSlot): string {
 function postsScope(): string {
   return activeCacheOwner() ?? ANON;
 }
+/**
+ * The scope a fetch files its result under, fixed when the fetch STARTS (audit
+ * R-28), as attendee.ts's captureReadScope does. Resolving it at write time
+ * let a fetch that began logged out and finished after a login decrypt with the
+ * new identity's keys and file members-only posts under the anon scope, which
+ * logout never wipes. A logged-out start never decrypts; a logout or account
+ * switch since the start drops the write (generation fence).
+ */
+interface PostsReadScope {
+  scope: string;
+  keysOwner?: string;
+  gen: number;
+}
+function capturePostsScope(): PostsReadScope {
+  const owner = activeCacheOwner();
+  return { scope: owner ?? ANON, keysOwner: owner ?? undefined, gen: cacheGeneration() };
+}
+/** The event's keys for a read that started under `rs`, or undefined. */
+async function keysFor(rs: PostsReadScope, coordinate: string) {
+  if (!rs.keysOwner || activeKeystoreOwner() !== rs.keysOwner) return undefined;
+  return loadEventKeys(coordinate, rs.keysOwner);
+}
 function newestEditedAt(posts: EventPost[]): number {
   return posts.reduce((m, p) => Math.max(m, p.editedAt), 0);
 }
@@ -220,13 +249,20 @@ export function cachedExternalPosts(coordinate: string): EventPost[] | undefined
 }
 // Bound the persisted feed at 300/coordinate (§3.5); posts are newest-first.
 const MAX_CACHED_POSTS = 300;
-function cachePosts(coordinate: string, key: PostSlot, posts: EventPost[], at?: number): void {
+function cachePosts(
+  rs: PostsReadScope,
+  coordinate: string,
+  key: PostSlot,
+  posts: EventPost[],
+  at?: number,
+): void {
   const capped = posts.length > MAX_CACHED_POSTS ? posts.slice(0, MAX_CACHED_POSTS) : posts;
-  cacheSet(postsKey(coordinate, key), capped, at ?? newestEditedAt(posts), postsScope());
+  cacheSet(postsKey(coordinate, key), capped, at ?? newestEditedAt(posts), rs.scope, rs.gen);
 }
 
 export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
   const { pubkey } = parseCoordinate(ctx.coordinate);
+  const rs = capturePostsScope();
   // Discovery for 31607 is {kinds, authors:[E_id]} — no `a` tag (spec §7.4).
   const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_LONGFORM, KIND_MEMBERS_POST], authors: [pubkey] },
@@ -236,7 +272,7 @@ export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
   // [] over the feed the page had just painted (audit DS41-015). Throw, so the
   // caller keeps what it has and can say it is not fresh.
   if (events.length === 0 && !answered) throw new RelaysUnansweredError();
-  const keys = await loadEventKeys(ctx.coordinate);
+  const keys = await keysFor(rs, ctx.coordinate);
   const eck = keys?.eck ?? [];
   // Authority boundary: `authors: [E_id]` is a request, not a guarantee — the
   // same reason `matchesFeed` re-checks `pubkey` below. This is the OFFICIAL
@@ -248,7 +284,7 @@ export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
   const posts = newestFirst(
     dedupePostsByD(own).map((e) => toEventPost(e, eck, "event")),
   );
-  cachePosts(ctx.coordinate, "event", posts);
+  cachePosts(rs, ctx.coordinate, "event", posts);
   return posts;
 }
 
@@ -260,6 +296,7 @@ export async function fetchEventPosts(ctx: EventContext): Promise<EventPost[]> {
  */
 export async function fetchAttendeePosts(ctx: EventContext): Promise<EventPost[]> {
   const { pubkey: eid } = parseCoordinate(ctx.coordinate);
+  const rs = capturePostsScope();
   const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_LONGFORM], "#a": [ctx.coordinate] },
     ctx.config.relays,
@@ -271,7 +308,7 @@ export async function fetchAttendeePosts(ctx: EventContext): Promise<EventPost[]
     (e) => e.pubkey !== eid && (!members || members.has(e.pubkey)),
   );
   const posts = newestFirst(dedupePostsByD(raw).map((e) => toEventPost(e, [], "attendees")));
-  cachePosts(ctx.coordinate, "attendees", posts);
+  cachePosts(rs, ctx.coordinate, "attendees", posts);
   return posts;
 }
 
@@ -346,13 +383,14 @@ export async function fetchExternalPosts(
   sources: readonly ExternalFeed[],
 ): Promise<EventPost[]> {
   const { pubkey: eid } = parseCoordinate(ctx.coordinate);
+  const rs = capturePostsScope();
   const feeds = sources.filter((s) => s.pubkey !== eid);
   if (!feeds.length) {
     // DELETE, not "cache an empty list": the organizer removing their last feed
     // has to make those articles disappear, and an empty write would be stamped
     // older than the entry it needs to replace and silently dropped by
     // latest-wins — leaving the removed feed on the page forever.
-    cacheDelete(postsKey(ctx.coordinate, "external"), postsScope());
+    cacheDelete(postsKey(ctx.coordinate, "external"), rs.scope);
     return [];
   }
 
@@ -404,7 +442,7 @@ export async function fetchExternalPosts(
   // A shrunk feed is then always a real config change, never an unreachable
   // relay, and a failed read leaves the previous snapshot painting.
   if (batches.every((b) => b.ok)) {
-    cachePosts(ctx.coordinate, "external", posts, Math.floor(Date.now() / 1000));
+    cachePosts(rs, ctx.coordinate, "external", posts, Math.floor(Date.now() / 1000));
   }
   return posts;
 }

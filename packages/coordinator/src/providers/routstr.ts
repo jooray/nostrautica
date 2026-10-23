@@ -8,7 +8,7 @@
  * STT stays on Venice/local (Routstr has no STT today) — which is why STT and LLM
  * are separately configurable.
  */
-import type { LlmProvider, ModelInfo, PaymentStrategy, TokenUsage } from "./types.js";
+import type { LlmProvider, ModelInfo, PaymentReservation, PaymentStrategy, TokenUsage } from "./types.js";
 import { ProviderContractError, validateProviderValue } from "./types.js";
 import {
   parseModelJson,
@@ -26,6 +26,18 @@ export interface RoutstrOptions {
   payment: PaymentStrategy; // CashuPayment (or ApiKeyPayment for a balance key)
   /** DNS-pinning policy for outbound requests (audit R22). Default: pin + public-only. */
   net?: ProviderNetPolicy;
+}
+
+/** A strategy's per-request reservation, or one adapted from the legacy pair. */
+function reservePayment(p: PaymentStrategy, req: { estimateTokens?: number }): Promise<PaymentReservation> {
+  if (p.reserve) return p.reserve(req);
+  return p.prepare(req).then((headers) => ({
+    headers,
+    settle: (h: Headers) => p.settle(h),
+    fail: async () => {
+      await p.fail?.();
+    },
+  }));
 }
 
 /**
@@ -94,12 +106,20 @@ export class RoutstrLlm implements LlmProvider {
     // prepare() runs BEFORE the completion deadline is armed and takes no signal —
     // a CashuPayment whose mint stops answering would otherwise park the serial job
     // loop forever with nothing logged. Bounded so the worst case is a failed job.
-    const headers = {
-      "Content-Type": "application/json",
-      ...(await withUncancellableDeadline("Routstr payment.prepare", PROVIDER_TIMEOUTS.payment, () =>
-        this.opts.payment.prepare({ estimateTokens: estimateRequestTokens(req) }),
-      )),
-    };
+    //
+    // The deadline frees the awaiter, not the work (audit R-49): a reservation that
+    // lands after it fired has already moved proofs out of the wallet and into the
+    // journal, and no request will ever settle it. Quarantine it whenever it lands,
+    // through its OWN handle, so it can never close out the next request's.
+    const pending = reservePayment(this.opts.payment, { estimateTokens: estimateRequestTokens(req) });
+    let payment: PaymentReservation;
+    try {
+      payment = await withUncancellableDeadline("Routstr payment.prepare", PROVIDER_TIMEOUTS.payment, () => pending);
+    } catch (e) {
+      void pending.then((late) => late.fail()).catch(() => {});
+      throw e;
+    }
+    const headers = { "Content-Type": "application/json", ...payment.headers };
     let body: any;
     try {
       body = await withProviderTimeout(
@@ -136,7 +156,7 @@ export class RoutstrLlm implements LlmProvider {
               }
               const parsed = await readJsonCapped<any>(res, "Routstr chat/completions");
               // Change proofs (if any) come back in response headers — settle the wallet.
-              await this.opts.payment.settle(res.headers);
+              await payment.settle(res.headers);
               return parsed;
             },
           ),
@@ -146,7 +166,7 @@ export class RoutstrLlm implements LlmProvider {
       // Network failure / non-2xx / TIMEOUT after prepare(): the reserved proofs
       // never reach a settle() — account for them, and after a post-reservation
       // timeout the mint state is genuinely ambiguous (audit COORD-5, H-4).
-      await this.opts.payment.fail?.().catch(() => {});
+      await payment.fail().catch(() => {});
       throw e;
     }
     const content = body.choices?.[0]?.message?.content;

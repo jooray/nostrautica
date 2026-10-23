@@ -31,7 +31,7 @@ vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
   onlyVerified: <T,>(events: T[]) => events,
 }));
 
-import { fetchEventPage } from "./event-page.js";
+import { fetchEventPage, cachedEventPage } from "./event-page.js";
 import type { EventContext } from "./event-context.js";
 import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
 
@@ -65,6 +65,17 @@ describe("fetchEventPage author pinning", () => {
     __resetPersistForTests();
     setActiveCacheOwner(null);
     fetchEvents.mockReset();
+  });
+
+  // Audit R-28: the cache scope was resolved when the read finished.
+  it("does not file a page read under the identity that became active mid-read", async () => {
+    setActiveCacheOwner("1".repeat(64));
+    fetchEvents.mockImplementationOnce(async () => {
+      setActiveCacheOwner("2".repeat(64));
+      return [pageEvent(EID, { label: "Tickets", target: "https://real.example", createdAt: 1000 })];
+    });
+    expect((await fetchEventPage(ctx))?.menu).toHaveLength(1);
+    expect(cachedEventPage(COORD)).toBeUndefined();
   });
 
   it("returns the page E_id published", async () => {

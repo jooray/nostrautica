@@ -512,3 +512,4 @@ b06b36b7720d998cdf5b8668547be4d4d4b9e0a94511b828a1330cf3b5e61d66  packages/vendo
 66540e50b5e6d9f871caa33c47821c6be5e0d917b662845fbda9289ef38ba931  packages/vendor/marmot-ts/lib/vendor/ts-mls/welcome.js
 aa8d85fc17e01bd59fdd9f1e3e4f927eb7992cd090b26adc0f64c3aec85f51dd  packages/vendor/marmot-ts/lib/vendor/ts-mls/wireformat.d.ts
 4fab957d8adc6b1b7df68a84d0b0a6dbae4336c15d42f4569a39253abf1e517a  packages/vendor/marmot-ts/lib/vendor/ts-mls/wireformat.js
+52211d507ff024ab78d4d739bf2c57f5c34ce2ef0a656e18f1a0196cf63d9f7f  packages/vendor/marmot-ts/package.json

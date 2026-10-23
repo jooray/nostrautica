@@ -21,6 +21,25 @@ describe("ics", () => {
     expect(segs.map((s, i) => (i === 0 ? s : s.slice(1))).join("")).toBe("X".repeat(200));
   });
 
+  it("folds by UTF-8 octets, never splitting a code point (R-79)", () => {
+    const octets = (s: string) => new TextEncoder().encode(s).length;
+    const unfold = (f: string) => f.replace(/\r\n /g, "");
+    // 40 CJK characters are 120 octets: must not sit on one physical line.
+    const cjk = "SUMMARY:" + "会".repeat(40);
+    const folded = foldLine(cjk);
+    for (const seg of folded.split("\r\n")) expect(octets(seg)).toBeLessThanOrEqual(75);
+    expect(unfold(folded)).toBe(cjk);
+    // An emoji straddling the 75th octet moves whole to the next line.
+    const emoji = "X".repeat(73) + "😀" + "Y".repeat(10);
+    const segs = foldLine(emoji).split("\r\n");
+    expect(segs[0]).toBe("X".repeat(73));
+    expect(segs[1].startsWith(" 😀")).toBe(true);
+    expect(foldLine(emoji)).not.toMatch(/[\uD800-\uDFFF](?![\uDC00-\uDFFF])/u);
+    expect(unfold(foldLine(emoji))).toBe(emoji);
+    // ASCII lines at the limit are untouched.
+    expect(foldLine("X".repeat(75))).toBe("X".repeat(75));
+  });
+
   it("builds a valid single-event VCALENDAR", () => {
     const ics = buildIcs(
       {

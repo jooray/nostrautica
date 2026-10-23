@@ -61,8 +61,9 @@ inside a deploy's readiness window can make that grep miss.
 ### Startup time
 
 `restart-coordinator.sh` waits for the daemon's own readiness line
-(`watching for installs, submissions, admin commands`) and reports how long it
-took. Two thresholds, doing different jobs:
+(`[coordinator] running — watching for installs, submissions, admin commands`,
+matched as the whole line so attendee text in the log cannot fake it) and
+reports how long it took. Two thresholds, doing different jobs:
 
 | | default | override | on breach |
 |---|---|---|---|

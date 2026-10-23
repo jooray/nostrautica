@@ -29,6 +29,9 @@ data class EventKeys(
     val pendingEck: List<EckVersion>? = null,
     /** Other accounts holding organizer custody; every rotation re-issues to them (SB-90). */
     val coOrganizers: List<String>? = null,
+    /** Members this organizer revoked, oldest first (audit 2026-10-21 R-04): sent in
+     *  the next 21603 so a newly attached coordinator does not re-admit them. */
+    val revoked: List<String>? = null,
 ) {
     val isOrganizer: Boolean get() = role == "organizer" && eidNsecHex != null && einboxNsecHex != null
 
@@ -55,6 +58,7 @@ data class EventKeys(
                 coordinatorGen = maxOf(primary.coordinatorGen ?: 0, fallback.coordinatorGen ?: 0).takeIf { it > 0 },
                 pendingEck = pendingMinus(EckIdentity.union(primary.pendingEck ?: emptyList(), fallback.pendingEck ?: emptyList()), EckIdentity.union(primary.eck, fallback.eck)),
                 coOrganizers = ((primary.coOrganizers ?: emptyList()) + (fallback.coOrganizers ?: emptyList())).distinct().ifEmpty { null },
+                revoked = ((fallback.revoked ?: emptyList()) + (primary.revoked ?: emptyList())).distinct().ifEmpty { null },
             )
         }
 
@@ -140,23 +144,38 @@ class EventKeysStore(private val secure: SecureStore) {
         return updated
     }
 
-    /** Self-encrypt every record with the account's signer and drop the plaintext. */
-    suspend fun lockForLogout(owner: String, signer: NostrSigner) =
-        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) { lockForLogoutOffMain(owner, signer) }
-
-    private suspend fun lockForLogoutOffMain(owner: String, signer: NostrSigner) {
-        for (rec in list(owner)) {
-            runCatching {
-                var toLock = rec
-                secure.get(lockedName(owner, rec.coordinate))?.let { prior ->
-                    val restored = json.decodeFromString(EventKeys.serializer(), signer.nip44Decrypt(owner, prior))
-                    toLock = EventKeys.merge(rec, restored)
-                }
-                secure.put(lockedName(owner, rec.coordinate), signer.nip44Encrypt(owner, json.encodeToString(EventKeys.serializer(), toLock)))
-                secure.put(name(owner, rec.coordinate), null)
+    /**
+     * Self-encrypt every record with the account's signer and drop the plaintext.
+     * Bounded by [deadlineMs] (session.svelte.ts LOGOUT_LOCK_TIMEOUT_MS): an
+     * unreachable remote signer used to hold the logout for a minute per record.
+     * Returns how many records were left in plaintext (a failed or timed-out
+     * encrypt keeps the record rather than risk losing custody), so the caller
+     * can tell the user the wipe was partial instead of reporting success (R-68).
+     */
+    suspend fun lockForLogout(owner: String, signer: NostrSigner, deadlineMs: Long = LOGOUT_LOCK_TIMEOUT_MS): Int =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+            val records = list(owner)
+            var locked = 0
+            kotlinx.coroutines.withTimeoutOrNull(deadlineMs) {
+                for (rec in records) if (lockOne(owner, signer, rec)) locked++
             }
+            _changes.value++
+            records.size - locked
         }
-        _changes.value++
+
+    private suspend fun lockOne(owner: String, signer: NostrSigner, rec: EventKeys): Boolean = try {
+        var toLock = rec
+        secure.get(lockedName(owner, rec.coordinate))?.let { prior ->
+            val restored = json.decodeFromString(EventKeys.serializer(), signer.nip44Decrypt(owner, prior))
+            toLock = EventKeys.merge(rec, restored)
+        }
+        secure.put(lockedName(owner, rec.coordinate), signer.nip44Encrypt(owner, json.encodeToString(EventKeys.serializer(), toLock)))
+        secure.put(name(owner, rec.coordinate), null)
+        true
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e // the deadline: stop, the rest stay in plaintext and are counted
+    } catch (e: Exception) {
+        false
     }
 
     /** Restore what [lockForLogout] locked. Returns false if some record stayed locked. */
@@ -175,5 +194,9 @@ class EventKeysStore(private val secure: SecureStore) {
             }.onFailure { complete = false }
         }
         return complete
+    }
+
+    companion object {
+        const val LOGOUT_LOCK_TIMEOUT_MS = 12_000L
     }
 }

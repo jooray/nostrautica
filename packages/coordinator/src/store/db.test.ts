@@ -912,6 +912,40 @@ describe("inbox rate accounting + population caps (audit C3)", () => {
   });
 });
 
+/**
+ * Audit R-15: the talk path never recorded a transcript ref, so a talk whose
+ * media a later revision replaced left the old transcript owned by nothing —
+ * unreachable by delete_data and the retention purge alike.
+ */
+describe("orphaned transcripts are swept (audit R-15)", () => {
+  const DAY = 86_400_000;
+  it("drops a transcript with no ref and no current media attribution, keeps the rest", () => {
+    const store = new Store();
+    const talk = (x: string, revision: number) =>
+      store.upsertTalk({
+        coordinate: "c", pubkey: "p", talkD: "d", title: "t", description: "", speakersJson: "[]",
+        mediaJson: JSON.stringify({ x }), lang: "en", revision, mediaX: x, now: 1,
+      });
+    store.putTranscript("oldTalk", "the replaced talk", 1);
+    talk("oldTalk", 1);
+    talk("newTalk", 2); // a re-recorded revision: oldTalk is now attributed to nothing
+    store.putTranscript("newTalk", "current talk", 1);
+    store.putTranscript("refd", "has a ref", 1, "en", { coordinate: "c", pubkey: "q" });
+    store.upsertAttendee({ coordinate: "c", pubkey: "r", status: "approved", profileJson: JSON.stringify({ __media: [{ x: "intro" }] }), now: 1 });
+    store.putTranscript("intro", "legacy intro, no ref", 1);
+    store.upsertAttendee({ coordinate: "c", pubkey: "s", status: "approved", profileJson: "not json", now: 1 });
+    store.putTranscript("fresh", "still being written", 10 * DAY);
+
+    store.pruneOldData(10 * DAY + 1000);
+
+    expect(store.getTranscript("oldTalk")).toBeUndefined();
+    expect(store.getTranscript("newTalk")).toBe("current talk");
+    expect(store.getTranscript("refd")).toBe("has a ref");
+    expect(store.getTranscript("intro")).toBe("legacy intro, no ref");
+    expect(store.getTranscript("fresh")).toBe("still being written");
+  });
+});
+
 // ── C5: reference-counted deletion of shared derived artifacts ────────────────
 describe("reference-counted purge (audit C5)", () => {
   it("keeps a shared transcript/summary/artifact alive for another event", () => {
@@ -1259,6 +1293,16 @@ describe("job matching survives an organizer-chosen identifier", () => {
     store.enqueueJob("process_attendee", "proc:31923:pk:other:r1", { coordinate: "c" });
     expect(store.supersedePendingJobs("proc:31923:pk:a_b:", "keep")).toBe(1);
     expect(store.waitingJobCount()).toBe(0);
+  });
+
+  it("supersedePendingJobs treats a backslash in the identifier literally (R-11)", () => {
+    // Unescaped, the `\:` in this prefix is an escape sequence matching a bare `:`,
+    // so superseding event `a\`'s older revision also deleted event `a`'s job.
+    const store = new Store(":memory:");
+    store.enqueueJob("process_attendee", "proc:31923:pk:a:pk2:r1", { coordinate: "c" });
+    store.enqueueJob("process_attendee", "proc:31923:pk:a\\:pk2:r1", { coordinate: "c" });
+    expect(store.supersedePendingJobs("proc:31923:pk:a\\:pk2:", "keep")).toBe(1);
+    expect(store.supersedePendingJobs("proc:31923:pk:a:pk2:", "keep")).toBe(1);
   });
 
   it("resumeWaitingJobs matches one coordinate exactly, never every parked job", () => {
@@ -1724,6 +1768,38 @@ describe("purgeAttendeeArtifacts removes the subject's pipeline status", () => {
     }
     store.purgeAttendeeArtifacts(C, "gone");
     expect(store.poisonStatuses(C).map((r) => r.pubkey)).toEqual(["stays"]);
+    store.close();
+  });
+
+  it("deletes their pipeline jobs in every state, but not their chat removal (R-09)", () => {
+    const store = new Store();
+    const C = "31923:aa:d";
+    const keys = (): string[] =>
+      ((store as any).db.prepare("SELECT dedupe_key FROM jobs ORDER BY dedupe_key").all() as { dedupe_key: string }[]).map(
+        (r) => r.dedupe_key,
+      );
+    store.enqueueJob("process_attendee", "proc:gone:1", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("match_recompute", "match:gone:1", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("process_talk", "talk:gone:1", { coordinate: C, pubkey: "gone", talkD: "t" });
+    store.enqueueJob("chat_revoke_member", "chat-revoke:gone", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("process_attendee", "proc:stays:1", { coordinate: C, pubkey: "stays" });
+    store.enqueueJob("process_attendee", "proc:other-event", { coordinate: "31923:aa:other", pubkey: "gone" });
+    // A finished job still carries the pubkey in its payload.
+    (store as any).db.prepare("UPDATE jobs SET state = 'done' WHERE dedupe_key = 'match:gone:1'").run();
+    store.purgeAttendeeArtifacts(C, "gone");
+    expect(keys()).toEqual(["chat-revoke:gone", "proc:other-event", "proc:stays:1"]);
+    store.close();
+  });
+
+  it("cancelSubjectPipelineJobs without allStates leaves running and finished rows (revoke)", () => {
+    const store = new Store();
+    const C = "31923:aa:d";
+    store.enqueueJob("process_attendee", "proc:gone:pending", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("process_attendee", "proc:gone:running", { coordinate: C, pubkey: "gone" });
+    store.enqueueJob("process_attendee", "proc:gone:done", { coordinate: C, pubkey: "gone" });
+    (store as any).db.prepare("UPDATE jobs SET state = 'running' WHERE dedupe_key = 'proc:gone:running'").run();
+    (store as any).db.prepare("UPDATE jobs SET state = 'done' WHERE dedupe_key = 'proc:gone:done'").run();
+    expect(store.cancelSubjectPipelineJobs(C, "gone", { allStates: false })).toBe(1);
     store.close();
   });
 });

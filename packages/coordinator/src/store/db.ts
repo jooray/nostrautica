@@ -175,6 +175,17 @@ function applyBaselineDDL(db: DatabaseSync): void {
   } catch {
     /* column already exists */
   }
+  // Migration (audit R-16): the decryption-key fingerprint a cached transcript was
+  // produced under, so a cache hit requires the key and not just the public
+  // ciphertext hash. A plain nullable column: an older binary neither reads nor
+  // writes it (its INSERT OR REPLACE leaves it NULL), and NULL reads here as
+  // "unverified", which costs one download + decrypt before the row is served
+  // again. No SCHEMA_VERSION bump.
+  try {
+    db.exec("ALTER TABLE transcripts ADD COLUMN key_fp TEXT");
+  } catch {
+    /* column already exists */
+  }
   // Migration (COORD-7): the ECK version a talk's 31610 was published under.
   try {
     db.exec("ALTER TABLE talks ADD COLUMN published_eck_id INTEGER");
@@ -226,6 +237,14 @@ function applyBaselineDDL(db: DatabaseSync): void {
   // SCHEMA for the same reason.
   try {
     db.exec("ALTER TABLE marmot_chat_keys ADD COLUMN external INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (audit R-44): when a marmot_kv row was first written, so MLS ingest
+  // evidence that never settles can be aged out. A plain defaulted column: an older
+  // binary's INSERT takes the default, and 0 reads as "older than any horizon".
+  try {
+    db.exec("ALTER TABLE marmot_kv ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
   } catch {
     /* column already exists */
   }
@@ -1256,6 +1275,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   blob_sha256 TEXT PRIMARY KEY,
   text TEXT NOT NULL,
   lang TEXT,
+  key_fp TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS nostr_summaries (
@@ -1388,6 +1408,7 @@ CREATE TABLE IF NOT EXISTS marmot_kv (
   namespace TEXT NOT NULL,
   k TEXT NOT NULL,
   v TEXT NOT NULL,               -- serialized value, NIP-44-encrypted at rest
+  created_at INTEGER NOT NULL DEFAULT 0, -- unix ms of the first write (audit R-44)
   PRIMARY KEY (namespace, k)
 );
 -- account_pubkey ⇄ chat_pubkey bindings from authenticated kind-21607 attestations
@@ -1792,8 +1813,18 @@ export class Store {
     return count;
   }
 
-  /** Count of attendee rows for an event (audit C3 population cap: pending + approved
-   *  + revoked). Used to bound roster growth below the 2,000 protocol cap. */
+  /** The current window's count for (coordinate, pubkey) WITHOUT bumping it — 0 when
+   *  the stored row belongs to an earlier window (audit 2026-10-21, R-12). */
+  peekInboxRate(coordinate: string, pubkey: string, now: number, windowMs: number): number {
+    const windowStart = windowMs > 0 ? now - (now % windowMs) : now;
+    const row = this.db
+      .prepare("SELECT window_start, count FROM inbox_rate WHERE coordinate = ? AND pubkey = ?")
+      .get(coordinate, pubkey) as { window_start: number; count: number } | undefined;
+    return row && row.window_start === windowStart ? row.count : 0;
+  }
+
+  /** Count of attendee rows for an event (pending + approved + revoked). Sizes the
+   *  inbox rumor budget; the member cap counts approved rows only (R-03). */
   attendeeCount(coordinate: string): number {
     return (
       this.db.prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ?").get(coordinate) as { n: number }
@@ -1807,6 +1838,28 @@ export class Store {
         .prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ? AND status = 'pending'")
         .get(coordinate) as { n: number }
     ).n;
+  }
+
+  /** Count of approved members — what the 2,000-member intake cap bounds (audit
+   *  2026-10-21, R-03: pending and revoked rows hold no roster seat). */
+  approvedAttendeeCount(coordinate: string): number {
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ? AND status = 'approved'")
+        .get(coordinate) as { n: number }
+    ).n;
+  }
+
+  /** Pending rows not touched (no join, no submission) since `cutoffMs`, oldest
+   *  first — the join queue's eviction candidates (R-03). */
+  stalePendingPubkeys(coordinate: string, cutoffMs: number): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT pubkey FROM attendees WHERE coordinate = ? AND status = 'pending' AND COALESCE(updated_at, 0) < ? ORDER BY updated_at",
+        )
+        .all(coordinate, cutoffMs) as { pubkey: string }[]
+    ).map((r) => r.pubkey);
   }
 
   // ── events (installed via 21603) ──────────────────────────────────────────
@@ -1874,6 +1927,14 @@ export class Store {
     return !!row && row.retention_expired === 1;
   }
 
+  /** Coordinates of every installed event the retention sweep has not expired. */
+  liveEventCoordinates(): string[] {
+    const rows = this.db
+      .prepare("SELECT coordinate FROM events WHERE retention_expired = 0")
+      .all() as { coordinate: string }[];
+    return rows.map((r) => r.coordinate);
+  }
+
   /** Mark an event retention-expired (idempotent). */
   markRetentionExpired(coordinate: string): void {
     this.db.prepare("UPDATE events SET retention_expired = 1 WHERE coordinate = ?").run(coordinate);
@@ -1935,6 +1996,12 @@ export class Store {
    * successive publishes within one second straddling the restart). Atomic under the
    * single-daemon write lock.
    */
+  /** Whether this coordinator ever built a replaceable publish at `address`
+   *  (`${kind}:${d}`): every builder routes through {@link nextPublishCreatedAt}. */
+  everPublished(address: string): boolean {
+    return this.db.prepare("SELECT 1 FROM publish_watermarks WHERE address = ?").get(address) !== undefined;
+  }
+
   nextPublishCreatedAt(address: string, now: number): number {
     const row = this.db.prepare("SELECT last_created_at FROM publish_watermarks WHERE address = ?").get(address) as
       | { last_created_at: number }
@@ -1947,6 +2014,11 @@ export class Store {
       )
       .run(address, next);
     return next;
+  }
+
+  /** Whether this daemon has ever published at `address` (`${kind}:${d}`). Read-only. */
+  hasPublishWatermark(address: string): boolean {
+    return !!this.db.prepare("SELECT 1 FROM publish_watermarks WHERE address = ?").get(address);
   }
 
   // ── §15 hierarchy: membership-proof re-issue ledger ─────────────────────────
@@ -2120,6 +2192,30 @@ export class Store {
          ON CONFLICT(coordinate) DO UPDATE SET high_gen = MAX(install_state.high_gen, excluded.high_gen), tombstoned = 1, detached_at = excluded.detached_at`,
       )
       .run(coordinate, gen, detachedAt);
+  }
+
+  /**
+   * Cancel one member's pipeline jobs (audit 2026-10-21, R-07/R-09): the types whose
+   * payload names the member as its subject (`$.pubkey`) and whose effect is to
+   * derive, publish or score THEIR data. Chat jobs are deliberately excluded — a
+   * revoke enqueues `chat_revoke_member` for exactly this pubkey, and dropping it
+   * would leave their device in the MLS group.
+   *
+   * `allStates: false` (revoke) drops only work that has not started (pending and
+   * parked); a running job is left to its own post-await status recheck.
+   * `allStates: true` (the `delete_data` purge) drops every row, terminal ones
+   * included, because the payload is a personal identifier the purge promised to
+   * remove. Returns the count deleted.
+   */
+  cancelSubjectPipelineJobs(coordinate: string, pubkey: string, opts: { allStates: boolean }): number {
+    const states = opts.allStates ? "" : "state IN ('pending','waiting') AND ";
+    const info = this.db
+      .prepare(
+        `DELETE FROM jobs WHERE ${states}type IN ('process_attendee','process_talk','match_recompute','publish_matches')
+           AND json_extract(payload, '$.coordinate') = ? AND json_extract(payload, '$.pubkey') = ?`,
+      )
+      .run(coordinate, pubkey);
+    return Number(info.changes);
   }
 
   /** Cancel every pending/running/waiting job for an event (detach and retention:
@@ -2328,11 +2424,18 @@ export class Store {
       .get(blobSha256) as { text: string } | undefined;
     return row?.text;
   }
-  /** Transcript text + STT-detected language (spec F1), for publishing on 31603. */
-  getTranscriptRow(blobSha256: string): { text: string; lang: string | null } | undefined {
+  /** Transcript text + STT-detected language (spec F1), for publishing on 31603,
+   *  and the key fingerprint it was produced under (audit R-16; NULL on rows an
+   *  older binary wrote). */
+  getTranscriptRow(blobSha256: string): { text: string; lang: string | null; key_fp: string | null } | undefined {
     return this.db
-      .prepare("SELECT text, lang FROM transcripts WHERE blob_sha256 = ?")
-      .get(blobSha256) as { text: string; lang: string | null } | undefined;
+      .prepare("SELECT text, lang, key_fp FROM transcripts WHERE blob_sha256 = ?")
+      .get(blobSha256) as { text: string; lang: string | null; key_fp: string | null } | undefined;
+  }
+  /** Bind a legacy (unfingerprinted) transcript row to the key that was just
+   *  proven to decrypt its blob (audit R-16). */
+  setTranscriptKeyFp(blobSha256: string, keyFp: string): void {
+    this.db.prepare("UPDATE transcripts SET key_fp = ? WHERE blob_sha256 = ?").run(keyFp, blobSha256);
   }
   /**
    * Cache a transcript keyed by its content-addressed blob hash (dedupe), and — when
@@ -2347,10 +2450,11 @@ export class Store {
     now: number,
     lang?: string,
     owner?: { coordinate: string; pubkey: string },
+    keyFp?: string,
   ): void {
     this.db
-      .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at) VALUES (?, ?, ?, ?)")
-      .run(blobSha256, text, lang ?? null, now);
+      .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at, key_fp) VALUES (?, ?, ?, ?, ?)")
+      .run(blobSha256, text, lang ?? null, now, keyFp ?? null);
     // A cached answer settles the blob; any empty-STT count before it is history.
     this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?").run(blobSha256);
     if (owner) {
@@ -2875,6 +2979,11 @@ export class Store {
       // KEPT: per-event spend is the SUM of those rows, so deleting it would refund
       // the event's budget and reset this person's per-attendee cap on a rejoin.
       this.db.prepare("DELETE FROM job_status WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      // …and so are their pipeline jobs (audit 2026-10-21, R-09), which the
+      // event-wide purge already deletes. Left behind, the payload kept the pubkey
+      // in the queue, and a `process_attendee` queued before the withdrawal could
+      // still run against a row a retried submission recreated (R-08).
+      this.cancelSubjectPipelineJobs(coordinate, pubkey, { allStates: true });
       this.db.exec("COMMIT");
     } catch (e) {
       // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
@@ -3582,11 +3691,15 @@ export class Store {
     // replaced. Latent for app-created events (the slug generator only emits
     // [a-z0-9-]) and reachable through a third-party-authored 31923, which
     // `parseCoordinate` accepts.
+    //
+    // The backslash itself is escaped too (audit 2026-10-21, R-11): in an
+    // identifier ending in `\`, the prefix `proc:…:a\:` read `\:` as an escape for
+    // a bare `:`, so the DELETE reached event `a`'s pending jobs as well.
     const info = this.db
       .prepare(
         "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? ESCAPE '\\' AND dedupe_key != ?",
       )
-      .run(`${prefix.replace(/[%_]/g, "\\$&")}%`, keepKey);
+      .run(`${prefix.replace(/[\\%_]/g, "\\$&")}%`, keepKey);
     return Number(info.changes);
   }
 
@@ -3968,7 +4081,38 @@ export class Store {
     const jobs = this.db
       .prepare("DELETE FROM jobs WHERE state IN ('done', 'poison') AND COALESCE(claimed_at, 0) < ?")
       .run(cutoff);
-    return Number(kps.changes) + Number(legacy.changes) + Number(rate.changes) + Number(jobs.changes);
+    const transcripts = this.sweepOrphanTranscripts(now - 24 * 60 * 60 * 1000);
+    return Number(kps.changes) + Number(legacy.changes) + Number(rate.changes) + Number(jobs.changes) + transcripts;
+  }
+
+  /**
+   * Drop cached STT transcripts nothing owns any more (audit R-15): no
+   * `transcript_refs` row and no attribution from any stored profile's media or
+   * any talk's current media. The talk path never recorded a ref, so a talk whose
+   * media a later revision replaced left the old recording's plaintext transcript
+   * reachable by nothing — not by `delete_data`, not by the retention purge, which
+   * both find transcripts through refs or CURRENT media only. The talk path records
+   * refs now; this clears what it left behind, and anything a future path forgets.
+   * `before` (unix ms) spares rows written in the last day, so a transcription
+   * still running cannot lose its row between the write and its ref.
+   */
+  sweepOrphanTranscripts(before: number): number {
+    const r = this.db
+      .prepare(
+        `WITH attributed(x) AS (
+           SELECT json_extract(m.value, '$.x')
+             FROM attendees a,
+                  json_each(CASE WHEN json_valid(a.profile_json) THEN a.profile_json ELSE '{}' END, '$.__media') m
+           UNION
+           SELECT json_extract(media_json, '$.x') FROM talks WHERE json_valid(media_json)
+         )
+         DELETE FROM transcripts
+          WHERE created_at < ?
+            AND blob_sha256 NOT IN (SELECT blob_sha256 FROM transcript_refs)
+            AND blob_sha256 NOT IN (SELECT x FROM attributed WHERE x IS NOT NULL)`,
+      )
+      .run(before);
+    return Number(r.changes);
   }
 
   // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────
@@ -4037,10 +4181,20 @@ export class Store {
   marmotKvSet(namespace: string, key: string, value: string): void {
     this.db
       .prepare(
-        `INSERT INTO marmot_kv (namespace, k, v) VALUES (?, ?, ?)
+        `INSERT INTO marmot_kv (namespace, k, v, created_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(namespace, k) DO UPDATE SET v = excluded.v`,
       )
-      .run(namespace, key, this.protect(value));
+      .run(namespace, key, this.protect(value), Date.now());
+  }
+
+  /** Keys under `prefix` in a namespace with their first-write time, newest first
+   *  (audit R-44: aging out ingest evidence that never settles). */
+  marmotKvKeysWithPrefix(namespace: string, prefix: string): { k: string; created_at: number }[] {
+    return (
+      this.db
+        .prepare("SELECT k, created_at FROM marmot_kv WHERE namespace = ? ORDER BY created_at DESC, rowid DESC")
+        .all(namespace) as { k: string; created_at: number }[]
+    ).filter((r) => r.k.startsWith(prefix));
   }
 
   marmotKvDelete(namespace: string, key: string): void {

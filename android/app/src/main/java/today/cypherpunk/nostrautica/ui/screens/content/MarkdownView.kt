@@ -50,6 +50,7 @@ import today.cypherpunk.nostrautica.domain.content.Markdown.Block
 import today.cypherpunk.nostrautica.domain.content.Markdown.Inline
 import today.cypherpunk.nostrautica.ui.LocalContainer
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
+import today.cypherpunk.nostrautica.ui.components.safeImageSrc
 
 /**
  * Open a link from content someone else wrote: https in the browser, `nostr:`
@@ -139,7 +140,7 @@ private fun MdInlines(list: List<Inline>, onLink: (String) -> Boolean, size: Int
     fun click(url: String) { if (!onLink(url)) openExternal(context, url) }
     for (run in runs) {
         if (run is Inline.Image) {
-            if (allowImages && run.url.startsWith("https://")) {
+            if (safeImageSrc(run.url, allowImages) != null) {
                 AsyncImage(
                     model = run.url, contentDescription = run.alt.ifEmpty { null }, contentScale = ContentScale.FillWidth,
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)),

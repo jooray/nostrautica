@@ -42,15 +42,37 @@ object Relays {
 
     const val MAX_DM_RELAYS = 20
 
+    /**
+     * relays.ts isAcceptedRelayUrl, the one implementation in the app: `wss://`, or
+     * `ws://` to this machine only (the dev stack). Plaintext to a remote host would
+     * expose the traffic and its metadata to anyone on the path.
+     */
+    fun isAccepted(url: String): Boolean {
+        val u = runCatching { java.net.URI(url.trim()) }.getOrNull() ?: return false
+        return when (u.scheme?.lowercase()) {
+            "wss" -> !u.host.isNullOrEmpty()
+            "ws" -> u.host in LOOPBACK
+            else -> false
+        }
+    }
+
+    private val LOOPBACK = setOf("localhost", "127.0.0.1", "[::1]", "::1")
+
+    /**
+     * Relays from a source someone else controls (an naddr's hints, a config or a
+     * grant's `config_relays`, a pasted pointer): normalized, and dropped unless
+     * [isAccepted] (audit R-66/R-78). Dropped, not deprioritised.
+     */
+    fun accepted(urls: List<String>): List<String> = urls.map(RelayPool::normalize).filter(::isAccepted).distinct()
+
     /** An event's relays: defaults ∪ its 31600 relays ∪ naddr hints. Never the chat-only interop relays. */
     fun forEvent(config: EventConfig?, hints: List<String> = emptyList()): List<String> =
-        (DEFAULT + (config?.relays ?: emptyList()) + hints.filterNot(EventConfig::isChatInteropRelay))
-            .map(RelayPool::normalize).distinct()
+        (DEFAULT.map(RelayPool::normalize) + accepted((config?.relays ?: emptyList()) + hints.filterNot(EventConfig::isChatInteropRelay))).distinct()
 
     fun forEventRead(config: EventConfig?, hints: List<String> = emptyList()): List<String> =
         (forEvent(config, hints) + DEFAULT_READ.map(RelayPool::normalize)).distinct()
 
     /** Chat traffic goes to the event's relays ∪ its chat relays. */
     fun forChat(config: EventConfig?): List<String> =
-        (forEvent(config) + (config?.chatRelays ?: CHAT_INTEROP)).map(RelayPool::normalize).distinct()
+        (forEvent(config) + accepted(config?.chatRelays ?: CHAT_INTEROP)).distinct()
 }

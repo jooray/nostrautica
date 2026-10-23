@@ -17,6 +17,8 @@ const keystore = vi.hoisted(() => ({
   saveNip46Session: vi.fn(async (_s?: unknown) => {}),
   loadNip46Session: vi.fn(async () => null as unknown),
   clearKeystore: vi.fn(async () => {}),
+  saveLoginOwner: vi.fn(async (_pk?: unknown) => {}),
+  loadLoginOwner: vi.fn(async () => undefined as string | undefined),
 }));
 vi.mock("$lib/signer/keystore.js", () => keystore);
 
@@ -76,7 +78,7 @@ vi.mock("$lib/stores/recent-events.svelte.js", () => ({
 }));
 vi.mock("$lib/stores/join-sent.svelte.js", () => ({ clearAllJoinSent, setJoinSentOwner }));
 
-import { consumeNsecFromHash, session } from "./session.svelte.js";
+import { consumeNsecFromHash, watchNsecInHash, session } from "./session.svelte.js";
 import { Nip46Signer, Nip46IdentityMismatchError } from "./nip46.js";
 import { router } from "$lib/router/router.svelte.js";
 import { buildHash } from "$lib/router/routes.js";
@@ -142,6 +144,38 @@ describe("consumeNsecFromHash (audit UX-12)", () => {
     session.cancelLinkKey();
     expect(session.pendingLinkKey).toBeNull();
     expect(session.pubkey).toBe(mine);
+  });
+
+  it("consumes a recovery link opened into an already-running tab (R-36)", async () => {
+    const listeners: Array<() => void> = [];
+    const win = {
+      location: { hash: "#/" },
+      history: { replaceState },
+      addEventListener: (name: string, fn: () => void) => name === "hashchange" && listeners.push(fn),
+      removeEventListener: vi.fn(),
+    };
+    vi.stubGlobal("window", win);
+    const onError = vi.fn();
+    const stop = watchNsecInHash(onError);
+
+    // A hash-only navigation: no reload, so the boot-time consume never runs.
+    win.location.hash = `#/login?nsec=${nsec}`;
+    router.route = { name: "login", nsec };
+    for (const fn of listeners) fn();
+    await Promise.resolve();
+
+    expect(replaceState).toHaveBeenCalledWith(null, "", "#/login");
+    expect(session.pendingLinkKey?.nsec).toBe(nsec);
+    expect(router.route).toEqual({ name: "login", nsec: undefined });
+    expect(onError).not.toHaveBeenCalled();
+
+    // A damaged key is reported, not thrown into the event loop.
+    win.location.hash = "#/login?nsec=broken";
+    for (const fn of listeners) fn();
+    await vi.waitFor(() => expect(onError).toHaveBeenCalledTimes(1));
+    stop();
+    expect(win.removeEventListener).toHaveBeenCalled();
+    session.cancelLinkKey();
   });
 
   it("returns false when the hash carries no nsec", async () => {
@@ -323,6 +357,27 @@ describe("a resumed tab checks the persisted login (SB-95)", () => {
     keystore.loadLoginMethod.mockResolvedValue("local");
     await session.verifyPersistedIdentity();
     expect(session.loggedIn).toBe(true);
+  });
+
+  it("records whose login is persisted, and signs out when it is now someone else's (R-41)", async () => {
+    keystore.saveLoginOwner.mockClear();
+    await session.createLocalKey();
+    const mine = session.pubkey!;
+    expect(keystore.saveLoginOwner).toHaveBeenCalledWith(mine);
+    keystore.loadLoginMethod.mockResolvedValue("local");
+    // Same owner on disk: nothing happens.
+    keystore.loadLoginOwner.mockResolvedValue(mine);
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(true);
+    // An install from before the owner record: no evidence, nothing happens.
+    keystore.loadLoginOwner.mockResolvedValue(undefined);
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(true);
+    // Another tab logged this account out and signed in as somebody else.
+    keystore.loadLoginOwner.mockResolvedValue("e".repeat(64));
+    await session.verifyPersistedIdentity();
+    expect(session.loggedIn).toBe(false);
+    keystore.loadLoginOwner.mockResolvedValue(undefined);
   });
 
   it("never mistakes a login that has not persisted yet for a remote logout", async () => {
@@ -606,5 +661,29 @@ describe("a NIP-07 restore with no extension says so", () => {
     expect(await session.restore()).toBe(true);
     expect(session.restoreError).toBe(false);
     expect(session.restoreErrorKind).toBeNull();
+  });
+});
+
+describe("logout purges stashed invite codes (audit R-26)", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("a code stashed while signed out follows the identity created mid-join, and is gone after logout", async () => {
+    const map = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      get length() {
+        return map.size;
+      },
+      key: (i: number) => [...map.keys()][i] ?? null,
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => void map.set(k, v),
+      removeItem: (k: string) => void map.delete(k),
+    });
+    const { storeInvite, loadInvite } = await import("$lib/stores/invite-store.js");
+    await session.logout().catch(() => {});
+    storeInvite("31923:e:x", "nsec1invite"); // signed out, as Join stores it
+    await session.createLocalKey();
+    expect(loadInvite("31923:e:x")).toBe("nsec1invite"); // re-owned mid-join
+    await session.logout();
+    expect([...map.keys()].some((k) => k.startsWith("nostrautica:invite:"))).toBe(false);
   });
 });

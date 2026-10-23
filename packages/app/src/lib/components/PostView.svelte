@@ -60,6 +60,19 @@
     return "@" + bech32.slice(0, 10) + "…";
   }
 
+  // `referrerpolicy` is not in the DOM typing for media elements, and a
+  // declarative src would start the fetch before it applied — set it first
+  // (the same pattern as ExternalTalkPlayer's direct video, audit U10).
+  function noReferrerSrc(node: HTMLVideoElement, src: string) {
+    node.setAttribute("referrerpolicy", EXTERNAL_IMG_REFERRER_POLICY);
+    node.src = src;
+    return {
+      update(next: string) {
+        node.src = next;
+      },
+    };
+  }
+
   // Text/link/mention flow inline; images/videos/quoted embeds render as blocks.
   const inlineTypes = new Set(["text", "link", "mention"]);
   const inline = $derived(tokens.filter((tk) => inlineTypes.has(tk.type)));
@@ -113,9 +126,18 @@
         </a>
       {/if}
     {:else if tk.type === "video"}
-      <!-- svelte-ignore a11y_media_has_caption -->
-      <video class="media" src={(tk as Extract<Token, { type: "video" }>).url} controls preload="metadata"
-      ></video>
+      <!-- Same policy as the image branch (audit R-23): a video URL is just as
+           much the author's choice of host, and preload="metadata" contacts it
+           on render. -->
+      {@const videoSrc = safeImageSrc((tk as Extract<Token, { type: "video" }>).url)}
+      {#if videoSrc}
+        <!-- svelte-ignore a11y_media_has_caption -->
+        <video class="media" use:noReferrerSrc={videoSrc} controls preload="metadata"></video>
+      {:else}
+        <a class="blocked-media" href={(tk as Extract<Token, { type: "video" }>).url} target="_blank" rel="noopener noreferrer nofollow">
+          {(tk as Extract<Token, { type: "video" }>).url}
+        </a>
+      {/if}
     {:else if tk.type === "embed"}
       <QuotedNote bech32={(tk as Extract<Token, { type: "embed" }>).bech32} />
     {/if}
