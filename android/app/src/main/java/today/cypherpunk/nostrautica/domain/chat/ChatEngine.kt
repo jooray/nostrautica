@@ -78,7 +78,11 @@ interface ChatEngine {
     /** Re-publish the current key package (or a fresh one when none is cached). */
     suspend fun republishKeyPackage(account: String)
 
-    /** Send a kind-9. Returns false when MDK only queued it durably. */
+    /**
+     * Send a kind-9. Returns false when MDK only queued it durably. Mentions need
+     * nothing extra: MDK's chat builder (`mention_p_tags`) adds one `["p", hex]`
+     * per `@npub1…` in [text], as for White Noise ([Mentions]).
+     */
     suspend fun sendText(account: String, groupIdHex: String, text: String): Boolean
 
     suspend fun react(account: String, groupIdHex: String, messageId: String, emoji: String)

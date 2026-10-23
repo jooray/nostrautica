@@ -46,7 +46,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleStartEffect
@@ -59,6 +62,7 @@ import today.cypherpunk.nostrautica.domain.chat.ChatMessage
 import today.cypherpunk.nostrautica.domain.chat.ChatSession
 import today.cypherpunk.nostrautica.domain.chat.DmCommand
 import today.cypherpunk.nostrautica.domain.chat.ExternalLink
+import today.cypherpunk.nostrautica.domain.chat.Mentions
 import today.cypherpunk.nostrautica.domain.chat.chat
 import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.protocol.Nip19
@@ -122,11 +126,28 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     val scope = rememberCoroutineScope()
     val coordinator = ev.ctx.cfg.coordinator
 
+    // The composer is a TextFieldValue, not a String: the @ picker needs the caret.
+    val draftKey = "chat.draft:${account.pubkey}:${ev.coordinate}"
+    var field by remember { mutableStateOf((c.prefs.getString(draftKey) ?: "").let { TextFieldValue(it, TextRange(it.length)) }) }
+    val draft = field.text
+    fun setDraft(text: String) { field = TextFieldValue(text, TextRange(text.length)) }
+    LaunchedEffect(draft) { delay(400); c.prefs.putString(draftKey, draft.takeIf { it.isNotEmpty() }) }
+    val dmTyping = DmCommand.parse(draft, emptyList()) != null
+    val mentionQuery = if (dmTyping || st.phase != ChatSession.Phase.READY) null else Mentions.active(draft, field.selection.end)
+    val draftMentions = remember(draft) { Mentions.mentionedPubkeys(draft) }
+
     // ── names ───────────────────────────────────────────────────────────────
     val deviceMap = remember(st.roster) { ChatMembers.deviceAccountMap(st.roster) }
     val memberList = remember(st.roster, st.groupDevices) { ChatMembers.list(st.roster, st.groupDevices, listOfNotNull(coordinator)) }
-    val wanted = remember(st.messages, memberList, deviceMap) {
-        (st.messages.map { it.sender } + st.messages.map { ChatMembers.accountOf(it.sender, deviceMap) } + memberList.members.map { it.account }).distinct()
+    // People mentioned in a message render as a name + avatar chip; the @ picker
+    // offers the whole roster, so that needs names too, but only once it is open.
+    val messageMentions = remember(st.messages) { st.messages.flatMap { Mentions.mentionedPubkeys(it.text) }.distinct() }
+    val pickerOpen = mentionQuery != null
+    val wanted = remember(st.messages, memberList, deviceMap, messageMentions, draftMentions, pickerOpen) {
+        val mentioned = messageMentions + draftMentions
+        (st.messages.map { it.sender } + st.messages.map { ChatMembers.accountOf(it.sender, deviceMap) } + memberList.members.map { it.account } +
+            mentioned + mentioned.map { ChatMembers.accountOf(it, deviceMap) } +
+            (if (pickerOpen) st.roster?.attendees.orEmpty().map { it.pubkey } else emptyList())).distinct()
     }
     val profiles by remember(wanted) { if (wanted.isEmpty()) flowOf(emptyMap()) else c.profiles.observe(wanted) }.collectAsState(emptyMap<String, ProfileMeta>())
     // Senders the roster can't name yet: their device kind-0 lives on the chat relays only.
@@ -135,15 +156,26 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         val devices = st.messages.map { it.sender }.distinct().filter { it !in deviceMap.values }
         runCatching { c.profiles.refresh(wanted.filter { it in deviceMap.values }) }
         runCatching { c.profiles.refresh(devices, chat.chatRelays(ev.ctx)) }
+        // Someone mentioned who is not on this event's roster (a White Noise user,
+        // say) publishes their kind-0 where everyone does.
+        val strangers = (messageMentions + draftMentions).filter { it !in deviceMap }
+        if (strangers.isNotEmpty()) runCatching { c.profiles.refresh(strangers) }
     }
     fun accountOf(pk: String) = ChatMembers.accountOf(pk, deviceMap)
-    fun nameOf(pk: String): String {
+    fun profileName(pk: String): String? {
         val a = accountOf(pk)
-        val raw = (profiles[a]?.name ?: profiles[pk]?.name)?.let(ChatMembers::cleanName)?.takeIf { it.isNotBlank() }
-        return raw ?: a.take(8)
+        return (profiles[a]?.name ?: profiles[pk]?.name)?.let(ChatMembers::cleanName)?.takeIf { it.isNotBlank() }
     }
+    fun nameOf(pk: String): String = profileName(pk) ?: accountOf(pk).take(8)
+    /** A mention's label: the person's name, else a short npub (never a raw key). */
+    fun mentionName(pk: String): String = profileName(pk) ?: Mentions.shortNpub(accountOf(pk))
     fun pictureOf(pk: String): String? = profiles[accountOf(pk)]?.picture ?: profiles[pk]?.picture
     fun openProfile(pk: String) = router.go(Route.Attendee(naddr, Nip19.npub(accountOf(pk))))
+    val me = st.chatPubkey
+    val mentionLook = remember(profiles, deviceMap, me) {
+        val myAccount = me?.let(::accountOf) ?: account.pubkey
+        MentionLook(::mentionName, ::pictureOf, ::accountOf, { pk -> accountOf(pk) == myAccount || pk == account.pubkey }, ::openProfile)
+    }
 
     // ── refusal / setup-slow ────────────────────────────────────────────────
     val setupLike = st.phase == ChatSession.Phase.SETUP || st.phase == ChatSession.Phase.STARTING
@@ -165,9 +197,6 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     }
 
     // ── composer state ──────────────────────────────────────────────────────
-    val draftKey = "chat.draft:${account.pubkey}:${ev.coordinate}"
-    var draft by remember { mutableStateOf(c.prefs.getString(draftKey) ?: "") }
-    LaunchedEffect(draft) { delay(400); c.prefs.putString(draftKey, draft.takeIf { it.isNotEmpty() }) }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var sendUnroutable by remember { mutableStateOf(false) }
@@ -178,13 +207,36 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     var showMembers by remember { mutableStateOf(false) }
     var showDevices by remember { mutableStateOf(false) }
 
-    val me = st.chatPubkey
     val dmTargets = remember(memberList, profiles, me) {
         val myAccount = me?.let(::accountOf)
         memberList.members.map { DmCommand.Target(it.account, nameOf(it.account)) }.filter { it.account != myAccount }.sortedBy { it.name.lowercase() }
     }
     val dmCommand = remember(draft, dmTargets) { DmCommand.parse(draft, dmTargets) }
     val dmMatches = remember(dmCommand, dmTargets) { (dmCommand as? DmCommand.Parsed.Choosing)?.let { DmCommand.match(dmTargets, it.query) } ?: emptyList() }
+
+    // ── @ mentions while composing (EventChat.svelte) ──────────────────────
+    // Choosing someone writes `@npub1… ` into the text, exactly what White Noise's
+    // composer writes, and MDK's sendText derives the matching `p` tag from it.
+    // The pick inserts the ACCOUNT pubkey, so nothing is re-resolved from a name.
+    // People in the chat first, then the rest of the roster; never you, never a
+    // device the roster has not bound to anyone.
+    val mentionPeople = remember(memberList, st.roster, profiles, me) {
+        val myAccount = me?.let(::accountOf) ?: account.pubkey
+        val attendees = st.roster?.attendees.orEmpty().map { it.pubkey }
+        val bound = attendees.toSet()
+        val seen = HashSet<String>()
+        fun batch(list: List<String>) = list.filter { it != myAccount && seen.add(it) }
+            .map { Mentions.Candidate(it, profileName(it) ?: Mentions.shortNpub(it)) }.sortedBy { it.name.lowercase() }
+        batch(memberList.members.map { it.account }.filter { it in bound }) + batch(attendees)
+    }
+    val mentionMatches = remember(mentionQuery, mentionPeople) { mentionQuery?.let { Mentions.match(mentionPeople, it.query) } ?: emptyList() }
+    fun pickMention(cand: Mentions.Candidate) {
+        val q = mentionQuery ?: return
+        val next = Mentions.insert(field.text, q, cand.account)
+        field = TextFieldValue(next.text, TextRange(next.caret))
+    }
+    val mentionStyle = SpanStyle(color = t.accent, fontWeight = FontWeight.SemiBold)
+    val mentionTransform = remember(profiles, deviceMap, mentionStyle) { MentionTransformation(::mentionName, mentionStyle) }
 
     fun rejoin() {
         sendError = null; sendUnroutable = false; rejoinNote = null
@@ -194,13 +246,13 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     }
 
     fun send() {
-        val text = draft.trim()
+        val text = field.text.trim()
         if (text.isEmpty() || sending || dmCommand != null) return
         sending = true; sendError = null; sendUnroutable = false
         scope.launch {
             try {
                 session.send(text)
-                draft = ""
+                setDraft("")
                 rejoinNote = null
             } catch (e: ChatSession.Unroutable) {
                 sendUnroutable = true; sendError = s.t("chat.sendFailed")
@@ -216,7 +268,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         scope.launch {
             try {
                 if (body.isNotEmpty() && !chat.sendDm(target.account, body)) Toasts.show(s.t("sync.queued"))
-                draft = ""
+                setDraft("")
                 router.go(Route.DmPeer(Nip19.npub(target.account)))
             } catch (e: Exception) {
                 dmError = e.message ?: s.t("chat.devices.actionFailed")
@@ -305,7 +357,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                     items(rows, key = { it.key }) { row ->
                         when (row) {
                             is ChatRow.Day -> DaySeparator(row.label, irc = displayMode == "irc")
-                            is ChatRow.Msg -> if (displayMode == "irc") IrcLine(row.m, nameOf(row.m.sender), accountOf(row.m.sender), s.locale) { openProfile(row.m.sender) }
+                            is ChatRow.Msg -> if (displayMode == "irc") IrcLine(row.m, nameOf(row.m.sender), accountOf(row.m.sender), s.locale, mentionLook) { openProfile(row.m.sender) }
                             else Bubble(
                                 m = row.m,
                                 mine = row.m.sender == me,
@@ -314,6 +366,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                                 picture = pictureOf(row.m.sender),
                                 account = accountOf(row.m.sender),
                                 locale = s.locale,
+                                mentions = mentionLook,
                                 onProfile = { openProfile(row.m.sender) },
                                 onReact = { emoji -> scope.launch { runCatching { session.toggleReaction(row.m, emoji) } } },
                             )
@@ -334,8 +387,9 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
 
         // /msg picker and hint
         if (dmCommand is DmCommand.Parsed.Choosing && dmMatches.isNotEmpty()) {
-            NickPicker(dmMatches, ::pictureOf) { target -> draft = "/msg ${target.name} "; dmError = null }
+            NickPicker(dmMatches, ::pictureOf) { target -> setDraft("/msg ${target.name} "); dmError = null }
         }
+        if (mentionMatches.isNotEmpty()) MentionPicker(mentionMatches, ::pictureOf, ::pickMention)
         if (dmCommand is DmCommand.Parsed.Ready) {
             Dim(
                 if (dmCommand.body.isNotEmpty()) s.t("chat.cmd.willSend", "name" to dmCommand.target.name) else s.t("chat.cmd.willOpen", "name" to dmCommand.target.name),
@@ -350,8 +404,17 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         val composerEnabled = st.phase == ChatSession.Phase.READY
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
-                value = draft,
-                onValueChange = { draft = it; dmError = null },
+                value = field,
+                onValueChange = { next ->
+                    // Backspace at a chip's edge takes the whole `@npub1…` with it.
+                    val old = field
+                    val backspace = old.selection.collapsed && next.selection.collapsed && next.text.length == old.text.length - 1 &&
+                        next.selection.end == old.selection.end - 1 && old.text.removeRange(next.selection.end, old.selection.end) == next.text
+                    val chip = if (backspace) Mentions.deleteBackward(old.text, old.selection.end) else null
+                    field = chip?.let { TextFieldValue(it.text, TextRange(it.caret)) } ?: next
+                    dmError = null
+                },
+                visualTransformation = mentionTransform,
                 modifier = Modifier.weight(1f),
                 placeholder = { Text(s.t("chat.compose.placeholder"), color = t.textDim) },
                 enabled = composerEnabled || draft.startsWith("/"),
