@@ -269,6 +269,14 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         io { unreactFromMessage(account, groupIdHex, messageId) }
     }
 
+    override suspend fun edit(account: String, groupIdHex: String, messageId: String, content: String) {
+        io { editMessage(account, groupIdHex, messageId, content) }
+    }
+
+    override suspend fun delete(account: String, groupIdHex: String, messageId: String) {
+        io { deleteMessage(account, groupIdHex, messageId) }
+    }
+
     override fun changes(account: String): Flow<Unit> = events.filter { it == account }.map { }
 
     override fun timeline(account: String, groupIdHex: String, me: String): ChatEngine.TimelineHandle = object : ChatEngine.TimelineHandle {
