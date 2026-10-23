@@ -47,8 +47,13 @@ object Markdown {
     private val HEADING = Regex("""^(#{1,3})\s+(.*)$""", RegexOption.DOT_MATCHES_ALL)
     private val FENCE = Regex("""(?:^|\n)```[^\n`]*\n([\s\S]*?)\n```(?=\n|$)""")
 
+    /** Blockquotes nest this deep; deeper `>` stay literal text (R-76). */
+    const val MAX_QUOTE_DEPTH = 8
+    /** Longer input is cut: the largest body the protocol allows (MAX_POST_BODY). */
+    const val MAX_SOURCE = 100_000
+
     fun parse(md: String): List<Block> {
-        val src = md.replace("\r\n", "\n")
+        val src = md.take(MAX_SOURCE).replace("\r\n", "\n")
         val out = mutableListOf<Block>()
         var last = 0
         for (m in FENCE.findAll(src)) {
@@ -62,15 +67,20 @@ object Markdown {
         return out
     }
 
-    private fun blocks(text: String): List<Block> =
+    /**
+     * [depth] is the blockquote nesting so far. Without it a line of N `>` recursed N
+     * times, re-splitting and copying the rest of the text at every level: a stranger's
+     * post of 50,000 `>` overflowed the stack on the main thread (audit R-76).
+     */
+    private fun blocks(text: String, depth: Int = 0): List<Block> =
         text.split(Regex("\n{2,}")).mapNotNull { raw ->
             val b = raw.trim('\n')
             if (b.isBlank()) return@mapNotNull null
             val lines = b.split("\n")
             HEADING.matchEntire(b)?.let { h -> return@mapNotNull Block.Heading(h.groupValues[1].length, inline(h.groupValues[2].trim())) }
-            if (lines.all { it.trimStart().startsWith(">") }) {
+            if (depth < MAX_QUOTE_DEPTH && lines.all { it.trimStart().startsWith(">") }) {
                 val inner = lines.joinToString("\n") { it.trimStart().removePrefix(">").removePrefix(" ") }
-                return@mapNotNull Block.Quote(blocks(inner))
+                return@mapNotNull Block.Quote(blocks(inner, depth + 1))
             }
             if (lines.all { LIST_ITEM.matches(it) }) return@mapNotNull listBlock(lines)
             if (isTable(lines)) return@mapNotNull table(lines)

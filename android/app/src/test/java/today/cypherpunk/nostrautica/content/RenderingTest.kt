@@ -22,6 +22,18 @@ import java.io.ByteArrayOutputStream
 import kotlin.random.Random
 
 class RenderingTest {
+    @Test fun aWallOfQuoteMarkersDoesNotRecursePerCharacter() {
+        // R-76: one level per `>` used to overflow the stack.
+        val started = System.currentTimeMillis()
+        var blocks = Markdown.parse(">".repeat(50_000))
+        assertTrue(System.currentTimeMillis() - started < 5_000)
+        var depth = 0
+        while (blocks.singleOrNull() is Block.Quote) { blocks = (blocks.single() as Block.Quote).blocks; depth++ }
+        assertEquals(Markdown.MAX_QUOTE_DEPTH, depth)
+        // Nesting within the cap still renders as quotes.
+        assertTrue(Markdown.parse("> > hi").single() is Block.Quote)
+    }
+
     // ── Markdown ────────────────────────────────────────────────────────────
 
     @Test fun blocks() {
