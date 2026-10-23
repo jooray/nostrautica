@@ -190,7 +190,6 @@ private fun methodLabel(m: Session.Method) = when (m) { Session.Method.LOCAL -> 
 fun BackupCard() {
     val c = LocalContainer.current
     val s = LocalStrings.current
-    val clipboard = LocalClipboardManager.current
     val scope = rememberCoroutineScope()
     var stage by remember { mutableStateOf("") }
     var more by remember { mutableStateOf(false) }
@@ -199,9 +198,12 @@ fun BackupCard() {
     var busy by remember { mutableStateOf(false) }
     val sk = remember(c.session.account.value) { c.session.exportSecret() }
     if (sk == null) { Dim(s.t("backup.noKey")); return }
+    val ctx = LocalContext.current
+    // The key's own screen: no screenshots, recordings or Recents thumbnail (R-73).
+    today.cypherpunk.nostrautica.ui.components.SecureWindow()
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Dim(s.t("backup.warning.a") + " " + s.t("backup.warning.keepSecret") + s.t("backup.warning.b"))
-        PrimaryButton(s.t("backup.copyKey"), { clipboard.setText(AnnotatedString(Nip19.nsec(sk))); stage = "copied" })
+        PrimaryButton(s.t("backup.copyKey"), { today.cypherpunk.nostrautica.ui.components.Secrets.copy(ctx, Nip19.nsec(sk)); stage = "copied" })
         if (stage == "copied") {
             Dim(s.t("backup.stage.copied"))
             SecondaryButton(s.t("backup.stage.iSavedIt"), { c.session.markBackedUp(); stage = "saved"; Toasts.show(s.t("backup.stage.confirmed")) })
@@ -219,7 +221,7 @@ fun BackupCard() {
             }, enabled = pass.length >= 4, busy = busy)
             encrypted?.let { e ->
                 SelectionContainer { Text(e, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
-                SmallButton(s.t("backup.file.copy"), { clipboard.setText(AnnotatedString(e)); c.session.markBackedUp() })
+                SmallButton(s.t("backup.file.copy"), { today.cypherpunk.nostrautica.ui.components.Secrets.copy(ctx, e); c.session.markBackedUp() })
             }
         }
     }

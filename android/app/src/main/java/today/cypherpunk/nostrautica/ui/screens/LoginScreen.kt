@@ -100,7 +100,6 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
         Intent(Intent.ACTION_VIEW, Uri.parse("nostrconnect://")).resolveActivity(ctx.packageManager) == null
     }
     var autoConnected by remember { mutableStateOf(false) }
-    val clipboard = LocalClipboardManager.current
 
     fun finish() {
         scope.launch { afterLogin(c) }
@@ -184,10 +183,12 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
                     })
                 }
                 if (showQr) {
+                    // The nostrconnect URI carries the pairing secret (R-73).
+                    today.cypherpunk.nostrautica.ui.components.SecureWindow()
                     Dim(s.t("signin.remote.scan"))
                     Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { QrCode(o.uri) }
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        LinkButton(s.t("signin.remote.copy"), { clipboard.setText(AnnotatedString(o.uri)) })
+                        LinkButton(s.t("signin.remote.copy"), { today.cypherpunk.nostrautica.ui.components.Secrets.copy(ctx, o.uri) })
                     }
                 } else {
                     LinkButton(s.t("signin.remote.showQr"), { showQr = true })
