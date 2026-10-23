@@ -12,7 +12,6 @@ import type { Store } from "../store/db.js";
 import {
   extractAudioSegments,
   probeDurationFromBytes,
-  ProbeUnavailableError,
   SubprocessError,
   type AudioSegment,
 } from "./audio.js";
@@ -311,18 +310,13 @@ export async function transcribeMedia(
   // H-3: probe the REAL decoded duration and reject over-limit media BEFORE STT,
   // regardless of the declared `duration`. Account the actual bytes + duration.
   const probe = deps.probeDuration ?? ((m, mime) => probeDurationFromBytes(m, mime, deps.signal));
-  let realDurationSec: number | undefined;
-  try {
-    realDurationSec = await probe(plaintext, descriptor.m);
-  } catch (e) {
-    // ffprobe never ANSWERED (timed out, was killed, could not be spawned). That is
-    // a fact about this host at this moment, not about the media, and the branch
-    // below would otherwise cache it as a permanent policy rejection: the recording
-    // is never transcribed and re-submitting the identical blob hits the same
-    // cached empty transcript forever. The bytes are already booked; rethrow so
-    // the job runner retries with backoff. Nothing is cached.
-    throw e;
-  }
+  // A probe that never ANSWERED (ProbeUnavailableError: timed out, was killed,
+  // could not be spawned) is a fact about this host at this moment, not about the
+  // media, and the branch below would otherwise cache it as a permanent policy
+  // rejection: the recording is never transcribed and re-submitting the identical
+  // blob hits the same cached empty transcript forever. The bytes are already
+  // booked; it propagates so the job runner retries with backoff. Nothing is cached.
+  const realDurationSec: number | undefined = await probe(plaintext, descriptor.m);
   // Unknown is booked as 0 against the usage budget because there is nothing else
   // to book — which is precisely why an unknown duration must not also be allowed
   // to PASS the cap below (2026-09-04 audit).
