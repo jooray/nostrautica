@@ -3,9 +3,15 @@ import { getPublicKey, generateSecretKey } from "nostr-tools/pure";
 import { npubEncode } from "nostr-tools/nip19";
 import {
   buildChatSend,
+  buildReactionSend,
+  buildEditSend,
+  buildDeleteSend,
   rumorToChatMessage,
   roundTripChatRumor,
   CHAT_KIND_TEXT,
+  CHAT_KIND_REACTION,
+  CHAT_KIND_EDIT,
+  CHAT_KIND_DELETE,
 } from "./messages.js";
 
 const pubkey = getPublicKey(generateSecretKey());
@@ -62,5 +68,40 @@ describe("chat message mapping", () => {
     expect(buildChatSend(pubkey, content, [["p", mentioned]]).rumor.tags).toEqual([["p", mentioned]]);
     // No mention, no tags at all: plain messages stay byte-identical to before.
     expect(buildChatSend(pubkey, "plain").rumor.tags).toEqual([]);
+  });
+});
+
+describe("message modifiers (MDK build_inner_event wire format)", () => {
+  const target = "e".repeat(64);
+
+  it("a reaction is kind 7, content = the emoji, one e tag to the target", () => {
+    const { rumor, intent } = buildReactionSend(pubkey, target, "👍");
+    expect(rumor).toMatchObject({ kind: CHAT_KIND_REACTION, pubkey, content: "👍", tags: [["e", target]] });
+    expect(intent.kind).toBe("applicationMessage");
+    const back = roundTripChatRumor(rumor);
+    expect(back).toMatchObject({ id: rumor.id, kind: CHAT_KIND_REACTION, tags: [["e", target]] });
+  });
+
+  it("refuses an empty or oversize reaction", () => {
+    expect(() => buildReactionSend(pubkey, target, " ")).toThrow();
+    expect(() => buildReactionSend(pubkey, target, "x".repeat(65))).toThrow();
+  });
+
+  it("an edit is kind 1009 with the e tag first, then the new text's mention p tags", () => {
+    const mentioned = getPublicKey(generateSecretKey());
+    const { rumor } = buildEditSend(pubkey, target, `now with @${npubEncode(mentioned)}`);
+    expect(rumor.kind).toBe(CHAT_KIND_EDIT);
+    expect(rumor.tags).toEqual([["e", target], ["p", mentioned]]);
+    expect(roundTripChatRumor(rumor).tags).toEqual(rumor.tags);
+    expect(buildEditSend(pubkey, target, "plain").rumor.tags).toEqual([["e", target]]);
+    expect(() => buildEditSend(pubkey, target, "  ")).toThrow();
+  });
+
+  it("a delete is kind 5, empty content, one e tag per retracted event (deduped)", () => {
+    const other = "d".repeat(64);
+    const { rumor } = buildDeleteSend(pubkey, [target, other, target]);
+    expect(rumor).toMatchObject({ kind: CHAT_KIND_DELETE, content: "", tags: [["e", target], ["e", other]] });
+    expect(roundTripChatRumor(rumor).id).toBe(rumor.id);
+    expect(() => buildDeleteSend(pubkey, [])).toThrow();
   });
 });

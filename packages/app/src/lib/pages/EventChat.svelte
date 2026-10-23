@@ -54,6 +54,7 @@
   import Avatar from "$lib/components/Avatar.svelte";
   import ChatHandoffCard from "$lib/components/ChatHandoffCard.svelte";
   import type { ChatMessage } from "$lib/chat/messages.js";
+  import type { ChatTimelineItem } from "$lib/chat/timeline.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
   import { saveDraft, loadDraft } from "$lib/stores/drafts.js";
   import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
@@ -85,12 +86,16 @@
   let rejoined = $state(false);
   let draft = $state("");
   let sending = $state(false);
+  /** The own message the composer is editing, and the draft it set aside. */
+  let editing = $state<{ id: string; stash: string } | null>(null);
 
   // Draft-safe auto-refresh (App-2): persist the compose text (owner-scoped) and
   // hold the pending reload while it's non-empty; it applies once the box clears.
   $effect(() => {
     const text = draft;
-    saveDraft(`chat:${naddr}`, text);
+    // While editing, the composer holds the message being edited, not a draft:
+    // restoring it after a reload would offer it as a new message.
+    if (!untrack(() => editing)) saveDraft(`chat:${naddr}`, text);
     if (text.trim().length > 0) return refreshGuard.hold("chat");
   });
   // Set once our own membership-resolve pass (grant fetch + shell re-sync) has run.
@@ -100,7 +105,9 @@
   // page mounts. So this page reads it rather than owning it: no re-handshake on
   // every visit, and the messages that arrived while the user was on other tabs
   // are already here.
-  const messages = $derived(chatSession.messages);
+  // The folded timeline (chat/timeline.ts): one line per message, its reactions,
+  // edit and deletion applied. The raw list still carries the modifiers.
+  const messages = $derived(chatSession.timeline);
   const chatPubkey = $derived(chatSession.chatPubkey);
   // Multi-tab (H-7): a read-only follower can't send from this tab — chat is
   // active in another tab, or Web Locks is unavailable. Show a notice + disable
@@ -357,6 +364,10 @@
     // A leader has its own client; an interactive follower proxies through the
     // leader tab (chatSession.send). Only a read-only follower can't send.
     if (!text || sending || readOnly) return;
+    if (editing) {
+      await saveEdit(editing.id, text);
+      return;
+    }
     // Defence in depth: the composer's Enter is intercepted and the Send button
     // is disabled while a slash command owns the line, but this is the one
     // mistake with a real cost — broadcasting a message meant for one person to
@@ -384,6 +395,92 @@
     } finally {
       sending = false;
     }
+  }
+
+  // ── reactions, edits, deletes ───────────────────────────────────────────────
+  // The same quick set as Android (ChatParts.kt QUICK_REACTIONS). Wire format and
+  // acceptance rules are MDK's, so Android and White Noise show the same room:
+  // chat/messages.ts builds, chat/timeline.ts folds.
+  const QUICK_REACTIONS = ["👍", "❤️", "😂", "🎉", "🙏", "👀"];
+  /** The message whose action tray is open. */
+  let menuFor = $state<string | null>(null);
+  /** The own message whose deletion is awaiting confirmation. */
+  let confirmDelete = $state<string | null>(null);
+  let actionError = $state<string | null>(null);
+  const canAct = $derived(phase === "ready" && !readOnly);
+
+  function toggleMenu(id: string): void {
+    confirmDelete = null;
+    menuFor = menuFor === id ? null : id;
+  }
+
+  async function runAction(fn: () => Promise<void>): Promise<void> {
+    actionError = null;
+    try {
+      await fn();
+    } catch (e) {
+      actionError = e instanceof ChatUnroutableError ? t("chat.sendFailed") : t("chat.actionFailed");
+    }
+  }
+
+  function react(m: ChatTimelineItem, emoji: string): void {
+    menuFor = null;
+    if (!canAct || m.deleted) return;
+    void runAction(() => chatSession.toggleReaction(m.id, emoji));
+  }
+
+  async function startEdit(m: ChatTimelineItem): Promise<void> {
+    menuFor = null;
+    if (!canAct) return;
+    editing = { id: m.id, stash: editing ? editing.stash : draft };
+    draft = m.content;
+    await tick();
+    composeEl?.focus();
+    composeEl?.setSelectionRange(draft.length, draft.length);
+  }
+
+  function cancelEdit(): void {
+    if (!editing) return;
+    draft = editing.stash;
+    editing = null;
+  }
+
+  async function saveEdit(id: string, text: string): Promise<void> {
+    sending = true;
+    try {
+      await runAction(async () => {
+        await chatSession.editMessage(id, text);
+        cancelEdit();
+      });
+    } finally {
+      sending = false;
+    }
+  }
+
+  function deleteMessage(m: ChatTimelineItem): void {
+    menuFor = null;
+    confirmDelete = null;
+    if (editing?.id === m.id) cancelEdit();
+    if (!canAct) return;
+    void runAction(() => chatSession.deleteMessage(m.id));
+  }
+
+  // ── older history ───────────────────────────────────────────────────────────
+  // Android pages its timeline from MDK 50 at a time behind "Load older
+  // messages". Here the whole decrypted history is already local (IndexedDB;
+  // relays cannot give us more, MLS is forward-secret), so the page bounds what
+  // is RENDERED instead: the newest WINDOW lines, and the button reveals more,
+  // keeping the reader's place.
+  const WINDOW = 200;
+  let shown = $state(WINDOW);
+  const visible = $derived(messages.length > shown ? messages.slice(-shown) : messages);
+  const hasOlder = $derived(messages.length > shown);
+  async function loadOlder(): Promise<void> {
+    const el = listEl;
+    const before = el ? el.scrollHeight - el.scrollTop : 0;
+    shown += WINDOW;
+    await tick();
+    if (el) el.scrollTop = el.scrollHeight - before;
   }
 
   // ── the message pane scrolls on its own ─────────────────────────────────────
@@ -437,8 +534,8 @@
   }
   // Group messages by calendar day for the day separators.
   const grouped = $derived.by(() => {
-    const out: { day: string; items: ChatMessage[] }[] = [];
-    for (const m of messages) {
+    const out: { day: string; items: ChatTimelineItem[] }[] = [];
+    for (const m of visible) {
       const day = dayLabel(m.createdAt);
       const last = out[out.length - 1];
       if (last && last.day === day) last.items.push(m);
@@ -502,14 +599,13 @@
   // a bubble that printed it verbatim showed 63 characters of bech32 where a
   // name belonged. The mentioned key is often a chat DEVICE key, since that is
   // what another Marmot client sees as our member, so it goes through accountOf
-  // like a sender does. Parsed once per message id: content never changes.
-  const segmentCache = new Map<string, MentionSegment[]>();
+  // like a sender does. Parsed once per message id and text: an edit changes it.
+  const segmentCache = new Map<string, { content: string; segs: MentionSegment[] }>();
   function segmentsOf(m: ChatMessage): MentionSegment[] {
-    let segs = segmentCache.get(m.id);
-    if (!segs) {
-      segs = parseMentions(m.content);
-      segmentCache.set(m.id, segs);
-    }
+    const hit = segmentCache.get(m.id);
+    if (hit && hit.content === m.content) return hit.segs;
+    const segs = parseMentions(m.content);
+    segmentCache.set(m.id, { content: m.content, segs });
     return segs;
   }
   /** A mention's label: the person's name, else a short npub (never a raw key). */
@@ -807,6 +903,74 @@
         /><span class="mention-name">@{mentionName(s.pubkey)}</span></span
       >{/if}{/each}{/snippet}
 
+<!-- The "…" beside a message: opens its action tray. Outside the bubble, which
+     is itself the open-profile control. -->
+{#snippet actionsButton(m: ChatTimelineItem)}
+  {#if canAct && !m.deleted}
+    <button
+      type="button"
+      class="msg-actions-btn"
+      class:open={menuFor === m.id}
+      aria-expanded={menuFor === m.id}
+      aria-label={t("chat.messageActions")}
+      title={t("chat.messageActions")}
+      onclick={() => toggleMenu(m.id)}
+    >
+      <Icon name="ellipsis" size={16} />
+    </button>
+  {/if}
+{/snippet}
+
+<!-- Quick reactions (Android's set) and, on our own messages, edit/delete.
+     In the flow rather than a popover, so the scroller can never clip it. -->
+{#snippet actionTray(m: ChatTimelineItem, mine: boolean)}
+  {#if menuFor === m.id && canAct && !m.deleted}
+    <div class="msg-tray" role="group" aria-label={t("chat.messageActions")}>
+      {#if confirmDelete === m.id}
+        <span class="tray-q">{t("chat.deleteConfirm")}</span>
+        <button type="button" class="btn inline danger" onclick={() => deleteMessage(m)}>{t("chat.deleteYes")}</button>
+        <button type="button" class="btn inline" onclick={() => (confirmDelete = null)}>{t("chat.cancel")}</button>
+      {:else}
+        <span class="tray-emoji">
+          {#each QUICK_REACTIONS as e (e)}
+            <button
+              type="button"
+              class="emoji-btn"
+              class:on={m.reactions.some((r) => r.emoji === e && r.mine)}
+              aria-label={t("chat.reactWith", { emoji: e })}
+              title={t("chat.reactWith", { emoji: e })}
+              onclick={() => react(m, e)}>{e}</button
+            >
+          {/each}
+        </span>
+        {#if mine}
+          <button type="button" class="btn inline" onclick={() => void startEdit(m)}>{t("chat.edit")}</button>
+          <button type="button" class="btn inline" onclick={() => (confirmDelete = m.id)}>{t("chat.delete")}</button>
+        {/if}
+      {/if}
+    </div>
+  {/if}
+{/snippet}
+
+<!-- Tally chips: tap to add/withdraw your own. Highlighted when you reacted. -->
+{#snippet reactionChips(m: ChatTimelineItem)}
+  {#if m.reactions.length > 0}
+    <span class="reactions">
+      {#each m.reactions as r (r.emoji)}
+        <button
+          type="button"
+          class="rchip"
+          class:mine={r.mine}
+          aria-pressed={r.mine}
+          title={t("chat.reactWith", { emoji: r.emoji })}
+          disabled={!canAct}
+          onclick={() => react(m, r.emoji)}>{r.emoji} {r.count}</button
+        >
+      {/each}
+    </span>
+  {/if}
+{/snippet}
+
 <div class="chat-head">
   <h1 class="disp">{t("chat.title")}</h1>
   <span class="badge">{t("chat.experimental")}</span>
@@ -947,6 +1111,11 @@
         {/if}
       </div>
     {:else}
+      {#if hasOlder}
+        <div class="older-row">
+          <button type="button" class="btn inline" onclick={() => void loadOlder()}>{t("chat.loadOlder")}</button>
+        </div>
+      {/if}
       {#each grouped as g (g.day)}
         <div class="day" class:irc={displayMode === "irc"}><span>{g.day}</span></div>
         {#each g.items as m, i (m.id)}
@@ -961,8 +1130,16 @@
                 title={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
                 onclick={() => openProfile(m.pubkey)}
               >&lt;{nameOf(m.pubkey)}&gt;</button>
-              <span class="irc-text">{@render richText(m)}</span>
+              {#if m.deleted}
+                <span class="irc-text deleted">{t("chat.deleted")}</span>
+              {:else}
+                <span class="irc-text">{@render richText(m)}</span>
+                {#if m.edited}<span class="edited">({t("chat.edited")})</span>{/if}
+              {/if}
+              {@render reactionChips(m)}
+              {@render actionsButton(m)}
             </p>
+            {@render actionTray(m, mine)}
           {:else}
             {@const showSender = i === 0 || g.items[i - 1]!.pubkey !== m.pubkey}
             <div class="msg" class:mine>
@@ -997,22 +1174,36 @@
                      role/tabindex rather than a <button> so the message stays
                      ordinary selectable text, and the click is ignored mid
                      selection — see openProfileUnlessSelecting. -->
-                <div
-                  class="bubble"
-                  role="button"
-                  tabindex="0"
-                  title={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
-                  onclick={() => openProfileUnlessSelecting(m.pubkey)}
-                  onkeydown={(e) => {
-                    if (e.key === "Enter" || e.key === " ") {
-                      e.preventDefault();
-                      openProfile(m.pubkey);
-                    }
-                  }}
-                >
-                  <p class="text">{@render richText(m)}</p>
-                  <span class="time">{timeLabel(m.createdAt)}</span>
+                <div class="bubble-row">
+                  <div
+                    class="bubble"
+                    class:editing={editing?.id === m.id}
+                    role="button"
+                    tabindex="0"
+                    title={t("chat.openProfileOf", { name: nameOf(m.pubkey) })}
+                    onclick={() => openProfileUnlessSelecting(m.pubkey)}
+                    onkeydown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        openProfile(m.pubkey);
+                      }
+                    }}
+                  >
+                    {#if m.deleted}
+                      <p class="text deleted">{t("chat.deleted")}</p>
+                    {:else}
+                      <p class="text">{@render richText(m)}</p>
+                    {/if}
+                    <span class="time"
+                      >{#if m.edited && !m.deleted}<span class="edited">{t("chat.edited")}</span>{/if}{timeLabel(
+                        m.createdAt,
+                      )}</span
+                    >
+                  </div>
+                  {@render actionsButton(m)}
                 </div>
+                {@render reactionChips(m)}
+                {@render actionTray(m, mine)}
               </div>
             </div>
           {/if}
@@ -1102,6 +1293,12 @@
             : t("chat.cmd.willOpen", { name: `${dmCommand.target.name} (${shortNpub(dmCommand.target.account)})` })}
         </p>
       {/if}
+      {#if editing}
+        <p class="editing-bar" role="status">
+          <span>{t("chat.editing")}</span>
+          <button type="button" class="btn inline" onclick={cancelEdit}>{t("chat.cancel")}</button>
+        </p>
+      {/if}
       <textarea
         bind:this={composeEl}
         bind:value={draft}
@@ -1116,6 +1313,11 @@
         onkeydown={(e) => {
           if (handleCommandKey(e)) return;
           if (handleMentionKey(e)) return;
+          if (e.key === "Escape" && editing) {
+            e.preventDefault();
+            cancelEdit();
+            return;
+          }
           if (e.key === "Enter" && !e.shiftKey) {
             e.preventDefault();
             void send();
@@ -1126,13 +1328,16 @@
         class="send"
         type="submit"
         disabled={!draft.trim() || sending || dmBusy || !!dmCommand || phase === "setup" || phase === "evicted"}
-        aria-label={dmCommand ? t("chat.cmd.pickPerson") : t("chat.send")}
+        aria-label={dmCommand ? t("chat.cmd.pickPerson") : editing ? t("chat.saveEdit") : t("chat.send")}
       >
-        <Icon name="send" size={20} />
+        <Icon name={editing ? "check" : "send"} size={20} />
       </button>
     </form>
     {#if dmError}
       <p class="send-error" role="alert">{dmError}</p>
+    {/if}
+    {#if actionError}
+      <p class="send-error" role="alert">{actionError}</p>
     {/if}
   {/if}
 
@@ -1377,6 +1582,156 @@
   .msg.mine .bubble {
     background: color-mix(in srgb, var(--accent) 18%, var(--bg-raised));
   }
+  .bubble.editing {
+    border-color: var(--accent);
+  }
+  /* Bubble + its "…" button. Reversed on our side so the button sits inward. */
+  .bubble-row {
+    display: flex;
+    align-items: center;
+    gap: 0.2rem;
+    min-width: 0;
+  }
+  .msg.mine .bubble-row {
+    flex-direction: row-reverse;
+  }
+  .bubble-row .bubble {
+    min-width: 0;
+  }
+  .text.deleted,
+  .irc-text.deleted {
+    font-style: italic;
+    color: var(--text-dim);
+  }
+  .edited {
+    margin-right: 0.35rem;
+    font-size: 0.65rem;
+    color: var(--text-dim);
+  }
+  .irc-line .edited {
+    margin: 0 0 0 0.35rem;
+  }
+  /* Hidden until the message is hovered or focused, where a pointer can hover;
+     always visible on touch, which has no hover to reveal it. */
+  .msg-actions-btn {
+    flex: none;
+    display: inline-grid;
+    place-items: center;
+    width: 1.6rem;
+    height: 1.6rem;
+    padding: 0;
+    border: none;
+    border-radius: 999px;
+    background: none;
+    color: var(--text-dim);
+    cursor: pointer;
+    opacity: 0;
+  }
+  .msg:hover .msg-actions-btn,
+  .irc-line:hover .msg-actions-btn,
+  .msg-actions-btn:focus-visible,
+  .msg-actions-btn.open {
+    opacity: 1;
+  }
+  @media (hover: none) {
+    .msg-actions-btn {
+      opacity: 0.6;
+    }
+  }
+  .msg-actions-btn:hover,
+  .msg-actions-btn.open {
+    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+    color: var(--text);
+  }
+  .irc-line .msg-actions-btn {
+    width: 1.3rem;
+    height: 1.3rem;
+    vertical-align: middle;
+    margin-left: 0.2rem;
+  }
+  .msg-tray {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.3rem;
+    margin-top: 0.25rem;
+    padding: 0.25rem 0.35rem;
+    background: var(--bg-raised);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .msg.mine .msg-tray {
+    align-self: flex-end;
+  }
+  .tray-emoji {
+    display: inline-flex;
+    gap: 0.1rem;
+  }
+  .emoji-btn {
+    padding: 0.15rem 0.3rem;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    font-size: 1.15rem;
+    line-height: 1.2;
+    cursor: pointer;
+  }
+  .emoji-btn:hover,
+  .emoji-btn:focus-visible {
+    background: color-mix(in srgb, var(--text-dim) 16%, transparent);
+  }
+  .emoji-btn.on {
+    background: color-mix(in srgb, var(--accent) 26%, transparent);
+  }
+  .tray-q {
+    font-size: 0.85rem;
+  }
+  .reactions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem;
+    margin-top: 0.2rem;
+  }
+  .msg.mine .reactions {
+    justify-content: flex-end;
+  }
+  .irc-line .reactions {
+    display: inline-flex;
+    margin: 0 0 0 0.4rem;
+    vertical-align: middle;
+  }
+  .rchip {
+    padding: 0.05rem 0.45rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--bg-raised);
+    color: inherit;
+    font: inherit;
+    font-size: 0.75rem;
+    cursor: pointer;
+  }
+  .rchip.mine {
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 18%, var(--bg-raised));
+  }
+  .rchip:disabled {
+    cursor: default;
+  }
+  .older-row {
+    display: flex;
+    justify-content: center;
+    margin: 0.2rem 0;
+  }
+  .editing-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.5rem;
+    flex-basis: 100%;
+    margin: 0;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+  }
   .text {
     margin: 0;
     white-space: pre-wrap;
@@ -1567,6 +1922,7 @@
        two can no longer drift apart. */
     bottom: var(--nav-band);
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
     align-items: flex-end;
     padding: 0.5rem 0;

@@ -29,9 +29,11 @@ import type { ChatMessage } from "./messages.js";
 import type { MarmotChat } from "./client.js";
 import {
   ChatTabCoordinator,
+  type ChatAction,
   type TabRole,
   type TabCoordinatorOptions,
 } from "./tab-leader.js";
+import { foldChatTimeline, type ChatTimelineItem } from "./timeline.js";
 import { warmChatTab } from "./warm.js";
 
 /** Test-only override; production always constructs the real coordinator. */
@@ -88,6 +90,13 @@ class ChatSessionStore {
   memberDevices = $state<string[] | undefined>(undefined);
   /** Our own chat identity pubkey (marks "my" bubbles); set once the client exists. */
   chatPubkey = $state<string | undefined>(undefined);
+  /**
+   * What the room shows: one line per kind 9 with its reactions, edit and
+   * deletion folded in (timeline.ts). `messages` stays the raw list, because
+   * that is what follower tabs are sent and a modifier can land before its
+   * target.
+   */
+  timeline: ChatTimelineItem[] = $derived(foldChatTimeline(this.messages, this.chatPubkey));
   /** Reactive by reference only — never deep-proxy the marmot client. */
   chat = $state.raw<MarmotChat | undefined>(undefined);
   /** This tab's multi-tab role (H-7). Only the leader owns a live client. */
@@ -227,6 +236,13 @@ class ChatSessionStore {
             throw new Error("the active tab is in a different event's chat");
           }
           await this.chat.send(text);
+        },
+        onActionRequest: async (action, coordinate) => {
+          if (!this.chat) throw new Error("no chat session");
+          if (coordinate && coordinate !== this.ctx?.coordinate) {
+            throw new Error("the active tab is in a different event's chat");
+          }
+          await this.runAction(action);
         },
         onRejoinRequest: async (force, coordinate) => {
           // Leader performs a follower's rejoin: MLS state has a single writer, so
@@ -467,6 +483,69 @@ class ChatSessionStore {
       return;
     }
     throw new Error("no chat session");
+  }
+
+  /**
+   * Toggle this device's `emoji` on a message: retract it when we already
+   * reacted with it, add it otherwise. Per emoji, so a second emoji is added
+   * alongside the first, as MDK allows; Android's own toggle reaches the same
+   * wire events.
+   */
+  async toggleReaction(messageId: string, emoji: string): Promise<void> {
+    const item = this.timeline.find((m) => m.id === messageId);
+    if (!item || item.deleted) return;
+    const own = item.reactions.find((r) => r.emoji === emoji && r.ownIds.length > 0);
+    await this.act(own ? { type: "retract", ids: [...own.ownIds] } : { type: "react", target: messageId, emoji });
+  }
+
+  /** Edit one of this device's own messages. Others' messages are refused here,
+   *  as every receiving client would refuse the edit anyway. */
+  async editMessage(messageId: string, content: string): Promise<void> {
+    const item = this.ownLiveMessage(messageId);
+    const text = content.trim();
+    if (!text || text === item.content) return;
+    await this.act({ type: "edit", target: messageId, content: text });
+  }
+
+  /** Delete one of this device's own messages (kind 5). */
+  async deleteMessage(messageId: string): Promise<void> {
+    this.ownLiveMessage(messageId);
+    await this.act({ type: "retract", ids: [messageId] });
+  }
+
+  private ownLiveMessage(messageId: string): ChatTimelineItem {
+    const item = this.timeline.find((m) => m.id === messageId);
+    if (!item || item.deleted || !this.chatPubkey || item.pubkey !== this.chatPubkey) {
+      throw new Error("only your own messages can be changed");
+    }
+    return item;
+  }
+
+  /** Same routing as {@link send}: the leader's client, or a proxy to it. */
+  private async act(action: ChatAction): Promise<void> {
+    if (this.chat) {
+      try {
+        await this.runAction(action);
+      } catch (err) {
+        if (await this.demoteIfUnroutable()) throw new ChatUnroutableError();
+        throw err;
+      }
+      return;
+    }
+    const c = this.coordinator;
+    if (c && c.role === "follower" && !this.readOnly) {
+      await c.proxyAction(action, this.ctx?.coordinate);
+      return;
+    }
+    throw new Error("no chat session");
+  }
+
+  private async runAction(action: ChatAction): Promise<void> {
+    const chat = this.chat;
+    if (!chat) throw new Error("no chat session");
+    if (action.type === "react") await chat.react(action.target, action.emoji);
+    else if (action.type === "edit") await chat.edit(action.target, action.content);
+    else await chat.retract(action.ids);
   }
 
   /** Leader: drop back to `setup` when the client holds no routable group.

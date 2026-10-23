@@ -351,7 +351,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                 LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     if (st.hasMoreBefore) item("older") {
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            SmallButton(s.t("chat.android.loadOlder"), { scope.launch { session.loadOlder() } })
+                            SmallButton(s.t("chat.loadOlder"), { scope.launch { session.loadOlder() } })
                         }
                     }
                     items(rows, key = { it.key }) { row ->
