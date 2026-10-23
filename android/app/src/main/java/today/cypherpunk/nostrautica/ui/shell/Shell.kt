@@ -115,7 +115,7 @@ private fun ThemeToggle() {
     IconSquare(if (dark) Icons.Outlined.LightMode else Icons.Outlined.DarkMode, s.t("nav.toggleTheme"), { prefs.setTheme(if (dark) "light" else "dark") })
 }
 
-/** The strip above the content: a back pill (or the brand) and the theme toggle. */
+/** The strip above the content: a back pill (or the brand), the outbox chip and the theme toggle. */
 @Composable
 fun TopStrip(back: Pair<String, () -> Unit>?) {
     val t = LocalTokens.current
@@ -127,6 +127,7 @@ fun TopStrip(back: Pair<String, () -> Unit>?) {
                 if (back != null) BackPill(back.first, back.second)
                 else Text(s.t("app.brand"), color = t.accent, fontWeight = FontWeight.Bold, fontSize = 18.sp)
             }
+            OutboxIndicator()
             ThemeToggle()
         }
         HorizontalDivider(Modifier.padding(horizontal = 16.dp), color = t.border)
