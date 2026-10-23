@@ -165,14 +165,7 @@ object OrganizerEvents {
     }
 
     /** ndk.ts isAcceptedRelayUrl: wss://, or ws:// to this machine only. */
-    fun isAcceptedRelayUrl(url: String): Boolean = runCatching {
-        val u = java.net.URI(url)
-        when (u.scheme) {
-            "wss" -> !u.host.isNullOrEmpty()
-            "ws" -> u.host in setOf("localhost", "127.0.0.1", "[::1]", "::1")
-            else -> false
-        }
-    }.getOrDefault(false)
+    fun isAcceptedRelayUrl(url: String): Boolean = today.cypherpunk.nostrautica.nostr.Relays.isAccepted(url)
 
     fun unionRelays(vararg lists: List<String>): List<String> =
         lists.flatMap { it }.map { it.trim().trimEnd('/') }.filter { it.isNotEmpty() }.distinct()

@@ -84,6 +84,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import today.cypherpunk.nostrautica.ui.components.rememberSafeImage
 
 // ── Small form pieces ───────────────────────────────────────────────────────
 
@@ -258,7 +259,8 @@ fun CoordinatorCardView(co: DiscoveredCoordinator, selected: Boolean, actions: @
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.Top) {
-            co.announce.picture?.let { AsyncImage(it, null, Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))); Text("  ") }
+            // Any announcer's logo: the same gate as every other remote image (R-67).
+            rememberSafeImage(co.announce.picture)?.let { AsyncImage(it, null, Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))); Text("  ") }
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(co.announce.name, fontWeight = FontWeight.SemiBold)
@@ -447,7 +449,9 @@ object ImageCrop {
      * [outWidth] wide, as JPEG. The organizer sees the exact crop before upload.
      */
     fun centerCrop(ctx: Context, uri: Uri, aspect: Float, outWidth: Int, quality: Int = 88): ByteArray {
-        val bytes = ctx.contentResolver.openInputStream(uri)!!.use { it.readBytes() }
+        // Bounded: the provider decides how long this stream is (R-74).
+        val bytes = ctx.contentResolver.openInputStream(uri)!!.use { today.cypherpunk.nostrautica.domain.media.Bounded.readBytes(it, today.cypherpunk.nostrautica.domain.media.Bounded.MAX_PICKED_IMAGE_BYTES) }
+            ?: throw IllegalArgumentException("That photo is too large. Please choose a smaller one.")
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
         var sample = 1

@@ -10,7 +10,8 @@
     "record.android.needsNetwork": "Uploading needs an internet connection. Your recording stays on this phone, so send it when you're back online.",
     "record.android.takeRestored": "Your unsent recording is still here.",
     "record.android.switchCamera": "Switch camera",
-    "event.android.offlineNote": "What you've opened in this event is saved on this phone and works without a signal."
+    "event.android.offlineNote": "What you've opened in this event is saved on this phone and works without a signal.",
+    "record.android.cantStrip": "This file couldn't be prepared for upload without its location and other hidden details, so it wasn't sent. Try another file, or record here instead."
   },
   "sk": {
     "join.android.photoUnreadable": "Túto fotku sa nepodarilo načítať. Vyberte, prosím, inú.",
@@ -23,7 +24,8 @@
     "record.android.needsNetwork": "Na nahranie treba internetové pripojenie. Nahrávka zostáva v tomto telefóne, takže ju pošlite, keď budete znova online.",
     "record.android.takeRestored": "Vaša neodoslaná nahrávka je stále tu.",
     "record.android.switchCamera": "Prepnúť kameru",
-    "event.android.offlineNote": "Čo ste si v tomto podujatí otvorili, je uložené v telefóne a funguje aj bez signálu."
+    "event.android.offlineNote": "Čo ste si v tomto podujatí otvorili, je uložené v telefóne a funguje aj bez signálu.",
+    "record.android.cantStrip": "Tento súbor sa nepodarilo pripraviť na nahratie bez polohy a ďalších skrytých údajov, preto sa neodoslal. Skúste iný súbor alebo nahrávajte priamo tu."
   },
   "cs": {
     "join.android.photoUnreadable": "Tuto fotku se nepodařilo načíst. Vyberte prosím jinou.",
@@ -36,7 +38,8 @@
     "record.android.needsNetwork": "K nahrání je potřeba připojení k internetu. Nahrávka zůstává v tomto telefonu, takže ji odešlete, až budete znovu online.",
     "record.android.takeRestored": "Vaše neodeslaná nahrávka je stále tady.",
     "record.android.switchCamera": "Přepnout kameru",
-    "event.android.offlineNote": "Co jste si v této akci otevřeli, je uložené v telefonu a funguje i bez signálu."
+    "event.android.offlineNote": "Co jste si v této akci otevřeli, je uložené v telefonu a funguje i bez signálu.",
+    "record.android.cantStrip": "Tento soubor se nepodařilo připravit k nahrání bez polohy a dalších skrytých údajů, proto se neodeslal. Zkuste jiný soubor, nebo nahrávejte přímo tady."
   },
   "de": {
     "join.android.photoUnreadable": "Dieses Foto konnte nicht gelesen werden. Bitte wähle ein anderes.",
@@ -49,7 +52,8 @@
     "record.android.needsNetwork": "Zum Hochladen brauchst du eine Internetverbindung. Deine Aufnahme bleibt auf diesem Telefon, schick sie also ab, sobald du wieder online bist.",
     "record.android.takeRestored": "Deine nicht gesendete Aufnahme ist noch da.",
     "record.android.switchCamera": "Kamera wechseln",
-    "event.android.offlineNote": "Was du in diesem Event geöffnet hast, ist auf diesem Telefon gespeichert und funktioniert auch ohne Empfang."
+    "event.android.offlineNote": "Was du in diesem Event geöffnet hast, ist auf diesem Telefon gespeichert und funktioniert auch ohne Empfang.",
+    "record.android.cantStrip": "Diese Datei konnte nicht ohne Standort und andere versteckte Angaben für den Upload vorbereitet werden, deshalb wurde sie nicht gesendet. Versuch eine andere Datei oder nimm direkt hier auf."
   },
   "es": {
     "join.android.photoUnreadable": "No se pudo leer esa foto. Elige otra, por favor.",
@@ -62,6 +66,7 @@
     "record.android.needsNetwork": "Para subir necesitas conexión a internet. Tu grabación se queda en este teléfono, así que envíala cuando vuelvas a estar en línea.",
     "record.android.takeRestored": "Tu grabación sin enviar sigue aquí.",
     "record.android.switchCamera": "Cambiar de cámara",
-    "event.android.offlineNote": "Lo que has abierto en este evento está guardado en este teléfono y funciona sin señal."
+    "event.android.offlineNote": "Lo que has abierto en este evento está guardado en este teléfono y funciona sin señal.",
+    "record.android.cantStrip": "No se pudo preparar este archivo para subirlo sin su ubicación y otros datos ocultos, así que no se envió. Prueba con otro archivo o graba aquí."
   }
 }

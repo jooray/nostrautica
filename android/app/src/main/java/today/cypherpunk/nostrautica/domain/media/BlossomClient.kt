@@ -136,9 +136,7 @@ class BlossomClient(base: OkHttpClient) {
         }
         if (code !in 200..299) throw IOException("Upload to $server failed: $code $reason")
         emit(total)
-        // Take the server's URL only when it points at OUR blob (audit MED-9).
-        val serverUrl = (jsonObjectOf(text)?.get("url") as? JsonPrimitive)?.content?.takeIf { it.contains(sha256) && isAcceptedBlossomUrl(it) }
-        return serverUrl ?: "${trim(server)}/$sha256"
+        return boundReplyUrl(server, sha256, (jsonObjectOf(text)?.get("url") as? JsonPrimitive)?.content)
     }
 
     // ── BUD-04 mirror ───────────────────────────────────────────────────────
@@ -149,8 +147,7 @@ class BlossomClient(base: OkHttpClient) {
         val req = Request.Builder().url("${trim(server)}/mirror").put(body).header("Authorization", header).build()
         mirrorHttp.newCall(req).await().use { res ->
             if (!res.isSuccessful) null
-            else ((jsonObjectOf(res.body.string())?.get("url") as? JsonPrimitive)?.content?.takeIf { it.contains(sha256) && isAcceptedBlossomUrl(it) })
-                ?: "${trim(server)}/$sha256"
+            else boundReplyUrl(server, sha256, (jsonObjectOf(res.body.string())?.get("url") as? JsonPrimitive)?.content)
         }
     } catch (e: Exception) {
         if (e is kotlinx.coroutines.CancellationException) throw e
@@ -183,7 +180,8 @@ class BlossomClient(base: OkHttpClient) {
         val p = primary ?: throw IOException("Upload failed on every candidate server: ${errors.joinToString("; ")}")
         val sha = Bytes.sha256Hex(bytes)
         val mirrored = coroutineScope { rest.map { s -> async { mirror(signer, s, p, sha) } }.awaitAll() }
-        return UploadResult(listOf(p) + mirrored.filterNotNull().filter { it != p }, sha, p)
+        // A mirror whose address fails the rule is dropped, not allowed to fail the whole descriptor.
+        return UploadResult(listOf(p) + mirrored.filterNotNull().filter { it != p && isAcceptedBlossomUrl(it) }, sha, p)
     }
 
     // ── BUD-02 delete ───────────────────────────────────────────────────────
@@ -260,9 +258,62 @@ class BlossomClient(base: OkHttpClient) {
         const val DOWNLOAD_STALL_TIMEOUT_MS = 30_000L
         private const val AUTH_REUSE_MARGIN_SEC = 600L
 
-        /** https only (audit APPR-8): server lists come from unvalidated 10063 tags too. */
-        fun isAcceptedBlossomUrl(url: String): Boolean =
-            runCatching { URI(url).let { it.scheme == "https" && !it.host.isNullOrEmpty() } }.getOrDefault(false)
+        /**
+         * The one Blossom URL rule (audit APPR-8, R-71): https with a host, no userinfo,
+         * and no host on this phone or its network (loopback, RFC 1918, link-local,
+         * CGNAT, ULA, `localhost`/`.local`). Server lists and descriptor URLs come from
+         * peers (10063 tags, configs, replies), and a phone fetching what they name must
+         * not become a probe of the LAN it sits on. The build's own servers are exempt by
+         * origin, so a dev build pointed at https://localhost keeps working. Ports are
+         * not restricted: the host is what matters, and real servers do use other ports.
+         */
+        fun isAcceptedBlossomUrl(url: String): Boolean {
+            val u = runCatching { URI(url.trim()) }.getOrNull() ?: return false
+            if (!u.scheme.equals("https", ignoreCase = true) || u.host.isNullOrEmpty() || u.rawUserInfo != null) return false
+            return !isLocalHost(u.host) || origin(u) in buildOrigins
+        }
+
+        private val buildOrigins by lazy {
+            today.cypherpunk.nostrautica.nostr.Relays.BLOSSOM.mapNotNull { runCatching { origin(URI(it.trim())) }.getOrNull() }.toSet()
+        }
+
+        /**
+         * The URL to publish for a blob a [server] just took (audit MED-9, R-20/R-21): its reply
+         * `url` only when it is accepted, on the SAME origin we asked, and its last path segment
+         * starts with our hash; otherwise the BUD-01 address every server must serve. A substring
+         * check let `https://evil.example/?x=<sha>` through as the blob's location.
+         */
+        fun boundReplyUrl(server: String, sha256: String, reply: String?): String {
+            val fallback = "${trim(server)}/$sha256"
+            val r = reply?.trim()?.takeIf { it.isNotEmpty() && isAcceptedBlossomUrl(it) } ?: return fallback
+            val u = runCatching { URI(r) }.getOrNull() ?: return fallback
+            val s = runCatching { URI(trim(server.trim())) }.getOrNull() ?: return fallback
+            if (origin(u) != origin(s)) return fallback
+            val last = u.rawPath?.substringAfterLast('/') ?: return fallback
+            return if (last.lowercase().startsWith(sha256.lowercase())) r else fallback
+        }
+
+        internal fun origin(u: URI): String {
+            val port = if (u.port == -1 && u.scheme.equals("https", ignoreCase = true)) 443 else u.port
+            return "${u.scheme?.lowercase()}://${u.host?.lowercase()}:$port"
+        }
+
+        /** A host literal that names this device or a private network. Names are not resolved. */
+        internal fun isLocalHost(rawHost: String): Boolean {
+            val h = rawHost.lowercase().removePrefix("[").removeSuffix("]").trimEnd('.')
+            if (h == "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) return true
+            val v4 = Regex("^(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})\\.(\\d{1,3})$").matchEntire(h.removePrefix("::ffff:"))
+            if (v4 != null) {
+                val (a, b) = v4.destructured.let { it.component1().toInt() to it.component2().toInt() }
+                return a == 0 || a == 10 || a == 127 || (a == 169 && b == 254) || (a == 172 && b in 16..31) ||
+                    (a == 192 && b == 168) || (a == 100 && b in 64..127) || a >= 224
+            }
+            if (':' in h) {
+                return h == "::" || h == "::1" || h.startsWith("fe8") || h.startsWith("fe9") || h.startsWith("fea") ||
+                    h.startsWith("feb") || h.startsWith("fc") || h.startsWith("fd")
+            }
+            return false
+        }
 
         fun trim(server: String) = server.trimEnd('/')
 

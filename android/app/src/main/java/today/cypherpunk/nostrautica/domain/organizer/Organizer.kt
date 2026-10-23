@@ -349,15 +349,19 @@ class Organizer(
 
     private suspend fun loadRosterOffMain(ctx: EventContext, keys: EventKeys): OrganizerEvents.RosterRead {
         val cfg = ctx.cfg
-        val publisher = cfg.coordinator ?: cfg.eidPubkey
-        val accepted = listOfNotNull(cfg.coordinator, cfg.eidPubkey)
+        // Every author we would ACCEPT, not only the current publisher (organizer.ts loadRoster,
+        // SB-91): with a coordinator attached, an E_id-authored roster (published from a device
+        // that had not yet seen the attach) was invisible to this read, so it came back "absent"
+        // on a device that has seen a roster and every later approve/revoke refused, while
+        // attendees were reading that very roster.
+        val accepted = listOfNotNull(cfg.coordinator, cfg.eidPubkey).distinct()
         // Both page-0 addresses (NIP §6.2.2), and only a record naming THIS space: a
         // same-named space on the same coordinator shares the legacy `d` (audit R-53).
         val page0Ds = Roster.page0Ds(ctx.coordinate)
-        val r = nostr.pool.fetch(ctx.relays, listOf(Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(publisher), tags = mapOf("d" to page0Ds))), timeoutMs = 10_000, graceMs = 2_000)
+        val r = nostr.pool.fetch(ctx.relays, listOf(Filter(kinds = listOf(Kinds.ROSTER), authors = accepted, tags = mapOf("d" to page0Ds))), timeoutMs = 10_000, graceMs = 2_000)
         nostr.store.put(r.events)
-        val latest = page0Ds.mapNotNull { nostr.store.latest(Kinds.ROSTER, publisher, it) }
-            .filter { it.pubkey in accepted && Roster.isPageFor(ctx.coordinate, page0Ds, it.tags) }.let(Ordering::pickLatest)
+        val latest = accepted.flatMap { a -> page0Ds.mapNotNull { nostr.store.latest(Kinds.ROSTER, a, it) } }
+            .filter { Roster.isPageFor(ctx.coordinate, page0Ds, it.tags) }.let(Ordering::pickLatest)
         if (latest == null) return OrganizerEvents.RosterRead.Absent(suspect = seen("roster", ctx.coordinate))
         var at = latest.createdAt
         // The key the roster's own `eck` tag names, from EVERY version held, staged
@@ -416,6 +420,8 @@ class Organizer(
     private suspend fun approveOffMain(ctx: EventContext, req: PendingRequest, role: String) = lock("roster:${ctx.coordinate}").withLock {
         // One roster author (SB-91): with a coordinator attached this is a 21604.
         assertNoCoordinatorAuthority(ctx)
+        // Never re-grant a removed member from the join they sent before the removal (R-14).
+        if (AdminModel.predatesRevoke(req, loadRevoked(ctx.coordinate))) throw RevokedRequest()
         val keys0 = orgKeys(ctx)
         keys0.current ?: throw IllegalStateException("no ECK available")
         // Roster first, with every version held (DS41-002): it may promote a staged
@@ -597,17 +603,24 @@ class Organizer(
         return Rotation(events, grantWraps)
     }
 
-    private suspend fun publishRotation(ctx: EventContext, rot: Rotation, extra: List<NostrEvent> = emptyList()) = coroutineScope {
+    /** True when every rebuilt 31604 reached a relay; anything else is only in the outbox. */
+    private suspend fun publishRotation(ctx: EventContext, rot: Rotation, extra: List<NostrEvent> = emptyList()): Boolean = coroutineScope {
         markSeen("roster", ctx.coordinate)
-        ((rot.events + extra).map { async { publish(it, ctx.relays, "rotation") } } +
+        val events = rot.events + extra
+        val sent = (events.map { async { publish(it, ctx.relays, "rotation") } } +
             rot.grants.map { (pk, w) -> async { sendWrap(w, pk, ctx, "grant") } }).awaitAll()
+        events.indices.filter { events[it].kind == Kinds.ROSTER }.all { sent[it] }
     }
 
     /** One past every id held, staged ones included, so an interrupted rotation's id is never reused. */
     private fun newEckVersion(k: EventKeys) = OrganizerEvents.nextEck(k.eck + (k.pendingEck ?: emptyList()), ProtocolCrypto.generateEck())
 
-    /** Revoke without a coordinator: forward-only ECK rotation, everyone else re-granted. */
-    suspend fun revokeClient(ctx: EventContext, removed: String) =
+    /**
+     * Revoke without a coordinator: forward-only ECK rotation, everyone else re-granted.
+     * True once the new roster reached a relay; false means it is only queued (R-43), and
+     * until it is delivered the removed member still reads the old one.
+     */
+    suspend fun revokeClient(ctx: EventContext, removed: String): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { revokeClientOffMain(ctx, removed) }
 
     private suspend fun revokeClientOffMain(ctx: EventContext, removed: String) = lock("roster:${ctx.coordinate}").withLock {
@@ -636,9 +649,10 @@ class Organizer(
         val staged = stageEck(keys, next)
         // The rotated ECK must reach the durable backup, or a fresh device restores v1 only.
         runCatching { writeBackup(ctx.coordinate, staged, staged.coordinatorGen ?: 0) }
-        publishRotation(ctx, rot, listOf(deletion))
+        val published = publishRotation(ctx, rot, listOf(deletion))
         promotePending(ctx.coordinate, next)
         reissueOrganizerGrants(ctx, ctx.coordinate)
+        published
     }
 
     /** Detach/replace (NIP §3.7): rotate the ECK AND E_inbox; the old inbox is kept for history. */
@@ -884,7 +898,10 @@ class Organizer(
     /** organizer.ts updateEventConfig: every other field is preserved; chat relays stay a separate set. */
     suspend fun updateConfig(ctx: EventContext, change: ConfigChange): Boolean {
         val keys = orgKeys(ctx)
-        val cfg = ctx.cfg
+        // The edit applies to the NEWEST config, never the screen's (R-42): a 31600 rebuilt from
+        // a cached one re-signs its coordinator, inbox, gen and eck, and publishMonotonic makes that
+        // stale copy win, undoing a detach, attach or inbox rotation made on another device.
+        val cfg = contexts.fetchConfig(ctx.coordinate, ctx.cfg.relays, requireAnswer = true) ?: throw ConfigUnreadable()
         val relays = change.relays?.let { OrganizerEvents.unionRelays(it) } ?: cfg.relays
         if (change.relays != null && relays.isEmpty()) throw IllegalArgumentException("at least one relay is required")
         val chat = change.chat ?: cfg.chat
@@ -896,6 +913,10 @@ class Organizer(
         )
         return publishConfig(ctx, eidSk(keys), next, OrganizerEvents.unionRelays(cfg.relays, relays))
     }
+
+    class ConfigUnreadable : Exception(
+        "Couldn't read this event's current settings from any relay, so nothing was changed (saving over an older copy would undo changes made on your other devices). Check your connection and try again.",
+    )
 
     private suspend fun publishConfig(ctx: EventContext, eidSk: ByteArray, base: EventConfig, relays: List<String>): Boolean {
         // The space hierarchy (§15) is edited from other screens and devices: a settings change built
@@ -1062,6 +1083,19 @@ class Organizer(
     }
 
     // ── Local review state (stores/review-state.ts), owner-scoped ───────────
+
+    /** When this device removed each member, per coordinate (R-14): survives the screen and a restart. */
+    private val revokedSer = MapSerializer(String.serializer(), Long.serializer())
+    suspend fun loadRevoked(coordinate: String): Map<String, Long> = cache.get(owner, "revoked:$coordinate", revokedSer) ?: emptyMap()
+    suspend fun markRevoked(coordinate: String, pubkey: String, at: Long = nowSec()): Map<String, Long> = lock("revoked:$coordinate").withLock {
+        val next = loadRevoked(coordinate) + (pubkey to at)
+        cache.put(owner, "revoked:$coordinate", revokedSer, next, nowSec())
+        next
+    }
+
+    class RevokedRequest : Exception(
+        "This person was removed after sending this request, so it was not approved. If they should come back, they need to send a new request.",
+    )
 
     private val reviewSer = MapSerializer(String.serializer(), String.serializer())
     suspend fun loadReview(coordinate: String): Map<String, String> = cache.get(owner, "review:$coordinate", reviewSer) ?: emptyMap()
