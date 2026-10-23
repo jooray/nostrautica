@@ -35,6 +35,7 @@
   import { submitTalk, newTalkId, takeTalkEditDraft } from "$lib/events/talks.js";
   import { classifyTalkUrl } from "$lib/media/external.js";
   import { checkMediaLimits, normalizeDurationSec, MAX_UPLOAD_BYTES } from "$lib/media/precheck.js";
+  import { stripMediaMetadata } from "$lib/media/strip-metadata.js";
   import { onUploadProgress } from "$lib/blossom/client.js";
   import { formatBytes } from "$lib/util/bytes.js";
   import ErrorState from "$lib/components/ErrorState.svelte";
@@ -531,7 +532,25 @@
     // Replacing a prior selection/recording: revoke its object URL first so
     // picking a different file doesn't orphan the previous one (audit App-4).
     if (recorded) URL.revokeObjectURL(recorded.url);
-    const url = URL.createObjectURL(file);
+    recorded = null;
+    error = null;
+    // A picked clip carries its own metadata (where a phone video was shot, the
+    // device, dates, tags), unlike our own recordings. Strip it, and refuse the
+    // file outright when that can't be done, never upload the original (the
+    // Android app's policy, audit R-22). Everything below, including the
+    // preview, uses the stripped copy, so what plays is what is sent.
+    let clean: Blob;
+    busy = true;
+    try {
+      clean = await stripMediaMetadata(file);
+    } catch (e) {
+      console.warn("[record] refusing picked file, metadata strip failed:", e);
+      error = new Error(t("record.error.cantStrip"));
+      return;
+    } finally {
+      busy = false;
+    }
+    const url = URL.createObjectURL(clean);
     let durationSec = 0;
     try {
       durationSec = await readDuration(url, mode === "audio");
@@ -540,11 +559,11 @@
     }
     // Reject a predictably-invalid file before the encrypt/upload round-trip.
     // The server checks stay authoritative; this just spares a doomed upload.
-    if (rejectOverLimits(file.size, durationSec)) {
+    if (rejectOverLimits(clean.size, durationSec)) {
       URL.revokeObjectURL(url);
       return;
     }
-    recorded = { blob: file, url, durationSec };
+    recorded = { blob: clean, url, durationSec };
   }
 
   /** How long to wait for the seek-to-end trick below before giving up. */

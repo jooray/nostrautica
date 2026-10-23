@@ -1697,6 +1697,10 @@ export const messages = {
     "record.error.textRequired": "Write your intro before submitting.",
     "record.error.tooLong": "That clip is {actual}s, but this event's limit is {limit}s. Trim it, compress it, or re-record something shorter.",
     "record.error.tooLarge": "That file is too large to upload (over {limitMb} MB). Compress it or pick a shorter clip.",
+    // A picked file whose hidden metadata (location, device, dates) couldn't be
+    // stripped is refused, never uploaded as-is (same wording as Android's cantStrip).
+    "record.error.cantStrip":
+      "This file couldn't be prepared for upload without its location and other hidden details, so it wasn't sent. Try an MP4, M4A, MP3 or WebM file, or record here instead.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Event report",
@@ -3480,6 +3484,8 @@ export const messages = {
     "record.error.textRequired": "Pred odoslaním napíšte svoje predstavenie.",
     "record.error.tooLong": "Táto nahrávka má {actual} s, ale limit tohto podujatia je {limit} s. Skráťte ju, skomprimujte alebo nahrajte kratšiu.",
     "record.error.tooLarge": "Tento súbor je príliš veľký na nahranie (viac než {limitMb} MB). Skomprimujte ho alebo vyberte kratšiu nahrávku.",
+    "record.error.cantStrip":
+      "Tento súbor sa nepodarilo pripraviť na nahratie bez polohy a ďalších skrytých údajov, preto sa neodoslal. Skúste súbor MP4, M4A, MP3 alebo WebM, alebo nahrávajte priamo tu.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Správa z podujatia",
@@ -5274,6 +5280,8 @@ export const messages = {
     "record.error.textRequired": "Před odesláním napište své představení.",
     "record.error.tooLong": "Tato nahrávka má {actual} s, ale limit této akce je {limit} s. Zkraťte ji, zkomprimujte nebo nahrajte kratší.",
     "record.error.tooLarge": "Tento soubor je příliš velký k nahrání (více než {limitMb} MB). Zkomprimujte jej nebo vyberte kratší nahrávku.",
+    "record.error.cantStrip":
+      "Tento soubor se nepodařilo připravit k nahrání bez polohy a dalších skrytých údajů, proto se neodeslal. Zkuste soubor MP4, M4A, MP3 nebo WebM, nebo nahrávejte přímo tady.",
 
     // Post-event report & payoff (spec §13)
     "title.report": "Zpráva z akce",
@@ -7056,6 +7064,8 @@ export const messages = {
     "record.error.textRequired": "Schreib dein Intro, bevor du es einreichst.",
     "record.error.tooLong": "Der Clip ist {actual}s lang, aber das Limit dieses Events liegt bei {limit}s. Kürze ihn, komprimiere ihn, oder nimm etwas Kürzeres auf.",
     "record.error.tooLarge": "Diese Datei ist zu groß zum Hochladen (über {limitMb} MB). Komprimiere sie oder wähle einen kürzeren Clip.",
+    "record.error.cantStrip":
+      "Diese Datei konnte nicht ohne Standort und andere versteckte Angaben für den Upload vorbereitet werden, deshalb wurde sie nicht gesendet. Versuch eine MP4-, M4A-, MP3- oder WebM-Datei oder nimm direkt hier auf.",
 
     // Bericht nach dem Event und Payoff (spec §13)
     "title.report": "Event-Bericht",
@@ -8876,6 +8886,8 @@ export const messages = {
     "record.error.textRequired": "Escribe tu presentación antes de enviar.",
     "record.error.tooLong": "Ese clip dura {actual}s, pero el límite de este evento es {limit}s. Recórtalo, comprímelo o vuelve a grabar algo más corto.",
     "record.error.tooLarge": "Ese archivo es demasiado grande para subir (más de {limitMb} MB). Comprímelo o elige un clip más corto.",
+    "record.error.cantStrip":
+      "No se pudo preparar este archivo para subirlo sin su ubicación y otros datos ocultos, así que no se envió. Prueba con un archivo MP4, M4A, MP3 o WebM, o graba aquí.",
 
     // Informe posterior al evento y resultado (spec §13)
     "title.report": "Informe del evento",
