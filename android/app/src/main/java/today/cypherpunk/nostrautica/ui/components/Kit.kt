@@ -238,12 +238,34 @@ fun Pill(text: String, bg: Color, fg: Color, modifier: Modifier = Modifier) {
 @Composable
 fun NewBadge(text: String) = Text(text.uppercase(), color = LocalTokens.current.accent, fontSize = 11.sp, fontWeight = FontWeight.Bold, letterSpacing = 1.sp)
 
+// ── Remote images ───────────────────────────────────────────────────────────
+
+/**
+ * The one gate for an image URL that came from the wire (external-images.svelte.ts
+ * safeImageSrc, R-67): only when "Load profile pictures from other servers" is on,
+ * and only https with a host and no userinfo. Anything else (http, `file:`,
+ * `content:`, a userinfo lookalike) is never handed to the image loader.
+ */
+fun safeImageSrc(url: String?, allowed: Boolean): String? {
+    if (!allowed) return null
+    val u = url?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val parsed = runCatching { java.net.URI(u) }.getOrNull() ?: return null
+    if (!parsed.scheme.equals("https", ignoreCase = true) || parsed.host.isNullOrEmpty() || parsed.rawUserInfo != null) return null
+    return u
+}
+
+/** [safeImageSrc] with the user's preference. */
+@Composable
+fun rememberSafeImage(url: String?): String? {
+    val allowed by LocalContainer.current.prefs.externalImages.collectAsState()
+    return safeImageSrc(url, allowed)
+}
+
 // ── Avatars ─────────────────────────────────────────────────────────────────
 
 @Composable
 fun Avatar(pubkey: String, name: String?, picture: String?, size: Dp = 44.dp, modifier: Modifier = Modifier) {
-    val prefs = LocalContainer.current.prefs
-    val allowExternal by prefs.externalImages.collectAsState()
+    val src = rememberSafeImage(picture)
     val (h1, h2) = avatarHues(pubkey)
     Box(
         modifier.size(size).clip(CircleShape)
@@ -251,8 +273,8 @@ fun Avatar(pubkey: String, name: String?, picture: String?, size: Dp = 44.dp, mo
         contentAlignment = Alignment.Center,
     ) {
         Text(initialsFor(name), color = Color.White, fontWeight = FontWeight.Bold, fontSize = (size.value * 0.36f).sp)
-        if (picture != null && allowExternal) {
-            AsyncImage(model = picture, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(size).clip(CircleShape))
+        if (src != null) {
+            AsyncImage(model = src, contentDescription = null, contentScale = ContentScale.Crop, modifier = Modifier.size(size).clip(CircleShape))
         }
     }
 }

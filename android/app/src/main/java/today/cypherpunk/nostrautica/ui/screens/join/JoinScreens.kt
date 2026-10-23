@@ -85,6 +85,7 @@ import today.cypherpunk.nostrautica.ui.shell.EventState
 import today.cypherpunk.nostrautica.ui.shell.LocalEvent
 import today.cypherpunk.nostrautica.ui.shell.Page
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
+import today.cypherpunk.nostrautica.ui.components.rememberSafeImage
 
 /**
  * pages/Join.svelte: the form (new identity inline, or a signed-in Nostr user),
@@ -402,8 +403,9 @@ private fun JoinBody(ev: EventState, p: androidx.compose.foundation.layout.Paddi
                                 }
                                 ProfileLoadState.LOADED -> {
                                     Row(verticalAlignment = Alignment.CenterVertically) {
-                                        if (existing.picture.isNotEmpty()) {
-                                            AsyncImage(existing.picture, null, Modifier.size(56.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                                        val pic = rememberSafeImage(existing.picture)
+                                        if (pic != null) {
+                                            AsyncImage(pic, null, Modifier.size(56.dp).clip(CircleShape), contentScale = ContentScale.Crop)
                                             Spacer(Modifier.width(12.dp))
                                         }
                                         if (existing.about.isNotEmpty()) Column {

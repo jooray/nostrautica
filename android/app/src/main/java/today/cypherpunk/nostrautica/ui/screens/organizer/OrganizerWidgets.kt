@@ -84,6 +84,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import java.util.TimeZone
+import today.cypherpunk.nostrautica.ui.components.rememberSafeImage
 
 // ── Small form pieces ───────────────────────────────────────────────────────
 
@@ -258,7 +259,8 @@ fun CoordinatorCardView(co: DiscoveredCoordinator, selected: Boolean, actions: @
         verticalArrangement = Arrangement.spacedBy(6.dp),
     ) {
         Row(verticalAlignment = Alignment.Top) {
-            co.announce.picture?.let { AsyncImage(it, null, Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))); Text("  ") }
+            // Any announcer's logo: the same gate as every other remote image (R-67).
+            rememberSafeImage(co.announce.picture)?.let { AsyncImage(it, null, Modifier.size(40.dp).clip(RoundedCornerShape(10.dp))); Text("  ") }
             Column(Modifier.weight(1f)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text(co.announce.name, fontWeight = FontWeight.SemiBold)

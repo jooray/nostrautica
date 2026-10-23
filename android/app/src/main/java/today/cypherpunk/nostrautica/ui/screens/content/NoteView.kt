@@ -41,6 +41,7 @@ import today.cypherpunk.nostrautica.ui.LocalContainer
 import today.cypherpunk.nostrautica.ui.components.Avatar
 import today.cypherpunk.nostrautica.ui.components.Dim
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
+import today.cypherpunk.nostrautica.ui.components.safeImageSrc
 
 /**
  * A short Nostr note (PostView.svelte): mentions by name, links, inline images
@@ -85,7 +86,7 @@ fun NoteView(note: NostrEvent, modifier: Modifier = Modifier) {
             }, fontSize = 15.sp, lineHeight = 22.sp)
         }
         for (tk in tokens) when (tk) {
-            is Token.Image -> if (allowImages && tk.url.startsWith("https://")) {
+            is Token.Image -> if (safeImageSrc(tk.url, allowImages) != null) {
                 AsyncImage(tk.url, null, Modifier.fillMaxWidth().heightIn(max = 420.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.FillWidth)
             } else LinkText(tk.url)
             is Token.Video -> LinkText(tk.url)
@@ -149,7 +150,7 @@ fun QuotedNote(bech32: String? = null, id: String? = null, label: String? = null
             val tokens = remember(note.id) { NoteTokens.parse(note.content, NoteTokens.imetaUrls(note.tags)) }
             val preview = tokens.joinToString("") { when (it) { is Token.Text -> it.value; is Token.Link -> it.url; else -> "" } }.trim().take(280)
             if (preview.isNotEmpty()) Text(preview, fontSize = 14.sp, lineHeight = 20.sp)
-            if (allowImages) tokens.filterIsInstance<Token.Image>().map { it.url }.distinct().filter { it.startsWith("https://") }.take(2).forEach {
+            if (allowImages) tokens.filterIsInstance<Token.Image>().map { it.url }.distinct().filter { safeImageSrc(it, true) != null }.take(2).forEach {
                 AsyncImage(it, null, Modifier.fillMaxWidth().heightIn(max = 240.dp).clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.FillWidth)
             }
         }

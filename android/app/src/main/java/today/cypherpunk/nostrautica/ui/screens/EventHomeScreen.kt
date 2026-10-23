@@ -60,6 +60,7 @@ import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
+import today.cypherpunk.nostrautica.ui.components.safeImageSrc
 
 /** The event header card (EventHeader.svelte): banner wash, serif title, date, place, role. */
 @Composable
@@ -68,8 +69,9 @@ fun EventHeader(ev: EventState, compact: Boolean = false) {
     val t = LocalTokens.current
     val allow by LocalContainer.current.prefs.externalImages.collectAsState()
     EventWash(ev.coordinate) {
-        if (!compact && ev.ctx.banner != null && allow) {
-            AsyncImage(ev.ctx.banner, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxWidth().height(120.dp))
+        val banner = safeImageSrc(ev.ctx.banner, allow)
+        if (!compact && banner != null) {
+            AsyncImage(banner, null, contentScale = ContentScale.Crop, modifier = Modifier.fillMaxWidth().height(120.dp))
         }
         Row(verticalAlignment = Alignment.CenterVertically) {
             if (compact) { EventIcon(ev.coordinate, ev.ctx.icon, ev.ctx.title, 28); Spacer(Modifier.width(10.dp)) }

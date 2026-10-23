@@ -45,6 +45,7 @@ import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 import java.text.DateFormat
 import java.util.Date
 import java.util.Locale
+import today.cypherpunk.nostrautica.ui.components.safeImageSrc
 
 fun shortDay(sec: Long, locale: String): String =
     DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.forLanguageTag(locale)).format(Date(sec * 1000))
@@ -107,8 +108,8 @@ fun PostCard(post: EventPost, naddr: String, full: Boolean = false, openable: Bo
             badges.forEach { Pill(it, t.bgElev2, t.textDim) }
         }
         if (full) {
-            val img = post.image
-            if (img != null && allowImages && img.startsWith("https://")) {
+            val img = safeImageSrc(post.image, allowImages)
+            if (img != null) {
                 AsyncImage(img, null, Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)), contentScale = ContentScale.FillWidth)
             }
             MarkdownView(post.content, onLink = internalPostLink(naddr, router::go))
