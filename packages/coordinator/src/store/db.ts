@@ -240,6 +240,14 @@ function applyBaselineDDL(db: DatabaseSync): void {
   } catch {
     /* column already exists */
   }
+  // Migration (audit R-44): when a marmot_kv row was first written, so MLS ingest
+  // evidence that never settles can be aged out. A plain defaulted column: an older
+  // binary's INSERT takes the default, and 0 reads as "older than any horizon".
+  try {
+    db.exec("ALTER TABLE marmot_kv ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
   // Migration (wire-v2 §6.2): per-direction icebreakers on cached pair rows.
   for (const col of ["icebreakers_json TEXT", "icebreakers_b_json TEXT"]) {
     try {
@@ -1400,6 +1408,7 @@ CREATE TABLE IF NOT EXISTS marmot_kv (
   namespace TEXT NOT NULL,
   k TEXT NOT NULL,
   v TEXT NOT NULL,               -- serialized value, NIP-44-encrypted at rest
+  created_at INTEGER NOT NULL DEFAULT 0, -- unix ms of the first write (audit R-44)
   PRIMARY KEY (namespace, k)
 );
 -- account_pubkey ⇄ chat_pubkey bindings from authenticated kind-21607 attestations
@@ -4094,10 +4103,20 @@ export class Store {
   marmotKvSet(namespace: string, key: string, value: string): void {
     this.db
       .prepare(
-        `INSERT INTO marmot_kv (namespace, k, v) VALUES (?, ?, ?)
+        `INSERT INTO marmot_kv (namespace, k, v, created_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(namespace, k) DO UPDATE SET v = excluded.v`,
       )
-      .run(namespace, key, this.protect(value));
+      .run(namespace, key, this.protect(value), Date.now());
+  }
+
+  /** Keys under `prefix` in a namespace with their first-write time, newest first
+   *  (audit R-44: aging out ingest evidence that never settles). */
+  marmotKvKeysWithPrefix(namespace: string, prefix: string): { k: string; created_at: number }[] {
+    return (
+      this.db
+        .prepare("SELECT k, created_at FROM marmot_kv WHERE namespace = ? ORDER BY created_at DESC, rowid DESC")
+        .all(namespace) as { k: string; created_at: number }[]
+    ).filter((r) => r.k.startsWith(prefix));
   }
 
   marmotKvDelete(namespace: string, key: string): void {
