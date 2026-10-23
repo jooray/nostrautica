@@ -32,6 +32,10 @@ import { isCliSubcommand, runCli } from "./cli.js";
 import { releaseSummary, coordinatorRelease, provenanceIsKnown } from "./release.js";
 import { installExitLogging } from "./lifecycle.js";
 
+/** Background retry of a failed boot-time 31611 announce: every 10 minutes, at most 12 times. */
+const ANNOUNCE_RETRY_MS = 600_000;
+const ANNOUNCE_RETRY_LIMIT = 12;
+
 async function runDaemon(): Promise<void> {
   // Exit forensics FIRST, before anything that can throw (production outage
   // 2026-07-25: the daemon died 3 minutes after a deploy and logged nothing at
@@ -301,19 +305,36 @@ async function runDaemon(): Promise<void> {
   // this coordinator instead of pasting its npub (docs/COORDINATOR-DISCOVERY-PLAN.md).
   // Replaceable — republished on every boot so config edits propagate.
   if (config.coordinator.announce) {
-    try {
-      const content = buildAnnounceContent(config, disclosureFromRoutes(roles));
-      // Release provenance (§13.9): the announce wire schema has no version field,
-      // so surface the release id in the existing `about` text (bounded at 2000).
-      const relTag = `nostrautica ${coordinatorRelease().releaseId}`;
-      content.about = (content.about ? `${content.about}\n\n${relTag}` : relTag).slice(0, 2000);
-      const announce = buildCoordinatorAnnounce(coordSk, content);
-      await client.publish(announce as any, config.relays.default);
-      console.log(
-        `[coordinator] announced as "${config.coordinator.name}" (kind 31611, pricing=${config.pricing.model})`,
-      );
-    } catch (e) {
-      console.warn("[coordinator] announce publish failed:", e instanceof Error ? e.message : e);
+    // Retried in the background: on the 0.14.0 production boot every relay timed
+    // out under the startup burst, which left the previous release's announcement
+    // (and its privacy disclosure) live until the next restart. Rebuilt per attempt
+    // so a retry carries a fresh created_at.
+    const announceOnce = async (): Promise<boolean> => {
+      try {
+        const content = buildAnnounceContent(config, disclosureFromRoutes(roles));
+        // Release provenance (§13.9): the announce wire schema has no version field,
+        // so surface the release id in the existing `about` text (bounded at 2000).
+        const relTag = `nostrautica ${coordinatorRelease().releaseId}`;
+        content.about = (content.about ? `${content.about}\n\n${relTag}` : relTag).slice(0, 2000);
+        const announce = buildCoordinatorAnnounce(coordSk, content);
+        await client.publish(announce as any, config.relays.default);
+        console.log(
+          `[coordinator] announced as "${config.coordinator.name}" (kind 31611, pricing=${config.pricing.model})`,
+        );
+        return true;
+      } catch (e) {
+        console.warn("[coordinator] announce publish failed:", e instanceof Error ? e.message : e);
+        return false;
+      }
+    };
+    if (!(await announceOnce())) {
+      let attempts = 0;
+      const retry = setInterval(() => {
+        void announceOnce().then((ok) => {
+          if (ok || ++attempts >= ANNOUNCE_RETRY_LIMIT) clearInterval(retry);
+        });
+      }, ANNOUNCE_RETRY_MS);
+      retry.unref();
     }
   }
 
