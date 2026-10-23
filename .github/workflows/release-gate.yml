@@ -60,6 +60,16 @@ jobs:
       - run: pnpm --filter @nostrautica/protocol build
       - run: pnpm check
       - run: pnpm --filter @nostrautica/app build
+      # Hand THIS build (base "/", the nsite shape) to the nsite publish job (audit
+      # R-63), so what gets published is the bytes this gate tested, not a second
+      # build in the job that holds the signing credential. Uploaded before the
+      # BASE_PATH=/app build below overwrites the same directory.
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pwa-build
+          path: packages/app/build
+          if-no-files-found: error
+          retention-days: 3
       # Build the app AGAIN the way production builds it (audit CI-1). The step
       # above builds at base "/", which is the local-preview shape; the deployed
       # site is served from a subdirectory and the post-receive hook on the build

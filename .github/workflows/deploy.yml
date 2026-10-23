@@ -30,6 +30,11 @@ jobs:
   deploy:
     runs-on: ubuntu-latest
     needs: gate
+    # Audit R-63: any writer could dispatch this on ANY branch, and the bunker
+    # credential was a repository secret every workflow can read. The environment
+    # is where required reviewers, a main-only branch rule and the secret itself
+    # belong; those are repository settings, not something this file can enforce.
+    environment: production
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -43,18 +48,16 @@ jobs:
           NSYTE_BUNKER_URI: ${{ secrets.NSYTE_BUNKER_URI }}
         run: |
           if [ -z "$NSYTE_BUNKER_URI" ]; then
-            echo "::error::NSYTE_BUNKER_URI secret is not set — cannot publish the nsite. Set it in repo/environment secrets." >&2
+            echo "::error::NSYTE_BUNKER_URI secret is not set — cannot publish the nsite. Set it in the production environment secrets." >&2
             exit 1
           fi
-      # No version: here. package.json's packageManager is the exact pin (audit R-80).
-      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+      # Publish the build the gate tested (audit R-63), instead of rebuilding here.
+      # It also keeps repo code out of this job: no pnpm install (lifecycle scripts),
+      # no build, in the one job that holds the signing credential.
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          node-version: "22"
-          cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter @nostrautica/protocol build
-      - run: pnpm --filter @nostrautica/app build
+          name: pwa-build
+          path: packages/app/build
       # nsyte is a Deno CLI published to JSR (@nsyte/cli) — it is NOT on npm, so the
       # old `npx nsyte` could never resolve. Run it via Deno at a PINNED JSR version
       # (audit R15: pin the deploy CLI) so a release can't drift onto a new nsyte.
