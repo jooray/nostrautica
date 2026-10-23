@@ -108,6 +108,13 @@
   const cachedCtx = cachedEventContext(naddr);
   let ctx = $state<EventContext | null>(cachedCtx ?? null);
   let error = $state<unknown>(null);
+  /**
+   * A media rejection whose message IS the explanation (too long, too large, can't
+   * strip its metadata). ErrorState would file it under a generic "Something went
+   * wrong" with a Retry that can't help, the reason hidden in "Technical details".
+   */
+  class MediaRejection extends Error {}
+  const rejection = $derived(error instanceof MediaRejection ? error.message : null);
   let videoEl = $state<HTMLVideoElement | null>(null);
   // Reactive so the UI reflects mic/camera-enabled state (hide the "Enable"
   // button once the stream is live — user feedback 2026-07-17).
@@ -510,7 +517,7 @@
   function rejectOverLimits(sizeBytes: number, durationSec: number): boolean {
     const violation = checkMediaLimits({ sizeBytes, durationSec, maxSec });
     if (!violation) return false;
-    error = new Error(
+    error = new MediaRejection(
       violation.kind === "duration"
         ? t("record.error.tooLong", { limit: violation.limit, actual: violation.actual })
         : t("record.error.tooLarge", { limitMb: Math.round(MAX_UPLOAD_BYTES / (1024 * 1024)) }),
@@ -545,7 +552,7 @@
       clean = await stripMediaMetadata(file);
     } catch (e) {
       console.warn("[record] refusing picked file, metadata strip failed:", e);
-      error = new Error(t("record.error.cantStrip"));
+      error = new MediaRejection(t("record.error.cantStrip"));
       return;
     } finally {
       busy = false;
@@ -870,7 +877,8 @@
 
 <h1>{talk ? t("record.talk.title") : t("record.intro.title")}</h1>
 
-{#if error}<ErrorState {error} onRetry={() => void retry()} {retrying} />{/if}
+{#if rejection}<div class="card warn" role="alert">{rejection}</div>
+{:else if error}<ErrorState {error} onRetry={() => void retry()} {retrying} />{/if}
 
 <!-- Real byte progress while the ciphertext goes out — the same information the
      download side already shows in MediaPlayer. Shown wherever an upload can be
