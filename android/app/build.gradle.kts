@@ -33,7 +33,7 @@ android {
         // root package.json version: assembleRelease fails otherwise (see below), and
         // tools/release-check.sh also requires versionCode above the last release's.
         versionCode = 10
-        versionName = "0.14.0"
+        versionName = "0.14.1"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         // Empty in every real build. For testing against the local stack the PWA's
         // e2e uses (docs/E2E-TESTING-GUIDE.md): -PdevRelays=ws://10.0.2.2:7777
