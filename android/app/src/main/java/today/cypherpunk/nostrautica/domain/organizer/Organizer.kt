@@ -349,15 +349,19 @@ class Organizer(
 
     private suspend fun loadRosterOffMain(ctx: EventContext, keys: EventKeys): OrganizerEvents.RosterRead {
         val cfg = ctx.cfg
-        val publisher = cfg.coordinator ?: cfg.eidPubkey
-        val accepted = listOfNotNull(cfg.coordinator, cfg.eidPubkey)
+        // Every author we would ACCEPT, not only the current publisher (organizer.ts loadRoster,
+        // SB-91): with a coordinator attached, an E_id-authored roster (published from a device
+        // that had not yet seen the attach) was invisible to this read, so it came back "absent"
+        // on a device that has seen a roster and every later approve/revoke refused, while
+        // attendees were reading that very roster.
+        val accepted = listOfNotNull(cfg.coordinator, cfg.eidPubkey).distinct()
         // Both page-0 addresses (NIP §6.2.2), and only a record naming THIS space: a
         // same-named space on the same coordinator shares the legacy `d` (audit R-53).
         val page0Ds = Roster.page0Ds(ctx.coordinate)
-        val r = nostr.pool.fetch(ctx.relays, listOf(Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(publisher), tags = mapOf("d" to page0Ds))), timeoutMs = 10_000, graceMs = 2_000)
+        val r = nostr.pool.fetch(ctx.relays, listOf(Filter(kinds = listOf(Kinds.ROSTER), authors = accepted, tags = mapOf("d" to page0Ds))), timeoutMs = 10_000, graceMs = 2_000)
         nostr.store.put(r.events)
-        val latest = page0Ds.mapNotNull { nostr.store.latest(Kinds.ROSTER, publisher, it) }
-            .filter { it.pubkey in accepted && Roster.isPageFor(ctx.coordinate, page0Ds, it.tags) }.let(Ordering::pickLatest)
+        val latest = accepted.flatMap { a -> page0Ds.mapNotNull { nostr.store.latest(Kinds.ROSTER, a, it) } }
+            .filter { Roster.isPageFor(ctx.coordinate, page0Ds, it.tags) }.let(Ordering::pickLatest)
         if (latest == null) return OrganizerEvents.RosterRead.Absent(suspect = seen("roster", ctx.coordinate))
         var at = latest.createdAt
         // The key the roster's own `eck` tag names, from EVERY version held, staged
