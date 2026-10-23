@@ -13,7 +13,7 @@ const h = vi.hoisted(() => ({
 vi.mock("$lib/stores/refresh-guard.svelte.js", () => ({ refreshGuard: { requestRefresh: h.requestRefresh } }));
 vi.mock("$lib/stale-chunk.js", () => ({ purgeServiceWorkerAndReload: h.purge }));
 
-import { updateStuck, reloadToLatestBuild } from "./update-stuck.svelte.js";
+import { updateStuck, reloadToLatestBuild, autoRecoverFromDrift } from "./update-stuck.svelte.js";
 import { updatePrompt } from "./update-prompt.svelte.js";
 
 let reload: ReturnType<typeof vi.fn>;
@@ -77,5 +77,33 @@ describe("reloadToLatestBuild (R-84)", () => {
     updatePrompt.update();
     expect(updateSW).not.toHaveBeenCalled();
     expect(h.purge).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("autoRecoverFromDrift: never depend on the user, never loop", () => {
+  it("reloads once per served revision, and again for a new one", () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+    });
+    expect(autoRecoverFromDrift("v1+a")).toBe(true);
+    expect(h.requestRefresh).toHaveBeenCalledTimes(1);
+    expect(h.purge).toHaveBeenCalledTimes(1);
+    expect(autoRecoverFromDrift("v1+a")).toBe(false); // the banner is the fallback now
+    expect(h.purge).toHaveBeenCalledTimes(1);
+    expect(autoRecoverFromDrift("v2+b")).toBe(true);
+    expect(h.purge).toHaveBeenCalledTimes(2);
+  });
+
+  it("a storage error fails to 'don't auto-reload'", () => {
+    vi.stubGlobal("sessionStorage", {
+      getItem: () => null,
+      setItem: () => {
+        throw new Error("blocked");
+      },
+    });
+    expect(autoRecoverFromDrift("v1+a")).toBe(false);
+    expect(h.requestRefresh).not.toHaveBeenCalled();
   });
 });

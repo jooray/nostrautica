@@ -10,6 +10,10 @@
  * its button does the one thing that always gets the current build: purge the
  * caches, drop the worker, reload from the network.
  *
+ * A confirmed drift first triggers that same action automatically, once per
+ * served revision (`autoRecoverFromDrift`); the banner is what is left when
+ * that attempt is spent and the tab is still stuck.
+ *
  * Dismissable, but a dismissal lasts only for the current episode: a later,
  * separate failure shows the banner again.
  */
@@ -47,6 +51,34 @@ export const updateStuck = {
  * it did nothing. Offline, a plain reload: purging the caches with no network
  * would leave nothing to boot from.
  */
+/** sessionStorage: the served sw.js revision the automatic recovery last ran for. */
+const AUTO_RELOAD_KEY = "nostrautica:update-auto-reload";
+
+/**
+ * A stuck build was CONFIRMED (sustained sw.js drift): move this tab on its own,
+ * without waiting for anyone to press the banner's button — the PWA must never
+ * depend on the user to get a new version. Through `refreshGuard` like every
+ * reload, so unsaved work is still waited for.
+ *
+ * At most once per served revision, latched in sessionStorage (which survives
+ * the reload): if a stale proxy keeps answering with the same old sw.js, the
+ * second confirmation of that revision does nothing and the banner is the
+ * fallback, instead of a reload loop. A storage error means we cannot latch, so
+ * it fails to "don't auto-reload" for the same reason. A NEW served revision
+ * (another deploy) earns one more attempt. Returns whether it reloaded.
+ */
+export function autoRecoverFromDrift(revision: string): boolean {
+  try {
+    if (sessionStorage.getItem(AUTO_RELOAD_KEY) === revision) return false;
+    sessionStorage.setItem(AUTO_RELOAD_KEY, revision);
+  } catch {
+    return false;
+  }
+  console.warn(`[pwa] stuck on an old build (served sw.js revision ${revision}); reloading to the latest build`);
+  reloadToLatestBuild();
+  return true;
+}
+
 export function reloadToLatestBuild(): void {
   const online = typeof navigator === "undefined" || navigator.onLine !== false;
   refreshGuard.requestRefresh(() => {

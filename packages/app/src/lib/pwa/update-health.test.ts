@@ -8,7 +8,17 @@
  * with the bundle running it.
  */
 import { describe, it, expect, vi } from "vitest";
-import { UpdateHealth, DRIFT_WARN_AFTER, SILENCE_WARN_MS } from "./update-health.js";
+import { UpdateHealth, DRIFT_WARN_AFTER, SILENCE_WARN_MS, servedRevision } from "./update-health.js";
+
+describe("servedRevision", () => {
+  it("reads the index.html revision out of a served sw.js, minified or not", () => {
+    expect(servedRevision(`e.precacheAndRoute([{url:"/app/index.html",revision:"v0.13.5+0123456789ab"}])`)).toBe(
+      "v0.13.5+0123456789ab",
+    );
+    expect(servedRevision(`[{"url": "/index.html", "revision": "abc"}]`)).toBe("abc");
+    expect(servedRevision("<html>proxy error</html>")).toBe("unknown");
+  });
+});
 
 const RELEASE = "2026.09.04-abc1234";
 /** A stand-in for the generated sw.js: the precache manifest names the release. */

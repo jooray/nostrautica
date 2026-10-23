@@ -30,7 +30,8 @@ import { warmRouteModules, CRITICAL_PARTICIPANT_ROUTES } from "$lib/router/route
 import { ensureEntryShellCached } from "$lib/pwa/offline-shell.js";
 import { UpdateHealth } from "$lib/pwa/update-health.js";
 import { RELEASE_MANIFEST } from "$lib/release.js";
-import { updateStuck } from "$lib/stores/update-stuck.svelte.js";
+import { updateStuck, autoRecoverFromDrift } from "$lib/stores/update-stuck.svelte.js";
+import { servedRevision } from "$lib/pwa/update-health.js";
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
 
 /**
@@ -142,10 +143,15 @@ export function registerPwa(): void {
           // check, means the update path is wedged — a stale proxy/cache answer,
           // or a worker that cannot activate — and that is exactly the state
           // that used to persist for days in total silence.
-          health.observeServiceWorkerSource(await res.text().catch(() => ""));
+          const source = await res.text().catch(() => "");
+          health.observeServiceWorkerSource(source);
           // Tell the user, not just the console (audit R-84) — and take the
           // banner down again once the served worker matches.
           updateStuck.set(health.driftDetected ? "drift" : null);
+          // …but never DEPEND on the user: a confirmed stuck build moves itself
+          // once per served revision (the banner stays as the fallback when that
+          // attempt is spent and the tab is still stuck).
+          if (health.driftDetected) autoRecoverFromDrift(servedRevision(source));
           await registration.update();
         } catch (e) {
           // Offline is normal and expected (the `online` listener below retries);
