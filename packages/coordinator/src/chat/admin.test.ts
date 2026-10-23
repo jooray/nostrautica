@@ -149,7 +149,7 @@ function makeAdmin(
   kps: AnyEvent[] = [],
   log?: (m: string) => void,
   extra?: {
-    enqueueSync?: (coordinate: string, pubkey: string, reenrolling?: string) => void;
+    enqueueSync?: (coordinate: string, pubkey: string, reenrolling?: string, reenrollAt?: number) => void;
     withMemberLock?: (coordinate: string, pubkey: string, fn: () => Promise<void>) => Promise<void>;
     fetchKeyPackages?: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
     onRosterChanged?: (coordinate: string) => void;
@@ -1453,10 +1453,10 @@ describe("a failed attestation sync is retried, not just logged", () => {
     // out with nothing further queued.
     const store = freshStore();
     const mls = new FakeMls();
-    const queued: Array<{ pubkey: string; reenrolling?: string }> = [];
+    const queued: Array<{ pubkey: string; reenrolling?: string; reenrollAt?: number }> = [];
     let failFetch = true;
     const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
-      enqueueSync: (_c, pubkey, reenrolling) => queued.push({ pubkey, reenrolling }),
+      enqueueSync: (_c, pubkey, reenrolling, reenrollAt) => queued.push({ pubkey, reenrolling, reenrollAt }),
     });
     await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
     store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
@@ -1467,7 +1467,7 @@ describe("a failed attestation sync is retried, not just logged", () => {
     // Rejoin: the device rotated its key package and attested — but the relay is
     // down for the inline sync, so it is queued.
     const admin2 = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")], undefined, {
-      enqueueSync: (_c, pubkey, reenrolling) => queued.push({ pubkey, reenrolling }),
+      enqueueSync: (_c, pubkey, reenrolling, reenrollAt) => queued.push({ pubkey, reenrolling, reenrollAt }),
       fetchKeyPackages: async () => {
         if (failFetch) throw new Error("simulated relay outage");
         return [kpEvent(CHATKEY, "kp2")];
@@ -1479,9 +1479,68 @@ describe("a failed attestation sync is retried, not just logged", () => {
 
     // The job runner comes back with what it was given.
     failFetch = false;
-    await admin2.syncMember(COORD, ACCOUNT, { reenrolling: queued[0]!.reenrolling });
+    expect(queued[0]!.reenrollAt).toBe(CREATED_AT);
+    await admin2.syncMember(COORD, ACCOUNT, { reenrolling: queued[0]!.reenrolling, reenrollAt: queued[0]!.reenrollAt });
     expect(mls.removed).toEqual([[CHATKEY]]);
     expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+  });
+
+  // prod 2026-10-23: a retry queued for event B at 09:15 was still carrying its
+  // warrant at 03:17 the next day, when the device rotated its shared key-package
+  // slot for event A — and B evicted and re-added a device that was fine.
+  it("a stale or undated re-enrolment warrant syncs without evicting anyone", async () => {
+    for (const reenrollAt of [undefined, CREATED_AT]) {
+      const store = freshStore();
+      const mls = new FakeMls();
+      const logs: string[] = [];
+      const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], (m) => logs.push(m), {
+        now: () => (CREATED_AT + 2 * 60 * 60) * 1000,
+      });
+      await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+      store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+      store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+      await admin.syncMember(COORD, ACCOUNT);
+      const admin2 = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp-rotated-for-another-event")], (m) => logs.push(m), {
+        now: () => (CREATED_AT + 2 * 60 * 60) * 1000,
+      });
+      expect(await admin2.syncMember(COORD, ACCOUNT, { reenrolling: CHATKEY, reenrollAt })).toBe(true);
+      expect(mls.removed).toEqual([]);
+      expect(mls.invited).toEqual([CHATKEY]);
+      expect(logs.some((l) => /re-enrolment request .* is (undated|stale)/.test(l))).toBe(true);
+    }
+  });
+
+  it("does not evict on a key package published well before the re-enrolment request", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    const old = { ...kpEvent(CHATKEY, "kp-old"), created_at: CREATED_AT - 60 * 60 };
+    const admin2 = makeAdmin(store, mls, [old]);
+    // Not synced: the rotated key package is still to come, so the retry waits for it.
+    expect(await admin2.syncMember(COORD, ACCOUNT, { reenrolling: CHATKEY, reenrollAt: CREATED_AT })).toBe(false);
+    expect(mls.removed).toEqual([]);
+    expect(store.isKpConsumed(COORD, "kp-old")).toBe(false);
+  });
+
+  it("one attestation re-enrols a device once, on its newest key package, however many are visible", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    const older = { ...kpEvent(CHATKEY, "kp-older"), created_at: CREATED_AT - 60 };
+    const newest = { ...kpEvent(CHATKEY, "kp-newest"), created_at: CREATED_AT - 1 };
+    const admin2 = makeAdmin(store, mls, [newest, older]);
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(mls.removed).toEqual([[CHATKEY]]);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+    expect(store.isKpConsumed(COORD, "kp-newest")).toBe(true);
   });
 
   it("says so plainly when there is no queue to fall back on", async () => {
