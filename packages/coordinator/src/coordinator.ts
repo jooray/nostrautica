@@ -166,6 +166,7 @@ import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
 import { profilePicture } from "./chat/avatar.js";
 import { sanitizeRelayUrls, type RelayPolicy } from "./net/relay-urls.js";
+import { sanitizeLogText } from "./log-line.js";
 import {
   sanitizeLlmText,
   sanitizeAiProfile,
@@ -469,7 +470,9 @@ const short = (pk: string) => pk.slice(0, 8);
 const MAX_UNDECRYPTABLE_MEMO = 10_000;
 function log(msg: string): void {
   const t = new Date().toISOString().slice(11, 19);
-  console.log(`[${t}] ${msg}`);
+  // One choke point for attendee-controlled text (names, titles, skills): it must
+  // never start a new line, least of all a forged readiness marker (audit R-48).
+  console.log(`[${t}] ${sanitizeLogText(msg)}`);
 }
 
 /** Stable identity of a relay set for subscription re-keying (audit COORD-8). */

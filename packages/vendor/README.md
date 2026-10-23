@@ -109,8 +109,10 @@ regenerate the patch against the new upstream file (`diff -u`) rather than hand-
 
 ## Integrity manifest
 
-`INTEGRITY.sha256` records a SHA-256 for every file under `marmot-ts/lib/`, and
-`node scripts/vendor-manifest.mjs --check` runs in the release gate.
+`INTEGRITY.sha256` records a SHA-256 for every file under `marmot-ts/lib/` and for
+`marmot-ts/package.json`, whose `exports` map decides which of those modules an import
+loads (the lockfile does not cover it), and `node scripts/vendor-manifest.mjs --check`
+runs in the release gate.
 
 This does **not** prove the bytes match an upstream build. The re-vendor script makes the
 build repeatable from a pinned commit, but the output still depends on the toolchain

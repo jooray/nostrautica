@@ -205,6 +205,7 @@ function cmdRestore(args: string[]): number {
     console.log(`[restore] installed ${file} → ${db}`);
     console.log(`  release       ${v.meta.releaseId}`);
     console.log(`  events        ${v.installedEventCount}`);
+    if (v.preRestorePath) console.log(`  replaced db   kept at ${v.preRestorePath} (delete once satisfied)`);
     console.log("[restore] OK — start the daemon to resume");
     return 0;
   } catch (e) {
@@ -499,34 +500,46 @@ async function cmdDoctor(args: string[]): Promise<number> {
     fail("ffmpeg/ffprobe", "not found on PATH — install ffmpeg (and ffprobe)");
   }
 
-  // 5. relay reachability summary. The connect policy has to be installed before the
-  // first guarded connection, or a dev config's local relay is refused by the guard.
-  setRelayConnectPolicy({ allowInsecure: config.security.allow_insecure_urls });
-  const relays = config.relays.default;
-  let reachable = 0;
-  for (const url of relays) {
-    if (await checkRelay(url)) reachable++;
+  // `--local` stops here with the network checks skipped (audit R-58). It is what a
+  // systemd ExecStartPre runs: a relay or Venice outage is not a reason to refuse
+  // to START, because the daemon rides those out itself, while a preflight that
+  // fails on them burns the unit's start-limit budget and leaves it failed with no
+  // retry until a human notices.
+  const localOnly = args.includes("--local");
+  if (localOnly) {
+    console.log("  [skip] relays, provider auth — --local (network checks are for a hand run)");
   }
-  if (relays.length === 0) warn("relays", "no default relays configured");
-  else if (reachable === relays.length) pass("relays", `${reachable}/${relays.length} reachable`);
-  else if (reachable > 0) warn("relays", `${reachable}/${relays.length} reachable`);
-  else fail("relays", `0/${relays.length} reachable`);
 
-  // 6. provider auth check (read-only): a Venice key must list models.
-  const apiKey = veniceApiKey(config);
-  const referencesVenice = (["summary", "match", "embed", "translate"] as const).some(
-    (r) => config!.models[r].provider === "venice",
-  );
-  if (apiKey && (referencesVenice || config.stt.provider === "venice-stt")) {
-    try {
-      const venice = new VeniceLlm({ payment: new ApiKeyPayment(apiKey), baseUrl: config.providers.venice?.base_url, requirePrivate: false });
-      const models = await venice.models();
-      pass("Venice auth", `${models.length} model(s) listed`);
-    } catch (e) {
-      fail("Venice auth", e instanceof Error ? e.message : String(e));
+  if (!localOnly) {
+    // 5. relay reachability summary. The connect policy has to be installed before the
+    // first guarded connection, or a dev config's local relay is refused by the guard.
+    setRelayConnectPolicy({ allowInsecure: config.security.allow_insecure_urls });
+    const relays = config.relays.default;
+    let reachable = 0;
+    for (const url of relays) {
+      if (await checkRelay(url)) reachable++;
     }
-  } else if (referencesVenice) {
-    fail("Venice auth", "a role routes to Venice but no API key is configured");
+    if (relays.length === 0) warn("relays", "no default relays configured");
+    else if (reachable === relays.length) pass("relays", `${reachable}/${relays.length} reachable`);
+    else if (reachable > 0) warn("relays", `${reachable}/${relays.length} reachable`);
+    else fail("relays", `0/${relays.length} reachable`);
+
+    // 6. provider auth check (read-only): a Venice key must list models.
+    const apiKey = veniceApiKey(config);
+    const referencesVenice = (["summary", "match", "embed", "translate"] as const).some(
+      (r) => config!.models[r].provider === "venice",
+    );
+    if (apiKey && (referencesVenice || config.stt.provider === "venice-stt")) {
+      try {
+        const venice = new VeniceLlm({ payment: new ApiKeyPayment(apiKey), baseUrl: config.providers.venice?.base_url, requirePrivate: false });
+        const models = await venice.models();
+        pass("Venice auth", `${models.length} model(s) listed`);
+      } catch (e) {
+        fail("Venice auth", e instanceof Error ? e.message : String(e));
+      }
+    } else if (referencesVenice) {
+      fail("Venice auth", "a role routes to Venice but no API key is configured");
+    }
   }
   if ((["summary", "match", "embed", "translate"] as const).some((r) => config!.models[r].provider === "routstr")) {
     if (config.providers.routstr?.node_url) pass("Routstr config", config.providers.routstr.node_url);
@@ -577,6 +590,11 @@ async function cmdDoctor(args: string[]): Promise<number> {
 
 /** Dispatch an operator subcommand; resolves to a process exit code. */
 export async function runCli(subcommand: CliSubcommand, args: string[]): Promise<number> {
+  // Owner-only for every file a verb creates (audit R-60). runDaemon() sets this,
+  // but main() dispatches here first, so `backup` wrote its CLEARTEXT snapshot
+  // (VACUUM INTO) under the inherited umask, 0644 on a stock host, and only
+  // chmodded it to 0600 afterwards. `restore` copies the live database the same way.
+  process.umask(0o077);
   switch (subcommand) {
     case "backup":
       return cmdBackup(args);

@@ -129,7 +129,7 @@ async function runDaemon(): Promise<void> {
     ? {
         payment: new ApiKeyPayment(apiKey),
         baseUrl: config.providers.venice?.base_url,
-        // Privacy is enforced PER ROLE by verifyModelPrivacy() below (a role may
+        // Privacy is enforced PER ROLE by resolveRoleRoutes() below (a role may
         // relax it via models.<role>.require_private = false, spec §16.2), so the
         // adapter must return the unfiltered list here.
         requirePrivate: false,
@@ -175,6 +175,8 @@ async function runDaemon(): Promise<void> {
       ...(r.amount_sats ? { defaultAmountSats: r.amount_sats } : {}),
       // Durable journal (audit H8): reservations survive a crash mid-request.
       journal: store,
+      // Mint traffic gets the same DNS pinning as every provider request (R-50).
+      net: providerNet,
     });
     // Reconcile interrupted reservations from a previous run (audit COORD-5):
     // reserved-but-unsettled proofs are quarantined as ambiguous, never lost.
@@ -262,14 +264,12 @@ async function runDaemon(): Promise<void> {
     // list is worth looking at, so this is most of the wall-clock between walking
     // in and seeing matches.
     //
-    // Cashu is the exception, and it is not a style preference: CashuPayment keeps
-    // ONE in-flight reservation id and rewrites the whole wallet file around an
-    // await, so two overlapping requests mis-journal each other's change and can
-    // lose bearer money (the audit item for this is still open). A role routed to
-    // Routstr therefore stays strictly serial until that is fixed. Production
-    // routes every role to Venice, where the client is reentrant and payment is an
-    // API key.
-    scoreConcurrency: referencedProviders.has("routstr") ? 1 : 2,
+    // Cashu used to be the exception: CashuPayment kept ONE in-flight reservation id
+    // and rewrote the wallet file around an await, so overlapping requests could
+    // mis-journal each other's change. Reservations are now per-request handles and
+    // every wallet-file section is serialised (audit R-49), so Routstr gets the same
+    // two as Venice.
+    scoreConcurrency: 2,
     chatMls,
     // Install authorization + unsolicited-install caps (audit COORD-3).
     maxEvents: config.security.max_events,

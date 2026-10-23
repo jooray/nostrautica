@@ -19,6 +19,9 @@
  *     releases (audit SB-51): `packages/vendor/ts-mls` was retired on 2026-10-05
  *     and the Dockerfile kept copying it. This catches it in seconds, in the
  *     cheapest job, with the path named.
+ *  4. Workflow toolchains are exact (audit R-80): no pnpm/action-setup `version:`
+ *     other than the root `packageManager` pin, and every `deno-version:` an exact
+ *     X.Y.Z.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync, readdirSync, existsSync } from "node:fs";
@@ -114,10 +117,47 @@ for (const m of dockerfile.matchAll(/^COPY\s+(.+)$/gm)) {
   }
 }
 
+// ── 4. Toolchains in workflows are exact (audit R-80) ───────────────────────
+// pnpm: package.json's `packageManager` is the pin (pnpm 11.12.0 was a broken
+// release that once stalled a production deploy, so "any 11" is not a pin). A
+// pnpm/action-setup `version:` overrides it, so one is allowed only when it is
+// that exact version. Deno: `deno-version:` must be an exact X.Y.Z.
+const packageManager = JSON.parse(read("package.json")).packageManager ?? "";
+const pinnedPnpm = packageManager.match(/^pnpm@(\d+\.\d+\.\d+)/)?.[1];
+if (!pinnedPnpm) errors.push(`root package.json: packageManager is not an exact pnpm@X.Y.Z (${packageManager})`);
+for (const f of readdirSync(wfDir).filter((n) => n.endsWith(".yml") || n.endsWith(".yaml"))) {
+  const lines = readFileSync(join(wfDir, f), "utf8").split("\n");
+  lines.forEach((line, i) => {
+    if (line.includes("uses: pnpm/action-setup@")) {
+      const indent = line.search(/\S/);
+      for (let j = i + 1; j < lines.length; j++) {
+        const next = lines[j];
+        if (next.trim() === "") continue;
+        if (next.search(/\S/) <= indent) break; // left the step
+        const v = next.match(/^\s*version:\s*["']?([^"'\s#]+)/)?.[1];
+        if (v !== undefined && v !== pinnedPnpm) {
+          errors.push(
+            `.github/workflows/${f}:${j + 1} pnpm/action-setup version ${v} overrides packageManager ${packageManager} — drop it or set ${pinnedPnpm}`,
+          );
+        }
+      }
+    }
+    // A `deno run` resolves its dependency graph at run time unless a lockfile is
+    // enforced (audit R-62), so every one must be --frozen.
+    if (/^\s*deno run\b/.test(line) && !line.includes("--frozen")) {
+      errors.push(`.github/workflows/${f}:${i + 1} deno run without --frozen (an unlocked dependency graph)`);
+    }
+    const deno = line.match(/^\s*deno-version:\s*["']?([^"'\s#]+)/)?.[1];
+    if (deno !== undefined && !/^v?\d+\.\d+\.\d+$/.test(deno)) {
+      errors.push(`.github/workflows/${f}:${i + 1} deno-version ${deno} is not an exact X.Y.Z release`);
+    }
+  });
+}
+
 // ── report ───────────────────────────────────────────────────────────────────
 if (errors.length) {
   console.error("Pin guardrail FAILED (audit Q14):");
   for (const e of errors) console.error(`  - ${e}`);
   process.exit(1);
 }
-console.log(`Pin guardrail OK: Node major ${expectedMajor} everywhere; all infra images digest-pinned; every Dockerfile COPY source is committed.`);
+console.log(`Pin guardrail OK: Node major ${expectedMajor} everywhere; all infra images digest-pinned; every Dockerfile COPY source is committed; pnpm/Deno exact.`);

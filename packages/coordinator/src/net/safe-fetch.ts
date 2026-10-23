@@ -129,7 +129,9 @@ function isBlockedV6(ip: string): boolean {
   if ((h[0]! & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
   if ((h[0]! & 0xff00) === 0xff00) return true; // ff00::/8 multicast
   // Transition/translation mechanisms that can smuggle a blocked v4 (COORD-6):
-  if (h[0] === 0x0064 && h[1] === 0xff9b && h[2] === 0x0000) return true; // 64:ff9b::/96 NAT64
+  // NAT64, the whole 64:ff9b::/32 (audit R-56): the well-known /96 AND RFC 8215's
+  // local-use 64:ff9b:1::/48, which a host may route to its own translator.
+  if (h[0] === 0x0064 && h[1] === 0xff9b) return true;
   if (h[0] === 0x2002) return true; // 2002::/16 6to4
   if (h[0] === 0x2001 && h[1] === 0x0000) return true; // 2001::/32 Teredo
   return false;

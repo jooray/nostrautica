@@ -9,7 +9,17 @@
  * fund the coordinator with Cashu tokens, pick a node + model, done.
  */
 import { randomUUID } from "node:crypto";
-import { readFileSync, writeFileSync, existsSync } from "node:fs";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeSync,
+} from "node:fs";
+import { dirname } from "node:path";
 import {
   CashuMint,
   CashuWallet,
@@ -17,8 +27,57 @@ import {
   getDecodedToken,
   type Proof,
 } from "@cashu/cashu-ts";
-import type { PaymentStrategy } from "./types.js";
+import { HttpResponseError, MintOperationError } from "@cashu/cashu-ts";
+import type { PaymentReservation, PaymentStrategy } from "./types.js";
 import type { Store } from "../store/db.js";
+import { guardedProviderFetch, type ProviderNetPolicy } from "../net/safe-fetch.js";
+import { PROVIDER_BODY_LIMITS, readJsonCapped } from "./http.js";
+
+type MintRequest = ConstructorParameters<typeof CashuMint>[1];
+
+/**
+ * cashu-ts's own `request()`, routed through the provider DNS-pinning guard
+ * (audit R-50). The library's default calls the global fetch, so a mint whose
+ * name passed config validation could still rebind to a loopback or private
+ * address at connect time. Same wire shape and error classes as the library's,
+ * plus the byte caps every other provider read has.
+ */
+export function guardedMintRequest(policy: ProviderNetPolicy): NonNullable<MintRequest> {
+  return async function request<T>({
+    endpoint,
+    requestBody,
+    headers,
+    ...init
+  }: {
+    endpoint: string;
+    requestBody?: Record<string, unknown>;
+    headers?: Record<string, string>;
+  } & Omit<RequestInit, "body" | "headers">): Promise<T> {
+    const body = requestBody ? JSON.stringify(requestBody) : undefined;
+    const allHeaders = {
+      Accept: "application/json, text/plain, */*",
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...headers,
+    };
+    return guardedProviderFetch(endpoint, { ...init, body, headers: allHeaders }, policy, async (res) => {
+      if (!res.ok) {
+        let err: { code?: unknown; detail?: unknown; error?: unknown };
+        try {
+          err = (await readJsonCapped(res, "Cashu mint", PROVIDER_BODY_LIMITS.error)) ?? {};
+        } catch {
+          err = { error: "bad response" };
+        }
+        if (res.status === 400 && typeof err.code === "number" && typeof err.detail === "string") {
+          throw new MintOperationError(err.code, err.detail);
+        }
+        const msg =
+          typeof err.error === "string" ? err.error : typeof err.detail === "string" ? err.detail : "HTTP request failed";
+        throw new HttpResponseError(msg, res.status);
+      }
+      return await readJsonCapped<T>(res, "Cashu mint");
+    });
+  };
+}
 
 interface WalletFile {
   mint: string;
@@ -39,27 +98,75 @@ export interface CashuPaymentOptions {
    * mode, where the whole token is a long-lived Bearer key (no per-request change).
    */
   journal?: Store;
+  /** DNS-pinning policy for mint requests (audit R-50). Default: pin + public-only. */
+  net?: ProviderNetPolicy;
 }
 
 export class CashuPayment implements PaymentStrategy {
   private wallet: CashuWallet;
   private loaded = false;
-  /** The reservation awaiting settle() for this in-flight request, if any. */
+  /** The reservation the LEGACY prepare()/settle()/fail() trio is tracking. */
   private pendingRequestId?: string;
+  /**
+   * Serialises every load → await → save of the wallet file (audit R-49). Two
+   * overlapping sections each read the same proofs, and the later save drops the
+   * earlier one's swap change. A section abandoned by its caller's deadline keeps
+   * the lock until its mint call actually ends, which is the point: the work is
+   * still running, so the next one must wait for it.
+   */
+  private walletLock: Promise<unknown> = Promise.resolve();
+
+  private exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.walletLock.then(fn, fn);
+    this.walletLock = run.catch(() => {});
+    return run;
+  }
 
   constructor(private readonly opts: CashuPaymentOptions) {
-    this.wallet = new CashuWallet(new CashuMint(opts.mintUrl));
+    this.wallet = new CashuWallet(new CashuMint(opts.mintUrl, guardedMintRequest(opts.net ?? {})));
   }
 
   private load(): WalletFile {
-    if (existsSync(this.opts.walletDbPath)) {
-      return JSON.parse(readFileSync(this.opts.walletDbPath, "utf8")) as WalletFile;
+    const path = this.opts.walletDbPath;
+    if (!existsSync(path)) return { mint: this.opts.mintUrl, proofs: [] };
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as WalletFile;
+    } catch (e) {
+      // Never fall back to an empty wallet here: the next save() would overwrite
+      // the only copy of the retained proofs (audit R-51). Stop, and say where.
+      throw new Error(
+        `cashu wallet file ${path} is unreadable (${e instanceof Error ? e.message : e}); ` +
+          "it holds bearer proofs, so fix or restore it by hand before retrying",
+      );
     }
-    return { mint: this.opts.mintUrl, proofs: [] };
   }
   private save(file: WalletFile): void {
+    // Temp file + fsync + rename (audit R-51). The wallet file is the ONLY copy of
+    // the retained `keep` proofs — the journal covers proofs that left it — so a
+    // truncating in-place write interrupted by a crash or a full disk stranded the
+    // whole balance. rename() replaces the target atomically within the directory.
     // Bearer money at rest: owner-read/write only (audit COORD-5).
-    writeFileSync(this.opts.walletDbPath, JSON.stringify(file, null, 2), { mode: 0o600 });
+    const path = this.opts.walletDbPath;
+    const tmp = `${path}.tmp`;
+    rmSync(tmp, { force: true }); // a leftover from a crash may carry another mode
+    const fd = openSync(tmp, "wx", 0o600);
+    try {
+      writeSync(fd, JSON.stringify(file, null, 2));
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+    try {
+      const dir = openSync(dirname(path), "r");
+      try {
+        fsyncSync(dir); // make the rename itself durable
+      } finally {
+        closeSync(dir);
+      }
+    } catch {
+      // Not every platform can fsync a directory; the data file is already synced.
+    }
   }
 
   private async ensureLoaded(): Promise<void> {
@@ -69,7 +176,23 @@ export class CashuPayment implements PaymentStrategy {
     }
   }
 
-  async prepare(req: { estimateTokens?: number }): Promise<Record<string, string>> {
+  /**
+   * One request's payment, with its own settle()/fail() (audit R-49). Prefer this
+   * over prepare(): the reservation id travels with the handle, so a prepare that
+   * completes after its caller gave up can never be settled by the next request.
+   */
+  async reserve(req: { estimateTokens?: number }): Promise<PaymentReservation> {
+    const { headers, requestId } = await this.exclusive(() => this.reserveLocked(req));
+    return {
+      headers,
+      settle: (h) => this.settleReservation(requestId, h),
+      fail: async () => this.failReservation(requestId),
+    };
+  }
+
+  private async reserveLocked(req: {
+    estimateTokens?: number;
+  }): Promise<{ headers: Record<string, string>; requestId?: string }> {
     await this.ensureLoaded();
     const file = this.load();
     const amount = Math.max(1, this.opts.defaultAmountSats ?? Math.ceil((req.estimateTokens ?? 1000) / 1000));
@@ -81,47 +204,59 @@ export class CashuPayment implements PaymentStrategy {
     // crash before settle() leaves an accountable `in_flight` record instead of a
     // silent loss (audit H8). Balance mode reuses one long-lived token, so there's
     // no per-request change to journal.
+    let requestId: string | undefined;
     if (this.opts.journal && this.opts.mode !== "balance") {
-      const requestId = randomUUID();
+      requestId = randomUUID();
       this.opts.journal.cashuReserve(requestId, this.opts.mintUrl, amount, send);
-      this.pendingRequestId = requestId;
     }
     file.proofs = keep;
     this.save(file);
 
     const token = getEncodedTokenV4({ mint: this.opts.mintUrl, proofs: send });
-    return this.opts.mode === "balance"
-      ? { Authorization: `Bearer ${token}` }
-      : { "X-Cashu": token };
+    const headers: Record<string, string> =
+      this.opts.mode === "balance" ? { Authorization: `Bearer ${token}` } : { "X-Cashu": token };
+    return { headers, requestId };
+  }
+
+  async prepare(req: { estimateTokens?: number }): Promise<Record<string, string>> {
+    const { headers, requestId } = await this.exclusive(() => this.reserveLocked(req));
+    this.pendingRequestId = requestId;
+    return headers;
   }
 
   async settle(responseHeaders: Headers): Promise<void> {
-    // settle() is only reached after the provider accepted the payment (res.ok),
-    // so the reserved proofs are now spent; bank any returned change.
     const requestId = this.pendingRequestId;
     this.pendingRequestId = undefined;
+    await this.settleReservation(requestId, responseHeaders);
+  }
+
+  private async settleReservation(requestId: string | undefined, responseHeaders: Headers): Promise<void> {
+    // settle() is only reached after the provider accepted the payment (res.ok),
+    // so the reserved proofs are now spent; bank any returned change.
     const changeToken = responseHeaders.get("X-Cashu");
 
     let banked: Proof[] = [];
     if (changeToken) {
-      await this.ensureLoaded();
-      try {
-        const decoded = getDecodedToken(changeToken);
-        // Journal the change proofs BEFORE redeeming them into the wallet file
-        // (audit COORD-5): a crash mid-receive then leaves the change accounted
-        // for in the durable journal instead of lost with the token string.
-        const changeProofs = (decoded.proofs ?? []) as Proof[];
-        if (requestId && this.opts.journal && changeProofs.length > 0) {
-          this.opts.journal.cashuSettle(requestId, changeProofs);
+      await this.exclusive(async () => {
+        await this.ensureLoaded();
+        try {
+          const decoded = getDecodedToken(changeToken);
+          // Journal the change proofs BEFORE redeeming them into the wallet file
+          // (audit COORD-5): a crash mid-receive then leaves the change accounted
+          // for in the durable journal instead of lost with the token string.
+          const changeProofs = (decoded.proofs ?? []) as Proof[];
+          if (requestId && this.opts.journal && changeProofs.length > 0) {
+            this.opts.journal.cashuSettle(requestId, changeProofs);
+          }
+          banked = await this.wallet.receive(decoded);
+          const file = this.load();
+          file.proofs = [...file.proofs, ...banked];
+          this.save(file);
+        } catch {
+          // Malformed / already-spent change — nothing to bank in the wallet; any
+          // change proofs journaled above stay recoverable there (COORD-5).
         }
-        banked = await this.wallet.receive(decoded);
-        const file = this.load();
-        file.proofs = [...file.proofs, ...banked];
-        this.save(file);
-      } catch {
-        // Malformed / already-spent change — nothing to bank in the wallet; any
-        // change proofs journaled above stay recoverable there (COORD-5).
-      }
+      });
     }
     // Close out the journal reservation (request completed). Idempotent: when the
     // change was already journaled above this is a no-op; it also covers the
@@ -141,6 +276,10 @@ export class CashuPayment implements PaymentStrategy {
   async fail(): Promise<void> {
     const requestId = this.pendingRequestId;
     this.pendingRequestId = undefined;
+    this.failReservation(requestId);
+  }
+
+  private failReservation(requestId: string | undefined): void {
     if (requestId && this.opts.journal) {
       this.opts.journal.cashuMarkAmbiguous(requestId);
     }
@@ -169,11 +308,13 @@ export class CashuPayment implements PaymentStrategy {
 
   /** Import a Cashu token to fund the wallet (operator top-up). */
   async fund(token: string): Promise<number> {
-    await this.ensureLoaded();
-    const received = await this.wallet.receive(getDecodedToken(token));
-    const file = this.load();
-    file.proofs = [...file.proofs, ...received];
-    this.save(file);
-    return file.proofs.reduce((sum, p) => sum + p.amount, 0);
+    return this.exclusive(async () => {
+      await this.ensureLoaded();
+      const received = await this.wallet.receive(getDecodedToken(token));
+      const file = this.load();
+      file.proofs = [...file.proofs, ...received];
+      this.save(file);
+      return file.proofs.reduce((sum, p) => sum + p.amount, 0);
+    });
   }
 }

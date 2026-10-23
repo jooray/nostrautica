@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# The called gate needs to read the repo and nothing else (audit R-64).
+permissions:
+  contents: read
+
 # CI is exactly the release gate (audit R15): guardrails, unit suite, the supported
 # e2e orchestrator path, docs build + tests, and the clean-context coordinator Docker
 # build. Reusing one workflow means a PR is checked against the same bar the nsite

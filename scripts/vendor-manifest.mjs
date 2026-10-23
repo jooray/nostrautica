@@ -30,9 +30,15 @@ import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = join(REPO_ROOT, "packages/vendor/INTEGRITY.sha256");
-/** Only `lib/` — `node_modules/` is pnpm's, and `package.json` is covered by the lockfile. */
-// (`lib/vendor/ts-mls`, the MLS engine marmot-ts bundles, lives inside this root.)
-const ROOTS = ["packages/vendor/marmot-ts/lib"];
+/**
+ * `lib/` plus the package's own `package.json`. `node_modules/` is pnpm's. The
+ * `package.json` is NOT covered by the lockfile, as this comment used to claim: for
+ * a workspace package pnpm records its dependencies, not its `exports`/`main` map,
+ * and that map decides which already-hashed module under `lib/` an import of
+ * `marmot-ts/...` actually loads (audit R-57). Re-pointing it must not land silently.
+ */
+// (`lib/vendor/ts-mls`, the MLS engine marmot-ts bundles, lives inside the lib root.)
+const ROOTS = ["packages/vendor/marmot-ts/lib", "packages/vendor/marmot-ts/package.json"];
 
 /** Every file under `dir`, recursively, as repo-relative POSIX paths, sorted. */
 function walk(dir) {
@@ -53,7 +59,7 @@ function build() {
   for (const root of ROOTS) {
     const abs = join(REPO_ROOT, root);
     if (!existsSync(abs)) throw new Error(`vendored path missing: ${root}`);
-    for (const rel of walk(abs)) {
+    for (const rel of statSync(abs).isDirectory() ? walk(abs) : [root]) {
       const digest = createHash("sha256").update(readFileSync(join(REPO_ROOT, rel))).digest("hex");
       lines.push(`${digest}  ${rel}`);
     }

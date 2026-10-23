@@ -6,14 +6,14 @@
  * and reserved-but-unsettled proofs are quarantined (never re-added to the wallet
  * → no double-spend, never dropped → no loss).
  */
-import { describe, it, expect, afterEach } from "vitest";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { describe, it, expect, afterEach, vi } from "vitest";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generateSecretKey } from "nostr-tools/pure";
-import { getEncodedTokenV4 } from "@cashu/cashu-ts";
+import { getEncodedTokenV4, MintOperationError } from "@cashu/cashu-ts";
 import { Store } from "../store/db.js";
-import { CashuPayment } from "./cashu.js";
+import { CashuPayment, guardedMintRequest } from "./cashu.js";
 
 const MINT = "https://mint.example";
 const SENT = [
@@ -179,6 +179,101 @@ describe("COORD-5 — Cashu request-failure + settle ordering", () => {
     await payment.settle(new Headers());
     expect(store.cashuJournalEntry("req-s2")!.state).toBe("settled");
     store.close();
+  });
+
+  it("overlapping reservations never spend the same proofs or swap each other's ids (R-49)", async () => {
+    const store = new Store(":memory:");
+    const walletPath = tmpPath("w.json");
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: walletPath, journal: store, defaultAmountSats: 4 });
+    const wellFormed = ["s-sent-1", "s-sent-2", "s-change-1"].map((secret, i) => ({
+      ...CHANGE_ENC[0],
+      amount: 4,
+      secret,
+      C: `0${i}`.repeat(32),
+    }));
+    (payment as any).save({ mint: MINT, proofs: wellFormed });
+    (payment as any).loaded = true;
+    // A mint swap that the first caller abandons mid-flight: it is still running
+    // when the second reservation starts.
+    let releaseFirst!: () => void;
+    const seen: string[][] = [];
+    (payment as any).wallet = {
+      send: async (_amount: number, proofs: typeof wellFormed) => {
+        seen.push(proofs.map((p) => p.secret));
+        if (seen.length === 1) await new Promise<void>((r) => (releaseFirst = r));
+        return { send: [proofs[0]], keep: proofs.slice(1) };
+      },
+    };
+    const a = payment.reserve({});
+    const b = payment.reserve({});
+    await new Promise((r) => setTimeout(r, 10));
+    expect(seen).toHaveLength(1); // b waits for a's swap instead of reading the same file
+    releaseFirst();
+    const [ra, rb] = await Promise.all([a, b]);
+    expect(seen[1]).toEqual(["s-sent-2", "s-change-1"]); // a's spent proof is gone
+    expect(ra.headers["X-Cashu"]).not.toBe(rb.headers["X-Cashu"]);
+
+    // Each handle closes its own reservation.
+    await rb.settle(new Headers());
+    await ra.fail();
+    const states = store.cashuNonterminal().map((e) => e.state);
+    expect(states).toEqual(["ambiguous"]);
+    store.close();
+  });
+
+  it("replaces the wallet file atomically and leaves no temp file behind (R-51)", () => {
+    const walletPath = tmpPath("wallet.json");
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: walletPath });
+    writeFileSync(`${walletPath}.tmp`, "stale leftover from a crash", { mode: 0o644 });
+    (payment as any).save({ mint: MINT, proofs: SENT });
+    // The old inode is replaced, not truncated in place: a reader holding the old
+    // file never sees a half-written one.
+    const before = statSync(walletPath).ino;
+    (payment as any).save({ mint: MINT, proofs: CHANGE });
+    expect(statSync(walletPath).ino).not.toBe(before);
+    expect(existsSync(`${walletPath}.tmp`)).toBe(false);
+    expect((payment as any).load().proofs).toEqual(CHANGE);
+    expect(statSync(walletPath).mode & 0o777).toBe(0o600);
+  });
+
+  it("refuses to treat a corrupt wallet file as empty, and names it (R-51)", () => {
+    const walletPath = tmpPath("wallet.json");
+    writeFileSync(walletPath, '{"mint":"https://mint.example","proofs":[{"am', { mode: 0o600 });
+    const payment = new CashuPayment({ mintUrl: MINT, walletDbPath: walletPath });
+    expect(() => (payment as any).load()).toThrow(walletPath);
+    // …and nothing overwrote the damaged original, which may still be recoverable.
+    expect(readFileSync(walletPath, "utf8")).toContain('"proofs":[{"am');
+  });
+
+  it("mint traffic goes through the DNS-pinning guard: a rebinding mint is refused (R-50)", async () => {
+    const fetchSpy = vi.fn();
+    vi.stubGlobal("fetch", fetchSpy);
+    const lookupFn = vi.fn(async () => [{ address: "127.0.0.1", family: 4 }]) as any;
+    const payment = new CashuPayment({
+      mintUrl: "https://rebinding-mint.example",
+      walletDbPath: tmpPath("w.json"),
+      net: { lookupFn },
+    });
+    await expect(payment.fund("cashuBo2FteBtodHRwczovL21pbnQuZXhhbXBsZWF1Y3NhdA")).rejects.toThrow(/blocked/);
+    expect(lookupFn).toHaveBeenCalled();
+    expect(fetchSpy).not.toHaveBeenCalled();
+    vi.unstubAllGlobals();
+  });
+
+  it("the guarded mint request keeps cashu-ts's wire shape and error classes", async () => {
+    const fetchSpy = vi
+      .fn()
+      .mockResolvedValueOnce(Response.json({ keysets: [] }))
+      .mockResolvedValueOnce(Response.json({ code: 11001, detail: "Token already spent" }, { status: 400 }));
+    vi.stubGlobal("fetch", fetchSpy);
+    const request = guardedMintRequest({ allowInsecure: true }) as any;
+    await expect(request({ endpoint: "https://m/v1/keysets", method: "GET" })).resolves.toEqual({ keysets: [] });
+    const swap = request({ endpoint: "https://m/v1/swap", method: "POST", requestBody: { inputs: [] } });
+    await expect(swap).rejects.toBeInstanceOf(MintOperationError);
+    const [, init] = fetchSpy.mock.calls[1];
+    expect(init.body).toBe('{"inputs":[]}');
+    expect(init.headers["Content-Type"]).toBe("application/json");
+    vi.unstubAllGlobals();
   });
 
   it("the wallet file is written owner-only (mode 0600)", () => {

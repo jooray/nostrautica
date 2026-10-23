@@ -7,7 +7,16 @@ import { describe, it, expect, afterEach, vi } from "vitest";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadConfig, validateConfiguredUrl, spendExposure, type UnknownConfigKey } from "./config.js";
+import { nsecEncode } from "nostr-tools/nip19";
+import {
+  configSchema,
+  loadConfig,
+  resolveIdentity,
+  roleRequiresPrivate,
+  validateConfiguredUrl,
+  spendExposure,
+  type UnknownConfigKey,
+} from "./config.js";
 
 const tmpDirs: string[] = [];
 afterEach(() => {
@@ -248,8 +257,66 @@ describe("SEC-7 spend exposure at startup", () => {
     // Restricted installs: only known organizers get a budget at all.
     const allowed = `\n[security]\nallowed_eid_pubkeys = ["${"a".repeat(64)}"]\n`;
     expect(spendExposure(loadConfig(writeConfig(BASE + zeroed + allowed)))).toBeUndefined();
-    // One ceiling left standing is enough to bound the total.
+    // The call ceiling alone is enough to bound the total.
     const oneLimit = `\n[budgets]\ndaemon_bytes_per_window = 0\ndaemon_duration_sec_per_window = 0\ndaemon_calls_per_window = 1000\n`;
     expect(spendExposure(loadConfig(writeConfig(BASE + oneLimit)))).toBeUndefined();
+  });
+
+  it("does not accept a media-only ceiling as a spend bound (audit R-47)", () => {
+    // Text joins, match runs and translations decode no media, so bytes and
+    // duration ceilings never trip on them: every LLM call is still unbounded.
+    const mediaOnly = `\n[budgets]\ndaemon_bytes_per_window = 1000\ndaemon_duration_sec_per_window = 3600\ndaemon_calls_per_window = 0\n`;
+    const msg = spendExposure(loadConfig(writeConfig(BASE + mediaOnly)));
+    expect(msg).toBeDefined();
+    expect(msg).toMatch(/daemon_calls_per_window/);
+  });
+});
+
+describe("resolveIdentity never echoes a mistyped secret (audit R-61)", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("a bad nsec checksum throws a fixed message without the key", () => {
+    const good = nsecEncode(new Uint8Array(32).fill(7));
+    const typo = good.slice(0, -1) + (good.endsWith("q") ? "p" : "q");
+    vi.stubEnv("NOSTRAUTICA_COORDINATOR_NSEC", typo);
+    const cfg = loadConfig(writeConfig(BASE));
+    let message = "";
+    try {
+      resolveIdentity(cfg);
+    } catch (e) {
+      message = (e as Error).message;
+    }
+    expect(message).toMatch(/not a valid nsec/);
+    // Not the key, and not any long run of it either.
+    expect(message).not.toContain(typo.slice(5, 25));
+  });
+});
+
+// Moved from the deleted providers/privacy.test.ts (audit R-81): the knob is
+// config's, and resolveRoleRoutes (routes.test.ts) is the live enforcement.
+describe("roleRequiresPrivate (spec §16.2 knob)", () => {
+  const models = (match: Record<string, unknown> = {}) => ({
+    summary: { provider: "venice", model: "s" },
+    match: { provider: "venice", model: "m", ...match },
+    embed: { provider: "venice", model: "e" },
+  });
+
+  it("uses the per-role override when present, else the provider default", () => {
+    const cfg = configSchema.parse({
+      relays: { default: ["wss://relay.example"] },
+      providers: { venice: { require_private: true } },
+      models: models({ require_private: false }),
+    });
+    expect(roleRequiresPrivate(cfg, "summary")).toBe(true);
+    expect(roleRequiresPrivate(cfg, "match")).toBe(false);
+  });
+
+  it("a provider default of false is inherited by roles without an override", () => {
+    const cfg = configSchema.parse({
+      relays: { default: ["wss://r"] },
+      providers: { venice: { require_private: false } },
+      models: models(),
+    });
+    expect(roleRequiresPrivate(cfg, "summary")).toBe(false);
   });
 });

@@ -321,19 +321,26 @@ export class VeniceLlm implements LlmProvider {
     // role whose real tier is `anonymized`, i.e. quietly publish a privacy claim
     // nothing checked. A decision page that 404s on an older gateway is not an
     // error — it just means this deployment has no decision models.
-    const [text, decision] = await Promise.all([
-      this.modelPage(),
-      this.modelPage("decision").catch((e: unknown) => {
-        // A 404 is an older gateway without decision models. Anything else is a
-        // real failure, and saying nothing made it look the same (DS41-045).
+    //
+    // The embedding page for the same reason (audit R-52): the `embed` role was
+    // never in the catalogue, so its "private" in the 31611 was the operator's
+    // config, not anything Venice said. A failed page leaves embed "unverified".
+    const optionalPage = (type: string) =>
+      this.modelPage(type).catch((e: unknown) => {
+        // A 404 is an older gateway without that page. Anything else is a real
+        // failure, and saying nothing made it look the same (DS41-045).
         if (!(e instanceof ProviderHttpError && e.status === 404)) {
-          console.warn(`[coordinator] Venice decision model page unavailable: ${e instanceof Error ? e.message : e}`);
+          console.warn(`[coordinator] Venice ${type} model page unavailable: ${e instanceof Error ? e.message : e}`);
         }
         return [] as any[];
-      }),
+      });
+    const [text, decision, embedding] = await Promise.all([
+      this.modelPage(),
+      optionalPage("decision"),
+      optionalPage("embedding"),
     ]);
     const seen = new Set<string>();
-    const raw = [...text, ...decision].filter((m) => {
+    const raw = [...text, ...decision, ...embedding].filter((m) => {
       if (!m?.id || seen.has(m.id)) return false;
       seen.add(m.id);
       return true;

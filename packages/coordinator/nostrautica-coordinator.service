@@ -48,10 +48,13 @@ StateDirectoryMode=0700
 Environment=NOSTRAUTICA_COORDINATOR_DB=/var/lib/nostrautica/coordinator.sqlite
 EnvironmentFile=/etc/nostrautica/coordinator.env
 
-# Preflight: refuse to start on an unhealthy environment. NOTE (audit O2): this
-# must be the genuinely read-only `doctor`; until that lands, doctor can run DB
-# migrations, so keep a backup before first start after an upgrade.
-ExecStartPre=/usr/bin/node dist/main.js doctor --config /etc/nostrautica/coordinator.toml
+# Preflight: refuse to start on a broken LOCAL environment — config, spend gate,
+# identity, database integrity, ffmpeg. `doctor` is read-only (audit O2). `--local`
+# skips the relay and provider probes (audit R-58): a third-party outage is not a
+# reason to refuse to start, the daemon rides it out, and a preflight that fails on
+# one burns the start-limit budget below and leaves the unit failed with no retry.
+# Run the full `doctor` by hand around config changes and upgrades.
+ExecStartPre=/usr/bin/node dist/main.js doctor --local --config /etc/nostrautica/coordinator.toml
 ExecStart=/usr/bin/node dist/main.js /etc/nostrautica/coordinator.toml
 
 # ── Crash supervision ────────────────────────────────────────────────────────

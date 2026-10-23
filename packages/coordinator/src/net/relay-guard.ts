@@ -37,7 +37,10 @@ export function makeGuardedLookup(
   allowInsecure = false,
 ): LookupFn {
   return (hostname, options, callback) => {
-    // An IP literal short-circuits DNS: check it directly.
+    // An IP literal short-circuits DNS: check it directly. Defense in depth only:
+    // node's net.connect never calls a custom lookup for a literal host, so the
+    // check that actually runs for `wss://127.0.0.1` is in GuardedWebSocket's
+    // constructor below (audit R-55).
     if (isIP(hostname) !== 0) {
       if (!allowInsecure && isBlockedAddress(hostname)) {
         callback(new Error(`relay host ${hostname} is a blocked (private/loopback/reserved) address`));
@@ -90,6 +93,22 @@ export function makeGuardedLookup(
  */
 export class GuardedWebSocket extends WS {
   constructor(address: string | URL, protocols?: any, options?: any) {
+    // An IP-literal host never reaches the guarded lookup (node skips DNS for it),
+    // so refuse a non-public literal here, before anything is dialled (audit R-55).
+    // Every relay URL source already rejects these syntactically; this is the
+    // connect-time backstop for one that did not. nostr-tools turns the throw into
+    // a rejected connect().
+    if (!allowInsecureRelays) {
+      let host = "";
+      try {
+        host = new URL(String(address)).hostname.replace(/^\[|\]$/g, "");
+      } catch {
+        // Unparseable: let ws report it the way it always has.
+      }
+      if (isIP(host) !== 0 && isBlockedAddress(host)) {
+        throw new Error(`relay host ${host} is a blocked (private/loopback/reserved) address`);
+      }
+    }
     super(address, protocols, {
       ...(options ?? {}),
       lookup: makeGuardedLookup(dnsLookup as unknown as LookupFn, allowInsecureRelays),
