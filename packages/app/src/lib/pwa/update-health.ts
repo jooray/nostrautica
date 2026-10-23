@@ -33,6 +33,16 @@ export const DRIFT_WARN_AFTER = 3;
  */
 export const SILENCE_WARN_MS = 10 * 60_000;
 
+/**
+ * The revision a served `sw.js` stamps on its precached `index.html` (see
+ * vite.config.ts), i.e. which build the server is actually handing out. Used to
+ * latch the automatic recovery once per served build. "unknown" when the body
+ * carries none (an error page, a proxy's answer), which still latches once.
+ */
+export function servedRevision(source: string): string {
+  return /index\.html"\s*,\s*"?revision"?\s*:\s*"([^"]+)"/.exec(source)?.[1] ?? "unknown";
+}
+
 type Log = (...args: unknown[]) => void;
 
 /**

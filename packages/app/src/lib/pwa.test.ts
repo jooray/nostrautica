@@ -189,4 +189,23 @@ describe("registerPwa update wiring (SB-67)", () => {
     await vi.advanceTimersByTimeAsync(60_000);
     expect(updateStuck.reason).toBeNull();
   });
+
+  it("a confirmed stuck build reloads itself once per served revision, via the guard", async () => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+    });
+    const stale = `precacheAndRoute([{url:"/app/index.html",revision:"v0.0.1+aaaaaaaaaaaa"}])`;
+    fetchMock.mockImplementation(async () => ({ text: async () => stale }));
+    await registered();
+    await vi.advanceTimersByTimeAsync(60_000 * 2);
+    expect(win.location.reload).not.toHaveBeenCalled(); // not confirmed yet
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(h.requestRefresh).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(win.location.reload).toHaveBeenCalledTimes(1));
+    // Same stale revision again (a proxy still serving it): latched, no loop.
+    await vi.advanceTimersByTimeAsync(60_000 * 3);
+    expect(win.location.reload).toHaveBeenCalledTimes(1);
+  });
 });
