@@ -26,6 +26,8 @@ object KeysBackup {
             pendingEck = pending.ifEmpty { null },
             priorEinboxNsecs = prior.ifEmpty { null },
             coOrganizers = ((a.coOrganizers ?: emptyList()) + (b.coOrganizers ?: emptyList())).distinct().sorted().take(Limits.MAX_ORGANIZERS).ifEmpty { null },
+            // R-04: union, [b] first so [a]'s entries are the newest; capped from the old end.
+            revoked = ((b.revoked ?: emptyList()) + (a.revoked ?: emptyList())).distinct().takeLast(Limits.MAX_REVOKED).ifEmpty { null },
         )
     }
 }

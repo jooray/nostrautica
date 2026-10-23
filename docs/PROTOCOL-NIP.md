@@ -1011,7 +1011,8 @@ relay-visible event on its own.
     inbox_nsec: hex32,
     eck: [{ id: int >0, key: base64(32 bytes) }] ≤1024,
     config_relays: string[] ≤30,
-    prev_coordinator?: hex32
+    prev_coordinator?: hex32,
+    revoked?: hex32[] ≤500
   }
   ```
 - Seal author **MUST** equal the coordinate's `E_id`. Install authorization and the `gen`
@@ -1020,6 +1021,20 @@ relay-visible event on its own.
   replaces: the one the newest `31600` named when the organizer attached this one, if
   different. It is the only key other than `E_id` whose roster the handover bootstrap may
   adopt (§3.7). A coordinator that predates the field ignores it.
+- `revoked` (optional, additive) lists members the organizer revoked and has not approved
+  since: revocations made while no coordinator was attached, and those the outgoing
+  coordinator enforced, whose own record does not travel. The organizer client keeps them
+  (and the `30078` event-keys backup carries them as `revoked`, unioned across devices);
+  it **SHOULD** drop anyone the current roster lists and keep the newest 500. A receiving
+  coordinator **MUST** record each as an organizer revocation **before** it subscribes to
+  or backfills `E_inbox`, so a replayed join (or the member's original invite code) does
+  not readmit them, and **MUST NOT** adopt them from a handover roster (§3.7). Only an
+  organizer `approve` lifts one; a grant never does. Without the field, a fresh install
+  re-evaluates every historical join on its own, which re-admits a member revoked while
+  no coordinator was attached. Upgrade path: both sides are additive, so an older
+  coordinator ignores the field and an older client sends none; an organizer who revoked
+  people on an older client re-revokes them (or detaches and re-attaches after the
+  upgrade) for the record to exist.
 
 #### `21604`: Admin Command
 

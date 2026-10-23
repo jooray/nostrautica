@@ -3055,6 +3055,52 @@ describe("NIP §3.5 — install generation + durable detach + startup revalidati
     expect(h.store.getAttendee(h.coordinate, p2.pubkey)).toBeDefined();
   });
 
+  // Audit 2026-10-21 R-05: `handleAdmin` returned on a missing live state, and the
+  // wrapper marked the command seen — so a revoke sent while the event was
+  // suspended was consumed and never applied, and the member kept their access.
+  it("an organizer revoke sent while the event is SUSPENDED is applied once it resumes (R-05)", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    h.transport.blockConfig = true;
+    await h.coordinator.installEvent({
+      coordinate: h.coordinate, inboxSkHex: bytesToHex(h.einboxSk),
+      eck: [{ id: 1, key: bytesToBase64(h.eck) }], configRelays: ["wss://test"],
+      gen: 1, source: "restore",
+    });
+
+    const createdAt = Math.floor(h.clock.t / 1000);
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "revoke", args: { pubkey: pk }, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+    h.transport.seed.push(wrap as any); // it is on the relay, for the rescan
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(false); // deferred, not consumed
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+
+    h.transport.blockConfig = false;
+    h.clock.t += 60_000;
+    await h.coordinator.retrySuspendedEvents();
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    expect(h.store.isRevoked(h.coordinate, pk)).toBe(true);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+  });
+
+  it("a command for an event this daemon does not hold is still consumed (R-05)", async () => {
+    const h = await setup();
+    const other = makeCoordinate(getPublicKey(h.eidSk), "not-installed", KIND_CALENDAR_EVENT);
+    const createdAt = Math.floor(h.clock.t / 1000);
+    const wrap = wrapRumor(h.eidSk, getPublicKey(h.coordSk), {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: other, cmd: "recompute", args: {}, expires: createdAt + 172_800 },
+      created_at: createdAt,
+    });
+    await h.coordinator.handleCoordinatorWrap(wrap as any);
+    expect(h.store.isRumorSeen((wrap as any).id)).toBe(true);
+  });
+
   /**
    * Audit B-10. A suspension (NIP §3.5 — the newest 31600 wasn't fetchable at
    * startup revalidation, which a relay outage at boot is enough to cause) drops
@@ -4870,13 +4916,13 @@ function secondCoordinator(h: Harness, coordSkB: Uint8Array): { coordinator: Coo
 async function handOverTo(
   h: Harness,
   coordSkB: Uint8Array,
-  opts: { prev?: string; cfgId?: string } = {},
+  opts: { prev?: string; cfgId?: string; revoked?: string[]; approval?: string } = {},
 ): Promise<{ coordinator: Coordinator; store: Store }> {
   const identifier = h.coordinate.split(":").slice(2).join(":");
   const coordPkB = getPublicKey(coordSkB);
   h.transport.seed.push({
     kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: opts.cfgId ?? "cfg-b", sig: "", content: "",
-    tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
+    tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"], ...(opts.approval ? [["approval", opts.approval]] : [])],
   } as any);
   const b = secondCoordinator(h, coordSkB);
   const grantWrap = wrapRumor(h.eidSk, coordPkB, {
@@ -4889,6 +4935,7 @@ async function handOverTo(
       eck: [{ id: 1, key: bytesToBase64(h.eck) }],
       config_relays: ["wss://test"],
       ...(opts.prev ? { prev_coordinator: opts.prev } : {}),
+      ...(opts.revoked ? { revoked: opts.revoked } : {}),
     },
   });
   await b.coordinator.handleCoordinatorWrap(grantWrap as any);
@@ -5716,6 +5763,42 @@ describe("audit R4 — the coordinator's own inbox is rate-gated before durable 
     const wraps = flood(h, h.eidSk); // the E_id of an event this daemon has installed
     for (const w of wraps) await h.coordinator.handleCoordinatorWrap(w as any);
     expect(wraps.every((w) => h.store.isRumorSeen((w as any).id))).toBe(true);
+  });
+
+  // Audit 2026-10-21 R-12: the shared bucket was charged BEFORE the sender cap was
+  // tested, so one flooding identity's already-over-cap rumors spent the whole
+  // inbox's budget, and a rescan replaying them spent it again.
+  it("an over-cap sender's excess does not spend the inbox budget everyone shares (R-12)", async () => {
+    const h = await setup();
+    const coordPub = getPublicKey(h.coordSk);
+    const baseSec = Math.floor(h.clock.t / 1000);
+    const flooder = generateSecretKey();
+    for (let i = 0; i < 640; i++) {
+      const w = wrapRumor(flooder, coordPub, {
+        kind: KIND_ADMIN_COMMAND,
+        content: { v: 2, a: h.coordinate, cmd: "recompute" },
+        created_at: baseSec - i,
+      });
+      await h.coordinator.handleCoordinatorWrap(w as any);
+    }
+    const bystander = wrapRumor(generateSecretKey(), coordPub, {
+      kind: KIND_ADMIN_COMMAND,
+      content: { v: 2, a: h.coordinate, cmd: "recompute" },
+    });
+    await h.coordinator.handleCoordinatorWrap(bystander as any);
+    expect(h.store.isRumorSeen((bystander as any).id)).toBe(true);
+  });
+
+  it("strangers exhausting the shared bucket cannot starve the organizer's commands (R-12)", async () => {
+    const h = await setup();
+    // A distinct-sender flood has used up the coordinator inbox's shared budget.
+    for (let i = 0; i < 700; i++) h.store.bumpInboxRate("coordinator-inbox", "", h.clock.t, 60_000);
+    const stranger = flood(h, generateSecretKey())[0]!;
+    await h.coordinator.handleCoordinatorWrap(stranger as any);
+    expect(h.store.isRumorSeen((stranger as any).id)).toBe(false); // the bucket still binds them
+    const organizer = flood(h, h.eidSk)[0]!;
+    await h.coordinator.handleCoordinatorWrap(organizer as any);
+    expect(h.store.isRumorSeen((organizer as any).id)).toBe(true);
   });
 });
 
@@ -6818,8 +6901,10 @@ describe("audit C3 — public inbox is population-bounded", () => {
 
   it("refuses a new attendee beyond the 2,000 roster population cap", async () => {
     const h = await setup();
+    // APPROVED members: since R-03 (2026-10-21) only they count toward the cap;
+    // pending requests have their own bounded queue.
     for (let i = 0; i < 2000; i++) {
-      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "seed" + i, status: "pending", now: 1 });
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "seed" + i, status: "approved", now: 1 });
     }
     expect(h.store.attendeeCount(h.coordinate)).toBe(2000);
     // A fresh join (even with a valid invite) is refused — the roster never grows
@@ -8156,5 +8241,263 @@ describe("audit DS41-041 — an event-context edit suggests a recompute", () => 
     metaSub(h).onEvent(meta(h, 30, [["title", "Renamed early"], ["t", "cypherpunk"], ["end", "9000"]]));
     await new Promise((r) => setTimeout(r, 10));
     expect(contextNotices(h)).toHaveLength(0);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-07 — a revoked member's pipeline work never republishes them.
+ *
+ * `processAttendeeJob` checked only that a row existed, `publishDirectory` never
+ * reads status, and the revoke cancelled no jobs. So a `process_attendee` queued
+ * before the revoke (the normal state right after a submission) ran afterwards and
+ * published the removed member's directory entry under the ROTATED ECK — the key
+ * minted to exclude them, readable by everyone who stayed.
+ */
+describe("audit 2026-10-21 R-07 — no pipeline publish for a revoked member", () => {
+  const directoryEntries = (h: Harness, from: number) =>
+    h.transport.published.slice(from).filter((e) => e.kind === KIND_DIRECTORY_ENTRY);
+
+  it("a process job queued before the revoke is cancelled and never runs", async () => {
+    const h = await setup();
+    const pk = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+    await admin(h, "revoke", { pubkey: pk });
+    const from = h.transport.published.length;
+    const sttBefore = h.stt.calls;
+
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, pk)?.ai_profile_json ?? null).toBeNull();
+    expect(h.stt.calls).toBe(sttBefore); // no paid work for someone who is gone
+    expect(directoryEntries(h, from)).toHaveLength(0);
+  });
+
+  it("a job already running when the revoke lands discards its result", async () => {
+    let onTranscribe: (() => Promise<void>) | undefined;
+    const h = await setup(0, { beforeTranscribe: async () => { await onTranscribe?.(); } });
+    const pk = await join(h, generateSecretKey(), "crypto");
+    let from = 0;
+    onTranscribe = async () => {
+      onTranscribe = undefined;
+      await admin(h, "revoke", { pubkey: pk });
+      from = h.transport.published.length;
+    };
+
+    await h.coordinator.jobs.drain();
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("revoked");
+    expect(h.store.getAttendee(h.coordinate, pk)?.ai_profile_json ?? null).toBeNull();
+    expect(from).toBeGreaterThan(0); // the revoke really landed mid-run
+    expect(directoryEntries(h, from)).toHaveLength(0);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-08 — a retried submission cannot recreate a purged member.
+ *
+ * The enrollment gate ran once, outside the retry, and `upsertAttendee` INSERTs. A
+ * submission whose first attempt failed on a relay publish, with a `delete_data`
+ * withdrawal landing before the retry, re-created the withdrawn member's row with
+ * the profile they had just asked the coordinator to delete.
+ */
+describe("audit 2026-10-21 R-08 — a retried submission after a delete_data withdrawal", () => {
+  it("is dropped instead of re-creating the purged row", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    await h.coordinator.jobs.drain();
+
+    let withdrawing: Promise<void> | undefined;
+    h.transport.onPublish = async (e) => {
+      if (withdrawing || e.kind !== KIND_DIRECTORY_ENTRY) return;
+      // The submission's directory publish: the withdrawal arrives now. Give it the
+      // chance to finish (it can only if nothing serializes it against the
+      // submission), then fail this publish so the submission is retried.
+      withdrawing = withdraw(h, sk, { deleteData: true });
+      await Promise.race([withdrawing, new Promise((r) => setTimeout(r, 100))]);
+      throw new Error("simulated relay outage");
+    };
+    await resubmitIntro(h, sk, "crypto");
+    await withdrawing;
+    h.transport.onPublish = undefined;
+
+    expect(withdrawing).toBeDefined();
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-06 — a withdrawal from a row that holds no key rotates nothing.
+ *
+ * The 21610 handler ran the full revoke chain for any existing row, so a pending
+ * (never-approved) sender could mint a new ECK version per distinct withdrawal and
+ * make the coordinator re-grant the whole, ever-growing list to every member.
+ */
+describe("audit 2026-10-21 R-06 — only an approved member's withdrawal rotates the ECK", () => {
+  const eckIds = (h: Harness): number[] =>
+    ((h.coordinator as any).events.get(h.coordinate).eck as { id: number }[]).map((v) => v.id);
+
+  it("a pending member withdrawing (twice) leaves the ECK and every grant untouched", async () => {
+    const h = await setup(0, { approval: "manual" });
+    const member = await join(h, generateSecretKey(), "design");
+    await admin(h, "approve", { pubkey: member });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    const before = eckIds(h);
+    const from = h.transport.published.length;
+
+    h.clock.t += 60_000;
+    await withdraw(h, sk, { deleteData: false, createdAt: Math.floor(h.clock.t / 1000) });
+    // A pending request withdrawn is a request cancelled (R-03): no row is left.
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+    h.clock.t += 60_000;
+    await join(h, sk, "crypto");
+    await withdraw(h, sk, { deleteData: true, createdAt: Math.floor(h.clock.t / 1000) });
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+
+    expect(eckIds(h)).toEqual(before);
+    expect(h.transport.published.slice(from).filter((e) => e.kind === 1059)).toHaveLength(0);
+  });
+
+  it("an approved member withdrawing still rotates (R-06)", async () => {
+    const h = await setup();
+    const sk = generateSecretKey();
+    await join(h, sk, "crypto");
+    const before = eckIds(h);
+    await withdraw(h, sk, { deleteData: false });
+    expect(eckIds(h).length).toBe(before.length + 1);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-03 — an anonymous join flood cannot close an event's door.
+ *
+ * The 2,000 cap counted every row, pending and revoked included, and pending rows
+ * never expired: 2,000 code-less joins to a manual-approval event refused every
+ * later join for good, invited guests included.
+ */
+describe("audit 2026-10-21 R-03 — member cap vs. pending join queue", () => {
+  const codeless = async (h: Harness, sk: Uint8Array): Promise<string> => {
+    const pk = getPublicKey(sk);
+    await h.coordinator.handleInboxWrap(
+      h.coordinate,
+      wrapRumor(sk, getPublicKey(h.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "x", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate]],
+      }) as any,
+    );
+    return pk;
+  };
+  const fill = (h: Harness, n: number, status: string, at: number) => {
+    for (let i = 0; i < n; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "a" + i.toString(16).padStart(63, "0"), status, now: at });
+    }
+  };
+
+  it("pending and revoked rows do not count toward the 2,000-member cap", async () => {
+    const h = await setup();
+    fill(h, 2000, "pending", h.clock.t);
+    for (let i = 0; i < 10; i++) {
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: "b" + i.toString(16).padStart(63, "0"), status: "revoked", now: h.clock.t });
+    }
+    const pk = await join(h, generateSecretKey(), "crypto"); // a valid invite
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
+  it("a full pending queue refuses a code-less join (no row) but still admits an invited guest", async () => {
+    const h = await setup();
+    fill(h, 1000, "pending", h.clock.t);
+    const stranger = await codeless(h, generateSecretKey());
+    expect(h.store.getAttendee(h.coordinate, stranger)).toBeUndefined();
+    expect(h.store.pendingAttendeeCount(h.coordinate)).toBe(1000);
+
+    const guest = await join(h, generateSecretKey(), "crypto");
+    expect(h.store.getAttendee(h.coordinate, guest)?.status).toBe("approved");
+  });
+
+  it("withdrawing a pending request cancels it, leaving no row to count", async () => {
+    const h = await setup(0, { approval: "manual" });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    await withdraw(h, sk, { deleteData: false });
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+
+  it("requests idle past the TTL are evicted when the queue is full", async () => {
+    const h = await setup();
+    fill(h, 1000, "pending", h.clock.t - 4 * 24 * 3600 * 1000);
+    const pk = await codeless(h, generateSecretKey());
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    expect(h.store.pendingAttendeeCount(h.coordinate)).toBe(1);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-04 — a revocation the new coordinator never saw survives the attach.
+ *
+ * A revoke made while no coordinator was attached (or recorded only by the outgoing
+ * one) was nothing but absence from the roster. A newly attached coordinator's full
+ * E_inbox backfill replayed the member's ORIGINAL join, its invite code verified
+ * against an empty claims table, and the member was re-approved and granted the ECK
+ * minted to exclude them. The 21603 now carries the organizer's `revoked` set, and
+ * the coordinator seeds it as tombstones before the backfill.
+ */
+describe("audit 2026-10-21 R-04 — the 21603 `revoked` set on a fresh attach", () => {
+  /** A join with invite `idx` that sits on the relay at E_inbox, for B's backfill. */
+  const seedJoin = (h: Harness, sk: Uint8Array, idx: number): string => {
+    const pk = getPublicKey(sk);
+    const inviteSk = h.invites[idx]!;
+    h.transport.seed.push(
+      wrapRumor(sk, getPublicKey(h.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "revoked one", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), makeInviteProof(inviteSk, h.coordinate, pk).sig]],
+      }) as any,
+    );
+    return pk;
+  };
+
+  it("control: without the set, the backfill re-approves the member on their original invite", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const b = await handOverTo(h, generateSecretKey(), { approval: "manual+invite" });
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
+  it("with the set, the replayed join is refused and the member gets no grant from B", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const coordSkB = generateSecretKey();
+    const before = wrapsTo(h, pk).length;
+    const b = await handOverTo(h, coordSkB, { revoked: [pk], approval: "manual+invite" });
+    expect(b.store.isRevoked(h.coordinate, pk)).toBe(true);
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+    expect(wrapsTo(h, pk).filter((w) => !h.transport.published.slice(0, before).includes(w))).toHaveLength(0);
+  });
+
+  it("bootstrapHandover does not promote a revoked member an older roster still lists", async () => {
+    const h = await setup();
+    const pk = getPublicKey(generateSecretKey());
+    seedRoster(h, getPublicKey(h.eidSk), [{ pubkey: pk, role: "attendee" }], { id: "stale-roster" });
+    const b = await handOverTo(h, generateSecretKey(), { revoked: [pk], approval: "manual+invite" });
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+  });
+
+  it("an organizer approve on the new coordinator still readmits them", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const coordSkB = generateSecretKey();
+    const b = await handOverTo(h, coordSkB, { revoked: [pk], approval: "manual+invite" });
+    const createdAt = Math.floor(h.clock.t / 1000) + 5;
+    await b.coordinator.handleCoordinatorWrap(
+      wrapRumor(h.eidSk, getPublicKey(coordSkB), {
+        kind: KIND_ADMIN_COMMAND,
+        content: { v: 2, a: h.coordinate, cmd: "approve", args: { pubkey: pk }, expires: createdAt + 172_800 },
+        created_at: createdAt,
+      }) as any,
+    );
+    expect(b.store.isRevoked(h.coordinate, pk)).toBe(false);
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
   });
 });

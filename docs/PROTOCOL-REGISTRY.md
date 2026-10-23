@@ -48,7 +48,7 @@ fits in one payload still carries `v: 2`.
 | 21600 | Join Request | Attendee account → `E_inbox` | No revision field; optional invite proof (§7). |
 | 21601 | Profile Submission | Attendee account → `E_inbox` | Carries `rev` (required): the primary ordering key over `(rev, created_at, id)` (§3.3). |
 | 21602 | Key Grant | `E_id`, or the coordinator currently named (current generation) in the newest `31600` → attendee | ECK versions union-merge into local custody; never downgrades. |
-| 21603 | Coordinator Grant (install) | `E_id` → coordinator | Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5. Optional `prev_coordinator` names the replaced coordinator, the only non-`E_id` roster author the handover may adopt (§3.7). |
+| 21603 | Coordinator Grant (install) | `E_id` → coordinator | Carries `gen` (required, strictly increasing per coordinate); install authorization rules in §3.5. Optional `prev_coordinator` names the replaced coordinator, the only non-`E_id` roster author the handover may adopt (§3.7). Optional `revoked` lists organizer-revoked members the coordinator records before replaying `E_inbox`. |
 | 21604 | Admin Command | `E_id` → coordinator | Carries `expires` (required) and is ordered by a per-subject watermark, not arrival order (§3.4); includes the `detach` command. |
 | 21605 | Organizer Grant | `E_id` → co-organizer | Grants full, irrevocable `E_id`/`E_inbox`/ECK custody; no scoped roles. |
 | 21606 | Coordinator Status | Coordinator → organizer, and optionally the affected attendee | Poison/health status and/or a billing block; attendee-directed copies are scoped to that attendee's own items. |

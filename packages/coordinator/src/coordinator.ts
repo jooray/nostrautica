@@ -216,12 +216,31 @@ const MAX_MEDIA_FILE_BYTES = PROTOCOL_MAX_MEDIA_FILE_BYTES;
 const MAX_TALKS_PER_SPEAKER = 10;
 
 /**
- * Event-wide attendee-population cap (audit C3). The 31604 roster protocol cap is
- * 2,000, so the coordinator must never grow its attendee set (pending + approved +
- * revoked) past it and then FAIL to publish the roster. A join that would create a
- * NEW attendee beyond this is refused.
+ * Event-wide member cap (audit C3). The 31604 roster protocol cap is 2,000, so the
+ * coordinator must never grow its APPROVED set past it and then FAIL to publish the
+ * roster. A join that would create a NEW attendee beyond this is refused.
+ *
+ * Counts approved rows only (audit 2026-10-21, R-03). It used to count pending and
+ * revoked rows too, so 2,000 anonymous join requests closed a manual-approval
+ * event's door for good: pending rows never expired, a revoke freed nothing, and
+ * there was no reject. Pending requests have their own bounded queue below.
  */
 const MAX_ATTENDEES_PER_EVENT = 2000;
+/**
+ * Bound on an event's queue of PENDING join requests (R-03). Past it, a join that
+ * no invite or membership proof admits is refused rather than queued; an entitled
+ * join is still admitted. Sized well above a real door rush (a few hundred people
+ * at once), small enough that the queue stays something an organizer can read.
+ */
+const MAX_PENDING_JOINS_PER_EVENT = 1000;
+/**
+ * A pending request untouched (no new join, no submission) for this long is
+ * evicted when the queue is full, so a flood can close the queue only for as long
+ * as it keeps refreshing every row. Matches the gift-wrap rescan horizon: past it
+ * the coordinator could not have recovered the request's lost wraps anyway, and the
+ * organizer can still approve an evicted person by hand (an approve creates the row).
+ */
+const PENDING_JOIN_TTL_MS = 3 * 24 * 60 * 60 * 1000;
 
 /** Durable inbox rate accounting (audit C3): fixed 60s window. */
 const INBOX_RATE_WINDOW_MS = 60_000;
@@ -555,6 +574,14 @@ async function mapWithConcurrency<T>(items: T[], limit: number, fn: (item: T) =>
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
+
+/**
+ * Thrown by a handler whose target exists but cannot act right now (audit
+ * 2026-10-21, R-05): an organizer 21604 for an event that is installed but
+ * suspended. `processRumorWithRetry` neither retries it in memory nor marks it
+ * seen, so the coordinator-inbox rescan replays it once the event is live again.
+ */
+class DeferredRumorError extends Error {}
 
 /**
  * Wall-clock accounting for the boot path, so "startup is slow" can be answered
@@ -1367,6 +1394,8 @@ export class Coordinator {
      * bootstrap then adopts an E_id-authored roster only.
      */
     prevCoordinator?: string;
+    /** The E_id-sealed 21603's `revoked` set (NIP §3.5, R-04): seeded as tombstones. */
+    revoked?: string[];
   }): Promise<void> {
     const { kind: spaceKind, pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
@@ -1590,6 +1619,13 @@ export class Coordinator {
     // Record the install generation (NIP §3.5): bump the high-water mark and clear
     // any prior detach tombstone (a fresh grant with a higher gen re-installs).
     this.deps.store.recordInstalledGen(grant.coordinate, gen);
+    // The organizer's revocations (the 21603 `revoked` set, audit 2026-10-21 R-04),
+    // seeded as tombstones BEFORE the inbox subscription and the full backfill below.
+    // A revoke made while no coordinator was attached — or recorded only by the
+    // outgoing one — was otherwise just absence from the roster, and the backfill
+    // replayed the member's original join and re-approved them on its invite code,
+    // with the ECK minted to exclude them.
+    if (source === "grant" && grant.revoked?.length) this.seedRevocations(grant.coordinate, grant.revoked);
 
     const state: EventState = {
       coordinate: grant.coordinate,
@@ -1688,6 +1724,27 @@ export class Coordinator {
     this.completedInstallGen.set(grant.coordinate, gen);
   }
 
+  /**
+   * Record the organizer's revocations carried by a 21603 (R-04). Additive: a grant
+   * never lifts a tombstone, only an organizer approve does. A row this store still
+   * holds as approved (a re-attach after a detach that kept the rows) is demoted so
+   * no re-grant or roster republish reaches it; the organizer's client already
+   * rotated the ECK and deleted the entry when it revoked.
+   */
+  private seedRevocations(coordinate: string, pubkeys: string[]): void {
+    let demoted = 0;
+    for (const pk of new Set(pubkeys)) {
+      this.deps.store.recordRevocation(coordinate, pk, this.now());
+      if (this.deps.store.getAttendee(coordinate, pk)?.status === "approved") {
+        this.deps.store.upsertAttendee({ coordinate, pubkey: pk, status: "revoked", now: this.now() });
+        this.deps.store.clearPairsInvolving(coordinate, pk);
+        this.deps.store.cancelSubjectPipelineJobs(coordinate, pk, { allStates: false });
+        demoted++;
+      }
+    }
+    log(`[install] ${coordinate}: the grant names ${pubkeys.length} organizer-revoked member(s)${demoted ? ` — ${demoted} demoted from approved` : ""}`);
+  }
+
   /** Suspend an event whose config is unfetchable (NIP §3.5, P0-5): record it for a
    *  backoff retry and ensure it is NOT live. Idempotent. */
   private suspendEvent(
@@ -1733,6 +1790,7 @@ export class Coordinator {
    */
   async retrySuspendedEvents(): Promise<void> {
     const now = this.now();
+    let resumed = false;
     for (const [coordinate, s] of [...this.suspended]) {
       if (s.retryAt > now) continue;
       await this.installEvent({
@@ -1744,7 +1802,11 @@ export class Coordinator {
         backfill: "recent",
         source: "restore",
       });
+      if (this.events.has(coordinate)) resumed = true;
     }
+    // Replay the organizer commands deferred while it was suspended (R-05) now,
+    // rather than at the next periodic rescan.
+    if (resumed) await this.rescanCoordinatorInbox();
   }
 
   private currentEck(state: EventState): { bytes: Uint8Array; id: number } {
@@ -1890,6 +1952,10 @@ export class Coordinator {
           return;
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
+          if (e instanceof DeferredRumorError) {
+            log(`[wrap] rumor ${rumor.id.slice(0, 8)} (kind ${rumor.kind}) deferred — left unseen: ${msg.slice(0, 160)}`);
+            return;
+          }
           // Permanent failures — the payload can never parse (schema) or is not
           // JSON at all — are marked seen instead of looping on every rescan.
           if (e instanceof ZodError || e instanceof SyntaxError) {
@@ -2115,16 +2181,32 @@ export class Coordinator {
    * Durable inbox rate gate (audit C3): accept at most MAX_RUMORS_PER_SENDER_WINDOW
    * rumors from one sender, and MAX_RUMORS_PER_EVENT_WINDOW per event, per window.
    * Returns true when the rumor is WITHIN budget (process it); false when over (drop).
+   *
+   * A sender already over its own cap is refused BEFORE the shared bucket is
+   * charged (audit 2026-10-21, R-12). Charging first let one flooding identity
+   * spend the whole inbox's budget with rumors its own cap was going to drop
+   * anyway — and since drops stay unseen, every rescan replayed the backlog and
+   * spent it again. The check is a read, not a bump, so a distinct-sender flood
+   * still stops creating per-sender rows once the shared bucket is exhausted.
+   *
+   * `organizer` (an installed event's E_id sending admin commands, see
+   * {@link isInstalledEventIdentity}) is not charged to the shared bucket at all:
+   * it has its own per-E_id bucket of the same size, so strangers flooding the
+   * coordinator's public inbox can no longer starve the organizer's approvals.
    */
-  private inboxRateAllows(coordinate: string, senderPubkey: string, exemptSenderCap = false): boolean {
+  private inboxRateAllows(coordinate: string, senderPubkey: string, organizer = false): boolean {
     const now = this.now();
+    if (organizer) {
+      const own = this.deps.store.bumpInboxRate(`${coordinate}:organizer`, senderPubkey, now, INBOX_RATE_WINDOW_MS);
+      return own <= MAX_RUMORS_PER_EVENT_WINDOW;
+    }
+    if (this.deps.store.peekInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS) >= MAX_RUMORS_PER_SENDER_WINDOW) {
+      return false;
+    }
     const eventCount = this.deps.store.bumpInboxRate(coordinate, "", now, INBOX_RATE_WINDOW_MS);
     if (eventCount > this.eventRumorBudget(coordinate)) return false;
-    // Always bump the sender's counter, exempt or not: the accounting is what the
-    // per-window budget is computed from, and an exemption is a decision about
-    // whether to REFUSE, not a licence to stop counting.
     const senderCount = this.deps.store.bumpInboxRate(coordinate, senderPubkey, now, INBOX_RATE_WINDOW_MS);
-    return exemptSenderCap || senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
+    return senderCount <= MAX_RUMORS_PER_SENDER_WINDOW;
   }
 
   /**
@@ -2168,6 +2250,21 @@ export class Coordinator {
    * pending rows, which is the point: joins create them, so the budget rises
    * with the crowd during the burst instead of after it.
    */
+  /**
+   * Is the event's pending join queue at its bound (audit 2026-10-21, R-03)? Only
+   * when it is, evict requests idle past {@link PENDING_JOIN_TTL_MS} first, oldest
+   * first, through the per-attendee purge (which keeps any revocation tombstone).
+   * The TTL is past the rescan's gift-wrap window, so the evicted request's own
+   * join is no longer replayed to recreate it.
+   */
+  private pendingQueueFull(coordinate: string): boolean {
+    if (this.deps.store.pendingAttendeeCount(coordinate) < MAX_PENDING_JOINS_PER_EVENT) return false;
+    const stale = this.deps.store.stalePendingPubkeys(coordinate, this.now() - PENDING_JOIN_TTL_MS);
+    for (const pk of stale) this.deps.store.purgeAttendeeArtifacts(coordinate, pk);
+    if (stale.length) log(`[join] ${coordinate}: pending queue full — evicted ${stale.length} request(s) idle for over ${PENDING_JOIN_TTL_MS / 86_400_000} days`);
+    return this.deps.store.pendingAttendeeCount(coordinate) >= MAX_PENDING_JOINS_PER_EVENT;
+  }
+
   private eventRumorBudget(coordinate: string): number {
     if (coordinate === COORD_INBOX_RATE_KEY) return MAX_RUMORS_PER_EVENT_WINDOW;
     const enrolled = this.deps.store.attendeeCount(coordinate);
@@ -2253,6 +2350,7 @@ export class Coordinator {
           backfill: known ? "recent" : "full",
           source: "grant",
           prevCoordinator: grant.prev_coordinator,
+          revoked: grant.revoked,
         });
       } else if (rumor.kind === KIND_ADMIN_COMMAND) {
         const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
@@ -2362,11 +2460,16 @@ export class Coordinator {
       } else if (rumor.kind === KIND_PROFILE_SUBMISSION) {
         const content = profileSubmissionContentSchema.parse(JSON.parse(rumor.content));
         log(`[submission] from ${short(rumor.pubkey)} — rev ${content.rev}, ${content.media.length} media, ${content.intro_text ? "text intro, " : ""}${content.profile.skills.length} skills`);
-        await this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
-          rev: content.rev,
-          createdAt: effectiveCreatedAt, // §3.3 ordering key → the clamped value
-          rumorId: rumor.id,
-        });
+        // Under the member's lock (audit 2026-10-21, R-08), so a `delete_data`
+        // withdrawal cannot interleave with it — and per ATTEMPT, so a retry runs
+        // after a withdrawal that landed in between and sees the row it purged gone.
+        await this.withSubjectLock(state.coordinate, `member:${rumor.pubkey}`, () =>
+          this.handleSubmission(state, rumor.pubkey, content.profile, content.media, content.intro_text, {
+            rev: content.rev,
+            createdAt: effectiveCreatedAt, // §3.3 ordering key → the clamped value
+            rumorId: rumor.id,
+          }),
+        );
       } else if (rumor.kind === KIND_PROFILE_CORRECTION) {
         const content = profileCorrectionContentSchema.parse(JSON.parse(rumor.content));
         // The subject is the SEAL AUTHOR (rumor.pubkey), bound by unwrapRumor — an
@@ -2489,9 +2592,33 @@ export class Coordinator {
         return;
       }
       log(`[withdraw] ${short(pubkey)} leaving ${state.coordinate} (delete_data=${content.delete_data})`);
-      // The public effect chain is identical to an organizer revoke (idempotent, and
-      // its ECK rotation resumes idempotently via the same operation progress).
-      await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      // Only an APPROVED member's departure rotates the ECK (audit 2026-10-21, R-06).
+      // A pending or already-revoked row holds no current key, no directory entry and
+      // no roster seat, yet its withdrawal used to mint a new ECK version and re-grant
+      // the whole (unbounded) list to every member — so anyone able to send a join
+      // could grow every member's grant and the coordinator's republish work on
+      // demand. Such a row is just marked revoked (or purged below). A rotation this
+      // operation already recorded still resumes, so a retry after a crash
+      // mid-revoke finishes the republish instead of skipping it on the now
+      // `revoked` row.
+      const rotating =
+        existing.status === "approved" ||
+        this.deps.store.getCommandOpProgress(state.coordinate, subject).eckRotation !== undefined;
+      if (rotating) {
+        // The public effect chain is identical to an organizer revoke (idempotent, and
+        // its ECK rotation resumes idempotently via the same operation progress).
+        await this.revokeAttendee(state, pubkey, { subject, rumorId: order.rumorId });
+      } else if (existing.status === "pending") {
+        // Withdrawing a pending request cancels it: the row goes entirely, whatever
+        // `delete_data` says (nothing was processed for it — the pipeline runs only
+        // for approved members — so there is no spend to preserve). Keeping it as
+        // `revoked` would let join-then-withdraw cycles grow rows that neither the
+        // member cap nor the pending queue counts (R-03).
+        this.deps.store.purgeAttendeeArtifacts(state.coordinate, pubkey);
+        log(`[withdraw] ${short(pubkey)} cancelled their pending request — no ECK rotation`);
+      } else {
+        log(`[withdraw] ${short(pubkey)} was already '${existing.status}' — no ECK rotation`);
+      }
       if (content.delete_data) {
         // Ownership token recheck (audit R1, belt to the mutex): don't purge if a
         // newer membership command superseded this withdrawal mid-flight.
@@ -2779,11 +2906,14 @@ export class Coordinator {
     // Population cap (audit C3): a NEW attendee beyond the 2,000 roster protocol cap
     // is refused — the coordinator must never grow its attendee set past what the
     // 31604 roster can carry and then fail to publish it. Existing rows (re-delivered
-    // joins) are unaffected.
-    if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+    // joins) are unaffected. Approved members only (R-03, see the constant).
+    if (!existing && this.deps.store.approvedAttendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
       log(`[join] REJECTED ${short(attendeePubkey)}: event ${state.coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
       return;
     }
+    // Pending-queue bound (R-03): with the queue full, a NEW joiner gets no early
+    // enrollment row, and is refused below unless an entitlement admits them.
+    const queueFull = !existing && this.pendingQueueFull(state.coordinate);
 
     const inviteTag = tags.find((t) => t[0] === "invite");
     const invite = inviteTag && inviteTag[1] && inviteTag[2]
@@ -2820,13 +2950,19 @@ export class Coordinator {
     // the real one. C3's threat model is untouched: the gate exists so an unknown
     // sender can't create a row by SUBMITTING A PROFILE, and this row is created
     // by an authenticated join request, which is exactly what does that.
-    this.deps.store.upsertAttendee({
-      coordinate: state.coordinate,
-      pubkey: attendeePubkey,
-      status: "pending",
-      displayName: name.trim() || null,
-      now: this.now(),
-    });
+    //
+    // Skipped while the pending queue is full (R-03): a refused join must leave no
+    // row. The race above then costs only a delay — a submission that arrives
+    // first is left unseen and applied by the next inbox rescan once they are in.
+    if (!queueFull) {
+      this.deps.store.upsertAttendee({
+        coordinate: state.coordinate,
+        pubkey: attendeePubkey,
+        status: "pending",
+        displayName: name.trim() || null,
+        now: this.now(),
+      });
+    }
 
     // `approval: "manual"` (audit SB-124): every join waits for the organizer — a
     // valid invite included, which is the whole difference from `manual+invite`.
@@ -2860,6 +2996,10 @@ export class Coordinator {
         return;
       }
       const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+      if (!decision.grant && !current && queueFull) {
+        log(`[join] REJECTED ${short(attendeePubkey)}: the ${MAX_PENDING_JOINS_PER_EVENT}-request pending queue is full`);
+        return;
+      }
       this.deps.store.upsertAttendee({
         coordinate: state.coordinate,
         pubkey: attendeePubkey,
@@ -2984,6 +3124,12 @@ export class Coordinator {
       return;
     }
     const current = this.deps.store.getAttendee(state.coordinate, attendeePubkey);
+    if (!decision.grant && !current && queueFull) {
+      log(
+        `[join] REJECTED ${short(attendeePubkey)}: the ${MAX_PENDING_JOINS_PER_EVENT}-request pending queue is full (${decision.reason})`,
+      );
+      return;
+    }
     const status = decision.grant ? "approved" : (current?.status ?? "pending");
     if (!decision.grant && current && current.status !== "pending") {
       log(
@@ -3062,8 +3208,19 @@ export class Coordinator {
     // left with the original shape: matching-OFF (where `enqueueProcess` returns
     // immediately, so the directory publish is the only effect) and every path
     // where the retry happens after the row is written. Re-applying is idempotent.
+    //
+    // The enrollment gate in handleInboxWrap runs once, OUTSIDE the retry (audit
+    // 2026-10-21, R-08). If a `delete_data` withdrawal purged the row between that
+    // check and this attempt, the upsert below — which INSERTs — recreated the
+    // withdrawn member with the profile they had asked to have deleted. Re-checked
+    // here, under the member lock the caller holds, the submission is dropped.
+    const enrolled = this.deps.store.getAttendee(state.coordinate, pubkey);
+    if (!enrolled) {
+      log(`[submission] dropped from ${short(pubkey)}: their enrollment row is gone (withdrew with delete_data)`);
+      return;
+    }
     if (order) {
-      const cur = this.deps.store.getAttendee(state.coordinate, pubkey);
+      const cur = enrolled;
       if (cur?.profile_rev != null && cur.profile_rumor_id !== order.rumorId) {
         const current = { rev: cur.profile_rev, created_at: cur.profile_created_at ?? 0, id: cur.profile_rumor_id ?? "" };
         const candidate = { rev: order.rev, created_at: order.createdAt, id: order.rumorId };
@@ -3467,10 +3624,17 @@ export class Coordinator {
     for (const a of roster.attendees) {
       const existing = this.deps.store.getAttendee(state.coordinate, a.pubkey);
       if (existing?.status === "approved") continue; // already reconstructed from E_inbox backfill
+      // An organizer revocation outranks the roster (audit 2026-10-21, R-04): an
+      // outgoing coordinator's roster, or an E_id roster older than the revoke, may
+      // still list the member the grant's `revoked` set names.
+      if (this.deps.store.isRevoked(state.coordinate, a.pubkey)) {
+        log(`[handover] ${state.coordinate}: not adopting ${short(a.pubkey)} — revoked by the organizer`);
+        continue;
+      }
       // The same population cap a join is held to (audit SB-123): the E_inbox
       // backfill may already have enrolled people, so the merged-roster check above
       // is not enough on its own.
-      if (!existing && this.deps.store.attendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+      if (this.deps.store.approvedAttendeeCount(state.coordinate) >= MAX_ATTENDEES_PER_EVENT) {
         log(
           `[handover] ${state.coordinate}: stopped seeding at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap; the rest of the roster was not adopted`,
         );
@@ -3938,7 +4102,13 @@ export class Coordinator {
     // any STT/LLM spend.
     await this.assertSpendAllowed(coordinate, pubkey);
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
-    if (!attendee) return false;
+    // Only an APPROVED member is processed (audit 2026-10-21, R-07). A job queued
+    // before a revoke used to run anyway and `publishDirectory` (which never reads
+    // status) republished the removed member's entry under the ROTATED ECK.
+    if (attendee?.status !== "approved") {
+      if (attendee) log(`[pipeline] ${short(pubkey)}: skipped — attendee is '${attendee.status}', not approved`);
+      return false;
+    }
     const { profile, media, introText } = this.parseStoredProfile(attendee);
     // Server-side media caps (audit COORD-4): per-descriptor duration cap (the
     // event's configured max) and a total-download budget per submission —
@@ -4014,6 +4184,12 @@ export class Coordinator {
     signal?.throwIfAborted();
     if (!this.eventStillLive(coordinate, state.gen)) {
       log(`[pipeline] ${short(pubkey)}: event no longer live (detached/expired) — discarding result`);
+      return false;
+    }
+    // …and the member is still approved (R-07): a revoke or withdrawal that landed
+    // while STT/LLM ran must not be followed by a commit and a directory publish.
+    if (this.deps.store.getAttendee(coordinate, pubkey)?.status !== "approved") {
+      log(`[pipeline] ${short(pubkey)}: no longer approved (revoked/withdrawn during processing) — discarding result`);
       return false;
     }
     // Conditional commit (audit C2): write the ai_profile ONLY if the attendee's
@@ -4124,6 +4300,11 @@ export class Coordinator {
     // paid STT for a talks-off event.
     if (state.talks === "off") {
       log(`[talk] process_talk skipped for ${short(pubkey)}: talks are off for this event`);
+      return;
+    }
+    // A removed speaker's queued talk is not transcribed (audit 2026-10-21, R-07).
+    if (this.deps.store.getAttendee(coordinate, pubkey)?.status !== "approved") {
+      log(`[talk] process_talk skipped for ${short(pubkey)}: no longer an approved attendee`);
       return;
     }
     // Spend gate (spec §8/§9): billing block OR exceeded budget parks talk STT.
@@ -4941,7 +5122,22 @@ export class Coordinator {
     order?: { createdAt: number; rumorId: string; expires: number },
   ): Promise<void> {
     const state = this.events.get(coordinate);
-    if (!state) return;
+    if (!state) {
+      // Not live is not the same as unknown (audit 2026-10-21, R-05). A suspended
+      // event keeps its store rows and resumes later, but returning here let the
+      // wrapper mark the command seen — so an organizer's revoke sent while the
+      // event's config was briefly unfetchable was consumed and never applied.
+      // Defer it (left unseen; the rescan after resume replays it) when the event is
+      // held, not detached, and the command really is from its E_id.
+      if (
+        this.suspended.has(coordinate) &&
+        !this.deps.store.isInstallTombstoned(coordinate) &&
+        from === parseCoordinate(coordinate).pubkey
+      ) {
+        throw new DeferredRumorError(`"${cmd}" for ${coordinate}: the event is suspended, not live`);
+      }
+      return;
+    }
     // Only the organizer (E_id) may command the coordinator.
     if (from !== state.eidPubkey) return;
 
@@ -4991,7 +5187,7 @@ export class Coordinator {
       // person's profile submission, held back by the enrollment gate, is picked up
       // by the periodic inbox rescan.
       if (!attendee && /^[0-9a-f]{64}$/.test(pubkey)) {
-        if (this.deps.store.attendeeCount(coordinate) >= MAX_ATTENDEES_PER_EVENT) {
+        if (this.deps.store.approvedAttendeeCount(coordinate) >= MAX_ATTENDEES_PER_EVENT) {
           log(`[approve] REFUSED ${short(pubkey)}: event ${coordinate} at the ${MAX_ATTENDEES_PER_EVENT}-attendee cap`);
           return;
         }
@@ -5260,8 +5456,11 @@ export class Coordinator {
     );
     await this.deps.transport.publish(deletion, state.configRelays);
 
-    // 2. Mark removed (idempotent).
+    // 2. Mark removed (idempotent), and drop their not-yet-started pipeline work
+    //    (audit 2026-10-21, R-07): it would otherwise spend on, and republish, a
+    //    member who is gone. A running job rechecks status before it commits.
     this.deps.store.upsertAttendee({ coordinate: state.coordinate, pubkey: removedPubkey, status: "revoked", now: this.now() });
+    this.deps.store.cancelSubjectPipelineJobs(state.coordinate, removedPubkey, { allStates: false });
 
     // 3. Drop every cached pair that involves the removed attendee so remaining
     //    lists/matrix don't reference them after rotation (audit H3).
@@ -6744,6 +6943,22 @@ export class Coordinator {
     for (const { w } of ordered) await this.handleInboxWrap(state.coordinate, w as unknown as GiftWrap);
   }
 
+  /** Replay the coordinator's own inbox over the gift-wrap window (see rescanInboxes). */
+  private async rescanCoordinatorInbox(): Promise<void> {
+    const since = giftwrapSince(Math.floor(this.now() / 1000));
+    try {
+      const wraps = await this.deps.transport.fetch(
+        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since },
+        this.deps.defaultRelays,
+      );
+      const unseen = wraps.filter((w) => !this.deps.store.isRumorSeen(w.id)).length;
+      if (unseen > 0) log(`[rescan] coordinator inbox: ${unseen} unseen wrap(s) of ${wraps.length} in the window`);
+      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
+    } catch (e) {
+      log(`[rescan] coordinator-inbox rescan failed: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
   /**
    * Periodic rescan of every live inbox (P1 #14, open since July).
    *
@@ -6767,17 +6982,7 @@ export class Coordinator {
    */
   async rescanInboxes(): Promise<void> {
     const since = giftwrapSince(Math.floor(this.now() / 1000));
-    try {
-      const wraps = await this.deps.transport.fetch(
-        { kinds: [KIND_GIFT_WRAP], "#p": [this.coordPubkey], since },
-        this.deps.defaultRelays,
-      );
-      const unseen = wraps.filter((w) => !this.deps.store.isRumorSeen(w.id)).length;
-      if (unseen > 0) log(`[rescan] coordinator inbox: ${unseen} unseen wrap(s) of ${wraps.length} in the window`);
-      for (const w of wraps) await this.handleCoordinatorWrap(w as unknown as GiftWrap);
-    } catch (e) {
-      log(`[rescan] coordinator-inbox rescan failed: ${e instanceof Error ? e.message : e}`);
-    }
+    await this.rescanCoordinatorInbox();
     // Snapshot: an event can detach (or a config handover can repoint relays)
     // while this loop is awaiting, and `eventStillLive` re-checks per iteration.
     for (const coordinate of [...this.events.keys()]) {

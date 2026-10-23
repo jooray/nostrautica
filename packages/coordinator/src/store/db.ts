@@ -1813,8 +1813,18 @@ export class Store {
     return count;
   }
 
-  /** Count of attendee rows for an event (audit C3 population cap: pending + approved
-   *  + revoked). Used to bound roster growth below the 2,000 protocol cap. */
+  /** The current window's count for (coordinate, pubkey) WITHOUT bumping it — 0 when
+   *  the stored row belongs to an earlier window (audit 2026-10-21, R-12). */
+  peekInboxRate(coordinate: string, pubkey: string, now: number, windowMs: number): number {
+    const windowStart = windowMs > 0 ? now - (now % windowMs) : now;
+    const row = this.db
+      .prepare("SELECT window_start, count FROM inbox_rate WHERE coordinate = ? AND pubkey = ?")
+      .get(coordinate, pubkey) as { window_start: number; count: number } | undefined;
+    return row && row.window_start === windowStart ? row.count : 0;
+  }
+
+  /** Count of attendee rows for an event (pending + approved + revoked). Sizes the
+   *  inbox rumor budget; the member cap counts approved rows only (R-03). */
   attendeeCount(coordinate: string): number {
     return (
       this.db.prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ?").get(coordinate) as { n: number }
@@ -1828,6 +1838,28 @@ export class Store {
         .prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ? AND status = 'pending'")
         .get(coordinate) as { n: number }
     ).n;
+  }
+
+  /** Count of approved members — what the 2,000-member intake cap bounds (audit
+   *  2026-10-21, R-03: pending and revoked rows hold no roster seat). */
+  approvedAttendeeCount(coordinate: string): number {
+    return (
+      this.db
+        .prepare("SELECT COUNT(*) AS n FROM attendees WHERE coordinate = ? AND status = 'approved'")
+        .get(coordinate) as { n: number }
+    ).n;
+  }
+
+  /** Pending rows not touched (no join, no submission) since `cutoffMs`, oldest
+   *  first — the join queue's eviction candidates (R-03). */
+  stalePendingPubkeys(coordinate: string, cutoffMs: number): string[] {
+    return (
+      this.db
+        .prepare(
+          "SELECT pubkey FROM attendees WHERE coordinate = ? AND status = 'pending' AND COALESCE(updated_at, 0) < ? ORDER BY updated_at",
+        )
+        .all(coordinate, cutoffMs) as { pubkey: string }[]
+    ).map((r) => r.pubkey);
   }
 
   // ── events (installed via 21603) ──────────────────────────────────────────
@@ -2160,6 +2192,30 @@ export class Store {
          ON CONFLICT(coordinate) DO UPDATE SET high_gen = MAX(install_state.high_gen, excluded.high_gen), tombstoned = 1, detached_at = excluded.detached_at`,
       )
       .run(coordinate, gen, detachedAt);
+  }
+
+  /**
+   * Cancel one member's pipeline jobs (audit 2026-10-21, R-07/R-09): the types whose
+   * payload names the member as its subject (`$.pubkey`) and whose effect is to
+   * derive, publish or score THEIR data. Chat jobs are deliberately excluded — a
+   * revoke enqueues `chat_revoke_member` for exactly this pubkey, and dropping it
+   * would leave their device in the MLS group.
+   *
+   * `allStates: false` (revoke) drops only work that has not started (pending and
+   * parked); a running job is left to its own post-await status recheck.
+   * `allStates: true` (the `delete_data` purge) drops every row, terminal ones
+   * included, because the payload is a personal identifier the purge promised to
+   * remove. Returns the count deleted.
+   */
+  cancelSubjectPipelineJobs(coordinate: string, pubkey: string, opts: { allStates: boolean }): number {
+    const states = opts.allStates ? "" : "state IN ('pending','waiting') AND ";
+    const info = this.db
+      .prepare(
+        `DELETE FROM jobs WHERE ${states}type IN ('process_attendee','process_talk','match_recompute','publish_matches')
+           AND json_extract(payload, '$.coordinate') = ? AND json_extract(payload, '$.pubkey') = ?`,
+      )
+      .run(coordinate, pubkey);
+    return Number(info.changes);
   }
 
   /** Cancel every pending/running/waiting job for an event (detach and retention:
@@ -2923,6 +2979,11 @@ export class Store {
       // KEPT: per-event spend is the SUM of those rows, so deleting it would refund
       // the event's budget and reset this person's per-attendee cap on a rejoin.
       this.db.prepare("DELETE FROM job_status WHERE coordinate = ? AND pubkey = ?").run(coordinate, pubkey);
+      // …and so are their pipeline jobs (audit 2026-10-21, R-09), which the
+      // event-wide purge already deletes. Left behind, the payload kept the pubkey
+      // in the queue, and a `process_attendee` queued before the withdrawal could
+      // still run against a row a retried submission recreated (R-08).
+      this.cancelSubjectPipelineJobs(coordinate, pubkey, { allStates: true });
       this.db.exec("COMMIT");
     } catch (e) {
       // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
@@ -3630,11 +3691,15 @@ export class Store {
     // replaced. Latent for app-created events (the slug generator only emits
     // [a-z0-9-]) and reachable through a third-party-authored 31923, which
     // `parseCoordinate` accepts.
+    //
+    // The backslash itself is escaped too (audit 2026-10-21, R-11): in an
+    // identifier ending in `\`, the prefix `proc:…:a\:` read `\:` as an escape for
+    // a bare `:`, so the DELETE reached event `a`'s pending jobs as well.
     const info = this.db
       .prepare(
         "DELETE FROM jobs WHERE state IN ('pending','waiting') AND dedupe_key LIKE ? ESCAPE '\\' AND dedupe_key != ?",
       )
-      .run(`${prefix.replace(/[%_]/g, "\\$&")}%`, keepKey);
+      .run(`${prefix.replace(/[\\%_]/g, "\\$&")}%`, keepKey);
     return Number(info.changes);
   }
 

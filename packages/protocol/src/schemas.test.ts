@@ -183,6 +183,19 @@ describe("every §7 payload round-trips through JSON", () => {
     }
   });
 
+  it("21603 coordinator grant carrying the organizer's revocations (R-04)", () => {
+    roundTrips(coordinatorGrantContentSchema, {
+      v: 2, a: "31923:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [], config_relays: [], revoked: [hex],
+    });
+    for (const bad of [["npub1xyz"], Array.from({ length: 501 }, () => hex)]) {
+      expect(() =>
+        coordinatorGrantContentSchema.parse({
+          v: 2, a: "31923:" + hex + ":ev", gen: 1, inbox_nsec: hex, eck: [], config_relays: [], revoked: bad,
+        }),
+      ).toThrow();
+    }
+  });
+
   it("21603 coordinator grant requires a positive gen (NIP §3.5)", () => {
     expect(() =>
       coordinatorGrantContentSchema.parse({
