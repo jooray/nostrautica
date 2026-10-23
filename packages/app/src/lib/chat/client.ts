@@ -296,7 +296,14 @@ export class MarmotChat {
     );
     const meta = account.get(this.identity.account);
     const ev = buildChatKeyProfile(this.identity, meta?.name, meta?.picture);
-    await publishSigned(ev as unknown as Parameters<typeof publishSigned>[0], this.relays).catch(() => {});
+    // The chat relay set ONLY (NIP §10.3: "MUST NOT publish device kind 0
+    // anywhere else", audit R-38). `this.relays` also carries the event's general
+    // relays, which would put the device→account link and the display name on
+    // relays chosen for everything but chat. An event with no `chat_relay` tags
+    // routes chat over its general set, so that set is its chat relay set.
+    const chatRelays = chatRelaysOf(this.ctx.config);
+    const targets = chatRelays.length > 0 ? chatRelays : this.relays;
+    await publishSigned(ev as unknown as Parameters<typeof publishSigned>[0], targets).catch(() => {});
   }
 
   /** Publish the chat identity's 10050 (inbox) + 10002 (discovery) relay lists. */

@@ -359,3 +359,22 @@ describe("a DM thread remembers where it was opened from", () => {
     expect(cold.win.location.hash).toBe(buildHash(DM));
   });
 });
+
+describe("unknown routes never carry a credential (audit R-35)", () => {
+  it("strips it from the route, the address bar, and what Back returns to", () => {
+    const replaced: string[] = [];
+    (fw.win as unknown as { history: unknown }).history = {
+      replaceState: (_s: unknown, _t: string, url: string) => {
+        replaced.push(url);
+        fw.win.location.hash = url;
+      },
+    };
+    fw.navigate("#/e/naddr1xyz/joni?code=SECRET");
+    expect(router.route).toEqual({ name: "notFound", hash: "#/e/naddr1xyz/joni" });
+    expect(replaced).toEqual(["#/e/naddr1xyz/joni"]);
+    fw.navigate(buildHash(DM_PEER));
+    expect(router.dmReturn ?? "").not.toContain("SECRET");
+    router.back();
+    expect(fw.win.location.hash).not.toContain("SECRET");
+  });
+});

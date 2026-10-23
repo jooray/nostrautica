@@ -11,6 +11,8 @@
  * relay event with `v:99` is "invalid", not "you are out of date", and must never
  * be able to nag every user into reloading.
  */
+import { reloadToLatestBuild } from "./update-stuck.svelte.js";
+
 let needed = $state(false);
 
 export const updatePrompt = {
@@ -22,11 +24,12 @@ export const updatePrompt = {
   flag() {
     needed = true;
   },
-  /** Apply the waiting service-worker update (autoUpdate reloads), else hard reload. */
+  /**
+   * Move to the newest deployed build. This used to call the plugin's
+   * `updateSW(true)`, which in autoUpdate mode does nothing (audit R-84), so the
+   * button was inert whenever a service worker was registered.
+   */
   update() {
-    const sw = (window as unknown as { __nostrauticaUpdateSW?: (r?: boolean) => void })
-      .__nostrauticaUpdateSW;
-    if (sw) sw(true);
-    else window.location.reload();
+    reloadToLatestBuild();
   },
 };

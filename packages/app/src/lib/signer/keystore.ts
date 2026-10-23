@@ -10,6 +10,7 @@ const STORE = "keystore";
 const SK_KEY = "local-sk";
 const METHOD_KEY = "login-method";
 const NIP46_KEY = "nip46-session";
+const OWNER_KEY = "login-pubkey";
 
 function openDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -77,6 +78,20 @@ export async function loadLoginMethod(): Promise<string | undefined> {
 }
 
 /**
+ * The pubkey the persisted login belongs to (audit R-41). The method string
+ * alone cannot tell "still my login" from "someone logged me out and signed in
+ * as somebody else", which is exactly what a tab resumed from the background
+ * has to decide. Absent on installs that predate it until their next login.
+ */
+export async function saveLoginOwner(pubkey: string): Promise<void> {
+  await put(OWNER_KEY, pubkey);
+}
+
+export async function loadLoginOwner(): Promise<string | undefined> {
+  return get<string>(OWNER_KEY);
+}
+
+/**
  * Persist a NIP-46 (Amber) session so it survives a refresh (spec §5.3).
  *
  * SECURITY (audit U17): the stored session is a BEARER CAPABILITY for the remote
@@ -104,4 +119,5 @@ export async function clearKeystore(): Promise<void> {
   await del(SK_KEY);
   await del(METHOD_KEY);
   await del(NIP46_KEY);
+  await del(OWNER_KEY);
 }

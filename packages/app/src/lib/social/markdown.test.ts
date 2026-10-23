@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach } from "vitest";
 import { renderMarkdown } from "./markdown.js";
+import { setExternalImagesAllowed } from "$lib/stores/external-images.svelte.js";
 
 describe("renderMarkdown — escape-first invariant (spec §7.4: never raw HTML)", () => {
   it("neutralizes <script> payloads", () => {
@@ -60,7 +61,7 @@ describe("renderMarkdown — features", () => {
 
   it("renders https images", () => {
     expect(renderMarkdown("![alt text](https://x.example/p.png)")).toBe(
-      '<p><img src="https://x.example/p.png" alt="alt text" loading="lazy" /></p>',
+      '<p><img src="https://x.example/p.png" alt="alt text" loading="lazy" referrerpolicy="no-referrer" /></p>',
     );
   });
 
@@ -109,7 +110,7 @@ describe("renderMarkdown — features", () => {
 describe("renderMarkdown — autolink stays out of emitted tags (audit APPR-6)", () => {
   it("does not splice an <a> inside an emitted img's alt attribute", () => {
     const html = renderMarkdown("![x https://e.com](https://ok.png)");
-    expect(html).toBe('<p><img src="https://ok.png" alt="x https://e.com" loading="lazy" /></p>');
+    expect(html).toBe('<p><img src="https://ok.png" alt="x https://e.com" loading="lazy" referrerpolicy="no-referrer" /></p>');
   });
 
   it("does not nest an <a> inside an emitted link's text", () => {
@@ -122,7 +123,7 @@ describe("renderMarkdown — autolink stays out of emitted tags (audit APPR-6)",
   it("still autolinks genuine bare urls around emitted tags", () => {
     const html = renderMarkdown("see https://a.com and ![x https://e.com](https://ok.png) done");
     expect(html).toBe(
-      '<p>see <a href="https://a.com" target="_blank" rel="noopener noreferrer">https://a.com</a> and <img src="https://ok.png" alt="x https://e.com" loading="lazy" /> done</p>',
+      '<p>see <a href="https://a.com" target="_blank" rel="noopener noreferrer">https://a.com</a> and <img src="https://ok.png" alt="x https://e.com" loading="lazy" referrerpolicy="no-referrer" /> done</p>',
     );
   });
 });
@@ -181,5 +182,31 @@ describe("renderMarkdown — emitted tags are opaque to later passes", () => {
     const html = renderMarkdown(forged);
     expect(html).not.toContain(String.fromCharCode(0));
     expect(html).toContain("before 0 after");
+  });
+
+  it("folds a newline in alt text to a space, never a <br /> inside the attribute (R-24)", () => {
+    expect(renderMarkdown("before\n![two\nlines](https://x.example/p.png)\nafter")).toBe(
+      '<p>before<br /><img src="https://x.example/p.png" alt="two lines" loading="lazy" referrerpolicy="no-referrer" /><br />after</p>',
+    );
+  });
+});
+
+describe("renderMarkdown — third-party image policy (audit SEC-17, R-23)", () => {
+  afterEach(() => setExternalImagesAllowed(true));
+
+  it("never emits an http: image, even though SAFE_URL admits http links", () => {
+    const html = renderMarkdown("![pic](http://tracker.example/p.png)");
+    expect(html).not.toContain("<img");
+    expect(html).toContain('<a href="http://tracker.example/p.png"');
+    expect(html).toContain(">pic</a>");
+  });
+
+  it("turns images into links when the reader has turned off-origin images off", () => {
+    setExternalImagesAllowed(false);
+    const html = renderMarkdown("![](https://cdn.example/p.png)");
+    expect(html).not.toContain("<img");
+    expect(html).toBe(
+      '<p><a href="https://cdn.example/p.png" target="_blank" rel="noopener noreferrer nofollow">https://cdn.example/p.png</a></p>',
+    );
   });
 });

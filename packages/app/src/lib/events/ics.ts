@@ -39,18 +39,38 @@ export function icsEscape(text: string): string {
     .replace(/\r\n|\r|\n/g, "\\n");
 }
 
-/** Fold a content line to <=75 octets with CRLF + space continuation (§3.1). */
+/** UTF-8 length of one code point. */
+function utf8Octets(cp: number): number {
+  return cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+}
+
+/**
+ * Fold a content line to <=75 octets with CRLF + space continuation (§3.1).
+ *
+ * Octets of UTF-8, not UTF-16 code units (audit R-79): counting `.length` let a
+ * CJK title run to 3x the limit on one physical line, and slicing at a fixed
+ * index could split a surrogate pair into two lone halves. Breaks fall only
+ * between code points, so unfolding restores the line exactly.
+ */
 export function foldLine(line: string): string {
-  if (line.length <= 75) return line;
   const parts: string[] = [];
-  let rest = line;
-  parts.push(rest.slice(0, 75));
-  rest = rest.slice(75);
-  while (rest.length > 74) {
-    parts.push(" " + rest.slice(0, 74));
-    rest = rest.slice(74);
+  let cur = "";
+  let octets = 0;
+  // The first physical line holds 75 octets; a continuation line spends one of
+  // its 75 on the leading space.
+  let limit = 75;
+  for (const ch of line) {
+    const n = utf8Octets(ch.codePointAt(0)!);
+    if (octets + n > limit) {
+      parts.push(cur);
+      cur = " ";
+      octets = 1;
+      limit = 75;
+    }
+    cur += ch;
+    octets += n;
   }
-  if (rest.length) parts.push(" " + rest);
+  parts.push(cur);
   return parts.join("\r\n");
 }
 

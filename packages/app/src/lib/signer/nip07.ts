@@ -29,6 +29,19 @@ export class Nip07Signer implements AppSigner {
     const pubkey = await this.getPublicKey();
     const signed = (await this.provider.signEvent({ ...template, pubkey })) as VerifiedEvent;
     if (!verifyEvent(signed)) throw new Error("NIP-07 returned an invalid signature");
+    // A valid signature proves only that SOMEONE signed SOMETHING. Bind it to the
+    // identity this session adopted and to the template we asked for, as the
+    // NIP-46 signer does (audit R-37) — an extension that switched accounts, or
+    // rewrote the event, must not have its output published as ours.
+    if (
+      signed.pubkey !== pubkey ||
+      signed.kind !== template.kind ||
+      signed.created_at !== template.created_at ||
+      signed.content !== template.content ||
+      JSON.stringify(signed.tags) !== JSON.stringify(template.tags)
+    ) {
+      throw new Error("NIP-07 signEvent: extension returned a different event");
+    }
     return signed;
   }
 

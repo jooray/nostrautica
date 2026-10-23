@@ -21,6 +21,8 @@ import {
   saveNip46Session,
   loadNip46Session,
   clearKeystore,
+  saveLoginOwner,
+  loadLoginOwner,
 } from "./keystore.js";
 import {
   setActiveOwner,
@@ -37,7 +39,7 @@ import { recentEvents } from "$lib/stores/recent-events.svelte.js";
 import { clearAllJoinSent, setJoinSentOwner } from "$lib/stores/join-sent.svelte.js";
 import { ownStatusStore } from "$lib/stores/own-status.svelte.js";
 import { mutes } from "$lib/stores/mutes.svelte.js";
-import { setInviteOwner } from "$lib/stores/invite-store.js";
+import { setInviteOwner, purgeInvites } from "$lib/stores/invite-store.js";
 import { router } from "$lib/router/router.svelte.js";
 import { broadcastLogout } from "./session-broadcast.js";
 
@@ -233,6 +235,19 @@ class Session {
     await unlockChatIdentityForLogin(pubkey, (ct) => signer.nip44Decrypt(pubkey, ct)).catch((e) => {
       console.warn("[session] chat-identity unlock failed; device key remains locked", e);
     });
+    // Record WHOSE login is persisted (audit R-41), before the identity goes
+    // live: `verifyPersistedIdentity` compares against it, and every caller of
+    // adopt() runs inside trackLogin or a restore, which that check waits out.
+    // Only while still current, so a superseded adoption cannot overwrite the
+    // newer one's record. Best-effort: a failed write leaves the check as blind
+    // as it was before.
+    if (tok === this.opToken) {
+      try {
+        await saveLoginOwner(pubkey);
+      } catch {
+        /* storage unavailable */
+      }
+    }
     // Do not expose a live identity until custody has settled. Event pages react
     // to pubkey/signer and previously made a permanent visitor decision in this
     // window while the organizer snapshot was still encrypted.
@@ -582,6 +597,7 @@ class Session {
     ownStatusStore.setOwner(null);
     mutes.setOwner(null);
     setInviteOwner(null);
+    purgeInvites(); // R-26: a stashed invite must not reach the next identity
     this.signer = null;
     this.pubkey = null;
     this.freshLocalKey = false;
@@ -615,10 +631,13 @@ class Session {
    * calls this, and a tab whose session the disk no longer backs tears itself
    * down exactly as if it had heard the broadcast.
    *
-   * Only "nothing persisted at all" counts. A DIFFERENT persisted identity is
-   * also what this tab's own login→login switch looks like mid-flight (the new
-   * key is saved before `adopt()` runs), so it is left alone; and a read error
-   * proves nothing.
+   * Two states count: nothing persisted at all, and a persisted login whose
+   * recorded owner is a DIFFERENT account (audit R-41: logged out elsewhere,
+   * then someone else signed in). A different identity is also what this tab's
+   * own login→login switch looks like mid-flight (the new key is saved before
+   * `adopt()` runs), which is why nothing runs while a login or restore is in
+   * flight; a missing owner record (an install from before it existed) and a
+   * read error prove nothing.
    */
   async verifyPersistedIdentity(): Promise<void> {
     if (!this.loggedIn || this.restoring || this.loggingOut || this.loginsInFlight > 0) return;
@@ -626,8 +645,10 @@ class Session {
     const epoch = this.loginEpoch;
     const pubkey = this.pubkey!;
     let method: string | undefined | null;
+    let owner: string | undefined | null;
     try {
       method = await loadLoginMethod();
+      owner = method ? await loadLoginOwner().catch(() => undefined) : undefined;
     } catch {
       return;
     }
@@ -642,6 +663,12 @@ class Session {
     }
     if (!method) {
       console.warn("[session] persisted login is gone (logged out in another tab); signing this tab out");
+      this.applyRemoteLogout(pubkey);
+    } else if (owner && owner !== pubkey) {
+      // Logged out elsewhere AND another account signed in since (audit R-41):
+      // the method string alone looked like "still logged in", so this tab kept
+      // acting as an account its owner had signed out of on this device.
+      console.warn("[session] persisted login now belongs to another account; signing this tab out");
       this.applyRemoteLogout(pubkey);
     }
   }
@@ -671,6 +698,7 @@ class Session {
     ownStatusStore.setOwner(null);
     mutes.setOwner(null);
     setInviteOwner(null);
+    purgeInvites();
     void Promise.resolve(this.signer?.close?.()).catch(() => {});
     this.signer = null;
     this.pubkey = null;
@@ -716,4 +744,23 @@ export async function consumeNsecFromHash(): Promise<boolean> {
     if (route.name === "login") route.nsec = undefined;
   }
   return true;
+}
+
+/**
+ * Consume a recovery link that arrives in an ALREADY-RUNNING tab (audit R-36).
+ *
+ * The boot call in the layout covers a cold open only. Pasting the link into a
+ * tab where the app is up, or tapping it while the installed PWA is open, is a
+ * hash-only navigation: no reload, so no boot, and the account key stayed in
+ * the address bar and in that history entry for as long as the tab lived.
+ * `onError` receives a malformed key (it has been stripped already). Returns
+ * the unsubscribe.
+ */
+export function watchNsecInHash(onError: (e: unknown) => void): () => void {
+  if (typeof window === "undefined") return () => {};
+  const onHashChange = () => {
+    consumeNsecFromHash().catch(onError);
+  };
+  window.addEventListener("hashchange", onHashChange);
+  return () => window.removeEventListener("hashchange", onHashChange);
 }

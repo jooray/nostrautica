@@ -9,6 +9,8 @@
  * renders as its literal markdown, which is honest and harmless.
  */
 
+import { safeImageSrc, EXTERNAL_IMG_REFERRER_POLICY } from "$lib/stores/external-images.svelte.js";
+
 function escapeHtml(s: string): string {
   return (
     s
@@ -85,11 +87,25 @@ function inline(s: string): string {
 
   // 2. Images. `alt` is a plain-text attribute, so any placeholder inside it
   //    resolves to TEXT — an emitted <code> must never land in an attribute.
-  out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt: string, url: string) =>
-    SAFE_URL.test(url)
-      ? hold(`<img src="${url}" alt="${asText(alt)}" loading="lazy" />`, asText(alt))
-      : m,
-  );
+  //    Newlines fold to spaces: the paragraph pass later turns every "\n" into
+  //    "<br />", and would otherwise write one inside alt="…" (audit R-24).
+  out = out.replace(/!\[([^\]]*)\]\(([^)\s]+)\)/g, (m, alt: string, url: string) => {
+    if (!SAFE_URL.test(url)) return m;
+    const altText = asText(alt).replace(/\s*\n\s*/g, " ");
+    // The same third-party image policy as every other wire image (audit SEC-17,
+    // R-23): https only, no referrer, and when the reader has turned off-origin
+    // images off, a link to the address instead of a silent request to it.
+    if (!safeImageSrc(url)) {
+      return hold(
+        `<a href="${url}" target="_blank" rel="noopener noreferrer nofollow">${altText || url}</a>`,
+        altText || url,
+      );
+    }
+    return hold(
+      `<img src="${url}" alt="${altText}" loading="lazy" referrerpolicy="${EXTERNAL_IMG_REFERRER_POLICY}" />`,
+      altText,
+    );
+  });
 
   // 3. Links. The TEXT may carry emphasis; the href may not carry anything.
   out = out.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, text: string, url: string) =>

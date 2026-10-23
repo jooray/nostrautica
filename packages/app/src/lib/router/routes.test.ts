@@ -40,6 +40,15 @@ describe("parseHash", () => {
     expect(parseHash("#/e/naddr1/bogus").name).toBe("notFound");
     expect(parseHash("#/e").name).toBe("notFound");
   });
+
+  it("strips credentials from an unknown route's hash, keeping other params (R-35)", () => {
+    expect(parseHash("#/e/naddr1/joni?code=SECRET")).toEqual({ name: "notFound", hash: "#/e/naddr1/joni" });
+    expect(parseHash("#/logni?nsec=nsec1abc&x=1")).toEqual({ name: "notFound", hash: "#/logni?x=1" });
+    expect(buildHash(parseHash("#/nope?code=a&nsec=b"))).toBe("#/nope");
+    expect(parseHash("#/nope?x=1")).toEqual({ name: "notFound", hash: "#/nope?x=1" });
+    // The routes that consume a credential still receive it.
+    expect(parseHash("#/e/naddr1/join?code=SECRET")).toEqual({ name: "join", naddr: "naddr1", code: "SECRET" });
+  });
 });
 
 describe("buildHash", () => {

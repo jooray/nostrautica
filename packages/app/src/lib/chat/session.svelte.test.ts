@@ -300,6 +300,61 @@ describe("chat session — real MLS membership, and its handoff to follower tabs
     await Promise.resolve();
     expect(chatSession.memberDevices).toBeUndefined();
   });
+
+  it("a follower goes read-only when the leader moves to another event, and cannot send into it (R-31)", async () => {
+    const COORD = (ctx as unknown as { coordinate: string }).coordinate;
+    const OTHER = "31923:" + "e".repeat(64) + ":other";
+    const leaderSent: { text: string; coordinate?: string }[] = [];
+    let leaderEvent = COORD;
+    const leaderTab = new ChatTabCoordinator({
+      scope: OWNER,
+      locks: locks as never,
+      createChannel: (n: string) => new FakeChannel(n) as never,
+      onRoleChange: () => {},
+      onSendRequest: async (text, coordinate) => {
+        if (coordinate && coordinate !== leaderEvent) throw new Error("different event");
+        leaderSent.push({ text, coordinate });
+      },
+    });
+    await leaderTab.whenSettled;
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+
+    leaderTab.broadcastState(COORD, []);
+    await vi.waitFor(() => expect(chatSession.readOnly).toBe(false));
+    await chatSession.send("to my event");
+    expect(leaderSent).toEqual([{ text: "to my event", coordinate: COORD }]);
+
+    // Handover: the leader tab is now serving a different event.
+    leaderEvent = OTHER;
+    leaderTab.broadcastState(OTHER, []);
+    await vi.waitFor(() => expect(chatSession.readOnly).toBe(true));
+    await expect(chatSession.send("must not land in the other room")).rejects.toThrow();
+    expect(leaderSent).toHaveLength(1);
+    leaderTab.dispose();
+  });
+
+  it("a leader refuses a proxied send stamped with another event's coordinate (R-31)", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.tabRole).toBe("leader"));
+    const followerTab = new ChatTabCoordinator({
+      scope: OWNER,
+      locks: locks as never,
+      createChannel: (n: string) => new FakeChannel(n) as never,
+      onRoleChange: () => {},
+    });
+    await followerTab.whenSettled;
+    expect(followerTab.role).toBe("follower");
+    await expect(followerTab.proxySend("x", "31923:" + "e".repeat(64) + ":other")).rejects.toThrow(
+      /different event/,
+    );
+    const chat = chatSession.chat as unknown as { send: ReturnType<typeof vi.fn> };
+    expect(chat.send).not.toHaveBeenCalled();
+    // The same event, or a previous-build tab that sends no coordinate, still works.
+    await followerTab.proxySend("y", (ctx as unknown as { coordinate: string }).coordinate);
+    await followerTab.proxySend("z");
+    expect(chat.send).toHaveBeenCalledTimes(2);
+    followerTab.dispose();
+  });
 });
 
 /**

@@ -35,6 +35,9 @@ export const messages = {
     "update.action": "Update now",
     "update.deferred":
       "An update is ready and will apply automatically as soon as you finish what you're typing.",
+    // The update watchdog's banner (audit R-84): this tab is not moving to new builds.
+    "update.stuck": "This tab may still be running an old version of the app and is not updating itself.",
+    "update.registerFailed": "Automatic updates aren't working in this tab.",
     "logout.encryptFailed":
       "Logout couldn't lock some of your keys on this device (your signer was unreachable), so they were left in place rather than risked. Log in again to finish securing them.",
     "logout.dismiss": "Dismiss",
@@ -1846,6 +1849,8 @@ export const messages = {
     "update.action": "Aktualizovať",
     "update.deferred":
       "Aktualizácia je pripravená a použije sa automaticky hneď, ako dokončíte to, čo píšete.",
+    "update.stuck": "Táto karta možno stále beží na starej verzii aplikácie a sama sa neaktualizuje.",
+    "update.registerFailed": "Automatické aktualizácie v tejto karte nefungujú.",
     "logout.encryptFailed":
       "Pri odhlásení sa na tomto zariadení nepodarilo uzamknúť niektoré vaše kľúče (podpisovač bol nedostupný), takže zostali na mieste, aby sa neriskovalo ich poškodenie. Prihláste sa znova a dokončite ich zabezpečenie.",
     "logout.dismiss": "Zavrieť",
@@ -3631,6 +3636,8 @@ export const messages = {
     "update.action": "Aktualizovat",
     "update.deferred":
       "Aktualizace je připravena a použije se automaticky hned, jakmile dokončíte to, co píšete.",
+    "update.stuck": "Tato karta možná stále běží na staré verzi aplikace a sama se neaktualizuje.",
+    "update.registerFailed": "Automatické aktualizace v této kartě nefungují.",
     "logout.encryptFailed":
       "Při odhlášení se na tomto zařízení nepodařilo uzamknout některé vaše klíče (podepisovač byl nedostupný), takže zůstaly na místě, aby se neriskovalo jejich poškození. Přihlaste se znovu a dokončete jejich zabezpečení.",
     "logout.dismiss": "Zavřít",
@@ -5424,6 +5431,8 @@ export const messages = {
     "update.action": "Jetzt aktualisieren",
     "update.deferred":
       "Ein Update ist bereit und wird automatisch angewendet, sobald du fertig getippt hast.",
+    "update.stuck": "Dieser Tab läuft womöglich noch mit einer alten Version der App und aktualisiert sich nicht von selbst.",
+    "update.registerFailed": "Automatische Updates funktionieren in diesem Tab nicht.",
     "logout.encryptFailed":
       "Beim Abmelden konnten einige deiner Schlüssel auf diesem Gerät nicht gesperrt werden (dein Signer war nicht erreichbar), deshalb wurden sie unverändert gelassen, statt sie zu riskieren. Melde dich erneut an, um sie vollständig zu sichern.",
     "logout.dismiss": "Schließen",
@@ -7201,6 +7210,8 @@ export const messages = {
     "update.action": "Actualizar ahora",
     "update.deferred":
       "Hay una actualización lista y se aplicará automáticamente en cuanto termines de escribir.",
+    "update.stuck": "Es posible que esta pestaña siga usando una versión antigua de la app y no se esté actualizando sola.",
+    "update.registerFailed": "Las actualizaciones automáticas no funcionan en esta pestaña.",
     "logout.encryptFailed":
       "Cerrar sesión no pudo bloquear algunas de tus claves en este dispositivo (tu firmador no respondió), así que se dejaron como estaban en vez de arriesgarlas. Inicia sesión de nuevo para terminar de protegerlas.",
     "logout.dismiss": "Descartar",

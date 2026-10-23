@@ -9,7 +9,7 @@
   import { secretSurface } from "$lib/stores/secret-surface.svelte.js";
   import { theme } from "$lib/stores/theme.svelte.js";
   import { i18n, t } from "$lib/i18n/i18n.svelte.js";
-  import { session, consumeNsecFromHash } from "$lib/signer/session.svelte.js";
+  import { session, consumeNsecFromHash, watchNsecInHash } from "$lib/signer/session.svelte.js";
   import { initSessionBroadcast } from "$lib/signer/session-broadcast.js";
   import { onNip46AuthUrl } from "$lib/signer/nip46.js";
   import { loadLoginMethod } from "$lib/signer/keystore.js";
@@ -18,6 +18,7 @@
   import { connectivity } from "$lib/stores/connectivity.svelte.js";
   import { updatePrompt } from "$lib/stores/update-prompt.svelte.js";
   import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
+  import { updateStuck, reloadToLatestBuild } from "$lib/stores/update-stuck.svelte.js";
   import { installQueueFlusher, flushQueue } from "$lib/nostr/publish-queue.js";
   import { installRelayErrorGuard } from "$lib/nostr/errors.js";
   import { installStaleChunkRecovery } from "$lib/stale-chunk.js";
@@ -135,6 +136,11 @@
       console.warn("[boot] recovery link carried an unusable key", e);
       bootError = "boot.badRecoveryLink";
     }
+    // …and every later one opened into this running tab (audit R-36).
+    watchNsecInHash((e) => {
+      console.warn("[nav] recovery link carried an unusable key", e);
+      bootError = "boot.badRecoveryLink";
+    });
     // UX-19: never gate the shell on a NIP-46 reconnect — a dead signer relay
     // otherwise burns connect (12s) + getPublicKey (12s) before `booted`,
     // delaying queue-flush/prefetch/registration behind it. Local/nip07
@@ -434,6 +440,19 @@
   {#if refreshGuard.updateWaiting}
     <div class="card" style="margin:0.5rem 0" role="status" aria-live="polite">
       {t("update.deferred")}
+    </div>
+  {:else if updateStuck.reason}
+    <!-- The update watchdog's verdict (audit R-84): this tab is not moving to
+         new builds on its own. Hidden while a guarded reload is already
+         waiting, which says the more useful thing. -->
+    <div class="card warn" style="margin:0.5rem 0" role="status" aria-live="polite">
+      {t(updateStuck.reason === "drift" ? "update.stuck" : "update.registerFailed")}
+      <button type="button" class="btn" style="margin-left:0.5rem" onclick={() => reloadToLatestBuild()}>
+        {t("update.action")}
+      </button>
+      <button type="button" class="btn" style="margin-left:0.5rem" onclick={() => updateStuck.dismiss()}>
+        {t("logout.dismiss")}
+      </button>
     </div>
   {/if}
   {#if session.logoutError}
