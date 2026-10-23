@@ -778,6 +778,19 @@ describe("roster read-modify-write safety", () => {
     expect(await loadEventKeys(COORD, OTHER_OWNER)).toBeUndefined();
   });
 
+  // Audit 2026-10-21 R-04: a client-side revoke left no record a later coordinator
+  // could be told about, so its E_inbox backfill re-admitted the member.
+  it("records the revoked member for the next coordinator attach", async () => {
+    fetchEventsRelayOnly.mockResolvedValue([
+      rosterEvent([
+        { pubkey: ALICE, d: "d-alice", role: "attendee" },
+        { pubkey: BOB, d: "d-bob", role: "attendee" },
+      ]),
+    ]);
+    await revokeAttendeeClient({} as AppSigner, ctx, BOB);
+    expect((await loadEventKeys(COORD, OWNER))?.revoked).toEqual([BOB]);
+  });
+
   it("reads every remaining member's directory entry in one request", async () => {
     fetchEventsRelayOnly.mockResolvedValue([
       rosterEvent([
@@ -1345,6 +1358,22 @@ describe("sendAdminCommand outcome", () => {
 
     expect(await sendAdminCommand(withCoord, "revoke", { pubkey: OWNER })).toBe("published");
   });
+
+  // Audit 2026-10-21 R-04: the current coordinator's tombstone does not travel to
+  // the next one, so the organizer's device keeps the record — and an approve drops it.
+  it("records a revoke for the next attach and drops it on an approve", async () => {
+    await saveEventKeys(organizerKeys(), OWNER);
+    fetchEvents.mockResolvedValue([]);
+    const withCoord = {
+      ...ctx,
+      config: { ...ctx.config, coordinator: getPublicKey(generateSecretKey()) },
+    } as EventContext;
+    const member = "f".repeat(64);
+    await sendAdminCommand(withCoord, "revoke", { pubkey: member });
+    expect((await loadEventKeys(COORD, OWNER))?.revoked).toEqual([member]);
+    await sendAdminCommand(withCoord, "approve", { pubkey: member });
+    expect((await loadEventKeys(COORD, OWNER))?.revoked).toBeUndefined();
+  });
 });
 
 /**
@@ -1567,6 +1596,38 @@ describe("updateEventConfig relay editing", () => {
       const grant = grantFor(sk);
       expect(grant).toBeDefined();
       expect(grant!.prev_coordinator).toBeUndefined();
+    });
+
+    // Audit 2026-10-21 R-04: the grant tells the new coordinator who the organizer
+    // revoked, minus anyone the current roster lists (re-approved on another device).
+    it("carries the recorded revocations the current roster does not list", async () => {
+      const gone = "d".repeat(64);
+      const back = "e".repeat(64);
+      const eckBytes = generateEck();
+      await saveEventKeys({ ...withInbox(), eck: [{ id: 1, key: bytesToBase64(eckBytes) }], revoked: [gone, back] }, OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const sk = generateSecretKey();
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK) });
+      const served = await fetchEventsRelayOnly({ kinds: [KIND_EVENT_CONFIG] });
+      const roster = {
+        id: "roster-r04",
+        kind: KIND_ROSTER,
+        pubkey: EID_PUBKEY,
+        created_at: 5000,
+        tags: [["d", IDENTIFIER], ["a", COORD], ["eck", "1"], ["v", "2"]],
+        content: eckEncrypt(
+          eckBytes,
+          JSON.stringify({ v: 2, eck_current: 1, attendees: [{ pubkey: back, d: "d-back", role: "attendee" }] }),
+        ),
+      };
+      fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[] }) =>
+        filter.kinds?.includes(KIND_EVENT_CONFIG) ? served : [roster],
+      );
+
+      await attachCoordinator({} as AppSigner, stale, getPublicKey(sk));
+
+      expect(grantFor(sk)?.revoked).toEqual([gone]);
     });
 
     // Audit SB-90: another organizer device rotated the inbox on a detach; this

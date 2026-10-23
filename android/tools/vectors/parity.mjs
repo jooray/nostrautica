@@ -126,6 +126,12 @@ add("coordinatorGrantContent", "prev_coordinator hex", install({ prev_coordinato
 add("coordinatorGrantContent", "prev_coordinator uppercase", install({ prev_coordinator: pk.toUpperCase() }));
 add("coordinatorGrantContent", "prev_coordinator short", install({ prev_coordinator: pk.slice(2) }));
 add("coordinatorGrantContent", "prev_coordinator npub", install({ prev_coordinator: "npub1" + "q".repeat(58) }));
+// 21603 revoked (NIP §3.5, audit 2026-10-21 R-04): optional hex pubkeys, at most 500.
+add("coordinatorGrantContent", "revoked hex", install({ revoked: [pk, hex("cc")] }));
+add("coordinatorGrantContent", "revoked uppercase", install({ revoked: [pk.toUpperCase()] }));
+add("coordinatorGrantContent", "501 revoked", install({ revoked: n(501, () => pk) }));
+add("eventKeysBackup", "revoked", backup({ revoked: [hex("cc")] }));
+add("eventKeysBackup", "501 revoked", backup({ revoked: n(501, () => hex("cc")) }));
 
 const talk = (over) => ({ v: 2, a: coord, talk_d: "t1", title: "T", external_url: "https://youtu.be/x", external_kind: "youtube", ...over });
 add("talkSubmissionContent", "base", talk({}));
@@ -245,6 +251,7 @@ const backupMerges = [];
   mb("staged then promoted", bk({ pending_eck: [{ id: 2, key: eckKeyOf(2) }] }), bk({ eck: [{ id: 1, key: eckKeyOf(1) }, { id: 2, key: eckKeyOf(2) }] }));
   mb("old backup without a", { v: 2, eid_nsec: hex("01"), einbox_nsec: hex("02"), eck: [{ id: 1, key: eckKeyOf(1) }] }, bk({ coordinator_gen: 3 }));
   mb("co-organizers union", bk({ co_organizers: [hex("cc"), hex("aa")] }), bk({ co_organizers: [hex("bb"), hex("aa")] }));
+  mb("revoked union", bk({ revoked: [hex("cc"), hex("aa")] }), bk({ revoked: [hex("bb"), hex("aa")] }));
 }
 
 writeFileSync(new URL("../../protocol/src/test/resources/parity-vectors.json", import.meta.url),

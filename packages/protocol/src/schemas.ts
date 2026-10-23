@@ -327,6 +327,13 @@ export const MAX_PRIOR_INBOXES = 64;
 /** Organizer accounts (creator + co-organizers) one event's custody records name. */
 export const MAX_ORGANIZERS = 32;
 /**
+ * Organizer-revoked members one 21603 grant / 30078 backup carries (NIP §3.5
+ * `revoked`, audit 2026-10-21 R-04). 500 × 67 bytes keeps the list near half of
+ * the 65,535-byte NIP-44 plaintext a gift-wrapped grant must fit in; a writer over
+ * it keeps the most recent revocations.
+ */
+export const MAX_REVOKED = 500;
+/**
  * Attendee entries in ONE 31604 page. Not the operative limit and not meant to
  * be: the 65,535-byte NIP-44 plaintext ceiling always binds first (the smallest
  * possible entry is ~100 bytes, so ~640 entries is all that can physically fit).
@@ -629,6 +636,13 @@ export const coordinatorGrantContentSchema = z.object({
   // This is the ONLY way a roster authored by a key other than E_id becomes
   // adoptable: it is vouched for by E_id, because the grant is E_id-sealed.
   prev_coordinator: hex32.optional(),
+  // Members the organizer revoked (NIP §3.5, audit 2026-10-21 R-04), so a newly
+  // attached coordinator enforces those removals before it replays E_inbox. A
+  // revocation made while no coordinator was attached (or by the outgoing one)
+  // otherwise lived only as absence from the roster, and the backfill re-admitted
+  // the member on their original invite. Optional and additive: an older
+  // coordinator ignores it, an older client sends none.
+  revoked: z.array(hex32).max(MAX_REVOKED).optional(),
 });
 export type CoordinatorGrantContent = z.infer<
   typeof coordinatorGrantContentSchema
@@ -1354,6 +1368,9 @@ export const eventKeysBackupSchema = z.object({
   // Other accounts this organizer has handed custody to (21605), so every device
   // of the account re-issues it to them on a rotation (audit SB-90). Additive.
   co_organizers: z.array(hex32).max(MAX_ORGANIZERS).optional(),
+  // Members this organizer revoked (R-04), oldest first, so any device of the
+  // account can carry them in the next 21603. Additive.
+  revoked: z.array(hex32).max(MAX_REVOKED).optional(),
 });
 export type EventKeysBackup = z.infer<typeof eventKeysBackupSchema>;
 

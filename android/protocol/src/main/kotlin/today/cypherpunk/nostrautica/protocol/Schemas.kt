@@ -157,6 +157,8 @@ object Limits {
     const val MAX_PRIOR_INBOXES = 64
     /** Organizer accounts one event's custody records name. */
     const val MAX_ORGANIZERS = 32
+    /** Organizer-revoked members one 21603 grant / 30078 backup carries (NIP §3.5, R-04). */
+    const val MAX_REVOKED = 500
     const val MAX_TALK_TITLE = 200
     const val MAX_TALK_DESC = 2000
     const val MAX_CHAT_KEY_LABEL = 60
@@ -434,11 +436,15 @@ data class CoordinatorGrantContent(
      *  incoming coordinator adopts a roster only from E_id or this key; omitted on a
      *  first attach or a re-attach of the same coordinator. */
     @SerialName("prev_coordinator") val prevCoordinator: String? = null,
+    /** Members the organizer revoked (NIP §3.5, audit 2026-10-21 R-04): the new
+     *  coordinator seeds them as tombstones before it replays E_inbox. */
+    val revoked: List<String>? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v); check(Coordinate.isSpace(a)) { "a" }; check(gen > 0) { "gen" }
         checkHex32(inboxNsec, "inbox_nsec"); checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }; checkList(configRelays, Limits.MAX_RELAYS, "config_relays")
         prevCoordinator?.let { checkHex32(it, "prev_coordinator") }
+        checkList(revoked, Limits.MAX_REVOKED, "revoked"); revoked?.forEach { checkHex32(it, "revoked") }
     }
 }
 
@@ -863,9 +869,12 @@ data class EventKeysBackup(
     @SerialName("prior_einbox_nsecs") val priorEinboxNsecs: List<String>? = null,
     /** Accounts this one handed custody to (SB-90). */
     @SerialName("co_organizers") val coOrganizers: List<String>? = null,
+    /** Members this organizer revoked, oldest first (R-04), for the next 21603. */
+    val revoked: List<String>? = null,
 ) : Validated {
     override fun validate() {
         checkList(coOrganizers, Limits.MAX_ORGANIZERS, "co_organizers"); coOrganizers?.forEach { checkHex32(it, "co_organizers") }
+        checkList(revoked, Limits.MAX_REVOKED, "revoked"); revoked?.forEach { checkHex32(it, "revoked") }
         checkVersion(v); checkHex32(eidNsec, "eid_nsec"); checkHex32(einboxNsec, "einbox_nsec")
         checkList(eck, Limits.MAX_ECK_VERSIONS, "eck"); eck.forEach { it.validate() }
         check(coordinatorGen == null || coordinatorGen >= 0) { "coordinator_gen" }

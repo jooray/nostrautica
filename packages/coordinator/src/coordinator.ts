@@ -1369,6 +1369,8 @@ export class Coordinator {
      * bootstrap then adopts an E_id-authored roster only.
      */
     prevCoordinator?: string;
+    /** The E_id-sealed 21603's `revoked` set (NIP §3.5, R-04): seeded as tombstones. */
+    revoked?: string[];
   }): Promise<void> {
     const { kind: spaceKind, pubkey: eidPubkey, identifier } = parseCoordinate(grant.coordinate);
     // Relay lists from untrusted input (grant, later the 31600) are validated:
@@ -1592,6 +1594,13 @@ export class Coordinator {
     // Record the install generation (NIP §3.5): bump the high-water mark and clear
     // any prior detach tombstone (a fresh grant with a higher gen re-installs).
     this.deps.store.recordInstalledGen(grant.coordinate, gen);
+    // The organizer's revocations (the 21603 `revoked` set, audit 2026-10-21 R-04),
+    // seeded as tombstones BEFORE the inbox subscription and the full backfill below.
+    // A revoke made while no coordinator was attached — or recorded only by the
+    // outgoing one — was otherwise just absence from the roster, and the backfill
+    // replayed the member's original join and re-approved them on its invite code,
+    // with the ECK minted to exclude them.
+    if (source === "grant" && grant.revoked?.length) this.seedRevocations(grant.coordinate, grant.revoked);
 
     const state: EventState = {
       coordinate: grant.coordinate,
@@ -1688,6 +1697,27 @@ export class Coordinator {
       );
     }
     this.completedInstallGen.set(grant.coordinate, gen);
+  }
+
+  /**
+   * Record the organizer's revocations carried by a 21603 (R-04). Additive: a grant
+   * never lifts a tombstone, only an organizer approve does. A row this store still
+   * holds as approved (a re-attach after a detach that kept the rows) is demoted so
+   * no re-grant or roster republish reaches it; the organizer's client already
+   * rotated the ECK and deleted the entry when it revoked.
+   */
+  private seedRevocations(coordinate: string, pubkeys: string[]): void {
+    let demoted = 0;
+    for (const pk of new Set(pubkeys)) {
+      this.deps.store.recordRevocation(coordinate, pk, this.now());
+      if (this.deps.store.getAttendee(coordinate, pk)?.status === "approved") {
+        this.deps.store.upsertAttendee({ coordinate, pubkey: pk, status: "revoked", now: this.now() });
+        this.deps.store.clearPairsInvolving(coordinate, pk);
+        this.deps.store.cancelSubjectPipelineJobs(coordinate, pk, { allStates: false });
+        demoted++;
+      }
+    }
+    log(`[install] ${coordinate}: the grant names ${pubkeys.length} organizer-revoked member(s)${demoted ? ` — ${demoted} demoted from approved` : ""}`);
   }
 
   /** Suspend an event whose config is unfetchable (NIP §3.5, P0-5): record it for a
@@ -2295,6 +2325,7 @@ export class Coordinator {
           backfill: known ? "recent" : "full",
           source: "grant",
           prevCoordinator: grant.prev_coordinator,
+          revoked: grant.revoked,
         });
       } else if (rumor.kind === KIND_ADMIN_COMMAND) {
         const cmd = adminCommandContentSchema.parse(JSON.parse(rumor.content));
@@ -3563,6 +3594,13 @@ export class Coordinator {
     for (const a of roster.attendees) {
       const existing = this.deps.store.getAttendee(state.coordinate, a.pubkey);
       if (existing?.status === "approved") continue; // already reconstructed from E_inbox backfill
+      // An organizer revocation outranks the roster (audit 2026-10-21, R-04): an
+      // outgoing coordinator's roster, or an E_id roster older than the revoke, may
+      // still list the member the grant's `revoked` set names.
+      if (this.deps.store.isRevoked(state.coordinate, a.pubkey)) {
+        log(`[handover] ${state.coordinate}: not adopting ${short(a.pubkey)} — revoked by the organizer`);
+        continue;
+      }
       // The same population cap a join is held to (audit SB-123): the E_inbox
       // backfill may already have enrolled people, so the merged-roster check above
       // is not enough on its own.

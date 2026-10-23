@@ -85,6 +85,7 @@ import {
   eventKeysBackupSchema,
   MAX_ORGANIZERS,
   MAX_PRIOR_INBOXES,
+  MAX_REVOKED,
 } from "@nostrautica/protocol";
 import type { GiftWrap } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
@@ -609,6 +610,7 @@ export async function approveAttendee(
     publishOrQueue(entryEvent, ctx.config.relays),
     ...rosterEvents.map((e) => publishOrQueue(e, ctx.config.relays)),
   ]);
+  await recordOrganizerRevocation(ctx.coordinate, req.attendeePubkey, false);
 }
 
 /**
@@ -980,7 +982,34 @@ export async function sendAdminCommand(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd, args, expires },
   });
-  return toOutcome(await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays));
+  const outcome = toOutcome(await publishAccountGiftWrap(wrap as any, ctx.config.coordinator, ctx.config.relays));
+  // A queued command still goes out, so it is recorded either way.
+  if ((cmd === "revoke" || cmd === "approve") && typeof args.pubkey === "string") {
+    await recordOrganizerRevocation(ctx.coordinate, args.pubkey, cmd === "revoke");
+  }
+  return outcome;
+}
+
+/**
+ * Keep the organizer's revoked set (`EventKeys.revoked`, audit 2026-10-21 R-04):
+ * add on a revoke, drop on an approve. It is the only durable record of a
+ * revocation the NEXT coordinator can be told about — a client-side revoke leaves
+ * nothing else behind, and the current coordinator's tombstone does not travel.
+ * `attachCoordinator` sends it in the 21603. Best-effort: a failed write only
+ * means the next attach cannot name this person.
+ */
+async function recordOrganizerRevocation(coordinate: string, pubkey: string, revoked: boolean): Promise<void> {
+  const owner = activeKeystoreOwner() ?? undefined;
+  try {
+    const keys = await loadEventKeys(coordinate, owner);
+    if (!keys || keys.role !== "organizer") return;
+    const next = (keys.revoked ?? []).filter((p) => p !== pubkey);
+    if (revoked) next.push(pubkey);
+    keys.revoked = next.length > 0 ? next.slice(-MAX_REVOKED) : undefined;
+    await saveEventKeys(keys, owner);
+  } catch (e) {
+    console.warn("[organizer] could not record the revocation for a later coordinator attach:", e);
+  }
 }
 
 /**
@@ -1517,6 +1546,12 @@ export async function revokeAttendeeClient(
   });
   const rosterEvents = buildRosterEvents(ctx, eidSk, newEckBytes, newId, rekeyed.roster, rosterAt);
 
+  // The only lasting record of this revoke that a later coordinator can be told
+  // (21603 `revoked`, audit 2026-10-21 R-04): without it the next attach's E_inbox
+  // backfill re-admitted the member on their original join. Set before the staged
+  // save and the backup write below, so both carry it. Recorded even if a publish
+  // below fails; attach drops anyone the current roster still lists.
+  keys.revoked = [...(keys.revoked ?? []).filter((p) => p !== removedPubkey), removedPubkey].slice(-MAX_REVOKED);
   await stageEck(keys, newEck, owner);
   // The new ECK must reach the DURABLE backup, not just this device.
   //
@@ -2139,6 +2174,13 @@ export async function attachCoordinator(
   //    re-attaching the same one) does not rotate — there is no departing custodian.
   const previous = ctx.config.coordinator;
   const replacing = !!previous && previous !== coordinatorPubkey;
+  // The members this organizer revoked, for the grant's `revoked` set (NIP §3.5,
+  // audit 2026-10-21 R-04), read BEFORE any rotation below. Anyone the current
+  // roster lists is dropped from it: the set is a union across devices, and a
+  // member one device re-approved must not be shut out by another's older record.
+  // Best-effort — an unreadable roster sends the set unfiltered, which errs
+  // toward keeping a removal in force (an organizer approve lifts it).
+  const revoked = await revokedForGrant(ctx, keys, owner);
   let einboxNsecHex = keys.einboxNsecHex;
   let einboxPubkey = ctx.config.inbox;
   let eck = keys.eck;
@@ -2188,6 +2230,7 @@ export async function attachCoordinator(
       // named here, so naming it is what lets the outgoing coordinator's approvals
       // carry over; a forged roster under any other key is ignored.
       ...(replacing ? { prev_coordinator: previous } : {}),
+      ...(revoked.length > 0 ? { revoked } : {}),
     },
   });
 
@@ -2222,6 +2265,15 @@ export async function attachCoordinator(
   }
 }
 
+/** The grant's `revoked` set: the recorded revocations minus the current roster (R-04). */
+async function revokedForGrant(ctx: EventContext, keys: EventKeys, owner: string | undefined): Promise<string[]> {
+  const recorded = keys.revoked ?? [];
+  if (recorded.length === 0) return [];
+  const read = await loadRoster(ctx, keys, owner).catch(() => undefined);
+  const listed = new Set(read?.state === "ok" ? read.roster.attendees.map((a) => a.pubkey) : []);
+  return recorded.filter((p) => !listed.has(p)).slice(-MAX_REVOKED);
+}
+
 /** This device's custody for one event, in the 30078 backup's shape. */
 function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: number): EventKeysBackup {
   return {
@@ -2234,6 +2286,7 @@ function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: numbe
     ...(keys.pendingEck?.length ? { pending_eck: keys.pendingEck } : {}),
     ...(keys.priorEinboxNsecs?.length ? { prior_einbox_nsecs: keys.priorEinboxNsecs.slice(-MAX_PRIOR_INBOXES) } : {}),
     ...(keys.coOrganizers?.length ? { co_organizers: keys.coOrganizers.slice(0, MAX_ORGANIZERS) } : {}),
+    ...(keys.revoked?.length ? { revoked: keys.revoked.slice(-MAX_REVOKED) } : {}),
   };
 }
 
@@ -2242,7 +2295,7 @@ function keysAsBackup(keys: EventKeys, coordinate: string, coordinatorGen: numbe
  * anything changed, i.e. whether the other copy held custody this device lacked.
  */
 function foldBackupIntoKeys(keys: EventKeys, merged: EventKeysBackup): boolean {
-  const snap = () => JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0, keys.coOrganizers ?? []]);
+  const snap = () => JSON.stringify([keys.eck, keys.pendingEck ?? [], keys.einboxNsecHex, keys.priorEinboxNsecs ?? [], keys.coordinatorGen ?? 0, keys.coOrganizers ?? [], keys.revoked ?? []]);
   const before = snap();
   keys.eck = unionEck(keys.eck, merged.eck);
   const pending = unionEck(keys.pendingEck ?? [], merged.pending_eck ?? []).filter(
@@ -2258,6 +2311,8 @@ function foldBackupIntoKeys(keys: EventKeys, merged: EventKeysBackup): boolean {
   keys.coordinatorGen = Math.max(keys.coordinatorGen ?? 0, merged.coordinator_gen ?? 0) || undefined;
   const co = [...new Set([...(keys.coOrganizers ?? []), ...(merged.co_organizers ?? [])])];
   keys.coOrganizers = co.length > 0 ? co : undefined;
+  const revoked = [...new Set([...(merged.revoked ?? []), ...(keys.revoked ?? [])])].slice(-MAX_REVOKED);
+  keys.revoked = revoked.length > 0 ? revoked : undefined;
   return before !== snap();
 }
 

@@ -169,6 +169,7 @@ async function restore(coordinate: string, backup: EventKeysBackup, owner: strin
           ...(existing.pendingEck?.length ? { pending_eck: existing.pendingEck } : {}),
           ...(existing.priorEinboxNsecs?.length ? { prior_einbox_nsecs: existing.priorEinboxNsecs } : {}),
           ...(existing.coOrganizers?.length ? { co_organizers: existing.coOrganizers } : {}),
+          ...(existing.revoked?.length ? { revoked: existing.revoked } : {}),
         }
       : undefined;
   const merged = local
@@ -187,6 +188,7 @@ async function restore(coordinate: string, backup: EventKeysBackup, owner: strin
     // Staged versions stay staged (DS41-002); loadRoster promotes the one in use.
     pendingEck: merged.pending_eck,
     coOrganizers: merged.co_organizers,
+    revoked: merged.revoked,
   }, owner);
 }
 

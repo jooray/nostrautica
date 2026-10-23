@@ -4763,13 +4763,13 @@ function secondCoordinator(h: Harness, coordSkB: Uint8Array): { coordinator: Coo
 async function handOverTo(
   h: Harness,
   coordSkB: Uint8Array,
-  opts: { prev?: string; cfgId?: string } = {},
+  opts: { prev?: string; cfgId?: string; revoked?: string[]; approval?: string } = {},
 ): Promise<{ coordinator: Coordinator; store: Store }> {
   const identifier = h.coordinate.split(":").slice(2).join(":");
   const coordPkB = getPublicKey(coordSkB);
   h.transport.seed.push({
     kind: 31600, pubkey: getPublicKey(h.eidSk), created_at: 2, id: opts.cfgId ?? "cfg-b", sig: "", content: "",
-    tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"]],
+    tags: [["d", identifier], ["v", "2"], ["inbox", getPublicKey(h.einboxSk)], ["matching", "on"], ["coordinator", coordPkB, "2"], ...(opts.approval ? [["approval", opts.approval]] : [])],
   } as any);
   const b = secondCoordinator(h, coordSkB);
   const grantWrap = wrapRumor(h.eidSk, coordPkB, {
@@ -4782,6 +4782,7 @@ async function handOverTo(
       eck: [{ id: 1, key: bytesToBase64(h.eck) }],
       config_relays: ["wss://test"],
       ...(opts.prev ? { prev_coordinator: opts.prev } : {}),
+      ...(opts.revoked ? { revoked: opts.revoked } : {}),
     },
   });
   await b.coordinator.handleCoordinatorWrap(grantWrap as any);
@@ -8212,11 +8213,89 @@ describe("audit 2026-10-21 R-03 — member cap vs. pending join queue", () => {
     expect(h.store.getAttendee(h.coordinate, guest)?.status).toBe("approved");
   });
 
+  it("withdrawing a pending request cancels it, leaving no row to count", async () => {
+    const h = await setup(0, { approval: "manual" });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
+    await withdraw(h, sk, { deleteData: false });
+    expect(h.store.getAttendee(h.coordinate, pk)).toBeUndefined();
+  });
+
   it("requests idle past the TTL are evicted when the queue is full", async () => {
     const h = await setup();
     fill(h, 1000, "pending", h.clock.t - 4 * 24 * 3600 * 1000);
     const pk = await codeless(h, generateSecretKey());
     expect(h.store.getAttendee(h.coordinate, pk)?.status).toBe("pending");
     expect(h.store.pendingAttendeeCount(h.coordinate)).toBe(1);
+  });
+});
+
+/**
+ * Audit 2026-10-21 R-04 — a revocation the new coordinator never saw survives the attach.
+ *
+ * A revoke made while no coordinator was attached (or recorded only by the outgoing
+ * one) was nothing but absence from the roster. A newly attached coordinator's full
+ * E_inbox backfill replayed the member's ORIGINAL join, its invite code verified
+ * against an empty claims table, and the member was re-approved and granted the ECK
+ * minted to exclude them. The 21603 now carries the organizer's `revoked` set, and
+ * the coordinator seeds it as tombstones before the backfill.
+ */
+describe("audit 2026-10-21 R-04 — the 21603 `revoked` set on a fresh attach", () => {
+  /** A join with invite `idx` that sits on the relay at E_inbox, for B's backfill. */
+  const seedJoin = (h: Harness, sk: Uint8Array, idx: number): string => {
+    const pk = getPublicKey(sk);
+    const inviteSk = h.invites[idx]!;
+    h.transport.seed.push(
+      wrapRumor(sk, getPublicKey(h.einboxSk), {
+        kind: KIND_JOIN_REQUEST,
+        content: { v: 2, name: "revoked one", message: "", rsvp_public: false },
+        tags: [["a", h.coordinate], ["invite", getPublicKey(inviteSk), makeInviteProof(inviteSk, h.coordinate, pk).sig]],
+      }) as any,
+    );
+    return pk;
+  };
+
+  it("control: without the set, the backfill re-approves the member on their original invite", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const b = await handOverTo(h, generateSecretKey(), { approval: "manual+invite" });
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
+  });
+
+  it("with the set, the replayed join is refused and the member gets no grant from B", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const coordSkB = generateSecretKey();
+    const before = wrapsTo(h, pk).length;
+    const b = await handOverTo(h, coordSkB, { revoked: [pk], approval: "manual+invite" });
+    expect(b.store.isRevoked(h.coordinate, pk)).toBe(true);
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+    expect(wrapsTo(h, pk).filter((w) => !h.transport.published.slice(0, before).includes(w))).toHaveLength(0);
+  });
+
+  it("bootstrapHandover does not promote a revoked member an older roster still lists", async () => {
+    const h = await setup();
+    const pk = getPublicKey(generateSecretKey());
+    seedRoster(h, getPublicKey(h.eidSk), [{ pubkey: pk, role: "attendee" }], { id: "stale-roster" });
+    const b = await handOverTo(h, generateSecretKey(), { revoked: [pk], approval: "manual+invite" });
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).not.toBe("approved");
+  });
+
+  it("an organizer approve on the new coordinator still readmits them", async () => {
+    const h = await setup();
+    const pk = seedJoin(h, generateSecretKey(), 5);
+    const coordSkB = generateSecretKey();
+    const b = await handOverTo(h, coordSkB, { revoked: [pk], approval: "manual+invite" });
+    const createdAt = Math.floor(h.clock.t / 1000) + 5;
+    await b.coordinator.handleCoordinatorWrap(
+      wrapRumor(h.eidSk, getPublicKey(coordSkB), {
+        kind: KIND_ADMIN_COMMAND,
+        content: { v: 2, a: h.coordinate, cmd: "approve", args: { pubkey: pk }, expires: createdAt + 172_800 },
+        created_at: createdAt,
+      }) as any,
+    );
+    expect(b.store.isRevoked(h.coordinate, pk)).toBe(false);
+    expect(b.store.getAttendee(h.coordinate, pk)?.status).toBe("approved");
   });
 });

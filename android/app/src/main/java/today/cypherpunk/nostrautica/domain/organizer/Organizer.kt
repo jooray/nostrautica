@@ -451,6 +451,7 @@ class Organizer(
             (listOf(async { sendWrap(grantWrap, req.attendeePubkey, ctx, "grant") }, async { publish(entryEvent, ctx.relays, "directory") }) +
                 rosterEvents.map { async { publish(it, ctx.relays, "roster") } }).awaitAll()
         }
+        recordRevocation(ctx.coordinate, req.attendeePubkey, false)
         Unit
     }
 
@@ -630,7 +631,10 @@ class Organizer(
         // it up, publish, and only then make it current (DS41-002).
         val rot = rotateFor(ctx, eidSk, prev, next, eckAll, roster.attendees.filter { it.pubkey != removed }, at, roster.nostrGroupId,
             EckIdentity.union(keys.eck, keys.pendingEck ?: emptyList()))
-        val staged = stageEck(keys, next)
+        // R-04: the only lasting record of this revoke a later coordinator can be told,
+        // set before the staged save and the backup so both carry it.
+        val withRevoked = keys.copy(revoked = ((keys.revoked ?: emptyList()).filter { it != removed } + removed).takeLast(Limits.MAX_REVOKED))
+        val staged = stageEck(withRevoked, next)
         // The rotated ECK must reach the durable backup, or a fresh device restores v1 only.
         runCatching { writeBackup(ctx.coordinate, staged, staged.coordinatorGen ?: 0) }
         publishRotation(ctx, rot, listOf(deletion))
@@ -668,7 +672,8 @@ class Organizer(
         val eid = keys.eidNsecHex ?: return null
         val inbox = keys.einboxNsecHex ?: return null
         return EventKeysBackup(a = coordinate, eidNsec = eid, einboxNsec = inbox, eck = keys.eck,
-            coordinatorGen = maxOf(gen, keys.coordinatorGen ?: 0), pendingEck = keys.pendingEck, priorEinboxNsecs = keys.priorEinboxNsecs, coOrganizers = keys.coOrganizers)
+            coordinatorGen = maxOf(gen, keys.coordinatorGen ?: 0), pendingEck = keys.pendingEck, priorEinboxNsecs = keys.priorEinboxNsecs, coOrganizers = keys.coOrganizers,
+            revoked = keys.revoked?.takeLast(Limits.MAX_REVOKED))
     }
 
     class BackupUnreadable : Exception("Couldn't read this event's key backup, so it was not rewritten (that would drop keys saved by your other devices).")
@@ -709,7 +714,21 @@ class Organizer(
             a = ctx.coordinate, cmd = cmd, args = JsonObject(args.mapValues { JsonPrimitive(it.value) }),
             expires = nowSec() + Limits.ADMIN_COMMAND_TTL_SEC,
         )
-        return sendWrap(wrapFromEid(eidSk, coordinator, Kinds.ADMIN_COMMAND, Wire.encode(AdminCommandContent.serializer(), content)), coordinator, ctx, "admin")
+        val sent = sendWrap(wrapFromEid(eidSk, coordinator, Kinds.ADMIN_COMMAND, Wire.encode(AdminCommandContent.serializer(), content)), coordinator, ctx, "admin")
+        if (cmd == "revoke" || cmd == "approve") args["pubkey"]?.let { recordRevocation(ctx.coordinate, it, cmd == "revoke") }
+        return sent
+    }
+
+    /**
+     * organizer.ts recordOrganizerRevocation (audit 2026-10-21 R-04): add on a revoke,
+     * drop on an approve. The current coordinator's tombstone does not travel, and a
+     * client-side revoke leaves nothing else behind, so this is what the next 21603's
+     * `revoked` set is built from. Best-effort.
+     */
+    private suspend fun recordRevocation(coordinate: String, pubkey: String, revoked: Boolean) {
+        val keys = keysFor(coordinate)?.takeIf { it.role == "organizer" } ?: return
+        val next = (keys.revoked ?: emptyList()).filter { it != pubkey } + listOfNotNull(pubkey.takeIf { revoked })
+        runCatching { saveKeys(keys.copy(revoked = next.takeLast(Limits.MAX_REVOKED).ifEmpty { null })) }
     }
 
     /** 21605: full organizer custody to another account. Returns whether it reached a relay. */
@@ -806,7 +825,8 @@ class Organizer(
         val m = KeysBackup.merge(local, remote, configInbox)
         foldBackup(coordinate, keys, m)
         fun norm(b: EventKeysBackup) = listOf(EckIdentity.union(b.eck).map { "${it.id}|${it.key}" }, EckIdentity.union(b.pendingEck ?: emptyList()).map { "${it.id}|${it.key}" },
-            listOf(b.einboxNsec), (b.priorEinboxNsecs ?: emptyList()).sorted(), listOf("${b.coordinatorGen ?: 0}"), (b.coOrganizers ?: emptyList()).sorted())
+            listOf(b.einboxNsec), (b.priorEinboxNsecs ?: emptyList()).sorted(), listOf("${b.coordinatorGen ?: 0}"), (b.coOrganizers ?: emptyList()).sorted(),
+            (b.revoked ?: emptyList()).sorted())
         if (norm(m) != norm(remote)) accounts.signAndPublish(Kinds.APP_DATA, signer.nip44Encrypt(me, Wire.encode(EventKeysBackup.serializer(), m)), listOf(listOf("d", d)), Relays.DEFAULT, "eventkeys")
         Unit
     }
@@ -818,7 +838,8 @@ class Organizer(
         val folded = cur.copy(eck = eck, pendingEck = EventKeys.pendingMinus(EckIdentity.union(cur.pendingEck ?: emptyList(), m.pendingEck ?: emptyList()), eck),
             einboxNsecHex = m.einboxNsec, priorEinboxNsecs = ((cur.priorEinboxNsecs ?: emptyList()) + (m.priorEinboxNsecs ?: emptyList()) + listOfNotNull(cur.einboxNsecHex)).distinct().filter { it != m.einboxNsec }.ifEmpty { null },
             coordinatorGen = maxOf(cur.coordinatorGen ?: 0, m.coordinatorGen ?: 0).takeIf { it > 0 },
-            coOrganizers = ((cur.coOrganizers ?: emptyList()) + (m.coOrganizers ?: emptyList())).distinct().ifEmpty { null })
+            coOrganizers = ((cur.coOrganizers ?: emptyList()) + (m.coOrganizers ?: emptyList())).distinct().ifEmpty { null },
+            revoked = ((m.revoked ?: emptyList()) + (cur.revoked ?: emptyList())).distinct().takeLast(Limits.MAX_REVOKED).ifEmpty { null })
         if (folded != cur) saveKeys(folded)
     }
 
@@ -920,6 +941,17 @@ class Organizer(
         val cfg = ctx.cfg
         val previous = cfg.coordinator
         val replacing = previous != null && previous != coordinator
+        // The grant's `revoked` set (NIP §3.5, audit 2026-10-21 R-04), read before any
+        // rotation: the recorded revocations minus anyone the current roster lists (a
+        // member another device re-approved). An unreadable roster sends it unfiltered.
+        val revoked = (keys.revoked ?: emptyList()).let { recorded ->
+            if (recorded.isEmpty()) recorded
+            else {
+                val listed = (runCatching { loadRoster(ctx, keys) }.getOrNull() as? OrganizerEvents.RosterRead.Ok)
+                    ?.roster?.attendees?.map { it.pubkey }?.toSet() ?: emptySet()
+                recorded.filter { it !in listed }.takeLast(Limits.MAX_REVOKED)
+            }
+        }
         var inboxPub = cfg.inbox
         if (previous != null && previous != coordinator) {
             sendCommandTo(ctx, eidSk, previous, "detach", emptyMap())
@@ -930,7 +962,8 @@ class Organizer(
         val next = cfg.copy(inbox = inboxPub, coordinator = coordinator, coordinatorGen = gen, eck = currentEck)
         val grant = CoordinatorGrantContent(a = ctx.coordinate, gen = gen, inboxNsec = keys.einboxNsecHex!!, eck = keys.eck, configRelays = cfg.relays,
             // NIP §3.7 / SB-122: the incoming coordinator adopts a roster only from E_id or the one named here.
-            prevCoordinator = if (replacing) previous else null)
+            prevCoordinator = if (replacing) previous else null,
+            revoked = revoked.ifEmpty { null })
         val wrap = wrapFromEid(eidSk, coordinator, Kinds.COORDINATOR_GRANT, Wire.encode(CoordinatorGrantContent.serializer(), grant))
         coroutineScope {
             listOf(async { publishConfig(ctx, eidSk, next, cfg.relays) }, async { sendWrap(wrap, coordinator, ctx, "install") }).awaitAll()
@@ -1130,6 +1163,7 @@ class Organizer(
             coordinatorGen = (m.coordinatorGen ?: 0).takeIf { it > 0 },
             pendingEck = m.pendingEck,
             coOrganizers = m.coOrganizers,
+            revoked = m.revoked,
         ))
     }
 

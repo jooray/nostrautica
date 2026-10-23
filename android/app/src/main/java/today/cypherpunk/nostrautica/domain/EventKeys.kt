@@ -29,6 +29,9 @@ data class EventKeys(
     val pendingEck: List<EckVersion>? = null,
     /** Other accounts holding organizer custody; every rotation re-issues to them (SB-90). */
     val coOrganizers: List<String>? = null,
+    /** Members this organizer revoked, oldest first (audit 2026-10-21 R-04): sent in
+     *  the next 21603 so a newly attached coordinator does not re-admit them. */
+    val revoked: List<String>? = null,
 ) {
     val isOrganizer: Boolean get() = role == "organizer" && eidNsecHex != null && einboxNsecHex != null
 
@@ -55,6 +58,7 @@ data class EventKeys(
                 coordinatorGen = maxOf(primary.coordinatorGen ?: 0, fallback.coordinatorGen ?: 0).takeIf { it > 0 },
                 pendingEck = pendingMinus(EckIdentity.union(primary.pendingEck ?: emptyList(), fallback.pendingEck ?: emptyList()), EckIdentity.union(primary.eck, fallback.eck)),
                 coOrganizers = ((primary.coOrganizers ?: emptyList()) + (fallback.coOrganizers ?: emptyList())).distinct().ifEmpty { null },
+                revoked = ((fallback.revoked ?: emptyList()) + (primary.revoked ?: emptyList())).distinct().ifEmpty { null },
             )
         }
 
