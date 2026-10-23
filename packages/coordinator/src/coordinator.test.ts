@@ -2003,6 +2003,32 @@ describe("audit R-53 — same-named spaces on one coordinator get their own addr
     expect(h.transport.published.filter((e) => e.kind === KIND_ROSTER).length).toBe(count);
   });
 
+  it("a failed address upgrade does not abandon the other events, and a later pass finishes it", async () => {
+    // Production, first boot of 0.14.0: every relay timed out under the startup
+    // burst, and the one throw ended the whole pass until the next restart.
+    const a = await setup();
+    const b = await installSameNamedSpace(a);
+    try {
+      await a.coordinator.start();
+      await a.coordinator.rosterAddressMigration;
+      for (const h of [a, b]) {
+        h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: getPublicKey(generateSecretKey()), status: "approved", now: h.clock.t });
+      }
+      const migrate = () => (a.coordinator as any).migrateRosterAddresses(() => false) as Promise<number>;
+      a.transport.failPublishes = 99;
+      // Both events no longer hold a derived watermark only if neither had members
+      // at boot; whichever did not is attempted, and neither failure stops the pass.
+      const failed = await migrate();
+      expect(failed).toBeGreaterThan(0);
+      a.transport.failPublishes = 0;
+      expect(await migrate()).toBe(0);
+      expect(newestAt(a, spaceRecordsD(a.coordinate))).toBeDefined();
+      expect(newestAt(a, spaceRecordsD(b.coordinate))).toBeDefined();
+    } finally {
+      a.coordinator.stop();
+    }
+  });
+
   it("never publishes the legacy alias for an identifier shaped like a derived address", async () => {
     // Such a space's alias (`<hex64>`, `<hex64>:N`) could BE another space's
     // derived page, which the alias would then overwrite.

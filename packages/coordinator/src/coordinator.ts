@@ -278,6 +278,8 @@ const INBOX_RESCAN_INTERVAL_MS = 120_000;
  * people's relay budget to shave minutes off something nobody is waiting on.
  */
 const PROFILE_REFRESH_INTERVAL_MS = 3_600_000;
+/** Retry cadence for an R-53 roster address upgrade that a relay refused or timed out. */
+const ROSTER_MIGRATION_RETRY_MS = 600_000;
 /**
  * How long after an event ends the sweep keeps watching its attendees' profiles.
  *
@@ -4060,28 +4062,47 @@ export class Coordinator {
    * handful of SQLite lookups. Sequential, because it is background work and
    * the relays it publishes to are the same ones the live paths are using.
    */
-  private async migrateRosterAddresses(stopped: () => boolean): Promise<void> {
+  private async migrateRosterAddresses(stopped: () => boolean): Promise<number> {
     let republished = 0;
+    let failed = 0;
     for (const state of [...this.events.values()]) {
-      if (stopped()) return;
+      if (stopped()) return failed;
       if (state.retentionExpired || this.events.get(state.coordinate) !== state) continue;
       const derived = spaceRecordsD(state.coordinate);
-      if (
-        !this.deps.store.hasPublishWatermark(`${KIND_ROSTER}:${derived}`) &&
-        this.deps.store.approvedAttendees(state.coordinate).length > 0
-      ) {
-        await this.publishRosterCoalesced(state);
-        republished++;
-      }
-      if (
-        state.matchVisibility === "event" &&
-        this.deps.store.hasPublishWatermark(`${KIND_MATCH_MATRIX}:${state.identifier}`) &&
-        !this.deps.store.hasPublishWatermark(`${KIND_MATCH_MATRIX}:${derived}`)
-      ) {
-        await this.publishMatrix(state);
+      // Per event: on the first production boot every relay timed out under the
+      // startup burst, and one throw used to abandon every event after it until
+      // the next restart. A failure leaves the watermark unset, so a later pass
+      // picks the event up again.
+      //
+      // Done-ness is its own marker, written only after a relay took the publish.
+      // The address watermark cannot serve: it is written when the event is BUILT,
+      // so on that boot the timed-out event was left looking upgraded for good.
+      const rosterDone = `r53-upgraded:${KIND_ROSTER}:${derived}`;
+      const matrixDone = `r53-upgraded:${KIND_MATCH_MATRIX}:${derived}`;
+      try {
+        if (
+          !this.deps.store.hasPublishWatermark(rosterDone) &&
+          this.deps.store.approvedAttendees(state.coordinate).length > 0
+        ) {
+          await this.publishRosterCoalesced(state);
+          this.deps.store.nextPublishCreatedAt(rosterDone, Math.floor(this.now() / 1000));
+          republished++;
+        }
+        if (
+          state.matchVisibility === "event" &&
+          this.deps.store.hasPublishWatermark(`${KIND_MATCH_MATRIX}:${state.identifier}`) &&
+          !this.deps.store.hasPublishWatermark(matrixDone)
+        ) {
+          await this.publishMatrix(state);
+          this.deps.store.nextPublishCreatedAt(matrixDone, Math.floor(this.now() / 1000));
+        }
+      } catch (e) {
+        failed++;
+        log(`[roster] address upgrade failed for ${state.coordinate}: ${e instanceof Error ? e.message : e}`);
       }
     }
     if (republished > 0) log(`[roster] republished ${republished} roster(s) at the derived address (R-53 upgrade)`);
+    return failed;
   }
 
   // ── pipeline jobs ──────────────────────────────────────────────────────────
@@ -6476,9 +6497,22 @@ export class Coordinator {
     this.closers.add(() => {
       migrationStopped = true;
     });
-    this.rosterAddressMigration = this.migrateRosterAddresses(() => migrationStopped).catch((e) =>
-      log(`[roster] address upgrade failed: ${e instanceof Error ? e.message : e}`),
-    );
+    // Retried every 10 minutes until a pass completes with no failure: it is
+    // background work, and a relay that timed out at boot usually answers later.
+    let migrationTimer: ReturnType<typeof setTimeout> | undefined;
+    this.closers.add(() => clearTimeout(migrationTimer));
+    const migrate = (): Promise<void> =>
+      this.migrateRosterAddresses(() => migrationStopped)
+        .catch((e) => {
+          log(`[roster] address upgrade failed: ${e instanceof Error ? e.message : e}`);
+          return 1;
+        })
+        .then((failed) => {
+          if (failed === 0 || migrationStopped) return;
+          migrationTimer = setTimeout(() => void migrate(), ROSTER_MIGRATION_RETRY_MS);
+          if (typeof (migrationTimer as any).unref === "function") (migrationTimer as any).unref();
+        });
+    this.rosterAddressMigration = migrate();
     // Profile-refresh sweep: pick up kind-0 bios edited outside Nostrautica (see
     // {@link profileRefreshSweep} for the user report this fixes).
     //
