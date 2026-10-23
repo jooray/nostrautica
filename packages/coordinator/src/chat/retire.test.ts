@@ -152,6 +152,37 @@ describe("0x8009 flag day — retiring legacy MLS groups", () => {
     expect(store.getMarmotGroup(COORD)?.mls_group_id).toBe(ids.mlsGroupIdHex);
   });
 
+  it("KEEPS a room whose state fails to load: a load failure is not a legacy profile (prod 2026-10-23)", async () => {
+    const { store, coordSk } = legacyStore();
+    const { mls } = createMarmotClientMls({ store, coordSk, network: new FakeNetwork() });
+    await retireStaleGroups({ store, mls });
+    const ids = await mls.createGroup({ name: "n", description: "d", relays: RELAYS });
+    store.upsertMarmotGroup({ coordinate: COORD, mlsGroupId: ids.mlsGroupIdHex, nostrGroupId: ids.nostrGroupIdHex, status: "active", now: 2 });
+    // Damage the stored state so the next load throws.
+    store.marmotKvSet("group-state", ids.mlsGroupIdHex, "not a serialized group state");
+
+    const again = createMarmotClientMls({ store, coordSk, network: new FakeNetwork() });
+    expect(await again.mls.groupProfile(ids.mlsGroupIdHex)).toBe("unreadable");
+    const logs: string[] = [];
+    const result = await retireStaleGroups({ store, mls: again.mls, log: (m) => logs.push(m) });
+
+    expect(result).toEqual({ coordinates: [], groups: [] });
+    expect(store.getMarmotGroup(COORD)?.mls_group_id).toBe(ids.mlsGroupIdHex);
+    expect(await again.mls.storedGroupIds()).toContain(ids.mlsGroupIdHex);
+    expect(logs.join("\n")).toMatch(/KEPT the MLS group of/);
+  });
+
+  it("still replaces a room whose row names a group with no stored state at all", async () => {
+    const { store, coordSk } = legacyStore();
+    const { mls } = createMarmotClientMls({ store, coordSk, network: new FakeNetwork() });
+    await retireStaleGroups({ store, mls });
+    store.upsertMarmotGroup({ coordinate: COORD, mlsGroupId: "ab".repeat(32), nostrGroupId: "cd".repeat(32), status: "active", now: 2 });
+    expect(await mls.groupProfile("ab".repeat(32))).toBe("missing");
+    const result = await retireStaleGroups({ store, mls });
+    expect(result.coordinates).toEqual([COORD]);
+    expect(store.getMarmotGroup(COORD)).toBeUndefined();
+  });
+
   it("purges an orphan legacy group no event row names (e.g. a stale link-confirmation group)", async () => {
     const { store, coordSk } = legacyStore();
     store.deleteMarmotGroup(COORD); // state present, no row

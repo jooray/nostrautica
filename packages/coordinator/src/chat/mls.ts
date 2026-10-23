@@ -37,10 +37,13 @@ const { proposeRemoveUser, proposeUpdateMetadata } = Proposals;
  * profile (component 0x8009, which White Noise / MDK require). `unsupported` —
  * loads, but was created under the legacy 0xF2F1 proof (marmot-ts 0.6.0) or a
  * mixed profile: the library refuses every inbound event for it and it can never
- * hold an MDK member. `unreadable` — the stored state does not even deserialize
- * (or is missing), which a format change between generations can also cause.
+ * hold an MDK member. `missing` — a group id with no stored state at all.
+ * `unreadable` — state exists but did not load: a corrupt or inconsistent store,
+ * a format change between generations, or a fault during the load itself. It says
+ * nothing about the group's profile, so it is never by itself grounds to discard
+ * the group (prod 2026-10-23, see retire.ts).
  */
-export type GroupProfileStatus = "current" | "unsupported" | "unreadable";
+export type GroupProfileStatus = "current" | "unsupported" | "missing" | "unreadable";
 
 /**
  * Whether a kind-30443 carries a CURRENT KeyPackage: one with a valid 0x8009
@@ -259,7 +262,13 @@ export class MarmotClientMls implements ChatMls {
     try {
       const group = await this.client.groups.get(mlsGroupIdHex);
       return group.profileSupport.kind === "supported" ? "current" : "unsupported";
-    } catch {
+    } catch (e) {
+      if (!(await this.client.groups.has(mlsGroupIdHex).catch(() => true))) return "missing";
+      // The one place this error is seen: everything above it reduces it to a status.
+      const chain: string[] = [];
+      for (let c: unknown = e; c && chain.length < 4; c = c instanceof Error ? c.cause : undefined)
+        chain.push(c instanceof Error ? c.message : String(c));
+      console.warn(`[chat] MLS group ${mlsGroupIdHex.slice(0, 12)}… did not load: ${chain.join(" <- ")}`);
       return "unreadable";
     }
   }

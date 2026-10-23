@@ -44,22 +44,40 @@ export async function retireStaleGroups(deps: {
   const log = deps.log ?? (() => {});
   const result: RetireResult = { coordinates: [], groups: [] };
 
-  // Event rooms first: a row whose group is not current is dropped together with
-  // its state, so ensureGroup recreates it. A row with NO state at all
-  // ("unreadable" covers missing) is equally dead — a group the coordinator cannot
-  // load is one it cannot administer.
+  // Event rooms first: a row whose group is legacy (`unsupported`) is dropped
+  // together with its state, so ensureGroup recreates it. A row with NO state at
+  // all (`missing`) is equally dead and is recreated the same way.
+  //
+  // An `unreadable` group is KEPT. Discarding it used to be the rule, and it is
+  // destructive in exactly the wrong way: on 2026-10-23 a live event room failed
+  // one load at a deploy restart, was retired as if it were a pre-0x8009 room,
+  // and every member was pulled into a brand-new group. The old room's state was
+  // gone, so the failure could not even be diagnosed afterwards; the same
+  // database loaded every other group fine. A load failure is not evidence of the
+  // legacy profile. The group stays, its error is logged (MarmotClientMls.
+  // groupProfile), and the next access retries the load.
   const referenced = new Set<string>();
   for (const row of store.allMarmotGroups()) {
     referenced.add(row.mls_group_id.toLowerCase());
     const status = await mls.groupProfile(row.mls_group_id);
     if (status === "current") continue;
+    if (status === "unreadable") {
+      log(
+        `[chat] KEPT the MLS group of ${row.coordinate} (${row.mls_group_id.slice(0, 12)}…): it did not load, ` +
+          `but a load failure is not a legacy profile — not retiring a possibly live room`,
+      );
+      continue;
+    }
     await mls.retireGroup(row.mls_group_id);
     store.deleteMarmotGroup(row.coordinate);
     result.coordinates.push(row.coordinate);
     result.groups.push(row.mls_group_id);
     log(
       `[chat] retired the ${status} MLS group of ${row.coordinate} (${row.mls_group_id.slice(0, 12)}…): ` +
-        `it predates the 0x8009 identity-proof profile — a fresh group will be created and members re-added`,
+        (status === "missing"
+          ? "it has no stored state"
+          : "it predates the 0x8009 identity-proof profile") +
+          " — a fresh group will be created and members re-added",
     );
   }
 
@@ -70,7 +88,7 @@ export async function retireStaleGroups(deps: {
   for (const id of await mls.storedGroupIds()) {
     if (referenced.has(id.toLowerCase())) continue;
     const status = await mls.groupProfile(id);
-    if (status === "current") continue;
+    if (status === "current" || status === "unreadable") continue;
     await mls.retireGroup(id);
     result.groups.push(id);
     log(`[chat] purged ${status} orphan MLS group state ${id.slice(0, 12)}…`);
