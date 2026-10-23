@@ -42,12 +42,13 @@ import {
 import { createMarmotNetwork } from "./network.js";
 import {
   buildChatSend,
+  buildReactionSend,
+  buildEditSend,
+  buildDeleteSend,
   decodeApplicationMessage,
   roundTripChatRumor,
   rumorToChatMessage,
-  CHAT_KIND_TEXT,
-  CHAT_KIND_REACTION,
-  CHAT_KIND_EDIT,
+  CHAT_KINDS,
   type ChatMessage,
 } from "./messages.js";
 import { sendChatKeyAttestation } from "./attest.js";
@@ -904,7 +905,7 @@ export class MarmotChat {
   }): Promise<void> {
     try {
       const rumors = await group.history?.queryRumors({
-        kinds: [CHAT_KIND_TEXT, CHAT_KIND_REACTION, CHAT_KIND_EDIT],
+        kinds: CHAT_KINDS,
       });
       for (const rumor of rumors ?? []) {
         try {
@@ -927,10 +928,28 @@ export class MarmotChat {
 
   /** Send a kind-9 chat message to THIS EVENT's group. Convergence-gated (§2). */
   async send(text: string): Promise<void> {
+    await this.publish(buildChatSend(this.identity.pubkey, text));
+  }
+
+  /** React to a message (kind 7, `e` → target; see buildReactionSend). */
+  async react(target: string, emoji: string): Promise<void> {
+    await this.publish(buildReactionSend(this.identity.pubkey, target, emoji));
+  }
+
+  /** Replace the text of one of our own messages (kind 1009). */
+  async edit(target: string, content: string): Promise<void> {
+    await this.publish(buildEditSend(this.identity.pubkey, target, content));
+  }
+
+  /** Retract our own events: a message, or the reactions an un-react withdraws (kind 5). */
+  async retract(ids: string[]): Promise<void> {
+    await this.publish(buildDeleteSend(this.identity.pubkey, ids));
+  }
+
+  private async publish({ rumor, intent }: ReturnType<typeof buildChatSend>): Promise<void> {
     const groups = await this.currentEventGroups();
     const group = groups[0];
     if (!group) throw new Error("no joined chat group yet");
-    const { rumor, intent } = buildChatSend(this.identity.pubkey, text);
     await this.client.groups.send(group.id, intent);
     // Optimistic local echo (Bug 4): marmot does not deliver our own application
     // message back to us over the 445 subscription, so the sender would otherwise

@@ -556,3 +556,115 @@ describe("chat session — a history replay is ingested as one batch", () => {
     expect(broadcast).toHaveBeenCalledTimes(2);
   });
 });
+
+/**
+ * Reactions, edits and deletes ride the same routing as a send: the leader's own
+ * client, or a proxy to the leader tab. The room shows the folded timeline.
+ */
+describe("chat session — reactions, edits and deletes", () => {
+  let locks: FakeLockManager;
+  const ME = "c".repeat(64);
+  const THEM = "d".repeat(64);
+
+  function actionChat() {
+    return {
+      ...fakeChat(),
+      react: vi.fn().mockResolvedValue(undefined),
+      edit: vi.fn().mockResolvedValue(undefined),
+      retract: vi.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    FakeChannel.buses.clear();
+    locks = new FakeLockManager();
+    resolveChatIdentity.mockResolvedValue({ pubkey: ME });
+    chatCreate.mockImplementation(async () => actionChat());
+    __setChatCoordinatorFactoryForTests(
+      (opts: TabCoordinatorOptions) =>
+        new ChatTabCoordinator({
+          ...opts,
+          locks: locks as never,
+          createChannel: (n: string) => new FakeChannel(n) as never,
+        }),
+    );
+  });
+
+  afterEach(() => {
+    chatSession.dispose();
+    __setChatCoordinatorFactoryForTests(null);
+  });
+
+  async function leaderWith(messages: object[]) {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
+    const chat = chatSession.chat as unknown as Omit<ReturnType<typeof actionChat>, "onMessage"> & {
+      onMessage: (m: unknown) => void;
+    };
+    for (const m of messages) chat.onMessage({ tags: [], ...m });
+    await vi.waitFor(() => expect(chatSession.messages).toHaveLength(messages.length));
+    return chat;
+  }
+
+  it("folds modifiers into the timeline instead of listing them", async () => {
+    await leaderWith([
+      { id: "m1", pubkey: THEM, kind: 9, content: "hi", createdAt: 1 },
+      { id: "r1", pubkey: ME, kind: 7, content: "👍", createdAt: 2, tags: [["e", "m1"]] },
+    ]);
+    expect(chatSession.timeline).toHaveLength(1);
+    expect(chatSession.timeline[0]!.reactions).toEqual([{ emoji: "👍", count: 1, mine: true, ownIds: ["r1"] }]);
+  });
+
+  it("toggleReaction adds a reaction, and retracts our own when it is already there", async () => {
+    const chat = await leaderWith([
+      { id: "m1", pubkey: THEM, kind: 9, content: "hi", createdAt: 1 },
+      { id: "r1", pubkey: ME, kind: 7, content: "👍", createdAt: 2, tags: [["e", "m1"]] },
+      { id: "r2", pubkey: THEM, kind: 7, content: "🎉", createdAt: 3, tags: [["e", "m1"]] },
+    ]);
+    await chatSession.toggleReaction("m1", "👍");
+    expect(chat.retract).toHaveBeenCalledWith(["r1"]);
+    // Someone else's 🎉 is not ours to withdraw: tapping it adds our own.
+    await chatSession.toggleReaction("m1", "🎉");
+    expect(chat.react).toHaveBeenCalledWith("m1", "🎉");
+  });
+
+  it("edits and deletes only our own messages", async () => {
+    const chat = await leaderWith([
+      { id: "mine", pubkey: ME, kind: 9, content: "typo", createdAt: 1 },
+      { id: "theirs", pubkey: THEM, kind: 9, content: "hello", createdAt: 2 },
+    ]);
+    await chatSession.editMessage("mine", "  fixed  ");
+    expect(chat.edit).toHaveBeenCalledWith("mine", "fixed");
+    await chatSession.deleteMessage("mine");
+    expect(chat.retract).toHaveBeenCalledWith(["mine"]);
+    await expect(chatSession.editMessage("theirs", "nope")).rejects.toThrow();
+    await expect(chatSession.deleteMessage("theirs")).rejects.toThrow();
+    expect(chat.edit).toHaveBeenCalledTimes(1);
+    expect(chat.retract).toHaveBeenCalledTimes(1);
+  });
+
+  it("a follower proxies the action to the leader tab", async () => {
+    const COORD = (ctx as unknown as { coordinate: string }).coordinate;
+    const received: unknown[] = [];
+    const leaderTab = new ChatTabCoordinator({
+      scope: OWNER,
+      locks: locks as never,
+      createChannel: (n: string) => new FakeChannel(n) as never,
+      onRoleChange: () => {},
+      onActionRequest: async (action, coordinate) => {
+        received.push({ action, coordinate });
+      },
+    });
+    await leaderTab.whenSettled;
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    expect(chatSession.tabRole).toBe("follower");
+    leaderTab.broadcastState(COORD, [
+      { id: "m1", pubkey: THEM, kind: 9, content: "hi", createdAt: 1, tags: [] },
+    ]);
+    await vi.waitFor(() => expect(chatSession.timeline).toHaveLength(1));
+    await chatSession.toggleReaction("m1", "🙏");
+    expect(received).toEqual([{ action: { type: "react", target: "m1", emoji: "🙏" }, coordinate: COORD }]);
+    leaderTab.dispose();
+  });
+});

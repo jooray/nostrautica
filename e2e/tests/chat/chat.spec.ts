@@ -123,6 +123,48 @@ test.describe.serial(COORD_NPUB && RELAY_UP ? "marmot group chat" : "marmot grou
     await expectMessage(alice, m3);
   });
 
+  test("2b — reactions, edits and deletes reach the other member folded in", async () => {
+    test.setTimeout(150_000);
+    // Modifiers are their own kind-7/1009/5 rumors over the same kind-445 stream;
+    // the receiving side must fold them onto the message, never show a new bubble.
+    const row = (page: Page, text: string) => page.locator(".msg", { hasText: text }).last();
+    const openActions = async (page: Page, text: string) => {
+      const r = row(page, text);
+      await r.hover();
+      await r.getByRole("button", { name: "Message actions" }).click();
+      return r;
+    };
+
+    // Alice reacts to Bob's message; Bob sees the tally, not a "🎉" bubble.
+    const onAlice = await openActions(alice, m2);
+    await onAlice.getByRole("button", { name: "React with 🎉" }).click();
+    await expect(row(alice, m2).locator(".rchip.mine")).toHaveText("🎉 1", { timeout: 15_000 });
+    await expect(row(bob, m2).locator(".rchip")).toHaveText("🎉 1", { timeout: 30_000 });
+    // Tapping her own chip withdraws it (kind 5 naming the reaction).
+    await row(alice, m2).locator(".rchip.mine").click();
+    await expect(row(bob, m2).locator(".rchip")).toHaveCount(0, { timeout: 30_000 });
+
+    // Alice edits a message of her own; Bob sees the new text, labelled.
+    const before = `to-be-edited-${Date.now()}`;
+    const after = `${before}-fixed`;
+    await sendChat(alice, before);
+    await expectMessage(bob, before);
+    await (await openActions(alice, before)).getByRole("button", { name: "Edit", exact: true }).click();
+    const ta = alice.locator("form.compose textarea").first();
+    await expect(ta).toHaveValue(before);
+    await ta.fill(after);
+    await alice.locator("form.compose button.send").first().click();
+    await expect(ta).toHaveValue("", { timeout: 15_000 });
+    await expect(row(bob, after).locator(".edited")).toHaveText("edited", { timeout: 30_000 });
+    await expect(bob.locator(".messages .msg", { hasText: before })).toHaveCount(1); // one bubble, edited in place
+
+    // …and deletes it; Bob sees the tombstone and no trace of the text.
+    await (await openActions(alice, after)).getByRole("button", { name: "Delete", exact: true }).click();
+    await row(alice, after).getByRole("button", { name: "Delete", exact: true }).click(); // confirm
+    await expect(bob.locator(".messages")).toContainText("Message deleted", { timeout: 30_000 });
+    await expect(bob.locator(".messages")).not.toContainText(before);
+  });
+
   test("3 — two-tab leadership handover", async () => {
     test.setTimeout(150_000);
     // A second Alice tab (same context ⇒ same account, shared Web Locks) joins as a
