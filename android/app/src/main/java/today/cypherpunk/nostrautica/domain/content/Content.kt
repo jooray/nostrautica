@@ -156,17 +156,18 @@ class Content(
     /**
      * Fetch the event's page, official posts, deletions and (when wanted) the
      * attendee feed in one round, then the curated feeds the page declares,
-     * one subscription per distinct relay set. Skipped when fresh.
+     * one subscription per distinct relay set. Skipped when fresh. True when the
+     * copy is fresh or every relay set answered (the offline pack reports a miss).
      */
-    suspend fun refresh(ctx: EventContext, owner: String?, force: Boolean = false, attendees: Boolean = true) =
+    suspend fun refresh(ctx: EventContext, owner: String?, force: Boolean = false, attendees: Boolean = true): Boolean =
         kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { refreshOffMain(ctx, owner, force, attendees) }
 
-    private suspend fun refreshOffMain(ctx: EventContext, owner: String?, force: Boolean, attendees: Boolean) {
+    private suspend fun refreshOffMain(ctx: EventContext, owner: String?, force: Boolean, attendees: Boolean): Boolean {
         val base = "content:posts:${ctx.coordinate}"
         val fk = base + if (attendees) ":a" else ""
         // A fresh fetch that included the attendee feed also covers one that doesn't.
         val fresh = cache.isFresh(fk, TTL_MS) || (!attendees && cache.isFresh("$base:a", TTL_MS))
-        if (!force && fresh) { rebuild(ctx, owner, attendees); return }
+        if (!force && fresh) { rebuild(ctx, owner, attendees); return true }
         val eid = eid(ctx)
         val filters = mutableListOf(
             Filter(kinds = listOf(Kinds.LONGFORM, Kinds.MEMBERS_POST), authors = listOf(eid)),
@@ -190,6 +191,7 @@ class Content(
         }
         rebuild(ctx, owner, attendees)
         if (allAnswered) cache.markFetched(fk)
+        return allAnswered
     }
 
     /** One post by `d` (posts.ts fetchPostByD), from the store after a fetch when stale. */

@@ -1,0 +1,22 @@
+{
+  "en": {
+    "event.android.offline.noPictures": "profile pictures aren't saved (turned off in Settings)",
+    "event.android.offline.metered": "You're on mobile data. Profile pictures are included, which can add a few MB."
+  },
+  "sk": {
+    "event.android.offline.noPictures": "profilové fotky sa neukladajú (vypnuté v Nastaveniach)",
+    "event.android.offline.metered": "Ste na mobilných dátach. Súčasťou sú aj profilové fotky, čo môže pridať niekoľko MB."
+  },
+  "cs": {
+    "event.android.offline.noPictures": "profilové fotky se neukládají (vypnuto v Nastavení)",
+    "event.android.offline.metered": "Jste na mobilních datech. Součástí jsou i profilové fotky, což může přidat několik MB."
+  },
+  "de": {
+    "event.android.offline.noPictures": "Profilbilder werden nicht gespeichert (in den Einstellungen ausgeschaltet)",
+    "event.android.offline.metered": "Du bist im Mobilfunknetz. Profilbilder sind enthalten, das kann einige MB ausmachen."
+  },
+  "es": {
+    "event.android.offline.noPictures": "las fotos de perfil no se guardan (desactivado en Ajustes)",
+    "event.android.offline.metered": "Estás usando datos móviles. Se incluyen las fotos de perfil, lo que puede sumar algunos MB."
+  }
+}
