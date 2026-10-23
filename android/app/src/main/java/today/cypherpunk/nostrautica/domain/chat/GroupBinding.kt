@@ -35,12 +35,18 @@ object GroupBinding {
         data class Bound(val group: GroupInfo) : Result
     }
 
+    /**
+     * The welcomer and member checks fail CLOSED (audit R-70): an unknown welcomer, an
+     * unreadable member list or no coordinator to compare with used to pass, leaving the
+     * roster's group id as the only binding, and that id is a value any group can carry.
+     */
     fun select(groups: List<GroupInfo>, rosterGroupId: String?, coordinator: String?): Result {
         val want = rosterGroupId?.lowercase()?.takeIf { it.isNotEmpty() } ?: return Result.Unverified
+        val coord = coordinator?.lowercase()?.takeIf { it.isNotEmpty() } ?: return Result.Unverified
         val candidates = groups.filter { g ->
             g.nostrGroupIdHex.lowercase() == want &&
-                (coordinator == null || g.welcomer == null || g.welcomer == coordinator) &&
-                (coordinator == null || g.members == null || coordinator in g.members)
+                g.welcomer?.lowercase() == coord &&
+                g.members?.any { it.lowercase() == coord } == true
         }
         // Removed and re-added leaves two states under one id; route to the live one.
         val pick = candidates.firstOrNull { it.selfMember } ?: candidates.firstOrNull() ?: return Result.NotJoined

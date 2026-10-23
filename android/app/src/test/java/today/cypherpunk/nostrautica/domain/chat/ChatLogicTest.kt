@@ -104,8 +104,11 @@ class GroupBindingTest {
     @Test fun refusesAGroupSealedBySomeoneElseOrWithoutTheCoordinator() {
         assertEquals(GroupBinding.Result.NotJoined, GroupBinding.select(listOf(g(welcomer = "f".repeat(64))), gid, coord))
         assertEquals(GroupBinding.Result.NotJoined, GroupBinding.select(listOf(g(members = listOf(me))), gid, coord))
-        // An unknown welcomer / unreadable member list is not evidence against it.
-        assertTrue(GroupBinding.select(listOf(g(welcomer = null, members = null)), gid, coord) is GroupBinding.Result.Bound)
+        // R-70: an unknown welcomer / unreadable member list / no coordinator is not evidence FOR it.
+        assertEquals(GroupBinding.Result.NotJoined, GroupBinding.select(listOf(g(welcomer = null)), gid, coord))
+        assertEquals(GroupBinding.Result.NotJoined, GroupBinding.select(listOf(g(members = null)), gid, coord))
+        assertEquals(GroupBinding.Result.Unverified, GroupBinding.select(listOf(g()), gid, null))
+        assertTrue(GroupBinding.select(listOf(g(welcomer = coord.uppercase())), gid, coord) is GroupBinding.Result.Bound)
     }
 
     @Test fun removedMemberIsEvictedNotReady() {
