@@ -84,10 +84,21 @@ internal fun DaySeparator(label: String, irc: Boolean) {
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-internal fun IrcLine(m: ChatMessage, name: String, account: String, locale: String, mentions: MentionLook, onNick: () -> Unit) {
+internal fun IrcLine(
+    m: ChatMessage,
+    name: String,
+    account: String,
+    locale: String,
+    mentions: MentionLook,
+    actions: MessageMenuActions,
+    editing: Boolean,
+    onNick: () -> Unit,
+) {
     val t = LocalTokens.current
     val s = LocalStrings.current
+    var menu by remember { mutableStateOf(false) }
     val hue = avatarHues(account).first
     val nickColor = hsl(hue, 0.6f, if (t.dark) 0.7f else 0.4f)
     val text = buildAnnotatedString {
@@ -99,7 +110,44 @@ internal fun IrcLine(m: ChatMessage, name: String, account: String, locale: Stri
         if (m.edited && !m.deleted) withStyle(SpanStyle(color = t.textDim, fontSize = 11.sp)) { append(" (${s.t("chat.edited")})") }
         m.reactions.forEach { r -> withStyle(SpanStyle(color = t.textDim, fontSize = 12.sp)) { append("  ${r.emoji}${r.count}") } }
     }
-    Text(text, Modifier.fillMaxWidth().clickable(onClick = onNick).padding(vertical = 1.dp), fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 18.sp)
+    Box {
+        Text(
+            text,
+            Modifier.fillMaxWidth()
+                .background(if (editing) t.accentSoft else Color.Transparent)
+                .combinedClickable(onClick = onNick, onLongClick = { if (!m.deleted) menu = true })
+                .padding(vertical = 1.dp),
+            fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 18.sp,
+        )
+        MessageMenu(menu, { menu = false }, name, actions, onProfile = onNick)
+    }
+}
+
+/**
+ * What the long-press menu can do with one line. Edit and Delete are null on
+ * anyone else's message, and on your own once it is deleted
+ * ([today.cypherpunk.nostrautica.domain.chat.MessageActions.canModify]).
+ */
+internal class MessageMenuActions(
+    val onReact: (String) -> Unit,
+    val onEdit: (() -> Unit)?,
+    val onDelete: (() -> Unit)?,
+)
+
+/** Quick reactions, then the person's profile, then Edit/Delete on your own line. */
+@Composable
+private fun MessageMenu(open: Boolean, onDismiss: () -> Unit, name: String, actions: MessageMenuActions, onProfile: () -> Unit) {
+    val s = LocalStrings.current
+    DropdownMenu(open, onDismiss) {
+        Row(Modifier.padding(horizontal = 8.dp)) {
+            QUICK_REACTIONS.forEach { e ->
+                Text(e, Modifier.clip(RoundedCornerShape(8.dp)).clickable { onDismiss(); actions.onReact(e) }.padding(8.dp), fontSize = 20.sp)
+            }
+        }
+        DropdownMenuItem(text = { Text(s.t("chat.openProfileOf", "name" to name)) }, onClick = { onDismiss(); onProfile() })
+        actions.onEdit?.let { edit -> DropdownMenuItem(text = { Text(s.t("chat.edit")) }, onClick = { onDismiss(); edit() }) }
+        actions.onDelete?.let { del -> DropdownMenuItem(text = { Text(s.t("chat.delete")) }, onClick = { onDismiss(); del() }) }
+    }
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -113,8 +161,9 @@ internal fun Bubble(
     account: String,
     locale: String,
     mentions: MentionLook,
+    actions: MessageMenuActions,
+    editing: Boolean,
     onProfile: () -> Unit,
-    onReact: (String) -> Unit,
 ) {
     val t = LocalTokens.current
     val s = LocalStrings.current
@@ -138,6 +187,7 @@ internal fun Bubble(
                     Modifier
                         .clip(RoundedCornerShape(14.dp))
                         .background(if (mine) t.accentSoft else t.bgElev)
+                        .then(if (editing) Modifier.border(2.dp, t.accent, RoundedCornerShape(14.dp)) else Modifier)
                         .combinedClickable(onClick = { if (!mine) onProfile() }, onLongClick = { if (!m.deleted) menu = true })
                         .padding(horizontal = 12.dp, vertical = 7.dp),
                 ) {
@@ -148,14 +198,7 @@ internal fun Bubble(
                         Text(timeLabel(m.at, locale), color = t.textDim, fontSize = 11.sp)
                     }
                 }
-                DropdownMenu(menu, { menu = false }) {
-                    Row(Modifier.padding(horizontal = 8.dp)) {
-                        QUICK_REACTIONS.forEach { e ->
-                            Text(e, Modifier.clip(RoundedCornerShape(8.dp)).clickable { menu = false; onReact(e) }.padding(8.dp), fontSize = 20.sp)
-                        }
-                    }
-                    DropdownMenuItem(text = { Text(s.t("chat.openProfileOf", "name" to name)) }, onClick = { menu = false; onProfile() })
-                }
+                MessageMenu(menu, { menu = false }, name, actions, onProfile)
             }
             if (m.reactions.isNotEmpty()) {
                 Row(Modifier.padding(top = 3.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -165,7 +208,7 @@ internal fun Bubble(
                             Modifier.clip(RoundedCornerShape(999.dp))
                                 .background(if (r.mine) t.accentSoft else t.bgElev)
                                 .border(1.dp, if (r.mine) t.accent else t.border, RoundedCornerShape(999.dp))
-                                .clickable { onReact(r.emoji) }
+                                .clickable { actions.onReact(r.emoji) }
                                 .padding(horizontal = 7.dp, vertical = 1.dp),
                             fontSize = 12.sp,
                         )
