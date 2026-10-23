@@ -65,11 +65,25 @@ jobs:
       # option and exits "Unknown option" after the whole gate has passed. `--sec`
       # auto-detects a bunker:// URL (or nbunksec/nsec). `--non-interactive` because
       # there is nobody to answer a prompt on a runner.
+      #
+      # The whole JSR/npm graph is locked (audit R-62). "@nsyte/cli@0.27.2" pins one
+      # package; its dependencies resolve from semver ranges at run time, in the one
+      # job holding the bunker credential. .github/nsyte/deno.lock records every
+      # module's integrity hash and --frozen refuses to run anything else. To bump
+      # nsyte: change the version here and regenerate the lock with
+      #   deno cache --frozen=false --config .github/nsyte/deno.json jsr:@nsyte/cli@<version>
+      # with Deno at the deno-version above, and review the lock diff.
+      #
+      # Not -A: no FFI, and the only subprocess allowed is git (nsyte reads the
+      # origin URL for its source tag; its keychain and browser probes fail closed
+      # inside try/catch without --allow-run).
       - name: Deploy to nsite
         env:
           NSYTE_BUNKER_URI: ${{ secrets.NSYTE_BUNKER_URI }}
         run: |
-          deno run -A jsr:@nsyte/cli@0.27.2 deploy packages/app/build \
+          deno run --frozen --config .github/nsyte/deno.json \
+            --allow-net --allow-read --allow-write --allow-env --allow-sys --allow-run=git \
+            jsr:@nsyte/cli@0.27.2 deploy packages/app/build \
             --fallback /index.html \
             --sec "$NSYTE_BUNKER_URI" \
             --non-interactive \

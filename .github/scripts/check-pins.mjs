@@ -142,6 +142,11 @@ for (const f of readdirSync(wfDir).filter((n) => n.endsWith(".yml") || n.endsWit
         }
       }
     }
+    // A `deno run` resolves its dependency graph at run time unless a lockfile is
+    // enforced (audit R-62), so every one must be --frozen.
+    if (/^\s*deno run\b/.test(line) && !line.includes("--frozen")) {
+      errors.push(`.github/workflows/${f}:${i + 1} deno run without --frozen (an unlocked dependency graph)`);
+    }
     const deno = line.match(/^\s*deno-version:\s*["']?([^"'\s#]+)/)?.[1];
     if (deno !== undefined && !/^v?\d+\.\d+\.\d+$/.test(deno)) {
       errors.push(`.github/workflows/${f}:${i + 1} deno-version ${deno} is not an exact X.Y.Z release`);
