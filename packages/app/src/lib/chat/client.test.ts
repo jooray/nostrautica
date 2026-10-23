@@ -424,6 +424,33 @@ describe("MarmotChat.send() — optimistic own-message echo (Bug 4)", () => {
     // de-dupe — assert the id is stable/re-derivable rather than duplicated here.
     expect(seen.filter((m) => m.id === echoed.id)).toHaveLength(1);
   });
+
+  it("reactions, edits and deletes go to the same group and echo the same way", async () => {
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-welcome-mod",
+      attendees: [],
+    });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    const seen: { kind: number; content: string; tags: string[][] }[] = [];
+    chat.onMessage = (m) => seen.push(m);
+    await chat.start();
+    lastClient.invites.deliver({ id: "welcome-mod" });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-mod"]));
+
+    const target = "e".repeat(64);
+    await chat.react(target, "👍");
+    await chat.edit(target, "fixed");
+    await chat.retract([target]);
+
+    expect(lastClient.groups.send).toHaveBeenCalledTimes(3);
+    expect(seen.map((m) => [m.kind, m.content, m.tags])).toEqual([
+      [7, "👍", [["e", target]]],
+      [1009, "fixed", [["e", target]]],
+      [5, "", [["e", target]]],
+    ]);
+  });
 });
 
 describe("MarmotChat welcome provenance (audit APPK-2)", () => {

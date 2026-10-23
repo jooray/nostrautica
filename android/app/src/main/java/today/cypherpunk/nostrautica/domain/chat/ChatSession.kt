@@ -307,6 +307,33 @@ class ChatSession internal constructor(
     }
 
     /**
+     * Replace the text of our own message [m] (kind 1009 through MDK). Returns
+     * false when there was nothing to send (empty or unchanged). Throws
+     * [Unroutable] when the device is out of the room.
+     */
+    suspend fun edit(m: ChatMessage, text: String): Boolean {
+        val (ref, gid) = ownAction(m)
+        val next = MessageActions.editedText(m.text, text) ?: return false
+        engine.edit(ref, gid, m.id, next)
+        return true
+    }
+
+    /** Delete our own message [m] for everyone (kind 5 through MDK). */
+    suspend fun delete(m: ChatMessage) {
+        val (ref, gid) = ownAction(m)
+        engine.delete(ref, gid, m.id)
+    }
+
+    private fun ownAction(m: ChatMessage): Pair<String, String> {
+        val ref = accountRef ?: throw Unroutable()
+        val gid = boundGroup
+        if (gid == null || _state.value.phase != Phase.READY) throw Unroutable()
+        // Every receiving client drops an edit or delete from anyone but the author.
+        require(MessageActions.canModify(m, _state.value.chatPubkey)) { "only your own messages can be changed" }
+        return ref to gid
+    }
+
+    /**
      * "Rejoin this chat" (client.ts rejoin; MARMOT-GROUP-CHAT.md "Rejoining a
      * device"): revoke this device (drops the coordinator-held leaf), rotate the
      * key package (a new event id the coordinator has not consumed), re-attest.

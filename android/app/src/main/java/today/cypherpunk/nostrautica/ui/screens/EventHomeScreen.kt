@@ -10,7 +10,18 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Close
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.Text
+import androidx.compose.ui.draw.clip
+import today.cypherpunk.nostrautica.domain.people.whatsNew
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -38,6 +49,7 @@ import today.cypherpunk.nostrautica.ui.components.Body
 import today.cypherpunk.nostrautica.ui.components.Card
 import today.cypherpunk.nostrautica.ui.components.Dim
 import today.cypherpunk.nostrautica.ui.components.EventWash
+import today.cypherpunk.nostrautica.ui.components.Notice
 import today.cypherpunk.nostrautica.ui.components.Pill
 import today.cypherpunk.nostrautica.ui.components.PrimaryButton
 import today.cypherpunk.nostrautica.ui.components.SecondaryButton
@@ -55,6 +67,7 @@ import today.cypherpunk.nostrautica.ui.shell.EventScaffold
 import today.cypherpunk.nostrautica.ui.shell.EventState
 import today.cypherpunk.nostrautica.ui.shell.LocalEvent
 import today.cypherpunk.nostrautica.ui.shell.Page
+import today.cypherpunk.nostrautica.ui.shell.VisitorPreview
 import today.cypherpunk.nostrautica.ui.theme.DisplayFont
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 import java.text.DateFormat
@@ -187,14 +200,47 @@ fun EventHomeScreen(naddr: String) {
             if (ev.isMember) runCatching { c.members.refresh(ev.ctx, a.signer) }
         }
 
+        // "You were approved" (spec §13): once, when approval landed since the last visit
+        // (the whats-new watermark), then acknowledged. Re-checked when the role flips
+        // from pending while this screen is open. Attendees only: an organizer's first
+        // visit to an event they made is not an approval.
+        var approvedBanner by remember(ev.coordinate) { mutableStateOf(false) }
+        LaunchedEffect(ev.coordinate, ev.realRole, account) {
+            val a = account ?: return@LaunchedEffect
+            if (ev.realRole != Role.ATTENDEE) return@LaunchedEffect
+            if (c.whatsNew.approvalIsNew(a.pubkey, ev.coordinate, approved = true)) {
+                approvedBanner = true
+                c.whatsNew.markApprovedSeen(a.pubkey, ev.coordinate)
+            }
+        }
+
         Page(p) {
             item { EventHeader(ev) }
+            if (approvedBanner) item {
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(t.okSoft).padding(start = 16.dp, top = 6.dp, bottom = 6.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Icon(Icons.Outlined.Check, null, Modifier.size(18.dp), tint = t.ok)
+                    Spacer(Modifier.width(8.dp))
+                    Text(s.t("event.approvedBanner"), Modifier.weight(1f), fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+                    IconButton({ approvedBanner = false }) { Icon(Icons.Outlined.Close, s.t("event.approvedBanner.dismiss"), Modifier.size(18.dp), tint = t.textDim) }
+                }
+            }
             if (ev.ctx.summary.isNotBlank()) item { Body(ev.ctx.summary) }
             item { LogisticsBlock(ev) }
             // Space hierarchy (§15): "Part of <community>" and the one-tap offer for a member who never answered.
             if (ev.ctx.cfg.parent != null) item { CommunityHeader(ev) }
+            // The exit bar of the visitor preview (spec §13). Everything gated on the role
+            // below already reads the effective (visitor) role.
+            if (ev.previewing) item {
+                Notice(s.t("event.viewAsVisitor.active")) {
+                    SmallButton(s.t("event.viewAsVisitor.exit"), { VisitorPreview.toggle(ev.coordinate) })
+                }
+            }
             when (ev.role) {
-                Role.VISITOR -> item {
+                // The web hides the readiness journey, and with it the Join CTA, while previewing.
+                Role.VISITOR -> if (!ev.previewing) item {
                     Card {
                         SectionTitle(s.tc("event.join", ev.isCommunity))
                         Dim(s.tc("event.join.body", ev.isCommunity))
@@ -220,7 +266,7 @@ fun EventHomeScreen(naddr: String) {
             if (ev.isMember) item { MemberActions(ev) }
             // Organizers get admin/duplicate; a signed-in non-member gets the
             // organizer-key recovery offer (a fresh device), so the slot decides.
-            if (ev.isOrganizer || (account != null && !ev.isMember)) item { OrganizerCard(ev) }
+            if (ev.isOrganizer || (account != null && !ev.isMember && !ev.previewing)) item { OrganizerCard(ev) }
             item { EventPageSections(ev) }
             ev.ctx.cfg.retentionDays?.let { days -> item { Dim(s.t("event.retention.line", "days" to days), size = 13) } }
         }

@@ -1005,7 +1005,7 @@ export class Coordinator {
         // interleave with one of them for the same member.
         withMemberLock: (coordinate, pubkey, fn) =>
           this.withSubjectLock(coordinate, `member:${pubkey}`, fn),
-        enqueueSync: (coordinate, pubkey, reenrolling) =>
+        enqueueSync: (coordinate, pubkey, reenrolling, reenrollAt) =>
           this.jobs.enqueue("chat_sync_member", `chat-sync:${coordinate}:${pubkey}:${this.now()}`, {
             coordinate,
             pubkey,
@@ -1014,6 +1014,8 @@ export class Coordinator {
             // hold, so a retry without it is a plain add that the eligibility gate
             // refuses — see MarmotAdmin.tryAddKeyPackage.
             ...(reenrolling ? { reenrolling } : {}),
+            // When the attestation was made: the warrant expires (REENROL_WARRANT_MS).
+            ...(reenrollAt !== undefined ? { reenrollAt } : {}),
           }),
         // A device-management action changes `chat_keys`, and the published 31604
         // roster is the only place a client reads the device list from — so without
@@ -1269,6 +1271,7 @@ export class Coordinator {
           // it was carried; both are plain adds, which is correct for them.
           this.marmot!.syncMember(p.coordinate, p.pubkey, {
             ...(typeof p.reenrolling === "string" ? { reenrolling: p.reenrolling } : {}),
+            ...(typeof p.reenrollAt === "number" ? { reenrollAt: p.reenrollAt } : {}),
           }),
         );
         // THROW on an incomplete sync (audit B-5), so this job is what its comment

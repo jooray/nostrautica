@@ -48,7 +48,7 @@ export interface MarmotAdminDeps {
    * constructible in tests without a queue; when absent, a failed attestation-path
    * sync is only logged, which is the behaviour this exists to replace.
    */
-  enqueueSync?(coordinate: string, accountPubkey: string, reenrolling?: string): void;
+  enqueueSync?(coordinate: string, accountPubkey: string, reenrolling?: string, reenrollAt?: number): void;
   /**
    * Run `fn` under the coordinator's per-member subject lock — the same
    * `member:<pubkey>` mutex the live approve / revoke / attestation paths already
@@ -188,13 +188,30 @@ export const HELD_KEY_PACKAGE_TTL_MS = 120_000;
  */
 export const MAX_HELD_KEY_PACKAGES = 256;
 
+/**
+ * How long an attestation's re-enrolment warrant lasts. A Rejoin completes in
+ * seconds to minutes; this bounds how long a durable retry may still evict a leaf.
+ */
+export const REENROL_WARRANT_MS = 60 * 60 * 1000;
+/** How much older than its re-enrolment request a rotated key package may be. */
+export const REENROL_KP_LEAD_SEC = 15 * 60;
+
+function kpCreatedAt(kp: AnyEvent): number {
+  return typeof kp.created_at === "number" ? kp.created_at : 0;
+}
+
 export class MarmotAdmin {
   private readonly store: Store;
   private readonly mls: ChatMls;
   private readonly now: () => number;
   private readonly coordinatorPubkey: string;
   private readonly fetchKeyPackages: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
-  private readonly enqueueSync?: (coordinate: string, accountPubkey: string, reenrolling?: string) => void;
+  private readonly enqueueSync?: (
+    coordinate: string,
+    accountPubkey: string,
+    reenrolling?: string,
+    reenrollAt?: number,
+  ) => void;
   private readonly withMemberLock?: (
     coordinate: string,
     accountPubkey: string,
@@ -602,6 +619,9 @@ export class MarmotAdmin {
     accountPubkey: string,
     opts?: {
       reenrolling?: string;
+      /** `created_at` (seconds) of the attestation behind `reenrolling`; without it
+       *  there is no re-enrolment warrant (see {@link REENROL_WARRANT_MS}). */
+      reenrollAt?: number;
       /**
        * Key packages already fetched for a KNOWN set of authors ({@link prefetched}),
        * so a walk over many members costs one relay read instead of one per member.
@@ -654,6 +674,33 @@ export class MarmotAdmin {
       fromHold.add(author);
       candidates.push(held);
     }
+    // The re-enrolment warrant (the only thing that may drop a live leaf) is
+    // narrowed here, before any key package sees it (prod 2026-10-23):
+    // - It expires. A durable retry used to carry it for as long as it kept
+    //   retrying, so an attestation stuck waiting for a rotated key package in
+    //   event B was still live hours later when the device rotated its shared
+    //   30443 slot for event A, and B evicted and re-added a healthy device.
+    //   An undated warrant (a retry row enqueued before `reenrollAt` existed) is
+    //   treated as expired.
+    // - It covers ONE key package per sync: the device's newest. Every older,
+    //   still-unconsumed key package of the same device used to get it too, so a
+    //   single attestation removed and re-added the device once per key package
+    //   (ec8bb441, twice in 13 s).
+    let reenrolling = opts?.reenrolling;
+    if (reenrolling) {
+      const at = opts?.reenrollAt;
+      if (at === undefined || this.now() - at * 1000 > REENROL_WARRANT_MS) {
+        this.log(
+          `[chat] re-enrolment request for ${reenrolling.slice(0, 8)} in ${coordinate} is ${at === undefined ? "undated" : "stale"} — syncing without evicting`,
+        );
+        reenrolling = undefined;
+      }
+    }
+    const warrantKp = reenrolling
+      ? candidates
+          .filter((kp) => kp.pubkey === reenrolling)
+          .reduce<AnyEvent | undefined>((a, b) => (!a || kpCreatedAt(b) > kpCreatedAt(a) ? b : a), undefined)
+      : undefined;
     let synced = true;
     for (const kp of candidates) {
       // `reconcile`: this path is a DELIBERATE "bring this member up to date" —
@@ -664,7 +711,7 @@ export class MarmotAdmin {
       // See tryAddKeyPackage.
       const ok = await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp, {
         reconcile: true,
-        reenrolling: opts?.reenrolling,
+        ...(kp === warrantKp ? { reenrolling, reenrollAt: opts?.reenrollAt } : {}),
       });
       // Release the hold only on "nothing further to do for this member" — a
       // transient Add/Welcome failure keeps the copy so the durable retry a moment
@@ -738,7 +785,7 @@ export class MarmotAdmin {
     coordinate: string,
     mlsGroupId: string,
     kp: AnyEvent,
-    opts?: { reconcile?: boolean; reenrolling?: string },
+    opts?: { reconcile?: boolean; reenrolling?: string; reenrollAt?: number },
   ): Promise<boolean> {
     if (this.isFreshlySpentConfirmKp(coordinate, kp)) {
       // NOT "nothing to do": the linked key IS authorized, we are just waiting for
@@ -855,6 +902,21 @@ export class MarmotAdmin {
       this.log(
         `[chat] re-adding ${kp.pubkey.slice(0, 8)} to ${coordinate}: attested device holds no leaf despite 30443 ${kp.id.slice(0, 8)} being consumed`,
       );
+    }
+    if (
+      member &&
+      opts?.reenrollAt !== undefined &&
+      typeof kp.created_at === "number" &&
+      kp.created_at < opts.reenrollAt - REENROL_KP_LEAD_SEC
+    ) {
+      // The device rotates its key package and THEN attests, so the key package of
+      // a re-enrolment is at most a beat older than the request. One from well
+      // before it was not published for this request (most likely rotated for
+      // another event) and is no evidence that this device lost the room.
+      this.log(
+        `[chat] keeping ${kp.pubkey.slice(0, 8)} in ${coordinate}: 30443 ${kp.id.slice(0, 8)} predates its re-enrolment request — waiting for the rotated one`,
+      );
+      return false;
     }
     if (member) {
       // Reaching here means THIS device attested re-enrolment for THIS event (the
@@ -1117,7 +1179,10 @@ export class MarmotAdmin {
         // until a restart or another manual Rejoin — while the rumor was marked
         // seen, so nothing re-drove it.
         try {
-          const synced = await this.syncMember(coordinate, accountPubkey, { reenrolling: content.chat_pubkey });
+          const synced = await this.syncMember(coordinate, accountPubkey, {
+            reenrolling: content.chat_pubkey,
+            reenrollAt: createdAt,
+          });
           // A FALSE return is the same situation as a throw (audit B-5): the device
           // is not in the group and the reason can clear on its own. It used to be
           // invisible here, because `tryAddKeyPackage` catches its own invite
@@ -1127,7 +1192,7 @@ export class MarmotAdmin {
             this.log(
               `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} did not complete — queued for durable retry`,
             );
-            this.enqueueSync(coordinate, accountPubkey, content.chat_pubkey);
+            this.enqueueSync(coordinate, accountPubkey, content.chat_pubkey, createdAt);
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1142,7 +1207,7 @@ export class MarmotAdmin {
             // repair. The user pressed Rejoin, saw "requested", and was not back in;
             // the inline attempt's transient failure had quietly turned the durable
             // retry into a no-op.
-            this.enqueueSync(coordinate, accountPubkey, content.chat_pubkey);
+            this.enqueueSync(coordinate, accountPubkey, content.chat_pubkey, createdAt);
           } else {
             this.log(
               `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} failed with no retry queue: ${msg.slice(0, 160)}`,

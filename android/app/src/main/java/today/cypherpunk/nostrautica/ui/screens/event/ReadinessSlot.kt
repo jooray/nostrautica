@@ -50,7 +50,13 @@ import today.cypherpunk.nostrautica.ui.components.PrimaryButton
 import today.cypherpunk.nostrautica.ui.components.SecondaryButton
 import today.cypherpunk.nostrautica.ui.components.SoftCard
 import today.cypherpunk.nostrautica.ui.nav.Route
+import today.cypherpunk.nostrautica.domain.offline.OfflinePackRules
+import today.cypherpunk.nostrautica.domain.offline.Step
+import today.cypherpunk.nostrautica.domain.offline.offlinePacks
+import today.cypherpunk.nostrautica.protocol.NostrSigner
+import today.cypherpunk.nostrautica.ui.screens.join.ProgressLine
 import today.cypherpunk.nostrautica.ui.screens.join.clockTime
+import today.cypherpunk.nostrautica.ui.screens.join.formatBytes
 import today.cypherpunk.nostrautica.ui.shell.EventState
 import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 
@@ -165,7 +171,7 @@ fun ReadinessCard(ev: EventState) {
 
 /**
  * The rest of a member's Overview: own processing-failure notices (21606 sealed
- * to me), the offline note, and "Leave event" (21610) for attendees.
+ * to me), the offline event pack, and "Leave event" (21610) for attendees.
  */
 @Composable
 fun MemberActions(ev: EventState) {
@@ -194,7 +200,7 @@ fun MemberActions(ev: EventState) {
                 })
             }
         }
-        Dim(s.t("event.android.offlineNote"), size = 13)
+        OfflinePackCard(ev, a.pubkey, a.signer)
         if (ev.role == Role.ATTENDEE) {
             when {
                 withdrawState != null -> Dim(if (withdrawState == "queued") s.t("event.leave.queued") else s.t("event.leave.requested"))
@@ -217,5 +223,62 @@ fun MemberActions(ev: EventState) {
                 else -> LinkButton(s.t("event.leave.action"), { confirming = true })
             }
         }
+    }
+}
+
+/**
+ * The offline event pack (EventHome.svelte's "Available offline" card): one tap
+ * pre-downloads people, matches, talks and the event page so they open with no
+ * signal. It never runs on its own: no background refresh, only this button.
+ */
+@Composable
+private fun OfflinePackCard(ev: EventState, owner: String, signer: NostrSigner) {
+    val c = LocalContainer.current
+    val s = LocalStrings.current
+    val packs = c.offlinePacks
+    val pack by remember(owner, ev.coordinate) { packs.observe(owner, ev.coordinate) }.collectAsState(null)
+    val progress by packs.progress.collectAsState()
+    val online by c.nostr.network.collectAsState()
+    val pictures by c.prefs.externalImages.collectAsState()
+    val steps = progress[ev.coordinate]
+    val packing = steps != null
+    val total = OfflinePackRules.STEPS.size
+    val done = pack?.let(OfflinePackRules::complete) == true
+    // Read when the card shows and again when a build starts or ends, not polled.
+    val metered = remember(online, packing) { online && packs.metered() }
+
+    Card {
+        Text(s.t("event.offline.title"), fontWeight = FontWeight.SemiBold)
+        Dim(
+            when {
+                steps != null -> s.t("event.offline.downloading", "n" to minOf(steps.size, total), "total" to total)
+                done -> s.t("event.offline.ready")
+                pack != null -> s.t("event.offline.partial")
+                else -> s.t("event.offline.body")
+            },
+            size = 13,
+        )
+        if (steps != null) ProgressLine(steps.size.toFloat() / total, null)
+        val p = pack
+        if (!packing && p != null) {
+            // Joined here so a missing leading clause can't leave a stray separator.
+            val notes = listOfNotNull(
+                p.bytesAdded?.takeIf { it >= OfflinePackRules.MIN_REPORTED_BYTES }?.let { s.t("event.offline.stored", "size" to formatBytes(it)) },
+                if (p.steps.any { it.key == Step.PICTURES && it.skipped }) s.t("event.android.offline.noPictures") else null,
+                if (done) s.t("event.offline.mediaNote") else null,
+            )
+            if (notes.isNotEmpty()) Dim(notes.joinToString(" · "), size = 12)
+        }
+        if (!online && !packing) Dim(s.t("error.cat.offline"), size = 12)
+        else if (metered && pictures && !packing) Dim(s.t("event.android.offline.metered"), size = 12)
+        SecondaryButton(
+            when {
+                packing -> s.t("event.offline.downloadingShort")
+                pack != null -> s.t("event.offline.refresh")
+                else -> s.t("event.offline.download")
+            },
+            { packs.start(ev.ctx, owner, signer) },
+            enabled = online && !packing,
+        )
     }
 }

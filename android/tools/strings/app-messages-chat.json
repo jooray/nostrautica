@@ -8,10 +8,6 @@
     "chat.android.steps.attestWaiting": "Asking the coordinator to add this phone…",
     "chat.android.steps.welcome": "Waiting for the coordinator to add you",
     "chat.android.steps.unverified": "Invitation received. Waiting for the event's member list to confirm it is this event's chat.",
-    "chat.android.edited": "edited",
-    "chat.android.deleted": "Message deleted",
-    "chat.android.loadOlder": "Load older messages",
-    "chat.android.react": "React",
     "chat.android.startFailed": "The chat couldn't start on this phone."
   },
   "sk": {
@@ -23,10 +19,6 @@
     "chat.android.steps.attestWaiting": "Žiadame koordinátora o pridanie tohto telefónu…",
     "chat.android.steps.welcome": "Čakáme, kým vás koordinátor pridá",
     "chat.android.steps.unverified": "Pozvánka prišla. Čakáme, kým zoznam členov podujatia potvrdí, že ide o chat tohto podujatia.",
-    "chat.android.edited": "upravené",
-    "chat.android.deleted": "Správa bola zmazaná",
-    "chat.android.loadOlder": "Načítať staršie správy",
-    "chat.android.react": "Reagovať",
     "chat.android.startFailed": "Chat sa v tomto telefóne nepodarilo spustiť."
   },
   "cs": {
@@ -38,10 +30,6 @@
     "chat.android.steps.attestWaiting": "Žádáme koordinátora o přidání tohoto telefonu…",
     "chat.android.steps.welcome": "Čekáme, až vás koordinátor přidá",
     "chat.android.steps.unverified": "Pozvánka dorazila. Čekáme, až seznam členů akce potvrdí, že jde o chat této akce.",
-    "chat.android.edited": "upraveno",
-    "chat.android.deleted": "Zpráva byla smazána",
-    "chat.android.loadOlder": "Načíst starší zprávy",
-    "chat.android.react": "Reagovat",
     "chat.android.startFailed": "Chat se v tomto telefonu nepodařilo spustit."
   },
   "de": {
@@ -53,10 +41,6 @@
     "chat.android.steps.attestWaiting": "Der Koordinator wird gebeten, dieses Telefon hinzuzufügen…",
     "chat.android.steps.welcome": "Warte darauf, dass der Koordinator dich hinzufügt",
     "chat.android.steps.unverified": "Einladung erhalten. Warte darauf, dass die Mitgliederliste der Veranstaltung bestätigt, dass es ihr Chat ist.",
-    "chat.android.edited": "bearbeitet",
-    "chat.android.deleted": "Nachricht gelöscht",
-    "chat.android.loadOlder": "Ältere Nachrichten laden",
-    "chat.android.react": "Reagieren",
     "chat.android.startFailed": "Der Chat konnte auf diesem Telefon nicht starten."
   },
   "es": {
@@ -68,10 +52,6 @@
     "chat.android.steps.attestWaiting": "Pidiendo al coordinador que añada este teléfono…",
     "chat.android.steps.welcome": "Esperando a que el coordinador te añada",
     "chat.android.steps.unverified": "Invitación recibida. Esperando a que la lista de miembros del evento confirme que es su chat.",
-    "chat.android.edited": "editado",
-    "chat.android.deleted": "Mensaje eliminado",
-    "chat.android.loadOlder": "Cargar mensajes anteriores",
-    "chat.android.react": "Reaccionar",
     "chat.android.startFailed": "El chat no pudo iniciarse en este teléfono."
   }
 }

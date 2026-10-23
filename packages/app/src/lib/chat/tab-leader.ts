@@ -47,6 +47,16 @@ export interface BroadcastChannelLike {
 
 export type TabRole = "pending" | "leader" | "follower";
 
+/**
+ * A modifier sent on an existing message (timeline.ts folds them). Proxied to the
+ * leader like a send, since only the leader owns MLS state. `retract` names
+ * event ids (a message, or the reactions an un-react withdraws).
+ */
+export type ChatAction =
+  | { type: "react"; target: string; emoji: string }
+  | { type: "edit"; target: string; content: string }
+  | { type: "retract"; ids: string[] };
+
 /** Broadcast wire protocol — {send request, ack, message list update, membership update} + election pings. */
 type Wire =
   | { t: "leader-hello"; scope: string }
@@ -58,6 +68,7 @@ type Wire =
   // still running the previous build interoperates until it reloads.
   | { t: "send"; scope: string; reqId: string; text: string; coordinate?: string }
   | { t: "rejoin"; scope: string; reqId: string; force?: boolean; coordinate?: string }
+  | { t: "action"; scope: string; reqId: string; action: ChatAction; coordinate?: string }
   | { t: "ack"; scope: string; reqId: string; ok: boolean; error?: string };
 
 export interface TabCoordinatorOptions {
@@ -75,6 +86,8 @@ export interface TabCoordinatorOptions {
   onLeaderMembers?(coordinate: string, members: string[]): void;
   /** Leader: a follower proxied a send; resolve to ack ok, throw to ack error. */
   onSendRequest?(text: string, coordinate?: string): Promise<void>;
+  /** Leader: a follower proxied a reaction/edit/delete; resolve/throw to ack. */
+  onActionRequest?(action: ChatAction, coordinate?: string): Promise<void>;
   /** Leader: a follower asked for a chat re-enrolment; resolve/throw to ack. */
   onRejoinRequest?(force: boolean, coordinate?: string): Promise<void>;
   /** Leader: a freshly-joined follower asked for the current state — re-broadcast it. */
@@ -301,6 +314,11 @@ export class ChatTabCoordinator {
       case "send":
         if (this.role === "leader") void this.handleSendRequest(msg.reqId, msg.text, msg.coordinate);
         return;
+      case "action":
+        if (this.role === "leader") {
+          void this.runForFollower(msg.reqId, () => this.opts.onActionRequest?.(msg.action, msg.coordinate));
+        }
+        return;
       case "rejoin":
         if (this.role === "leader") {
           void this.runForFollower(msg.reqId, () => this.opts.onRejoinRequest?.(msg.force ?? false, msg.coordinate));
@@ -382,6 +400,15 @@ export class ChatTabCoordinator {
   proxySend(text: string, coordinate?: string): Promise<void> {
     return this.proxy(
       (reqId) => ({ t: "send", scope: this.scope, reqId, text, coordinate }),
+      this.ackTimeoutMs,
+      "timed out waiting for the active tab to send",
+    );
+  }
+
+  /** Follower: proxy a reaction/edit/delete to the leader, like {@link proxySend}. */
+  proxyAction(action: ChatAction, coordinate?: string): Promise<void> {
+    return this.proxy(
+      (reqId) => ({ t: "action", scope: this.scope, reqId, action, coordinate }),
       this.ackTimeoutMs,
       "timed out waiting for the active tab to send",
     );

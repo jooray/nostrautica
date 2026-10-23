@@ -21,9 +21,12 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Forum
 import androidx.compose.material.icons.outlined.Info
+import androidx.activity.compose.BackHandler
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -32,6 +35,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -46,10 +50,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextRange
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.LifecycleStartEffect
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -59,6 +69,8 @@ import today.cypherpunk.nostrautica.domain.chat.ChatMessage
 import today.cypherpunk.nostrautica.domain.chat.ChatSession
 import today.cypherpunk.nostrautica.domain.chat.DmCommand
 import today.cypherpunk.nostrautica.domain.chat.ExternalLink
+import today.cypherpunk.nostrautica.domain.chat.Mentions
+import today.cypherpunk.nostrautica.domain.chat.MessageActions
 import today.cypherpunk.nostrautica.domain.chat.chat
 import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.protocol.Nip19
@@ -122,11 +134,35 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     val scope = rememberCoroutineScope()
     val coordinator = ev.ctx.cfg.coordinator
 
+    // The composer is a TextFieldValue, not a String: the @ picker needs the caret.
+    val draftKey = "chat.draft:${account.pubkey}:${ev.coordinate}"
+    var field by remember { mutableStateOf((c.prefs.getString(draftKey) ?: "").let { TextFieldValue(it, TextRange(it.length)) }) }
+    val draft = field.text
+    fun setDraft(text: String) { field = TextFieldValue(text, TextRange(text.length)) }
+    // While editing, the composer holds the message being edited, not a draft:
+    // the saved draft is the stash, which comes back on Cancel or after Save.
+    var editing by remember { mutableStateOf<MessageActions.Editing?>(null) }
+    LaunchedEffect(draft) {
+        if (editing != null) return@LaunchedEffect
+        delay(400); c.prefs.putString(draftKey, draft.takeIf { it.isNotEmpty() })
+    }
+    // An edit's text is a message, never a /msg command.
+    val dmTyping = editing == null && DmCommand.parse(draft, emptyList()) != null
+    val mentionQuery = if (dmTyping || st.phase != ChatSession.Phase.READY) null else Mentions.active(draft, field.selection.end)
+    val draftMentions = remember(draft) { Mentions.mentionedPubkeys(draft) }
+
     // ── names ───────────────────────────────────────────────────────────────
     val deviceMap = remember(st.roster) { ChatMembers.deviceAccountMap(st.roster) }
     val memberList = remember(st.roster, st.groupDevices) { ChatMembers.list(st.roster, st.groupDevices, listOfNotNull(coordinator)) }
-    val wanted = remember(st.messages, memberList, deviceMap) {
-        (st.messages.map { it.sender } + st.messages.map { ChatMembers.accountOf(it.sender, deviceMap) } + memberList.members.map { it.account }).distinct()
+    // People mentioned in a message render as a name + avatar chip; the @ picker
+    // offers the whole roster, so that needs names too, but only once it is open.
+    val messageMentions = remember(st.messages) { st.messages.flatMap { Mentions.mentionedPubkeys(it.text) }.distinct() }
+    val pickerOpen = mentionQuery != null
+    val wanted = remember(st.messages, memberList, deviceMap, messageMentions, draftMentions, pickerOpen) {
+        val mentioned = messageMentions + draftMentions
+        (st.messages.map { it.sender } + st.messages.map { ChatMembers.accountOf(it.sender, deviceMap) } + memberList.members.map { it.account } +
+            mentioned + mentioned.map { ChatMembers.accountOf(it, deviceMap) } +
+            (if (pickerOpen) st.roster?.attendees.orEmpty().map { it.pubkey } else emptyList())).distinct()
     }
     val profiles by remember(wanted) { if (wanted.isEmpty()) flowOf(emptyMap()) else c.profiles.observe(wanted) }.collectAsState(emptyMap<String, ProfileMeta>())
     // Senders the roster can't name yet: their device kind-0 lives on the chat relays only.
@@ -135,15 +171,26 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         val devices = st.messages.map { it.sender }.distinct().filter { it !in deviceMap.values }
         runCatching { c.profiles.refresh(wanted.filter { it in deviceMap.values }) }
         runCatching { c.profiles.refresh(devices, chat.chatRelays(ev.ctx)) }
+        // Someone mentioned who is not on this event's roster (a White Noise user,
+        // say) publishes their kind-0 where everyone does.
+        val strangers = (messageMentions + draftMentions).filter { it !in deviceMap }
+        if (strangers.isNotEmpty()) runCatching { c.profiles.refresh(strangers) }
     }
     fun accountOf(pk: String) = ChatMembers.accountOf(pk, deviceMap)
-    fun nameOf(pk: String): String {
+    fun profileName(pk: String): String? {
         val a = accountOf(pk)
-        val raw = (profiles[a]?.name ?: profiles[pk]?.name)?.let(ChatMembers::cleanName)?.takeIf { it.isNotBlank() }
-        return raw ?: a.take(8)
+        return (profiles[a]?.name ?: profiles[pk]?.name)?.let(ChatMembers::cleanName)?.takeIf { it.isNotBlank() }
     }
+    fun nameOf(pk: String): String = profileName(pk) ?: accountOf(pk).take(8)
+    /** A mention's label: the person's name, else a short npub (never a raw key). */
+    fun mentionName(pk: String): String = profileName(pk) ?: Mentions.shortNpub(accountOf(pk))
     fun pictureOf(pk: String): String? = profiles[accountOf(pk)]?.picture ?: profiles[pk]?.picture
     fun openProfile(pk: String) = router.go(Route.Attendee(naddr, Nip19.npub(accountOf(pk))))
+    val me = st.chatPubkey
+    val mentionLook = remember(profiles, deviceMap, me) {
+        val myAccount = me?.let(::accountOf) ?: account.pubkey
+        MentionLook(::mentionName, ::pictureOf, ::accountOf, { pk -> accountOf(pk) == myAccount || pk == account.pubkey }, ::openProfile)
+    }
 
     // ── refusal / setup-slow ────────────────────────────────────────────────
     val setupLike = st.phase == ChatSession.Phase.SETUP || st.phase == ChatSession.Phase.STARTING
@@ -165,9 +212,6 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     }
 
     // ── composer state ──────────────────────────────────────────────────────
-    val draftKey = "chat.draft:${account.pubkey}:${ev.coordinate}"
-    var draft by remember { mutableStateOf(c.prefs.getString(draftKey) ?: "") }
-    LaunchedEffect(draft) { delay(400); c.prefs.putString(draftKey, draft.takeIf { it.isNotEmpty() }) }
     var sending by remember { mutableStateOf(false) }
     var sendError by remember { mutableStateOf<String?>(null) }
     var sendUnroutable by remember { mutableStateOf(false) }
@@ -178,13 +222,36 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     var showMembers by remember { mutableStateOf(false) }
     var showDevices by remember { mutableStateOf(false) }
 
-    val me = st.chatPubkey
     val dmTargets = remember(memberList, profiles, me) {
         val myAccount = me?.let(::accountOf)
         memberList.members.map { DmCommand.Target(it.account, nameOf(it.account)) }.filter { it.account != myAccount }.sortedBy { it.name.lowercase() }
     }
-    val dmCommand = remember(draft, dmTargets) { DmCommand.parse(draft, dmTargets) }
+    val dmCommand = remember(draft, dmTargets, editing) { if (editing != null) null else DmCommand.parse(draft, dmTargets) }
     val dmMatches = remember(dmCommand, dmTargets) { (dmCommand as? DmCommand.Parsed.Choosing)?.let { DmCommand.match(dmTargets, it.query) } ?: emptyList() }
+
+    // ── @ mentions while composing (EventChat.svelte) ──────────────────────
+    // Choosing someone writes `@npub1… ` into the text, exactly what White Noise's
+    // composer writes, and MDK's sendText derives the matching `p` tag from it.
+    // The pick inserts the ACCOUNT pubkey, so nothing is re-resolved from a name.
+    // People in the chat first, then the rest of the roster; never you, never a
+    // device the roster has not bound to anyone.
+    val mentionPeople = remember(memberList, st.roster, profiles, me) {
+        val myAccount = me?.let(::accountOf) ?: account.pubkey
+        val attendees = st.roster?.attendees.orEmpty().map { it.pubkey }
+        val bound = attendees.toSet()
+        val seen = HashSet<String>()
+        fun batch(list: List<String>) = list.filter { it != myAccount && seen.add(it) }
+            .map { Mentions.Candidate(it, profileName(it) ?: Mentions.shortNpub(it)) }.sortedBy { it.name.lowercase() }
+        batch(memberList.members.map { it.account }.filter { it in bound }) + batch(attendees)
+    }
+    val mentionMatches = remember(mentionQuery, mentionPeople) { mentionQuery?.let { Mentions.match(mentionPeople, it.query) } ?: emptyList() }
+    fun pickMention(cand: Mentions.Candidate) {
+        val q = mentionQuery ?: return
+        val next = Mentions.insert(field.text, q, cand.account)
+        field = TextFieldValue(next.text, TextRange(next.caret))
+    }
+    val mentionStyle = SpanStyle(color = t.accent, fontWeight = FontWeight.SemiBold)
+    val mentionTransform = remember(profiles, deviceMap, mentionStyle) { MentionTransformation(::mentionName, mentionStyle) }
 
     fun rejoin() {
         sendError = null; sendUnroutable = false; rejoinNote = null
@@ -193,14 +260,83 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         }
     }
 
+    // ── edit / delete your own messages (EventChat.svelte) ─────────────────
+    // MDK builds both events (MarmotKit editMessage / deleteMessage), so the
+    // edit's mention `p` tags come from the `@npub1… ` text the composer keeps.
+    var actionError by remember { mutableStateOf<String?>(null) }
+    var confirmDelete by remember { mutableStateOf<ChatMessage?>(null) }
+    val composerFocus = remember { FocusRequester() }
+
+    fun runAction(fn: suspend () -> Unit) {
+        actionError = null
+        scope.launch {
+            try { fn() }
+            catch (e: CancellationException) { throw e }
+            catch (e: ChatSession.Unroutable) { actionError = s.t("chat.sendFailed") }
+            catch (e: Exception) { actionError = s.t("chat.actionFailed") }
+        }
+    }
+
+    fun startEdit(m: ChatMessage) {
+        if (!MessageActions.canModify(m, me)) return
+        editing = MessageActions.start(editing, field.text, m)
+        setDraft(m.text)
+        actionError = null
+        runCatching { composerFocus.requestFocus() }
+    }
+
+    fun cancelEdit() {
+        val e = editing ?: return
+        editing = null
+        setDraft(e.stash)
+    }
+
+    fun saveEdit(e: MessageActions.Editing) {
+        if (sending) return
+        val target = st.messages.firstOrNull { it.id == e.id } ?: e.message
+        sending = true; actionError = null
+        scope.launch {
+            try {
+                session.edit(target, field.text)
+                cancelEdit()
+            } catch (x: CancellationException) {
+                throw x
+            } catch (x: ChatSession.Unroutable) {
+                actionError = s.t("chat.sendFailed")
+            } catch (x: Exception) {
+                actionError = s.t("chat.actionFailed")
+            } finally { sending = false }
+        }
+    }
+
+    fun deleteMessage(m: ChatMessage) {
+        confirmDelete = null
+        if (editing?.id == m.id) cancelEdit()
+        runAction { session.delete(m) }
+    }
+
+    // Deleted elsewhere (another of your devices) while the composer held it.
+    LaunchedEffect(st.messages) { if (MessageActions.stale(editing, st.messages)) cancelEdit() }
+    BackHandler(enabled = editing != null) { cancelEdit() }
+
+    fun actionsFor(m: ChatMessage): MessageMenuActions {
+        val own = MessageActions.canModify(m, me)
+        return MessageMenuActions(
+            onReact = { emoji -> runAction { session.toggleReaction(m, emoji) } },
+            onEdit = if (own) ({ startEdit(m) }) else null,
+            onDelete = if (own) ({ confirmDelete = m }) else null,
+        )
+    }
+
     fun send() {
-        val text = draft.trim()
+        editing?.let { saveEdit(it); return }
+        val text = field.text.trim()
         if (text.isEmpty() || sending || dmCommand != null) return
         sending = true; sendError = null; sendUnroutable = false
         scope.launch {
             try {
                 session.send(text)
-                draft = ""
+                setDraft("")
                 rejoinNote = null
             } catch (e: ChatSession.Unroutable) {
                 sendUnroutable = true; sendError = s.t("chat.sendFailed")
@@ -216,7 +352,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         scope.launch {
             try {
                 if (body.isNotEmpty() && !chat.sendDm(target.account, body)) Toasts.show(s.t("sync.queued"))
-                draft = ""
+                setDraft("")
                 router.go(Route.DmPeer(Nip19.npub(target.account)))
             } catch (e: Exception) {
                 dmError = e.message ?: s.t("chat.devices.actionFailed")
@@ -299,13 +435,16 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                 LazyColumn(Modifier.fillMaxSize(), state = listState, contentPadding = PaddingValues(horizontal = 12.dp, vertical = 8.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     if (st.hasMoreBefore) item("older") {
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            SmallButton(s.t("chat.android.loadOlder"), { scope.launch { session.loadOlder() } })
+                            SmallButton(s.t("chat.loadOlder"), { scope.launch { session.loadOlder() } })
                         }
                     }
                     items(rows, key = { it.key }) { row ->
                         when (row) {
                             is ChatRow.Day -> DaySeparator(row.label, irc = displayMode == "irc")
-                            is ChatRow.Msg -> if (displayMode == "irc") IrcLine(row.m, nameOf(row.m.sender), accountOf(row.m.sender), s.locale) { openProfile(row.m.sender) }
+                            is ChatRow.Msg -> if (displayMode == "irc") IrcLine(
+                                row.m, nameOf(row.m.sender), accountOf(row.m.sender), s.locale, mentionLook,
+                                actions = actionsFor(row.m), editing = editing?.id == row.m.id,
+                            ) { openProfile(row.m.sender) }
                             else Bubble(
                                 m = row.m,
                                 mine = row.m.sender == me,
@@ -314,8 +453,10 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                                 picture = pictureOf(row.m.sender),
                                 account = accountOf(row.m.sender),
                                 locale = s.locale,
+                                mentions = mentionLook,
+                                actions = actionsFor(row.m),
+                                editing = editing?.id == row.m.id,
                                 onProfile = { openProfile(row.m.sender) },
-                                onReact = { emoji -> scope.launch { runCatching { session.toggleReaction(row.m, emoji) } } },
                             )
                         }
                     }
@@ -334,8 +475,9 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
 
         // /msg picker and hint
         if (dmCommand is DmCommand.Parsed.Choosing && dmMatches.isNotEmpty()) {
-            NickPicker(dmMatches, ::pictureOf) { target -> draft = "/msg ${target.name} "; dmError = null }
+            NickPicker(dmMatches, ::pictureOf) { target -> setDraft("/msg ${target.name} "); dmError = null }
         }
+        if (mentionMatches.isNotEmpty()) MentionPicker(mentionMatches, ::pictureOf, ::pickMention)
         if (dmCommand is DmCommand.Parsed.Ready) {
             Dim(
                 if (dmCommand.body.isNotEmpty()) s.t("chat.cmd.willSend", "name" to dmCommand.target.name) else s.t("chat.cmd.willOpen", "name" to dmCommand.target.name),
@@ -348,11 +490,29 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
 
         // Composer
         val composerEnabled = st.phase == ChatSession.Phase.READY
+        if (editing != null) {
+            Row(
+                Modifier.fillMaxWidth().padding(start = 16.dp, end = 12.dp, top = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(s.t("chat.editing"), Modifier.weight(1f), color = t.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+                SmallButton(s.t("chat.cancel"), ::cancelEdit)
+            }
+        }
         Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             OutlinedTextField(
-                value = draft,
-                onValueChange = { draft = it; dmError = null },
-                modifier = Modifier.weight(1f),
+                value = field,
+                onValueChange = { next ->
+                    // Backspace at a chip's edge takes the whole `@npub1…` with it.
+                    val old = field
+                    val backspace = old.selection.collapsed && next.selection.collapsed && next.text.length == old.text.length - 1 &&
+                        next.selection.end == old.selection.end - 1 && old.text.removeRange(next.selection.end, old.selection.end) == next.text
+                    val chip = if (backspace) Mentions.deleteBackward(old.text, old.selection.end) else null
+                    field = chip?.let { TextFieldValue(it.text, TextRange(it.caret)) } ?: next
+                    dmError = null
+                },
+                visualTransformation = mentionTransform,
+                modifier = Modifier.weight(1f).focusRequester(composerFocus),
                 placeholder = { Text(s.t("chat.compose.placeholder"), color = t.textDim) },
                 enabled = composerEnabled || draft.startsWith("/"),
                 maxLines = 5,
@@ -363,7 +523,8 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
             val canSend = when (val d = dmCommand) {
                 is DmCommand.Parsed.Ready -> !dmBusy
                 is DmCommand.Parsed.Choosing -> false
-                null -> composerEnabled && draft.isNotBlank() && !sending
+                null -> composerEnabled && draft.isNotBlank() && !sending &&
+                    (editing == null || MessageActions.editedText((st.messages.firstOrNull { it.id == editing?.id } ?: editing?.message)?.text.orEmpty(), draft) != null)
             }
             IconButton(
                 onClick = {
@@ -376,10 +537,12 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                 enabled = canSend,
             ) {
                 if (sending || dmBusy) CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                else if (editing != null) Icon(Icons.Filled.Check, s.t("chat.saveEdit"), tint = if (canSend) t.accent else t.textDim)
                 else Icon(Icons.AutoMirrored.Filled.Send, if (dmCommand != null) s.t("chat.cmd.pickPerson") else s.t("chat.send"), tint = if (canSend) t.accent else t.textDim)
             }
         }
         dmError?.let { Text(it, Modifier.padding(horizontal = 16.dp), color = t.danger, fontSize = 13.sp) }
+        actionError?.let { Text(it, Modifier.padding(horizontal = 16.dp, vertical = 2.dp), color = t.danger, fontSize = 13.sp) }
         sendError?.let { err ->
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(err, Modifier.weight(1f), color = t.danger, fontSize = 13.sp)
@@ -388,6 +551,15 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
             }
         }
         rejoinNote?.let { Dim(it, Modifier.padding(horizontal = 16.dp, vertical = 2.dp), size = 12) }
+    }
+
+    confirmDelete?.let { m ->
+        AlertDialog(
+            onDismissRequest = { confirmDelete = null },
+            confirmButton = { TextButton({ deleteMessage(m) }) { Text(s.t("chat.deleteYes"), color = t.danger) } },
+            dismissButton = { TextButton({ confirmDelete = null }) { Text(s.t("chat.cancel")) } },
+            text = { Text(s.t("chat.deleteConfirm")) },
+        )
     }
 
     if (showDevices) {
