@@ -53,14 +53,17 @@ class Profiles(private val nostr: Nostr, private val cache: Cache) {
 
     suspend fun local(pubkey: String): ProfileMeta? = nostr.store.latest(Kinds.PROFILE, pubkey)?.let(ProfileMeta::from)
 
-    suspend fun refresh(pubkeys: Collection<String>, relays: List<String> = Relays.READ, force: Boolean = false) {
+    /** True when every batch that was due got an answer (the offline pack reports a miss). */
+    suspend fun refresh(pubkeys: Collection<String>, relays: List<String> = Relays.READ, force: Boolean = false): Boolean {
         val due = pubkeys.distinct().filter { force || !cache.isFresh("k0:$it", TTL_MS) }
-        if (due.isEmpty()) return
+        if (due.isEmpty()) return true
+        var all = true
         due.chunked(100).forEach { chunk ->
             val r = nostr.fetch(relays, Filter(kinds = listOf(Kinds.PROFILE), authors = chunk))
             // Offline or unanswered: stay stale so the next open retries (DS41-061).
-            if (r.answered > 0) chunk.forEach { cache.markFetched("k0:$it") }
+            if (r.answered > 0) chunk.forEach { cache.markFetched("k0:$it") } else all = false
         }
+        return all
     }
 
     companion object {
