@@ -11,7 +11,9 @@
  * (`stco`/`co64`) and Matroska `SeekHead`/`Cues` hold absolute offsets. A
  * metadata box/element is overwritten with a skip-me box of the SAME size
  * (`free` / EBML `Void` / RIFF `JUNK` / FLAC `PADDING`) and its payload zeroed,
- * so the file length and every offset stay valid. Only MP3's ID3/APE tags,
+ * so the file length and every offset stay valid. Ogg's comment packet is
+ * rewritten as an empty comment list padded to its old length, so every page
+ * keeps its layout and only the touched pages' CRCs change. Only MP3's ID3/APE tags,
  * which sit at the very ends of the stream, are cut off instead.
  *
  * The output is assembled from `Blob` slices of the original plus the few
@@ -36,7 +38,7 @@ export class MetadataStripError extends Error {
   }
 }
 
-export type MediaContainer = "isobmff" | "matroska" | "mp3" | "flac" | "wav";
+export type MediaContainer = "isobmff" | "matroska" | "mp3" | "flac" | "wav" | "ogg";
 
 function fail(why: string): never {
   throw new MetadataStripError(why);
@@ -131,6 +133,7 @@ export function sniffContainer(head: Uint8Array): MediaContainer | null {
   if (head.length >= 4 && u32be(head, 0) === 0x1a45dfa3) return "matroska";
   if (ascii(head, 0, 4) === "fLaC") return "flac";
   if (ascii(head, 0, 4) === "RIFF" && ascii(head, 8, 4) === "WAVE") return "wav";
+  if (ascii(head, 0, 4) === "OggS") return "ogg";
   if (ascii(head, 0, 3) === "ID3") return "mp3"; // re-sniffed after the tag (FLAC can carry one)
   if (head.length >= 8 && ISO_FIRST_BOXES.has(ascii(head, 4, 4))) return "isobmff";
   if (head.length >= 4 && isAudioFrameSync(head, 0)) return "mp3";
@@ -155,6 +158,8 @@ export async function stripMediaMetadata(file: Blob): Promise<Blob> {
       return stripFlac(file, 0, file.size);
     case "wav":
       return stripWav(file);
+    case "ogg":
+      return stripOgg(file);
     default:
       return fail("unrecognised container");
   }
@@ -783,4 +788,204 @@ async function stripWav(file: Blob): Promise<Blob> {
   // Bytes past the RIFF's declared end are outside the file proper (an appended
   // tag, typically) and are cut, unless the data chunk itself ran open-ended.
   return assemble(file, edits, 0, openData ? file.size : end);
+}
+
+// ---------------------------------------------------------------------------
+// Ogg: Opus, Vorbis and FLAC-in-Ogg
+// ---------------------------------------------------------------------------
+//
+// The comment packet (OpusTags, the Vorbis comment header, FLAC's
+// VORBIS_COMMENT) becomes an EMPTY comment list with an empty vendor string,
+// zero-padded to its old length; FLAC PICTURE and other blocks become PADDING.
+// Same length means the same lacing values, the same pages, the same page
+// sequence numbers and granules, and the same file length: only the pages that
+// carry those bytes get a fresh CRC-32, so a comment spanning several pages
+// needs no re-pagination. Trailing zeros after the comment list are allowed:
+// RFC 7845 §5.2 for OpusTags, and libvorbis and FFmpeg stop reading the Vorbis
+// comment header at its framing bit.
+
+const OGG_CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let i = 0; i < 256; i++) {
+    let r = i << 24;
+    for (let k = 0; k < 8; k++) r = r & 0x80000000 ? (r << 1) ^ 0x04c11db7 : r << 1;
+    t[i] = r >>> 0;
+  }
+  return t;
+})();
+
+/** Ogg's CRC-32: polynomial 0x04C11DB7, initial 0, not reflected, no final xor. */
+function oggCrc(b: Uint8Array): number {
+  let c = 0;
+  for (let i = 0; i < b.length; i++) c = ((c << 8) ^ OGG_CRC_TABLE[((c >>> 24) ^ b[i]!) & 0xff]!) >>> 0;
+  return c;
+}
+
+const OGG_CONTINUED = 0x01;
+const OGG_BOS = 0x02;
+
+interface OggPage {
+  start: number;
+  end: number;
+  bodyStart: number;
+  flags: number;
+  serial: number;
+  lacing: Uint8Array;
+}
+
+/** A packet's bytes are a list of runs, one per page it crosses. */
+interface OggSpan {
+  page: number;
+  at: number;
+  len: number;
+}
+
+type OggCodec = "opus" | "vorbis" | "flac";
+
+interface OggStream {
+  codec: OggCodec | null;
+  /** Header packets in total, identification included; 1 until that is parsed. */
+  headers: number;
+  packets: OggSpan[][];
+  partial: OggSpan[] | null;
+}
+
+async function readOggPage(r: WindowReader, at: number, size: number): Promise<OggPage> {
+  if (at + 27 > size) fail("truncated Ogg page");
+  const h = await r.bytes(at, 27);
+  if (ascii(h, 0, 4) !== "OggS" || h[4] !== 0) fail("bad Ogg page");
+  const flags = h[5]!;
+  const serial = u32le(h, 14);
+  const n = h[26]!;
+  if (at + 27 + n > size) fail("truncated Ogg page");
+  const lacing = (await r.bytes(at + 27, n)).slice();
+  let body = 0;
+  for (const v of lacing) body += v;
+  const end = at + 27 + n + body;
+  if (end > size) fail("Ogg page runs past the end");
+  return { start: at, end, bodyStart: at + 27 + n, flags, serial, lacing };
+}
+
+async function readPacket(file: Blob, spans: OggSpan[]): Promise<Uint8Array> {
+  const parts = await Promise.all(spans.map((s) => readAt(file, s.at, s.len)));
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+/** The identification packet names the codec and how many headers follow it. */
+function oggCodec(b: Uint8Array): { codec: OggCodec; headers: number } {
+  if (ascii(b, 0, 8) === "OpusHead") return { codec: "opus", headers: 2 };
+  if (b[0] === 1 && ascii(b, 1, 6) === "vorbis") return { codec: "vorbis", headers: 3 };
+  if (b[0] === 0x7f && ascii(b, 1, 4) === "FLAC" && b.length >= 9) {
+    const n = (b[7]! << 8) | b[8]!;
+    if (n === 0) fail("Ogg FLAC without a header count");
+    return { codec: "flac", headers: 1 + n };
+  }
+  return fail("unknown Ogg codec");
+}
+
+/** The stripped replacement for header packet `index` (the id is 0), or null to keep it. */
+function oggCleanHeader(codec: OggCodec, index: number, b: Uint8Array): Uint8Array | null {
+  const out = new Uint8Array(b.length);
+  if (codec === "opus") {
+    if (ascii(b, 0, 8) !== "OpusTags" || b.length < 16) fail("bad OpusTags");
+    out.set(b.subarray(0, 8)); // magic; vendor length 0, comment count 0, zero padding
+    return out;
+  }
+  if (codec === "vorbis") {
+    if (b[0] !== (index === 1 ? 3 : 5) || ascii(b, 1, 6) !== "vorbis") fail("bad Vorbis header");
+    if (index === 2) return null; // the setup header: codebooks, nothing personal
+    if (b.length < 16) fail("bad Vorbis comment header");
+    out.set(b.subarray(0, 7));
+    out[15] = 1; // framing bit, after vendor length 0 and comment count 0
+    return out;
+  }
+  // FLAC-in-Ogg: each header packet after the first is exactly one metadata block.
+  const type = b[0]! & 0x7f;
+  const len = b.length >= 4 ? (b[1]! << 16) | (b[2]! << 8) | b[3]! : -1;
+  if (len + 4 !== b.length || type === 127 || type === 0) fail("bad Ogg FLAC metadata block");
+  if (type === 3) return null; // SEEKTABLE
+  out.set(b.subarray(0, 4));
+  if (type === 4) {
+    // VORBIS_COMMENT stays (the mapping expects one), emptied.
+    if (len < 8) fail("bad Ogg FLAC comment block");
+  } else out[0] = (b[0]! & 0x80) | 1; // anything else becomes PADDING
+  return out;
+}
+
+async function stripOgg(file: Blob): Promise<Blob> {
+  const r = new WindowReader(file);
+  const size = file.size;
+  const streams = new Map<number, OggStream>();
+  /** Pages that carry header packets: start offset → end offset. */
+  const headerPages = new Map<number, number>();
+  let at = 0;
+  while (at < size) {
+    const page = await readOggPage(r, at, size);
+    at = page.end;
+    let s = streams.get(page.serial);
+    if (page.flags & OGG_BOS) {
+      // A new logical stream: chained (one after another) or multiplexed. Each
+      // carries its own comment header, so each is stripped.
+      if (s) fail("second BOS page for an Ogg stream");
+      s = { codec: null, headers: 1, packets: [], partial: null };
+      streams.set(page.serial, s);
+    } else if (!s) fail("Ogg page for a stream that never began");
+    if (s.packets.length >= s.headers) continue; // past its headers: audio
+    headerPages.set(page.start, page.end);
+    if (!!(page.flags & OGG_CONTINUED) !== (s.partial !== null)) fail("broken Ogg packet continuation");
+    let pos = page.bodyStart;
+    for (const v of page.lacing) {
+      if (s.packets.length >= s.headers) break; // audio sharing the last header page
+      s.partial ??= [];
+      if (v > 0) s.partial.push({ page: page.start, at: pos, len: v });
+      pos += v;
+      if (v < 255) {
+        s.packets.push(s.partial);
+        s.partial = null;
+        if (s.packets.length === 1) {
+          const id = oggCodec(await readPacket(file, s.packets[0]!));
+          s.codec = id.codec;
+          s.headers = id.headers;
+        }
+      }
+    }
+  }
+  if (streams.size === 0) fail("no Ogg stream");
+
+  const pages = new Map<number, Uint8Array>();
+  for (const s of streams.values()) {
+    if (!s.codec || s.packets.length < s.headers) fail("Ogg headers incomplete");
+    for (let i = 1; i < s.headers; i++) {
+      const spans = s.packets[i]!;
+      const clean = oggCleanHeader(s.codec, i, await readPacket(file, spans));
+      if (!clean) continue;
+      let k = 0;
+      for (const span of spans) {
+        let buf = pages.get(span.page);
+        if (!buf) {
+          buf = await readAt(file, span.page, headerPages.get(span.page)! - span.page);
+          const stored = u32le(buf, 22);
+          buf.fill(0, 22, 26);
+          if (oggCrc(buf) !== stored) fail("bad Ogg page CRC");
+          pages.set(span.page, buf);
+        }
+        buf.set(clean.subarray(k, k + span.len), span.at - span.page);
+        k += span.len;
+      }
+    }
+  }
+  const edits: Edit[] = [];
+  for (const [start, buf] of pages) {
+    buf.fill(0, 22, 26);
+    const crc = oggCrc(buf);
+    buf.set([crc & 0xff, (crc >>> 8) & 0xff, (crc >>> 16) & 0xff, crc >>> 24], 22);
+    edits.push({ at: start, bytes: buf });
+  }
+  return assemble(file, edits);
 }

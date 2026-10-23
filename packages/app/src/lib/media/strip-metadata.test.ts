@@ -591,8 +591,9 @@ describe("stripMediaMetadata: FLAC and WAV", () => {
 
 describe("stripMediaMetadata: refusal (same policy as Android)", () => {
   it("refuses containers it cannot strip", async () => {
-    const ogg = cat(str("OggS"), new Uint8Array(60));
-    expect(await refused(ogg)).toBeInstanceOf(MetadataStripError);
+    const brokenOgg = cat(str("OggS"), new Uint8Array(60)); // no BOS page
+    expect(await refused(brokenOgg)).toBeInstanceOf(MetadataStripError);
+    expect(await refused(cat(str("RIFF"), le32(4), str("AVI "), new Uint8Array(8)))).toBeInstanceOf(MetadataStripError);
     expect(await refused(str("just some text pretending to be media"))).toBeInstanceOf(MetadataStripError);
     expect(await refused(new Uint8Array(4))).toBeInstanceOf(MetadataStripError);
   });
@@ -606,7 +607,241 @@ describe("stripMediaMetadata: refusal (same policy as Android)", () => {
     expect(sniffContainer(str("fLaC"))).toBe("flac");
     expect(sniffContainer(cat(str("RIFF"), le32(4), str("WAVE")))).toBe("wav");
     expect(sniffContainer(cat(str("RIFF"), le32(4), str("AVI ")))).toBeNull();
-    expect(sniffContainer(str("OggS"))).toBeNull();
+    expect(sniffContainer(str("OggS"))).toBe("ogg");
     expect(sniffContainer(new Uint8Array([0xff, 0xd8, 0xff, 0xe0]))).toBeNull(); // JPEG
+  });
+});
+
+// --- Ogg -------------------------------------------------------------------
+
+/** Ogg CRC-32, bit by bit (independent of the table-driven one under test). */
+function oggCrcRef(b: Uint8Array): number {
+  let c = 0;
+  for (const x of b) {
+    c ^= x << 24;
+    for (let k = 0; k < 8; k++) c = c & 0x80000000 ? (c << 1) ^ 0x04c11db7 : c << 1;
+    c >>>= 0;
+  }
+  return c;
+}
+
+interface OggGroup {
+  packets: Uint8Array[];
+  granule: bigint;
+}
+
+/**
+ * Paginate one logical stream. Each group starts a fresh page; within a group
+ * packets are laced back to back, at most `maxSegs` lacing values per page, so a
+ * small `maxSegs` makes a packet span several pages.
+ */
+function oggStream(serial: number, groups: OggGroup[], maxSegs = 255): Uint8Array {
+  const pages: Uint8Array[] = [];
+  let seq = 0;
+  groups.forEach((g, gi) => {
+    const segs: Array<{ len: number; data: Uint8Array; endsPacket: boolean }> = [];
+    for (const p of g.packets) {
+      let off = 0;
+      for (;;) {
+        const len = Math.min(255, p.length - off);
+        segs.push({ len, data: p.subarray(off, off + len), endsPacket: len < 255 });
+        off += len;
+        if (len < 255) break;
+      }
+    }
+    for (let i = 0; i < segs.length; i += maxSegs) {
+      const chunk = segs.slice(i, i + maxSegs);
+      const continued = i > 0 && !segs[i - 1]!.endsPacket;
+      const lastPage = gi === groups.length - 1 && i + maxSegs >= segs.length;
+      const flags = (continued ? 1 : 0) | (seq === 0 ? 2 : 0) | (lastPage ? 4 : 0);
+      const granule = chunk.some((s) => s.endsPacket) ? g.granule : -1n;
+      const head = new Uint8Array(27);
+      head.set(str("OggS"));
+      head[5] = flags;
+      new DataView(head.buffer).setBigInt64(6, granule, true);
+      new DataView(head.buffer).setUint32(14, serial, true);
+      new DataView(head.buffer).setUint32(18, seq++, true);
+      head[26] = chunk.length;
+      const page = cat(head, new Uint8Array(chunk.map((s) => s.len)), ...chunk.map((s) => s.data));
+      new DataView(page.buffer).setUint32(22, oggCrcRef(page), true);
+      pages.push(page);
+    }
+  });
+  return cat(...pages);
+}
+
+interface ParsedOggPage {
+  serial: number;
+  seq: number;
+  granule: bigint;
+  flags: number;
+  crcOk: boolean;
+}
+
+/** Walk pages (checking every CRC) and reassemble each stream's packets. */
+function parseOgg(b: Uint8Array): { pages: ParsedOggPage[]; packets: Map<number, Uint8Array[]> } {
+  const dv = new DataView(b.buffer, b.byteOffset, b.byteLength);
+  const pages: ParsedOggPage[] = [];
+  const packets = new Map<number, Uint8Array[]>();
+  const partial = new Map<number, Uint8Array[]>();
+  let at = 0;
+  while (at < b.length) {
+    expect(String.fromCharCode(...b.subarray(at, at + 4))).toBe("OggS");
+    const n = b[at + 26]!;
+    const lacing = b.subarray(at + 27, at + 27 + n);
+    const end = at + 27 + n + lacing.reduce((s, v) => s + v, 0);
+    const page = b.slice(at, end);
+    const stored = new DataView(page.buffer).getUint32(22, true);
+    page.fill(0, 22, 26);
+    const serial = dv.getUint32(at + 14, true);
+    pages.push({
+      serial,
+      seq: dv.getUint32(at + 18, true),
+      granule: dv.getBigInt64(at + 6, true),
+      flags: b[at + 5]!,
+      crcOk: oggCrcRef(page) === stored,
+    });
+    let pos = at + 27 + n;
+    for (const v of lacing) {
+      const parts = partial.get(serial) ?? [];
+      parts.push(b.subarray(pos, pos + v));
+      pos += v;
+      if (v < 255) {
+        const list = packets.get(serial) ?? [];
+        list.push(cat(...parts));
+        packets.set(serial, list);
+        partial.delete(serial);
+      } else partial.set(serial, parts);
+    }
+    at = end;
+  }
+  return { pages, packets };
+}
+
+function vorbisComments(vendor: string, comments: string[]): Uint8Array {
+  return cat(le32(vendor.length), str(vendor), le32(comments.length), ...comments.map((c) => cat(le32(c.length), str(c))));
+}
+
+const opusHead = cat(str("OpusHead"), new Uint8Array([1, 2]), be(312, 2).reverse(), le32(48000), new Uint8Array(3));
+const SECRET_COMMENTS = [
+  "TITLE=Secret voice note",
+  "ARTIST=Secret Person",
+  "LOCATION=+48.1486+017.1077",
+  "DATE=2026-10-01",
+  "METADATA_BLOCK_PICTURE=" + "A".repeat(600), // pushes the packet over three pages
+];
+const audioPackets = [str("OPUS-AUDIO-PACKET-1"), str("OPUS-AUDIO-PACKET-2"), new Uint8Array(300).fill(0x5a)];
+
+function opusFile(serial = 0x1234, maxSegs = 1): Uint8Array {
+  return oggStream(
+    serial,
+    [
+      { packets: [opusHead], granule: 0n },
+      { packets: [cat(str("OpusTags"), vorbisComments("libopus 1.5 Secret build", SECRET_COMMENTS))], granule: 0n },
+      { packets: audioPackets, granule: 48000n },
+    ],
+    maxSegs,
+  );
+}
+
+const vorbisId = cat(new Uint8Array([1]), str("vorbis"), new Uint8Array(23));
+const vorbisSetup = cat(new Uint8Array([5]), str("vorbis"), str("CODEBOOKS-AND-MODES"));
+function vorbisFile(serial = 0x5678): Uint8Array {
+  const comment = cat(new Uint8Array([3]), str("vorbis"), vorbisComments("Xiph Secret vendor", SECRET_COMMENTS), new Uint8Array([1]));
+  return oggStream(serial, [
+    { packets: [vorbisId], granule: 0n },
+    { packets: [comment, vorbisSetup], granule: 0n },
+    { packets: [str("VORBIS-AUDIO-1"), str("VORBIS-AUDIO-2")], granule: 4096n },
+  ]);
+}
+
+describe("stripMediaMetadata: Ogg (Opus / Vorbis / FLAC)", () => {
+  it("empties OpusTags spanning several pages, keeping every page, seq, granule and audio packet", async () => {
+    const file = opusFile();
+    const before = parseOgg(file);
+    expect(before.pages.length).toBeGreaterThan(4); // id + 3+ comment pages + audio
+    expect(contains(file, "Secret")).toBe(true);
+
+    const out = await run(file, "audio/ogg");
+    expect(out.length).toBe(file.length);
+    for (const s of ["Secret", "48.1486", "TITLE=", "libopus", "AAAA"]) expect(contains(out, s), s).toBe(false);
+    const after = parseOgg(out);
+    expect(after.pages.every((p) => p.crcOk)).toBe(true);
+    expect(after.pages.map(({ serial, seq, granule, flags }) => ({ serial, seq, granule, flags }))).toEqual(
+      before.pages.map(({ serial, seq, granule, flags }) => ({ serial, seq, granule, flags })),
+    );
+    const [head, tags, ...audio] = after.packets.get(0x1234)!;
+    expect(head).toEqual(opusHead);
+    expect(tags!.subarray(0, 8)).toEqual(str("OpusTags"));
+    expect(tags!.subarray(8).every((x) => x === 0)).toBe(true); // vendor 0, count 0, zero padding
+    expect(audio).toEqual(audioPackets);
+    // Only the comment pages changed.
+    const firstAudio = indexOf(file, "OPUS-AUDIO-PACKET-1") - 27 - 1; // header + 1 lacing value
+    expect(String.fromCharCode(...file.subarray(firstAudio, firstAudio + 4))).toBe("OggS");
+    expect(out.subarray(firstAudio)).toEqual(file.subarray(firstAudio));
+  });
+
+  it("empties the Vorbis comment header and keeps the setup header that shares its page", async () => {
+    const file = vorbisFile();
+    const out = await run(file);
+    expect(out.length).toBe(file.length);
+    expect(contains(out, "Secret")).toBe(false);
+    const after = parseOgg(out);
+    expect(after.pages.every((p) => p.crcOk)).toBe(true);
+    const [id, comment, setup, ...audio] = after.packets.get(0x5678)!;
+    expect(id).toEqual(vorbisId);
+    expect(comment!.subarray(0, 7)).toEqual(cat(new Uint8Array([3]), str("vorbis")));
+    expect(comment!.subarray(7, 15).every((x) => x === 0)).toBe(true);
+    expect(comment![15]).toBe(1); // framing bit
+    expect(setup).toEqual(vorbisSetup);
+    expect(audio).toEqual([str("VORBIS-AUDIO-1"), str("VORBIS-AUDIO-2")]);
+  });
+
+  it("empties FLAC-in-Ogg comments and turns its picture block into padding", async () => {
+    const streaminfo = cat(new Uint8Array([0]), be(34, 3), new Uint8Array(34).fill(9));
+    const id = cat(new Uint8Array([0x7f]), str("FLAC"), new Uint8Array([1, 0]), be(2, 2), str("fLaC"), streaminfo);
+    const commentBody = vorbisComments("reference libFLAC Secret", SECRET_COMMENTS);
+    const comment = cat(new Uint8Array([4]), be(commentBody.length, 3), commentBody);
+    const picture = cat(new Uint8Array([0x86]), be(20, 3), str("PNG-Secret-cover-art"));
+    const file = oggStream(7, [
+      { packets: [id], granule: 0n },
+      { packets: [comment, picture], granule: 0n },
+      { packets: [cat(new Uint8Array([0xff, 0xf8]), str("FLAC-FRAME"))], granule: 4608n },
+    ]);
+    const out = await run(file, "audio/ogg");
+    expect(out.length).toBe(file.length);
+    expect(contains(out, "Secret")).toBe(false);
+    const after = parseOgg(out);
+    expect(after.pages.every((p) => p.crcOk)).toBe(true);
+    const [id2, c2, p2, frame] = after.packets.get(7)!;
+    expect(id2).toEqual(id);
+    expect(c2!.subarray(0, 4)).toEqual(comment.subarray(0, 4)); // still a VORBIS_COMMENT block
+    expect(c2!.subarray(4).every((x) => x === 0)).toBe(true);
+    expect(p2![0]).toBe(0x81); // PADDING, last block
+    expect(p2!.subarray(4).every((x) => x === 0)).toBe(true);
+    expect(frame).toEqual(cat(new Uint8Array([0xff, 0xf8]), str("FLAC-FRAME")));
+  });
+
+  it("strips every link of a chained file", async () => {
+    const file = cat(opusFile(1, 255), vorbisFile(2));
+    const out = await run(file);
+    expect(out.length).toBe(file.length);
+    expect(contains(out, "Secret")).toBe(false);
+    expect(parseOgg(out).pages.every((p) => p.crcOk)).toBe(true);
+  });
+
+  it("refuses an unknown Ogg codec, a bad CRC, and a truncated page", async () => {
+    const speex = oggStream(3, [
+      { packets: [cat(str("Speex   "), new Uint8Array(72))], granule: 0n },
+      { packets: [vorbisComments("Secret", [])], granule: 0n },
+    ]);
+    expect(await refused(speex)).toBeInstanceOf(MetadataStripError);
+
+    const badCrc = opusFile();
+    badCrc[indexOf(badCrc, "OpusTags") + 20]! ^= 0xff; // corrupt a comment byte, CRC left as is
+    expect(await refused(badCrc)).toBeInstanceOf(MetadataStripError);
+
+    const file = opusFile();
+    expect(await refused(file.subarray(0, file.length - 5))).toBeInstanceOf(MetadataStripError);
   });
 });
