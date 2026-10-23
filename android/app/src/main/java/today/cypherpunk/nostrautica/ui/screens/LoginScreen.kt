@@ -2,15 +2,35 @@ package today.cypherpunk.nostrautica.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Key
 import androidx.compose.material.icons.outlined.QrCode2
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.layout.ContentScale
+import coil3.compose.AsyncImage
+import today.cypherpunk.nostrautica.domain.join.introMedia
+import today.cypherpunk.nostrautica.domain.media.PublicImages
+import today.cypherpunk.nostrautica.ui.components.Pill
+import today.cypherpunk.nostrautica.ui.screens.join.errorText
+import today.cypherpunk.nostrautica.ui.shell.Toasts
+import today.cypherpunk.nostrautica.ui.theme.LocalTokens
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -80,6 +100,9 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf<String?>(null) }
     var name by remember { mutableStateOf("") }
+    var newPhoto by remember { mutableStateOf<Uri?>(null) }
+    val pickPhoto = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri -> if (uri != null) newPhoto = uri }
+    val t = LocalTokens.current
     // Never pre-fill the (masked) paste field from a link: any app or web page can
     // open `…#/login?nsec=`, and one tap on Import would sign the user in as the
     // sender's identity (SB-22). A login link is shown as what it is, with the
@@ -241,12 +264,47 @@ fun SignInBody(nsec: String?, onDone: (() -> Unit)?, showCreate: Boolean = true)
             Card {
                 SectionTitle(s.t("login.createHeading"))
                 Dim(s.t("login.createSub"))
+                // The public profile photo (Login.svelte), the Join flow's picker.
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Box(
+                        Modifier.size(64.dp).clip(CircleShape).border(1.dp, t.border, CircleShape)
+                            .clickable { pickPhoto.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        val ph = newPhoto
+                        if (ph != null) AsyncImage(ph, null, Modifier.size(64.dp).clip(CircleShape), contentScale = ContentScale.Crop)
+                        else Icon(Icons.Outlined.Add, s.t("login.photoAdd"), tint = t.textDim)
+                    }
+                    Spacer(Modifier.width(12.dp))
+                    androidx.compose.foundation.layout.Column {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Dim(s.t("login.photoAdd"), size = 13)
+                            Pill(s.t("login.photoPublic"), t.bgElev2, t.textDim)
+                        }
+                        Dim(s.t("login.photoTap"), size = 13)
+                        if (newPhoto != null) LinkButton(s.t("join.android.photoRemove"), { newPhoto = null })
+                    }
+                }
                 Field(name, { name = it }, s.t("login.yourName"), placeholder = s.t("login.namePlaceholder"))
                 PrimaryButton(if (busy == "create") s.t("login.creating") else s.t("login.createMyIdentity"), {
                     busy = "create"; error = null
-                    c.session.createLocalKey()
                     scope.launch {
-                        runCatching { c.social.onboard(name.trim()) }
+                        // Prepare the photo BEFORE creating the key: a bad image fails closed, with no
+                        // side effects and nothing uploaded raw (APPR-3).
+                        val avatar = try {
+                            newPhoto?.let { PublicImages.prepareAvatar(ctx, it) }
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            error = errorText(e, s); busy = null; return@launch
+                        }
+                        val acct = c.session.createLocalKey()
+                        // An upload failure still proceeds photo-less, as on the web, but says so.
+                        val picture = avatar?.let { bytes ->
+                            runCatching { PublicImages.upload(c.introMedia, acct.signer, bytes, "image/jpeg") }
+                                .onFailure { Toasts.show(s.t("join.android.photoNotUploaded")) }.getOrNull()
+                        }
+                        runCatching { c.social.onboard(name.trim(), picture) }
                         busy = null
                         finish()
                     }

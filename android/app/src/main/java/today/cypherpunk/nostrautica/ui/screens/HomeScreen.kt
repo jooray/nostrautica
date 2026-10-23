@@ -36,6 +36,7 @@ import today.cypherpunk.nostrautica.AppContainer
 import today.cypherpunk.nostrautica.domain.EventContext
 import today.cypherpunk.nostrautica.domain.Role
 import today.cypherpunk.nostrautica.domain.ScanOutcome
+import today.cypherpunk.nostrautica.domain.people.whatsNew
 import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.protocol.Coordinate
 import today.cypherpunk.nostrautica.signer.Session
@@ -222,8 +223,10 @@ fun HomeScreen() {
 
 @Composable
 private fun EventRow(e: HomeEvent, onClick: () -> Unit) {
+    val c = LocalContainer.current
     val s = LocalStrings.current
     val t = LocalTokens.current
+    val owner = c.session.account.collectAsState().value?.pubkey
     val title = e.ctx?.title ?: Coordinate.parseOrNull(e.coordinate)?.identifier?.replace('-', ' ') ?: "…"
     Card(onClick = onClick, padding = 14.dp) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -235,6 +238,16 @@ private fun EventRow(e: HomeEvent, onClick: () -> Unit) {
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
                     if (e.pendingKey) Pill(s.t("home.role.awaitingKey"), t.warnSoft, t.warn)
                     else Pill(s.t(when (e.role) { Role.ORGANIZER -> "home.role.organizer"; Role.ATTENDEE -> "home.role.attendee"; else -> "home.role.visitor" }), t.bgElev2, t.textDim)
+                    // What the card says about itself (Home.svelte cardFacts): how many are in and what
+                    // arrived since the last visit, both from this phone's cache, never the network. No
+                    // cached directory says nothing about size.
+                    if (owner != null) {
+                        val community = remember(e.coordinate) { Coordinate.parseOrNull(e.coordinate)?.isCommunity == true }
+                        val people: Int? by remember(owner, e.coordinate) { c.members.observeDirectorySize(owner, e.coordinate) }.collectAsState(null)
+                        val fresh by remember(owner, e.coordinate) { c.whatsNew.peopleBadge(owner, e.coordinate) }.collectAsState(0)
+                        people?.let { Dim(s.tcp("attendees.count", community, it), maxLines = 1, size = 13) }
+                        if (fresh > 0) Text(s.tp("home.card.new", fresh), color = t.accent, fontWeight = FontWeight.Bold, fontSize = 13.sp, maxLines = 1)
+                    }
                 }
             }
             Text("›", color = t.textDim, fontSize = 20.sp)

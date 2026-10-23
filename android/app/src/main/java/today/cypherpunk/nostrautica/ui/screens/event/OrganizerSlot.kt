@@ -2,6 +2,7 @@ package today.cypherpunk.nostrautica.ui.screens.event
 
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ContentCopy
+import androidx.compose.material.icons.outlined.Person
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -28,10 +29,11 @@ import today.cypherpunk.nostrautica.ui.components.SecondaryButton
 import today.cypherpunk.nostrautica.ui.components.SmallButton
 import today.cypherpunk.nostrautica.ui.nav.Route
 import today.cypherpunk.nostrautica.ui.shell.EventState
+import today.cypherpunk.nostrautica.ui.shell.VisitorPreview
 
 /**
- * The organizer's slot on the event Overview (EventHome.svelte): the admin entry
- * and "Duplicate event" for an organizer; for a signed-in non-member, the offer to
+ * The organizer's slot on the event Overview (EventHome.svelte): the admin entry,
+ * "Duplicate event" and "View as visitor" for an organizer; for a signed-in non-member, the offer to
  * restore organizer keys from this account's relay backup (a fresh device).
  */
 @Composable
@@ -51,10 +53,14 @@ fun OrganizerCard(ev: EventState) {
                 DuplicateDraft.set(DuplicatePrefill.from(ev.ctx.title, ev.ctx.summary, ev.ctx.icon, ev.ctx.banner, ev.ctx.cfg) { s.t("event.duplicate.copyOf", "title" to it) })
                 router.go(Route.Create)
             }, icon = Icons.Outlined.ContentCopy)
+            // See the event as a non-member would (spec §13); the Overview shows the exit.
+            if (ev.canPreview) SecondaryButton(s.t("event.viewAsVisitor"), { VisitorPreview.toggle(ev.coordinate) }, icon = Icons.Outlined.Person)
             if (result == "restored") Dim(s.t("event.recoverKeys.restored"))
         }
         return
     }
+    // Previewing the public view: the organizer already holds the keys, no recovery offer.
+    if (ev.previewing) return
     val a = account ?: return
     if (ev.role == Role.ATTENDEE) return
 

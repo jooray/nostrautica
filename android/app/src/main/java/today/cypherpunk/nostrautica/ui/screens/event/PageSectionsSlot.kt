@@ -115,7 +115,8 @@ fun EventPageSections(ev: EventState) {
     Column(verticalArrangement = Arrangement.spacedBy(14.dp)) {
         // The event menu: the organizer's links, then the posts archive.
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            page?.menu?.forEach { item ->
+            // A visitor can't decrypt members-only items, so the preview leaves them out.
+            page?.menu?.filterNot { ev.previewing && it.membersOnly }?.forEach { item ->
                 SmallButton(item.label, { openTarget(item.target) }, icon = if (item.membersOnly) Icons.Outlined.Lock else null)
             }
             SmallButton(s.t("event.allPosts"), { router.go(Route.Posts(ev.naddr)) }, icon = Icons.Outlined.Campaign)
