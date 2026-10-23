@@ -2,6 +2,8 @@ package today.cypherpunk.nostrautica.ui.screens
 
 import android.content.Intent
 import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -44,6 +46,7 @@ import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.protocol.Nip19
 import today.cypherpunk.nostrautica.protocol.Nip49
 import today.cypherpunk.nostrautica.protocol.Wire
+import today.cypherpunk.nostrautica.signer.Backup
 import today.cypherpunk.nostrautica.signer.Session
 import today.cypherpunk.nostrautica.ui.LocalContainer
 import today.cypherpunk.nostrautica.ui.LocalRouter
@@ -185,7 +188,7 @@ private val CLIENTS = listOf(
 
 private fun methodLabel(m: Session.Method) = when (m) { Session.Method.LOCAL -> "local"; Session.Method.NIP55 -> "nip55"; Session.Method.NIP46 -> "nip46" }
 
-/** components/BackupCard.svelte: copy the nsec, or a password-protected ncryptsec. */
+/** components/BackupCard.svelte: copy the nsec, email a recovery link, or save/copy a password-protected ncryptsec. */
 @Composable
 fun BackupCard() {
     val c = LocalContainer.current
@@ -199,6 +202,18 @@ fun BackupCard() {
     val sk = remember(c.session.account.value) { c.session.exportSecret() }
     if (sk == null) { Dim(s.t("backup.noKey")); return }
     val ctx = LocalContext.current
+    // The NIP-49 export as a file, where the user picks (the web's download). Only the
+    // passphrase-encrypted form is ever written to storage, never the bare nsec.
+    val saveFile = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        val e = encrypted
+        if (uri != null && e != null) scope.launch {
+            val ok = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                runCatching { ctx.contentResolver.openOutputStream(uri)!!.use { it.write(e.toByteArray()) } }.isSuccess
+            }
+            if (ok) { if (stage == "") stage = "copied"; Toasts.show(s.t("backup.android.saved")) }
+            else Toasts.show(s.t("backup.android.saveFailed"))
+        }
+    }
     // The key's own screen: no screenshots, recordings or Recents thumbnail (R-73).
     today.cypherpunk.nostrautica.ui.components.SecureWindow()
     Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -210,18 +225,37 @@ fun BackupCard() {
         }
         if (!more) SmallButton(s.t("backup.more"), { more = true })
         else {
+            Text(s.t("backup.email.title"), fontWeight = FontWeight.SemiBold)
+            Dim(s.t("backup.email.body"))
+            SecondaryButton(s.t("backup.email.button"), {
+                // Built at tap time and handed straight to the mail app, never kept around (App-10).
+                val nsec = Nip19.nsec(sk)
+                val mail = Intent(Intent.ACTION_SENDTO, Uri.parse(Backup.mailto(Route.WEB_APP, nsec)))
+                    // Some mail apps read the mailto query, others only these extras.
+                    .putExtra(Intent.EXTRA_SUBJECT, Backup.EMAIL_SUBJECT)
+                    .putExtra(Intent.EXTRA_TEXT, Backup.emailBody(Route.WEB_APP, nsec))
+                runCatching { ctx.startActivity(mail) }
+                    .onSuccess { if (stage == "") stage = "copied" }
+                    .onFailure { Toasts.show(s.t("backup.android.noMailApp")) }
+            })
             Text(s.t("backup.file.title"), fontWeight = FontWeight.SemiBold)
             Field(pass, { pass = it }, s.t("backup.file.placeholder"), visual = PasswordVisualTransformation())
             SecondaryButton(s.t("backup.file.encrypt"), {
                 busy = true
+                val p = pass
                 scope.launch {
-                    encrypted = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { Nip49.encrypt(sk, pass) }
+                    encrypted = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { Nip49.encrypt(sk, p) }
+                    // The passphrase has done its job: drop it (App-10).
+                    pass = ""
                     busy = false
                 }
             }, enabled = pass.length >= 4, busy = busy)
             encrypted?.let { e ->
                 SelectionContainer { Text(e, fontFamily = FontFamily.Monospace, fontSize = 12.sp) }
-                SmallButton(s.t("backup.file.copy"), { today.cypherpunk.nostrautica.ui.components.Secrets.copy(ctx, e); c.session.markBackedUp() })
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SmallButton(s.t("backup.android.saveFile"), { saveFile.launch(Backup.NCRYPTSEC_FILE) })
+                    SmallButton(s.t("backup.file.copy"), { today.cypherpunk.nostrautica.ui.components.Secrets.copy(ctx, e); c.session.markBackedUp() })
+                }
             }
         }
     }

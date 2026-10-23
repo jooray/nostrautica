@@ -1,0 +1,32 @@
+{
+  "en": {
+    "backup.android.saveFile": "Save to file",
+    "backup.android.saved": "Saved. Keep the file and its passphrase apart.",
+    "backup.android.saveFailed": "Couldn't save the file.",
+    "backup.android.noMailApp": "No email app found on this phone."
+  },
+  "sk": {
+    "backup.android.saveFile": "Uložiť do súboru",
+    "backup.android.saved": "Uložené. Súbor a jeho heslo uchovávajte oddelene.",
+    "backup.android.saveFailed": "Súbor sa nepodarilo uložiť.",
+    "backup.android.noMailApp": "V tomto telefóne sa nenašla e‑mailová aplikácia."
+  },
+  "cs": {
+    "backup.android.saveFile": "Uložit do souboru",
+    "backup.android.saved": "Uloženo. Soubor a jeho heslo uchovávejte odděleně.",
+    "backup.android.saveFailed": "Soubor se nepodařilo uložit.",
+    "backup.android.noMailApp": "V tomto telefonu nebyla nalezena e‑mailová aplikace."
+  },
+  "de": {
+    "backup.android.saveFile": "In Datei speichern",
+    "backup.android.saved": "Gespeichert. Bewahre die Datei und ihre Passphrase getrennt auf.",
+    "backup.android.saveFailed": "Die Datei konnte nicht gespeichert werden.",
+    "backup.android.noMailApp": "Auf diesem Telefon wurde keine E‑Mail-App gefunden."
+  },
+  "es": {
+    "backup.android.saveFile": "Guardar en un archivo",
+    "backup.android.saved": "Guardado. Guarda el archivo y su frase de contraseña por separado.",
+    "backup.android.saveFailed": "No se pudo guardar el archivo.",
+    "backup.android.noMailApp": "No se encontró ninguna aplicación de correo en este teléfono."
+  }
+}
