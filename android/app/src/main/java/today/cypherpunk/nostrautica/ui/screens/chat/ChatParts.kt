@@ -80,9 +80,9 @@ internal fun IrcLine(m: ChatMessage, name: String, account: String, locale: Stri
         withStyle(SpanStyle(color = t.textDim)) { append(timeLabel(m.at, locale)); append(" ") }
         withStyle(SpanStyle(color = nickColor, fontWeight = FontWeight.SemiBold)) { append("<$name>") }
         append(" ")
-        if (m.deleted) withStyle(SpanStyle(color = t.textDim, fontStyle = FontStyle.Italic)) { append(s.t("chat.android.deleted")) }
+        if (m.deleted) withStyle(SpanStyle(color = t.textDim, fontStyle = FontStyle.Italic)) { append(s.t("chat.deleted")) }
         else append(m.text)
-        if (m.edited && !m.deleted) withStyle(SpanStyle(color = t.textDim, fontSize = 11.sp)) { append(" (${s.t("chat.android.edited")})") }
+        if (m.edited && !m.deleted) withStyle(SpanStyle(color = t.textDim, fontSize = 11.sp)) { append(" (${s.t("chat.edited")})") }
         m.reactions.forEach { r -> withStyle(SpanStyle(color = t.textDim, fontSize = 12.sp)) { append("  ${r.emoji}${r.count}") } }
     }
     Text(text, Modifier.fillMaxWidth().clickable(onClick = onNick).padding(vertical = 1.dp), fontFamily = FontFamily.Monospace, fontSize = 13.sp, lineHeight = 18.sp)
@@ -126,10 +126,10 @@ internal fun Bubble(
                         .combinedClickable(onClick = { if (!mine) onProfile() }, onLongClick = { if (!m.deleted) menu = true })
                         .padding(horizontal = 12.dp, vertical = 7.dp),
                 ) {
-                    if (m.deleted) Text(s.t("chat.android.deleted"), color = t.textDim, fontStyle = FontStyle.Italic, fontSize = 15.sp)
+                    if (m.deleted) Text(s.t("chat.deleted"), color = t.textDim, fontStyle = FontStyle.Italic, fontSize = 15.sp)
                     else Text(m.text, fontSize = 15.sp, lineHeight = 21.sp)
                     Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-                        if (m.edited && !m.deleted) { Text(s.t("chat.android.edited"), color = t.textDim, fontSize = 11.sp); Spacer(Modifier.width(6.dp)) }
+                        if (m.edited && !m.deleted) { Text(s.t("chat.edited"), color = t.textDim, fontSize = 11.sp); Spacer(Modifier.width(6.dp)) }
                         Text(timeLabel(m.at, locale), color = t.textDim, fontSize = 11.sp)
                     }
                 }
