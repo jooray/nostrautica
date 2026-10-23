@@ -60,6 +60,10 @@ class Members(
     fun observeDirectory(owner: String, coordinate: String): Flow<List<DirectoryEntryContent>> =
         cache.observe(owner, dirKey(coordinate), ListSerializer(DirectoryEntryContent.serializer())).map { it ?: emptyList() }
 
+    /** How many people the cached directory lists; null when this phone never decrypted one. */
+    fun observeDirectorySize(owner: String, coordinate: String): Flow<Int?> =
+        cache.observe(owner, dirKey(coordinate), ListSerializer(DirectoryEntryContent.serializer())).map { it?.size }
+
     fun observeMatches(owner: String, coordinate: String): Flow<MatchListContent?> =
         cache.observe(owner, matchesKey(coordinate), MatchListContent.serializer())
 
