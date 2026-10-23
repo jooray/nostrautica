@@ -175,6 +175,17 @@ function applyBaselineDDL(db: DatabaseSync): void {
   } catch {
     /* column already exists */
   }
+  // Migration (audit R-16): the decryption-key fingerprint a cached transcript was
+  // produced under, so a cache hit requires the key and not just the public
+  // ciphertext hash. A plain nullable column: an older binary neither reads nor
+  // writes it (its INSERT OR REPLACE leaves it NULL), and NULL reads here as
+  // "unverified", which costs one download + decrypt before the row is served
+  // again. No SCHEMA_VERSION bump.
+  try {
+    db.exec("ALTER TABLE transcripts ADD COLUMN key_fp TEXT");
+  } catch {
+    /* column already exists */
+  }
   // Migration (COORD-7): the ECK version a talk's 31610 was published under.
   try {
     db.exec("ALTER TABLE talks ADD COLUMN published_eck_id INTEGER");
@@ -226,6 +237,14 @@ function applyBaselineDDL(db: DatabaseSync): void {
   // SCHEMA for the same reason.
   try {
     db.exec("ALTER TABLE marmot_chat_keys ADD COLUMN external INTEGER NOT NULL DEFAULT 0");
+  } catch {
+    /* column already exists */
+  }
+  // Migration (audit R-44): when a marmot_kv row was first written, so MLS ingest
+  // evidence that never settles can be aged out. A plain defaulted column: an older
+  // binary's INSERT takes the default, and 0 reads as "older than any horizon".
+  try {
+    db.exec("ALTER TABLE marmot_kv ADD COLUMN created_at INTEGER NOT NULL DEFAULT 0");
   } catch {
     /* column already exists */
   }
@@ -1256,6 +1275,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
   blob_sha256 TEXT PRIMARY KEY,
   text TEXT NOT NULL,
   lang TEXT,
+  key_fp TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS nostr_summaries (
@@ -1388,6 +1408,7 @@ CREATE TABLE IF NOT EXISTS marmot_kv (
   namespace TEXT NOT NULL,
   k TEXT NOT NULL,
   v TEXT NOT NULL,               -- serialized value, NIP-44-encrypted at rest
+  created_at INTEGER NOT NULL DEFAULT 0, -- unix ms of the first write (audit R-44)
   PRIMARY KEY (namespace, k)
 );
 -- account_pubkey ⇄ chat_pubkey bindings from authenticated kind-21607 attestations
@@ -1943,6 +1964,12 @@ export class Store {
    * successive publishes within one second straddling the restart). Atomic under the
    * single-daemon write lock.
    */
+  /** Whether this coordinator ever built a replaceable publish at `address`
+   *  (`${kind}:${d}`): every builder routes through {@link nextPublishCreatedAt}. */
+  everPublished(address: string): boolean {
+    return this.db.prepare("SELECT 1 FROM publish_watermarks WHERE address = ?").get(address) !== undefined;
+  }
+
   nextPublishCreatedAt(address: string, now: number): number {
     const row = this.db.prepare("SELECT last_created_at FROM publish_watermarks WHERE address = ?").get(address) as
       | { last_created_at: number }
@@ -2341,11 +2368,18 @@ export class Store {
       .get(blobSha256) as { text: string } | undefined;
     return row?.text;
   }
-  /** Transcript text + STT-detected language (spec F1), for publishing on 31603. */
-  getTranscriptRow(blobSha256: string): { text: string; lang: string | null } | undefined {
+  /** Transcript text + STT-detected language (spec F1), for publishing on 31603,
+   *  and the key fingerprint it was produced under (audit R-16; NULL on rows an
+   *  older binary wrote). */
+  getTranscriptRow(blobSha256: string): { text: string; lang: string | null; key_fp: string | null } | undefined {
     return this.db
-      .prepare("SELECT text, lang FROM transcripts WHERE blob_sha256 = ?")
-      .get(blobSha256) as { text: string; lang: string | null } | undefined;
+      .prepare("SELECT text, lang, key_fp FROM transcripts WHERE blob_sha256 = ?")
+      .get(blobSha256) as { text: string; lang: string | null; key_fp: string | null } | undefined;
+  }
+  /** Bind a legacy (unfingerprinted) transcript row to the key that was just
+   *  proven to decrypt its blob (audit R-16). */
+  setTranscriptKeyFp(blobSha256: string, keyFp: string): void {
+    this.db.prepare("UPDATE transcripts SET key_fp = ? WHERE blob_sha256 = ?").run(keyFp, blobSha256);
   }
   /**
    * Cache a transcript keyed by its content-addressed blob hash (dedupe), and — when
@@ -2360,10 +2394,11 @@ export class Store {
     now: number,
     lang?: string,
     owner?: { coordinate: string; pubkey: string },
+    keyFp?: string,
   ): void {
     this.db
-      .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at) VALUES (?, ?, ?, ?)")
-      .run(blobSha256, text, lang ?? null, now);
+      .prepare("INSERT OR REPLACE INTO transcripts (blob_sha256, text, lang, created_at, key_fp) VALUES (?, ?, ?, ?, ?)")
+      .run(blobSha256, text, lang ?? null, now, keyFp ?? null);
     // A cached answer settles the blob; any empty-STT count before it is history.
     this.db.prepare("DELETE FROM stt_empty_attempts WHERE blob_sha256 = ?").run(blobSha256);
     if (owner) {
@@ -3981,7 +4016,38 @@ export class Store {
     const jobs = this.db
       .prepare("DELETE FROM jobs WHERE state IN ('done', 'poison') AND COALESCE(claimed_at, 0) < ?")
       .run(cutoff);
-    return Number(kps.changes) + Number(legacy.changes) + Number(rate.changes) + Number(jobs.changes);
+    const transcripts = this.sweepOrphanTranscripts(now - 24 * 60 * 60 * 1000);
+    return Number(kps.changes) + Number(legacy.changes) + Number(rate.changes) + Number(jobs.changes) + transcripts;
+  }
+
+  /**
+   * Drop cached STT transcripts nothing owns any more (audit R-15): no
+   * `transcript_refs` row and no attribution from any stored profile's media or
+   * any talk's current media. The talk path never recorded a ref, so a talk whose
+   * media a later revision replaced left the old recording's plaintext transcript
+   * reachable by nothing — not by `delete_data`, not by the retention purge, which
+   * both find transcripts through refs or CURRENT media only. The talk path records
+   * refs now; this clears what it left behind, and anything a future path forgets.
+   * `before` (unix ms) spares rows written in the last day, so a transcription
+   * still running cannot lose its row between the write and its ref.
+   */
+  sweepOrphanTranscripts(before: number): number {
+    const r = this.db
+      .prepare(
+        `WITH attributed(x) AS (
+           SELECT json_extract(m.value, '$.x')
+             FROM attendees a,
+                  json_each(CASE WHEN json_valid(a.profile_json) THEN a.profile_json ELSE '{}' END, '$.__media') m
+           UNION
+           SELECT json_extract(media_json, '$.x') FROM talks WHERE json_valid(media_json)
+         )
+         DELETE FROM transcripts
+          WHERE created_at < ?
+            AND blob_sha256 NOT IN (SELECT blob_sha256 FROM transcript_refs)
+            AND blob_sha256 NOT IN (SELECT x FROM attributed WHERE x IS NOT NULL)`,
+      )
+      .run(before);
+    return Number(r.changes);
   }
 
   // ── Marmot group chat (MARMOT-GROUP-CHAT §4.3) ─────────────────────────────
@@ -4050,10 +4116,20 @@ export class Store {
   marmotKvSet(namespace: string, key: string, value: string): void {
     this.db
       .prepare(
-        `INSERT INTO marmot_kv (namespace, k, v) VALUES (?, ?, ?)
+        `INSERT INTO marmot_kv (namespace, k, v, created_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(namespace, k) DO UPDATE SET v = excluded.v`,
       )
-      .run(namespace, key, this.protect(value));
+      .run(namespace, key, this.protect(value), Date.now());
+  }
+
+  /** Keys under `prefix` in a namespace with their first-write time, newest first
+   *  (audit R-44: aging out ingest evidence that never settles). */
+  marmotKvKeysWithPrefix(namespace: string, prefix: string): { k: string; created_at: number }[] {
+    return (
+      this.db
+        .prepare("SELECT k, created_at FROM marmot_kv WHERE namespace = ? ORDER BY created_at DESC, rowid DESC")
+        .all(namespace) as { k: string; created_at: number }[]
+    ).filter((r) => r.k.startsWith(prefix));
   }
 
   marmotKvDelete(namespace: string, key: string): void {

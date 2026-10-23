@@ -4156,6 +4156,10 @@ export class Coordinator {
               this.deps.store.addUsage(coordinate, pubkey, { bytes, durationSec }, this.now()),
             // Shutdown / per-event teardown (audit R13): unwind blocked STT/ffmpeg.
             signal,
+            // Ownership ref (audit R-15): without it a talk whose media a later
+            // revision replaced left this transcript owned by nothing, so neither
+            // delete_data nor the retention purge could ever reach it.
+            owner: { coordinate, pubkey },
             now: this.now,
           },
           d,
@@ -5228,9 +5232,16 @@ export class Coordinator {
     // …and the match list published TO them (audit DS41-046): it holds other
     // attendees' pubkeys, scores and private reasoning, and was replaced for
     // everyone else by the rotation. Its d is blinded under whichever ECK was
-    // current when it was published, so every pre-rotation version is named.
+    // current when it was published, so every pre-rotation version it was
+    // ACTUALLY published under is named (audit R-59): naming every version handed
+    // anyone still holding a long-retired ECK a public test of whether this pubkey
+    // joined after they lost access. The prev version is always named; whoever
+    // holds it is a current member and can read the roster anyway.
     const matchListDs = new Set(
-      state.eck.filter((v) => v.id !== newId).map((v) => blindedD(base64ToBytes(v.key), state.coordinate, removedPubkey)),
+      state.eck
+        .filter((v) => v.id !== newId)
+        .map((v) => blindedD(base64ToBytes(v.key), state.coordinate, removedPubkey))
+        .filter((d) => this.deps.store.everPublished(`${KIND_MATCH_LIST}:${d}`)),
     );
     matchListDs.add(blindedD(prevBytes, state.coordinate, removedPubkey));
     const deletion = finalizeEvent(
@@ -5704,11 +5715,21 @@ export class Coordinator {
     // rotation republishes under the new blinded d without deleting the old one on
     // every relay). Delete across ALL historical ECK versions (audit C5) so a
     // pre-rotation directory/match record is not left readable after retention.
+    //
+    // ALL historical versions, but only the addresses actually published under
+    // them (audit R-59): this kind-5 is public, and naming a member's blinded d
+    // under a version retired before they joined told anyone holding that old ECK
+    // that they joined later. A subject with no recorded publish at all (a record
+    // from before the watermark existed, 2026-07-22) keeps the old every-version
+    // naming, because missing a real record is worse than the leak.
     for (const a of this.deps.store.approvedAttendees(state.coordinate)) {
-      for (const ver of state.eck) {
+      const addrs = state.eck.flatMap((ver) => {
         const d = blindedD(base64ToBytes(ver.key), state.coordinate, a.pubkey);
-        pushAddr(`${KIND_DIRECTORY_ENTRY}:${this.coordPubkey}:${d}`, String(KIND_DIRECTORY_ENTRY));
-        pushAddr(`${KIND_MATCH_LIST}:${this.coordPubkey}:${d}`, String(KIND_MATCH_LIST));
+        return [KIND_DIRECTORY_ENTRY, KIND_MATCH_LIST].map((kind) => ({ kind, d }));
+      });
+      const published = addrs.filter(({ kind, d }) => this.deps.store.everPublished(`${kind}:${d}`));
+      for (const { kind, d } of published.length ? published : addrs) {
+        pushAddr(`${kind}:${this.coordPubkey}:${d}`, String(kind));
       }
     }
     // 31604 roster + 31606 matrix, at addresses that are not blinded. The
@@ -5731,9 +5752,11 @@ export class Coordinator {
     for (const a of this.matrixAddressesToDelete(state)) pushAddr(a, String(KIND_MATCH_MATRIX));
     // Published 31610 talks: delete under every historical ECK version (audit C5),
     // not only the one recorded on the row, so a rotated-away talk address is cleaned.
+    // Same published-only rule as the member records above (audit R-59).
     for (const talk of this.deps.store.publishedTalksForEvent(state.coordinate)) {
-      for (const ver of state.eck) {
-        const d = talkBlindedD(base64ToBytes(ver.key), state.coordinate, talk.pubkey, talk.talk_d);
+      const ds = state.eck.map((ver) => talkBlindedD(base64ToBytes(ver.key), state.coordinate, talk.pubkey, talk.talk_d));
+      const published = ds.filter((d) => this.deps.store.everPublished(`${KIND_TALK}:${d}`));
+      for (const d of published.length ? published : ds) {
         pushAddr(`${KIND_TALK}:${this.coordPubkey}:${d}`, String(KIND_TALK));
       }
     }

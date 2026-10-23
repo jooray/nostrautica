@@ -24,12 +24,24 @@ export const FFMPEG_TIMEOUT_MS = 120_000; // wall-clock kill for a hung/adversar
  * 31603, which makes it a working read-and-publish channel for anything readable
  * by the daemon user — `coordinator.toml`, `.env`, database fragments.
  *
- * `-protocol_whitelist file` confines it to the one temp file we wrote.
+ * `-protocol_whitelist file` restricts ffmpeg to the `file:` protocol. It does
+ * not confine it to the one temp file we wrote: a demuxer that follows references
+ * can still open other local files. `-format_whitelist` closes that (audit R-65):
+ * auto-probing may only pick one of the plain container demuxers below, so a blob
+ * that sniffs as HLS, ffconcat, an image sequence or any other interpreter-like
+ * format is refused outright. The list is fixed and does not depend on the
+ * descriptor's declared mime. Picked files arrive labelled with whatever type the
+ * phone or browser guessed, and the container sniff stays as it was, only inside
+ * this list. It covers what the apps record (WebM/Matroska, MP4/M4A/QuickTime,
+ * Ogg) and the audio files people pick (MP3, WAV, AAC, FLAC). The coordinator's
+ * own Ogg output is read back through the same guard.
  * `-probesize`/`-analyzeduration` bound how much of a hostile container ffmpeg
  * will chew through before giving up.
  */
+export const FFMPEG_DEMUXER_ALLOWLIST = "mov,matroska,ogg,mp3,wav,aac,flac";
 const FFMPEG_INPUT_GUARD = [
   "-protocol_whitelist", "file",
+  "-format_whitelist", FFMPEG_DEMUXER_ALLOWLIST,
   "-probesize", "5M",
   "-analyzeduration", "5M",
 ];
@@ -216,18 +228,34 @@ function run(
 export interface AudioSegment {
   data: Uint8Array;
   mime: string;
+  /**
+   * Seconds of audio in THIS output file, measured on the Ogg the coordinator's
+   * own ffmpeg wrote (audit R-17) — not on the attendee's container, whose
+   * duration field is whatever its author typed. Absent when not measured (an
+   * injected extractor in tests).
+   */
+  durationSec?: number;
 }
 
 /**
  * Extract mono 16 kHz Opus/OGG audio from a media blob. If the result would
  * exceed `maxBytes`, split into time segments that each fit.
+ *
+ * `maxDurationSec` (audit R-17) bounds how much input ffmpeg decodes: one second
+ * past the event's limit, so over-length media yields an output that MEASURES
+ * over the limit (and is rejected before STT) rather than a full two hours of
+ * audio. Each segment's duration is measured on the output.
  */
 export async function extractAudioSegments(
   media: Uint8Array,
   mime: string,
   maxBytes: number,
   signal?: AbortSignal,
+  maxDurationSec?: number,
 ): Promise<AudioSegment[]> {
+  const inputCapSec = maxDurationSec
+    ? Math.min(Math.ceil(maxDurationSec) + 1, MAX_INPUT_DURATION_SEC)
+    : MAX_INPUT_DURATION_SEC;
   const dir = await mkdtemp(join(tmpdir(), "nostrautica-"));
   try {
     const ext = mime.includes("mp4") ? "mp4" : "webm";
@@ -239,14 +267,14 @@ export async function extractAudioSegments(
     const wholePath = join(dir, "audio.ogg");
     await run("ffmpeg", [
       "-nostdin", "-y", ...FFMPEG_INPUT_GUARD,
-      "-t", String(MAX_INPUT_DURATION_SEC), "-i", inPath,
+      "-t", String(inputCapSec), "-i", inPath,
       "-vn", "-ac", "1", "-ar", "16000",
       "-c:a", "libopus", "-b:a", "16k",
       wholePath,
     ], { signal });
     const whole = await readFile(wholePath);
     if (whole.length <= maxBytes) {
-      return [{ data: new Uint8Array(whole), mime: "audio/ogg" }];
+      return [{ data: new Uint8Array(whole), mime: "audio/ogg", durationSec: await measureOutputSec(wholePath, signal) }];
     }
 
     // Too big: segment. Aim each segment well under the limit by duration.
@@ -259,7 +287,7 @@ export async function extractAudioSegments(
     const segPattern = join(dir, "seg-%03d.ogg");
     await run("ffmpeg", [
       "-nostdin", "-y", ...FFMPEG_INPUT_GUARD,
-      "-t", String(MAX_INPUT_DURATION_SEC), "-i", inPath,
+      "-t", String(inputCapSec), "-i", inPath,
       "-vn", "-ac", "1", "-ar", "16000",
       "-c:a", "libopus", "-b:a", "16k",
       "-f", "segment", "-segment_time", String(secPerSegment),
@@ -269,7 +297,7 @@ export async function extractAudioSegments(
     const segments: AudioSegment[] = [];
     for (const f of files) {
       const buf = await readFile(join(dir, f));
-      segments.push({ data: new Uint8Array(buf), mime: "audio/ogg" });
+      segments.push({ data: new Uint8Array(buf), mime: "audio/ogg", durationSec: await measureOutputSec(join(dir, f), signal) });
     }
     return segments;
   } finally {
@@ -311,6 +339,24 @@ async function probeDurationSec(
   signal?: AbortSignal,
   timeoutMs = FFPROBE_TIMEOUT_MS,
 ): Promise<number | undefined> {
+  const sec = await probeRawSec(path, signal, timeoutMs);
+  return sec === undefined ? undefined : Math.ceil(sec);
+}
+
+/**
+ * Seconds of audio in an Ogg this coordinator's ffmpeg just wrote (audit R-17),
+ * unrounded: Opus pre-skip makes a clean 90 s recording read 90.0065 s, and the
+ * caller compares with a tolerance rather than have a ceil turn it into 91.
+ */
+function measureOutputSec(path: string, signal?: AbortSignal): Promise<number | undefined> {
+  return probeRawSec(path, signal, FFPROBE_TIMEOUT_MS);
+}
+
+async function probeRawSec(
+  path: string,
+  signal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<number | undefined> {
   let stdout: Buffer;
   try {
     ({ stdout } = await run("ffprobe", [
@@ -338,7 +384,7 @@ async function probeDurationSec(
     console.warn(`[audio] ffprobe reported no usable duration (${JSON.stringify(stdout.toString().trim().slice(0, 40))})`);
     return undefined;
   }
-  return Math.ceil(sec);
+  return sec;
 }
 
 /**

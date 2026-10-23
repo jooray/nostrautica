@@ -15,6 +15,7 @@
  * do run for an event whose chat was turned off after its group existed (a frozen
  * group, DS41-047), because re-enabling chat brings that group back as it was.
  */
+import { verifyEvent } from "nostr-tools/pure";
 import type { Store, MarmotChatLinkRow } from "../store/db.js";
 import { keyPackageProfile, type ChatMls } from "./mls.js";
 import { normalizeAvatarUrl } from "./avatar.js";
@@ -1565,6 +1566,48 @@ export class MarmotAdmin {
   async ingest(coordinate: string, events: AnyEvent[]): Promise<void> {
     const group = this.store.getMarmotGroup(coordinate);
     if (!group) return; // ingest even when frozen — stay converged
-    await this.mls.ingest(group.mls_group_id, events);
+    // The trust boundary marmot-ts's own `connect()` drain applies, which the
+    // direct `groups.ingest` call skips (audit R-44): a valid signature, the
+    // kind-445 tag set, and exactly one `h` equal to this group's routing id.
+    // Anything else would reach the MLS session and leave a durable wrapper row.
+    const admissible = events.filter((e) => isAdmissibleGroupEvent(e, group.nostr_group_id));
+    if (admissible.length === 0) return;
+    await this.mls.ingest(group.mls_group_id, admissible);
+  }
+}
+
+const U64_MAX = (1n << 64n) - 1n;
+
+/**
+ * Whether a kind-445 event may be handed to the MLS session for `nostrGroupId`
+ * (audit R-44). Mirrors marmot-ts's `connect()` gate (`groups-manager.js`,
+ * `hasOnlyGroupEventTags` + `getSingletonTagValue(event, "h")`) and MDK's
+ * `kind_445_transport_group_id`: besides a single `h` tag, a group event may
+ * carry at most one NIP-40 `["expiration", <u64>]` tag and nothing else. The
+ * relay's `#h` filter matches an event with ANY `h` equal to ours, so an event
+ * with two `h` tags, or extra tags, used to get through.
+ */
+export function isAdmissibleGroupEvent(event: AnyEvent, nostrGroupId: string): boolean {
+  if (event.kind !== 445) return false;
+  let h: string | undefined;
+  let hCount = 0;
+  let expirations = 0;
+  for (const tag of event.tags) {
+    if (tag[0] === "h") {
+      hCount++;
+      h = tag[1];
+      continue;
+    }
+    if (tag[0] !== "expiration") return false;
+    if (++expirations > 1 || tag.length !== 2) return false;
+    if (!/^[0-9]+$/.test(tag[1]!) || BigInt(tag[1]!) > U64_MAX) return false;
+  }
+  if (hCount !== 1 || h !== nostrGroupId) return false;
+  // Last, because it is the expensive check. nostr-tools caches a pass on the
+  // event object, so an event the relay pool already verified costs nothing here.
+  try {
+    return verifyEvent(event as unknown as Parameters<typeof verifyEvent>[0]);
+  } catch {
+    return false;
   }
 }

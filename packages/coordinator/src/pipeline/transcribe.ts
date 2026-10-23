@@ -5,14 +5,13 @@
  * so a restart never re-pays for a transcript.
  */
 import { decryptMedia, sha256Hex, type MediaDescriptor,
-  MAX_MEDIA_FILE_BYTES,
+  MAX_MEDIA_FILE_BYTES, base64ToBytes, concatBytes, utf8ToBytes,
 } from "@nostrautica/protocol";
 import type { SttProvider } from "../providers/types.js";
 import type { Store } from "../store/db.js";
 import {
   extractAudioSegments,
   probeDurationFromBytes,
-  ProbeUnavailableError,
   SubprocessError,
   type AudioSegment,
 } from "./audio.js";
@@ -75,6 +74,8 @@ export interface BlobFetchOptions {
   maxBytes?: number;
   /** Caller cancellation (audit R13): shutdown / per-event teardown. */
   signal?: AbortSignal;
+  /** Every body chunk's size, across every mirror tried and on failure too (audit R-18). */
+  onBytes?: (n: number) => void;
   /**
    * The guarded downloader, injectable for tests — the same shape every other
    * expensive dependency in this pipeline takes (`probeDuration`, `extractAudio`,
@@ -105,7 +106,7 @@ export async function fetchBlob(
   let allPermanent = urls.length > 0;
   for (const url of urls) {
     try {
-      const bytes = await get(url, { allowedOrigins: opts.allowedOrigins, maxBytes, signal: opts.signal });
+      const bytes = await get(url, { allowedOrigins: opts.allowedOrigins, maxBytes, signal: opts.signal, onBytes: opts.onBytes });
       if (sha256Hex(bytes) !== expectedSha256) {
         // The bytes arrived and are not the bytes the descriptor names. No number
         // of retries changes that; the blob is either corrupt or substituted.
@@ -166,7 +167,34 @@ export interface TranscribeDeps {
    *  child processes, and the STT provider call so a shutdown/teardown unwinds a
    *  long transcription promptly instead of running to its provider deadline. */
   signal?: AbortSignal;
+  /**
+   * The (event, attendee) this transcription is for (audit C5, R-15/R-16). The
+   * ownership ref is recorded only once this caller has PROVEN it holds the key —
+   * a fingerprint-matched cache hit, or a successful decrypt — so a claimer who
+   * knows nothing but the public ciphertext hash cannot pin someone else's
+   * transcript past its owner's purge.
+   */
+  owner?: { coordinate: string; pubkey: string };
   now?: () => number;
+}
+
+/**
+ * Fingerprint of the key material a descriptor carries (audit R-16), stored next
+ * to a cached transcript so a cache hit requires the key and not just `x`. `x` is
+ * the ciphertext hash: it is in the Blossom URL, visible to the Blossom operator
+ * and to anyone the blob's link ever reached. Holding it proves nothing; holding
+ * a key that decrypts the blob to `ox` does. Hashed over the decoded bytes, so two
+ * base64 spellings of one key agree, and domain-separated so it is useless as
+ * anything but this cache's lookup key.
+ */
+export function transcriptKeyFingerprint(descriptor: MediaDescriptor): string {
+  return sha256Hex(
+    concatBytes(
+      utf8ToBytes(`nostrautica/transcript-key/v1|${descriptor.ox}|`),
+      base64ToBytes(descriptor["decryption-key"]),
+      base64ToBytes(descriptor["decryption-nonce"]),
+    ),
+  );
 }
 
 /** A transcript plus the STT-detected source language (spec F1, audit A1). */
@@ -185,8 +213,19 @@ export async function transcribeMedia(
   descriptor: MediaDescriptor,
 ): Promise<TranscriptResult> {
   const now = deps.now ?? (() => Date.now());
+  const owner = deps.owner;
+  const keyFp = transcriptKeyFingerprint(descriptor);
+  // Audit R-16. This used to return the cached row on `x` alone, before any
+  // download or decrypt: a descriptor naming someone else's blob hash with a
+  // garbage key got their plaintext transcript back (and published it on its own
+  // 31603), and its ownership ref kept that transcript alive past the owner's
+  // purge. A hit now needs the key the transcript was produced under; anything
+  // else takes the full path, where a wrong key fails the decrypt below.
   const cached = deps.store.getTranscriptRow(descriptor.x);
-  if (cached !== undefined) return { text: cached.text, lang: cached.lang ?? undefined };
+  if (cached !== undefined && cached.key_fp === keyFp) {
+    if (owner) deps.store.recordTranscriptRef(descriptor.x, owner.coordinate, owner.pubkey, now());
+    return { text: cached.text, lang: cached.lang ?? undefined };
+  }
   // Already given up on (DS41-040): reject before paying for another download + STT.
   const emptySoFar = deps.store.emptySttAttempts(descriptor.x);
   if (emptySoFar >= MAX_EMPTY_STT_ATTEMPTS) {
@@ -196,19 +235,49 @@ export async function transcribeMedia(
   }
 
   deps.signal?.throwIfAborted();
+  // Audit R-18: every byte streamed is booked, whichever mirror sent it and
+  // whether or not the download then succeeded. Only the success path and two
+  // rejection branches used to book anything, so a body cut off mid-stream, one
+  // run past the cap, or one whose hash did not match cost real transfer that
+  // never reached the usage budget. And the cap is the descriptor's own `size`
+  // (bounded by the operator's per-blob limit), not the 250 MiB ceiling: `size`
+  // is what capMedia screened against the submission budget, so a blob larger
+  // than it declared is a policy rejection at `size + 1` bytes, not at 250 MiB.
+  let streamed = 0;
   const download =
     deps.fetchBlob ??
     ((urls: string[], sha: string) =>
-      fetchBlob(urls, sha, { allowedOrigins: deps.blossomOrigins, maxBytes: deps.maxMediaBytes, signal: deps.signal }));
-  const ciphertext = await download(descriptor.url, descriptor.x);
+      fetchBlob(urls, sha, {
+        allowedOrigins: deps.blossomOrigins,
+        maxBytes: Math.min(deps.maxMediaBytes ?? DEFAULT_MAX_MEDIA_BYTES, descriptor.size),
+        signal: deps.signal,
+        onBytes: (n) => {
+          streamed += n;
+        },
+      }));
+  let ciphertext: Uint8Array;
+  try {
+    ciphertext = await download(descriptor.url, descriptor.x);
+  } catch (e) {
+    if (streamed > 0) deps.onUsage?.({ bytes: streamed, durationSec: 0 });
+    throw e;
+  }
+  // Booked once, here, before anything below can reject or return: a decrypt
+  // failure and a legacy cache reuse spent the download too. An injected
+  // downloader reports no chunks; then the body itself is the measure.
+  deps.onUsage?.({ bytes: Math.max(streamed, ciphertext.length), durationSec: 0 });
 
   // H-3: the actual downloaded ciphertext length MUST equal the declared `size`.
   // A mismatch means the descriptor lied (a declared `size: 1` fronting a huge blob
-  // to duck the aggregate byte budget). Account the bytes actually spent, then
-  // reject this media (empty cached transcript, no decrypt/STT).
+  // to duck the aggregate byte budget). The bytes are already booked above;
+  // reject this media (no decrypt/STT).
+  //
+  // Not cached (audit R-16). The verdict belongs to THIS descriptor, not to the
+  // blob: caching `""` under `x` let anyone who knew a victim's blob hash submit
+  // it with a wrong `size` and silence the victim's transcript for good, since
+  // the cache hit short-circuited everything after it. A repeat costs a metered
+  // download, and the job runner never retries a MediaPolicyError.
   if (ciphertext.length !== descriptor.size) {
-    deps.onUsage?.({ bytes: ciphertext.length, durationSec: 0 });
-    deps.store.putTranscript(descriptor.x, "", now());
     throw new MediaPolicyError(
       `declared size ${descriptor.size} != actual ciphertext length ${ciphertext.length}`,
     );
@@ -227,29 +296,31 @@ export async function transcribeMedia(
     throw new MediaPolicyError(`media does not decrypt with its descriptor: ${e instanceof Error ? e.message : String(e)}`);
   }
 
+  // The key is now proven. A row written by an older binary carries no
+  // fingerprint, so it could not be served above; bind it to this key and serve
+  // it without paying for STT again. Except an EMPTY one: that is exactly what
+  // the old size-mismatch branch planted, and re-transcribing a silent clip once
+  // is cheap.
+  if (cached !== undefined && cached.text !== "") {
+    deps.store.setTranscriptKeyFp(descriptor.x, keyFp);
+    if (owner) deps.store.recordTranscriptRef(descriptor.x, owner.coordinate, owner.pubkey, now());
+    return { text: cached.text, lang: cached.lang ?? undefined };
+  }
+
   // H-3: probe the REAL decoded duration and reject over-limit media BEFORE STT,
   // regardless of the declared `duration`. Account the actual bytes + duration.
   const probe = deps.probeDuration ?? ((m, mime) => probeDurationFromBytes(m, mime, deps.signal));
-  let realDurationSec: number | undefined;
-  try {
-    realDurationSec = await probe(plaintext, descriptor.m);
-  } catch (e) {
-    // ffprobe never ANSWERED (timed out, was killed, could not be spawned). That is
-    // a fact about this host at this moment, not about the media, and the branch
-    // below would otherwise cache it as a permanent policy rejection: the recording
-    // is never transcribed and re-submitting the identical blob hits the same
-    // cached empty transcript forever. Account the bytes we really spent
-    // downloading (abuse is metered even on failure) and rethrow so the job runner
-    // retries with backoff. Nothing is cached.
-    if (e instanceof ProbeUnavailableError) {
-      deps.onUsage?.({ bytes: ciphertext.length, durationSec: 0 });
-    }
-    throw e;
-  }
+  // A probe that never ANSWERED (ProbeUnavailableError: timed out, was killed,
+  // could not be spawned) is a fact about this host at this moment, not about the
+  // media, and the branch below would otherwise cache it as a permanent policy
+  // rejection: the recording is never transcribed and re-submitting the identical
+  // blob hits the same cached empty transcript forever. The bytes are already
+  // booked; it propagates so the job runner retries with backoff. Nothing is cached.
+  const realDurationSec: number | undefined = await probe(plaintext, descriptor.m);
   // Unknown is booked as 0 against the usage budget because there is nothing else
   // to book — which is precisely why an unknown duration must not also be allowed
   // to PASS the cap below (2026-09-04 audit).
-  deps.onUsage?.({ bytes: ciphertext.length, durationSec: realDurationSec ?? 0 });
+  deps.onUsage?.({ bytes: 0, durationSec: realDurationSec ?? 0 });
   if (deps.maxDurationSec) {
     // "Could not probe" used to read as 0 seconds and sail through this comparison.
     // ffprobe failing does not mean ffmpeg will: a container whose header ffprobe
@@ -270,9 +341,8 @@ export async function transcribeMedia(
     // `""` here meant the strict event poisoned the lenient one — an attendee
     // reusing one intro at two events (the reuse flow the product advertises) got
     // silence at the second, with `stt.calls` never incremented and no way to tell
-    // it from a genuinely silent recording. The declared-size check above still
-    // caches, because a size/hash mismatch is a property of the blob and no event's
-    // configuration can make it acceptable. The cost of not caching is one repeat
+    // it from a genuinely silent recording. (The declared-size check above no
+    // longer caches either, audit R-16.) The cost of not caching is one repeat
     // download+probe per processing attempt, and those bytes are metered
     // (`onUsage`, just above) exactly as an accepted blob's are.
     if (realDurationSec === undefined) {
@@ -290,7 +360,8 @@ export async function transcribeMedia(
 
   const caps = await deps.stt.capabilities();
   const extract =
-    deps.extractAudio ?? ((m, mime, maxBytes) => extractAudioSegments(m, mime, maxBytes, deps.signal));
+    deps.extractAudio ??
+    ((m, mime, maxBytes) => extractAudioSegments(m, mime, maxBytes, deps.signal, deps.maxDurationSec));
   let segments: AudioSegment[];
   try {
     segments = await extract(plaintext, descriptor.m, caps.maxUploadBytes);
@@ -302,6 +373,29 @@ export async function transcribeMedia(
       throw new MediaPolicyError(`audio extraction failed on this media: ${e.message}`);
     }
     throw e;
+  }
+
+  // Audit R-17. The probe above reads `format=duration`, which is container
+  // METADATA the attendee authored: an MP4 whose header says 30 s and whose
+  // samples run for two hours passed a 90 s cap, booked 30 s, and paid STT for two
+  // hours. What reaches STT is the Ogg our own ffmpeg just wrote, decoding no more
+  // than one second past the limit, and that is measured here. Over-length media
+  // measures over the limit and is rejected before the provider is called. Half a
+  // second of tolerance absorbs Opus pre-skip, so a clean 90 s recording that
+  // reads 90.0065 s still passes. The usage budget is topped up to the measured
+  // figure, so the books carry the larger of what the container claimed and what
+  // was really decoded.
+  const measured = segments.every((seg) => typeof seg.durationSec === "number")
+    ? segments.reduce((n, seg) => n + seg.durationSec!, 0)
+    : undefined;
+  if (measured !== undefined) {
+    const extra = Math.round(measured) - (realDurationSec ?? 0);
+    if (extra > 0) deps.onUsage?.({ bytes: 0, durationSec: extra });
+    if (deps.maxDurationSec && measured > deps.maxDurationSec + 0.5) {
+      throw new MediaPolicyError(
+        `decoded audio runs past the ${deps.maxDurationSec}s event limit (the container claimed ${realDurationSec ?? "?"}s)`,
+      );
+    }
   }
 
   const parts: string[] = [];
@@ -351,6 +445,6 @@ export async function transcribeMedia(
       `speech-to-text returned nothing for ${audioBytes} bytes of audio (attempt ${attempts}/${MAX_EMPTY_STT_ATTEMPTS}) — retrying`,
     );
   }
-  deps.store.putTranscript(descriptor.x, transcript, now(), lang);
+  deps.store.putTranscript(descriptor.x, transcript, now(), lang, owner, keyFp);
   return { text: transcript, lang };
 }

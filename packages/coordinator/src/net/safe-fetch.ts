@@ -34,6 +34,10 @@ export interface SafeFetchOptions {
   /** Caller cancellation (audit R13): shutdown / per-event teardown, combined with
    *  the per-hop wall-clock timeout so a blocked blob download unwinds promptly. */
   signal?: AbortSignal;
+  /** Told the size of every body chunk as it arrives, including on a download that
+   *  then fails (audit R-18), so a caller can meter bytes it paid for but never got
+   *  as a usable body. */
+  onBytes?: (n: number) => void;
 }
 
 export class SafeFetchError extends Error {
@@ -362,7 +366,7 @@ export async function safeFetch(raw: string, opts: SafeFetchOptions): Promise<Ui
     }
 
     try {
-      return await readCapped(res, opts.maxBytes);
+      return await readCapped(res, opts.maxBytes, opts.onBytes);
     } finally {
       clearTimeout(timer);
       await dispatcher.close().catch(() => {});
@@ -394,9 +398,10 @@ export async function abandonHop(
 }
 
 /** Read a response body, aborting if it exceeds `maxBytes` (streamed cap). */
-async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array> {
+async function readCapped(res: Response, maxBytes: number, onBytes?: (n: number) => void): Promise<Uint8Array> {
   if (!res.body) {
     const buf = new Uint8Array(await res.arrayBuffer());
+    onBytes?.(buf.length);
     if (buf.length > maxBytes) throw new SafeFetchError(`body exceeds cap ${maxBytes}`, false);
     return buf;
   }
@@ -408,6 +413,7 @@ async function readCapped(res: Response, maxBytes: number): Promise<Uint8Array> 
     if (done) break;
     if (value) {
       total += value.length;
+      onBytes?.(value.length);
       if (total > maxBytes) {
         await reader.cancel().catch(() => {});
         throw new SafeFetchError(`streamed bytes exceed cap ${maxBytes}`, false);

@@ -145,6 +145,62 @@ export function makeMarmotStores(store: Store): MarmotStores {
   };
 }
 
+/** A `prepared` ingest wrapper older than this is aged out (audit R-44). */
+export const PREPARED_WRAPPER_TTL_MS = 24 * 60 * 60 * 1000;
+/** At most this many `prepared` ingest wrappers are kept per group (audit R-44). */
+export const MAX_PREPARED_WRAPPERS_PER_GROUP = 1000;
+
+/**
+ * Age out MLS ingest evidence that will never settle (audit R-44).
+ *
+ * marmot-ts writes a durable `prepared` wrapper row for every kind-445 event it
+ * starts to ingest, BEFORE decryption, and an event that does not decrypt is
+ * "retryable unreadable" and stays `prepared` for good. A sender needs nothing
+ * but the group's public `h` and a fresh key to write one, so a flood grew the
+ * table without bound. Worse, any unfinished wrapper makes `hasUnfinished()`
+ * true, which postpones the group's history retention indefinitely.
+ *
+ * A `prepared` row is read by nothing but `hasUnfinished()` and `begin()`'s own
+ * "already begun" check: `get()` treats it as unknown, so the event stays
+ * processable whether or not the row exists. Removing an old one therefore loses
+ * no ingest semantics. If the event really is legitimate and comes back, it is
+ * ingested afresh. Rows past the TTL go, and so does every row beyond the
+ * newest {@link MAX_PREPARED_WRAPPERS_PER_GROUP}. Settled (`applied`/`terminal`)
+ * evidence is never touched. Returns how many rows were removed. The caller must
+ * hold the group's MLS lock.
+ */
+export function expireStalePreparedWrappers(
+  store: Store,
+  mlsGroupIdHex: string,
+  now: number,
+  ttlMs = PREPARED_WRAPPER_TTL_MS,
+  cap = MAX_PREPARED_WRAPPERS_PER_GROUP,
+): number {
+  const ns = MARMOT_NAMESPACES.ingestState;
+  const decoder = new TextDecoder();
+  let kept = 0;
+  let removed = 0;
+  for (const { k, created_at } of store.marmotKvKeysWithPrefix(ns, `${mlsGroupIdHex.toLowerCase()}/ingest/wrapper/v1/`)) {
+    const text = store.marmotKvGet(ns, k);
+    if (text === undefined) continue;
+    let prepared = false;
+    try {
+      const value = JSON.parse(decoder.decode(decodeValue<Uint8Array>(text))) as { state?: unknown };
+      prepared = value.state === "prepared";
+    } catch {
+      continue; // unreadable evidence is the library's to judge, not ours
+    }
+    if (!prepared) continue;
+    if (now - created_at > ttlMs || kept >= cap) {
+      store.marmotKvDelete(ns, k);
+      removed++;
+    } else {
+      kept++;
+    }
+  }
+  return removed;
+}
+
 /**
  * Delete every persisted key belonging to one MLS group, without loading it.
  *

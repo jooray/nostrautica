@@ -7,7 +7,7 @@
  * and remove-on-revoke state transitions, exercised through the actual MLS engine.
  */
 import { describe, it, expect } from "vitest";
-import { generateSecretKey, getPublicKey } from "nostr-tools/pure";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { MarmotClient } from "@internet-privacy/marmot-ts/client";
 import {
   getEpoch,
@@ -20,7 +20,7 @@ import type {
   Subscribable,
 } from "@internet-privacy/marmot-ts/client";
 import { Store } from "../store/db.js";
-import { makeMarmotStores } from "./stores.js";
+import { makeMarmotStores, expireStalePreparedWrappers, PREPARED_WRAPPER_TTL_MS } from "./stores.js";
 import { makeCoordinatorSigner } from "./signer.js";
 import { createMarmotClientMls } from "./mls.js";
 
@@ -357,5 +357,44 @@ describe("marmot-ts real round-trip (coordinator admin bot)", () => {
       }
     },
     180_000,
+  );
+
+  // Audit R-44: a 445 that does not decrypt leaves a durable `prepared` wrapper row
+  // that nothing ever settles, and anyone who knows the group's public `h` can
+  // write one per event with a throwaway key.
+  it(
+    "ages out the prepared wrapper rows that undecryptable 445 traffic leaves behind",
+    async () => {
+      const network = new FakeNetwork();
+      const coordSk = generateSecretKey();
+      const coordStore = new Store(":memory:", coordSk);
+      const { mls } = createMarmotClientMls({ store: coordStore, coordSk, network });
+      const ids = await mls.createGroup({ name: "room", description: "", relays: RELAYS });
+      const junk = Array.from({ length: 5 }, (_, i) =>
+        finalizeEvent(
+          { kind: 445, created_at: 1_700_000_000 + i, tags: [["h", ids.nostrGroupIdHex]], content: btoa("not an MLS message " + i) },
+          generateSecretKey(),
+        ),
+      );
+      await mls.ingest(ids.mlsGroupIdHex, junk as never);
+      const prefix = `${ids.mlsGroupIdHex}/ingest/wrapper/v1/`;
+      const rows = () => coordStore.marmotKvKeysWithPrefix("ingest-state", prefix);
+      expect(rows()).toHaveLength(5); // all `prepared`, none ever settles
+
+      // The cap keeps the newest rows; the TTL removes the rest.
+      expect(expireStalePreparedWrappers(coordStore, ids.mlsGroupIdHex, Date.now(), PREPARED_WRAPPER_TTL_MS, 2)).toBe(3);
+      expect(rows()).toHaveLength(2);
+      expect(expireStalePreparedWrappers(coordStore, ids.mlsGroupIdHex, Date.now() + PREPARED_WRAPPER_TTL_MS + 1)).toBe(2);
+      expect(rows()).toHaveLength(0);
+
+      // The group still works afterwards: a real member can be added.
+      const memberSk = generateSecretKey();
+      const member = makeMemberClient(memberSk, network);
+      await member.keyPackages.ensurePublished({ relays: RELAYS });
+      const [kpEvent] = await network.request(RELAYS, { kinds: [30443], authors: [getPublicKey(memberSk)] });
+      await mls.invite(ids.mlsGroupIdHex, kpEvent as never);
+      expect(await mls.isMember(ids.mlsGroupIdHex, getPublicKey(memberSk))).toBe(true);
+    },
+    30_000,
   );
 });

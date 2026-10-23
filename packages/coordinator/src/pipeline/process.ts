@@ -218,6 +218,7 @@ export async function processAttendee(
 
   // 1. Transcribe each media blob (cached by blob sha256). Text intros carry no
   //    blob, so they never reach this loop — the authored text is appended below.
+  const owner = deps.coordinate ? { coordinate: deps.coordinate, pubkey: input.pubkey } : undefined;
   const transcribe =
     deps.transcribe ??
     ((descriptor: MediaDescriptor, sig?: AbortSignal) =>
@@ -239,23 +240,24 @@ export async function processAttendee(
           // where all the waiting happens. The talk path already forwards it; this
           // is the intro path, the same fix on the other side.
           signal: sig,
+          // Ownership ref (audit C5), recorded by transcribeMedia only once this
+          // attendee has proven they hold the blob's key (audit R-16).
+          owner,
           now,
         },
         descriptor,
       ));
-  const owner = deps.coordinate ? { coordinate: deps.coordinate, pubkey: input.pubkey } : undefined;
   const transcripts: string[] = []; // text fed into buildAiProfile
   const published: MediaTranscript[] = []; // STT transcripts published on 31603
   for (const descriptor of input.media) {
     deps.signal?.throwIfAborted(); // shutdown cancellation (audit C11/R13)
-    // Ownership reference for the content-addressed transcript (audit C5): record it
-    // for THIS subject regardless of the transcription outcome (the payload — full or
-    // empty-on-policy-rejection — is content-addressed by `x`), so a purge can
-    // reference-count it.
-    if (owner) deps.store.recordTranscriptRef(descriptor.x, owner.coordinate, owner.pubkey, now());
+    // No ownership ref here any more (audit R-16): this used to record one for every
+    // descriptor BEFORE transcribing, so naming another attendee's blob hash — with
+    // no key — was enough to hold their transcript past their own purge. The ref is
+    // now recorded inside transcribeMedia, after key possession is proven.
     // A media-policy rejection (declared-size mismatch / over-duration, audit H-3)
-    // rejects THAT media only — an empty transcript is cached, no STT, and the
-    // other media/attendee continue — rather than poisoning the whole attendee.
+    // rejects THAT media only — nothing is cached, no STT, and the other
+    // media/attendee continue — rather than poisoning the whole attendee.
     let r: string | TranscriptResult;
     try {
       r = await transcribe(descriptor, deps.signal);
