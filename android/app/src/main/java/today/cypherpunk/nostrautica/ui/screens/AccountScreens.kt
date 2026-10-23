@@ -41,6 +41,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import today.cypherpunk.nostrautica.AppContainer
 import today.cypherpunk.nostrautica.BuildConfig
+import today.cypherpunk.nostrautica.domain.Role
 import today.cypherpunk.nostrautica.domain.join.joinFlow
 import today.cypherpunk.nostrautica.i18n.LocalStrings
 import today.cypherpunk.nostrautica.protocol.Nip19
@@ -341,6 +342,17 @@ fun EventMoreScreen(naddr: String) {
             item { MenuRow(Icons.Outlined.Event, s.t("more.allEvents")) { router.resetTo(Route.Home) } }
             item { MenuRow(Icons.Outlined.Add, s.t("more.createEvent")) { router.go(Route.Create) } }
             item { MenuRow(Icons.Outlined.Tune, s.t("nav.settings")) { router.go(Route.Settings) } }
+            // Visitors only (EventMore.svelte): the card promises "the join screen explains
+            // this", which holds only while Join still shows its form. A pending or approved
+            // member lands on a branch with no privacy text; members get the retention line
+            // on the Overview instead.
+            if (ev.role == Role.VISITOR) item {
+                Card {
+                    Text(s.t("more.eventPrivacy"), fontWeight = FontWeight.SemiBold)
+                    Dim(s.t("more.eventPrivacy.body"))
+                    SmallButton(s.t("more.eventPrivacy.link"), { router.go(Route.Join(naddr)) })
+                }
+            }
         }
     }
 }
