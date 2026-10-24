@@ -1,4 +1,5 @@
 /** @module @category Engine */
+import { mediaSourceStateToken } from "../core/media/source-state.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { contentTypes, encode, getCredentialFromLeafIndex, mlsMessageEncoder, processMessage, ValidationError, wireformats, } from "../vendor/ts-mls/index.js";
 import { verifyApplicationRumorAuthorship } from "../core/application-rumor.js";
@@ -407,13 +408,24 @@ export async function* ingestEnvelopes(ctx, envelopes, options) {
                 }
                 // Remember this eager delivery keyed by the branch state it decrypted
                 // against (epoch + confirmation tag); a later rewind abandoning this
-                // branch retracts it as `invalidated` (M7). An app message advances the
-                // ratchet but not the epoch/confirmation tag, so newState identifies the
-                // delivery branch.
-                ctx.recordDeliveredAppPayload(Number(result.newState.groupContext.epoch), bytesToHex(result.newState.confirmationTag), envelope, message, result.message);
+                // branch retracts it as `invalidated` (M7).
+                const sourceState = [ctx.getState(), ...ctx.retained.states()].find((state) => state.groupContext.epoch === sourceEpoch);
+                // Use exact source provenance when retained. Historical receiver-only
+                // delivery keeps its existing tip-bound retraction bookkeeping, but
+                // does not claim a media source identity.
+                const deliveryState = sourceState ?? result.newState;
+                ctx.recordDeliveredAppPayload(Number(deliveryState.groupContext.epoch), bytesToHex(deliveryState.confirmationTag), envelope, message, result.message);
                 ctx.dedup.remember(message);
                 log("application message envelope:%s", envelopeLabel(envelope));
-                yield { kind: "processed", result, envelope, message };
+                yield {
+                    kind: "processed",
+                    result,
+                    envelope,
+                    message,
+                    sourceParent: sourceState
+                        ? mediaSourceStateToken(sourceState)
+                        : undefined,
+                };
             }
         }
         catch (error) {

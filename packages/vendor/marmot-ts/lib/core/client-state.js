@@ -1,7 +1,7 @@
 /** @module @category Core - Client State */
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { clientStateDecoder, clientStateEncoder, ciphersuites, decode, getAppDataDictionary, nodeTypes, encode, } from "../vendor/ts-mls/index.js";
-import { AGENT_TEXT_STREAM_QUIC_COMPONENT, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_BLOSSOM_IMAGE_COMPONENT, GROUP_BLOSSOM_IMAGE_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT, GROUP_LIFECYCLE_COMPONENT_ID, GROUP_PROFILE_COMPONENT, GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT, NOSTR_ROUTING_COMPONENT_ID, decodeAdminPolicyV1, decodeAgentTextStreamQuicPolicyV1, decodeComponentsList, decodeEncryptedMediaPolicyV1, decodeEncryptedMediaPolicyV2, decodeGroupAvatarUrlV1, decodeGroupBlossomImage, decodeGroupProfileV1, decodeMessageRetentionV1, decodeGroupLifecycleV1, decodeNostrRoutingV1, getAdminPolicy, getComponentData, getEncryptedMediaPolicy, getEncryptedMediaPolicyV2, getGroupAvatarUrl, getGroupProfile, getMessageRetention, getGroupLifecycle, getNostrRouting, } from "./components/index.js";
+import { AGENT_TEXT_STREAM_QUIC_COMPONENT, AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT, GROUP_AVATAR_URL_COMPONENT_ID, GROUP_BLOSSOM_IMAGE_COMPONENT, GROUP_BLOSSOM_IMAGE_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT, GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_MESSAGE_RETENTION_COMPONENT, GROUP_MESSAGE_RETENTION_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT, GROUP_LIFECYCLE_COMPONENT_ID, GROUP_PROFILE_COMPONENT, GROUP_PROFILE_COMPONENT_ID, NOSTR_ROUTING_COMPONENT, NOSTR_ROUTING_COMPONENT_ID, decodeAdminPolicyV1, decodeAgentTextStreamQuicPolicyV1, decodeComponentsList, decodeEncryptedMediaPolicyV2, decodeGroupAvatarUrlV1, decodeGroupBlossomImage, decodeGroupProfileV1, decodeMessageRetentionV1, decodeGroupLifecycleV1, decodeNostrRoutingV1, getAdminPolicy, getComponentData, getEncryptedMediaPolicy, getGroupAvatarUrl, getGroupProfile, getMessageRetention, getGroupLifecycle, getNostrRouting, } from "./components/index.js";
 import { getGroupImageSource } from "./group-image.js";
 import { getGroupMemberPubkeys } from "./group-members.js";
 export { defaultMarmotClientConfig } from "./client-config.js";
@@ -15,7 +15,6 @@ const COMPONENT_NAMES = new Map([
     [AGENT_TEXT_STREAM_QUIC_COMPONENT_ID, AGENT_TEXT_STREAM_QUIC_COMPONENT],
     [GROUP_AVATAR_URL_COMPONENT_ID, GROUP_AVATAR_URL_COMPONENT],
     [GROUP_ENCRYPTED_MEDIA_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_COMPONENT],
-    [GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT],
     [GROUP_LIFECYCLE_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT],
 ]);
 const CIPHERSUITE_NAMES = new Map(Object.entries(ciphersuites).map(([name, id]) => [id, name]));
@@ -55,8 +54,6 @@ function decodeGroupComponent(componentId, data) {
                 : { kind: "present", mediaType: image.mediaType };
         }
         case GROUP_ENCRYPTED_MEDIA_COMPONENT_ID:
-            return decodeEncryptedMediaPolicyV1(data);
-        case GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID:
             return decodeEncryptedMediaPolicyV2(data);
         case GROUP_LIFECYCLE_COMPONENT_ID:
             return decodeGroupLifecycleV1(data);
@@ -110,7 +107,6 @@ export function getMarmotGroupView(clientState) {
             ? decodeGroupBlossomImage(blossomBytes)
             : undefined;
         const encryptedMedia = getEncryptedMediaPolicy(extensions);
-        const encryptedMediaV2 = getEncryptedMediaPolicyV2(extensions);
         const messageRetention = getMessageRetention(extensions);
         const protocolLifecycle = getGroupLifecycle(extensions);
         if (!profile && !adminPubkeys && !routing && !avatar && !blossomImage)
@@ -125,7 +121,6 @@ export function getMarmotGroupView(clientState) {
             blossomImage,
             imageSource: getGroupImageSource(clientState),
             encryptedMedia,
-            encryptedMediaV2,
             messageRetention,
             protocolLifecycle,
         };

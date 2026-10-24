@@ -10,6 +10,8 @@ import { describe, it, expect } from "vitest";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { MarmotClient } from "@internet-privacy/marmot-ts/client";
 import {
+  getAppComponents,
+  getEncryptedMediaPolicy,
   getEpoch,
   getNostrGroupIdHex,
   deserializeApplicationData,
@@ -22,7 +24,7 @@ import type {
 import { Store } from "../store/db.js";
 import { makeMarmotStores, expireStalePreparedWrappers, PREPARED_WRAPPER_TTL_MS } from "./stores.js";
 import { makeCoordinatorSigner } from "./signer.js";
-import { createMarmotClientMls } from "./mls.js";
+import { createMarmotClientMls, NEW_ROOM_MEDIA_ENDPOINTS } from "./mls.js";
 
 type Ev = { id: string; pubkey: string; kind: number; created_at: number; tags: string[][]; content: string; [k: string]: unknown };
 
@@ -129,6 +131,26 @@ describe("marmot-ts real round-trip (coordinator admin bot)", () => {
     },
     30_000,
   );
+
+  // marmot-ts 0.8.0 stopped adding a media policy to new groups by default. A room
+  // without one does not require 0x800b, unlike every MDK-created group, and White
+  // Noise members could not send media in it.
+  it("creates rooms that require encrypted media v2 (0x800b) with MDK's default servers", async () => {
+    const network = new FakeNetwork();
+    const coordSk = generateSecretKey();
+    const { mls, client } = createMarmotClientMls({ store: new Store(":memory:", coordSk), coordSk, network });
+    const ids = await mls.createGroup({ name: "Devcon chat", description: "", relays: RELAYS });
+    const extensions = (await client.groups.get(ids.mlsGroupIdHex)).state.groupContext.extensions;
+    expect(getAppComponents(extensions as never)).toContain(0x800b);
+    expect(getEncryptedMediaPolicy(extensions as never)).toEqual({
+      mediaFormat: "encrypted-media-v2",
+      allowedLocatorKinds: ["blossom-v1"],
+      defaultBlobEndpoints: NEW_ROOM_MEDIA_ENDPOINTS.map((url) => ({
+        locatorKind: "blossom-v1",
+        baseUrl: `${url}/`,
+      })),
+    });
+  });
 
   // Prod 2026-10-05 (0.9.0): every commit in an event room failed with "N admin
   // key(s) have no member leaf in the resulting epoch". The new library enforces

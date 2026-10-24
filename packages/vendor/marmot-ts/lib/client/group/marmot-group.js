@@ -8,6 +8,8 @@ import { buildForkTreeView } from "./fork-tree-view.js";
 import { logger } from "../../utils/debug.js";
 import { getMarmotGroupInfo, } from "../../core/client-state.js";
 import { evaluateKeyPackageForGroup, } from "../../core/key-package-eligibility.js";
+import { InMemoryKeyValueStore } from "../../extra/in-memory-key-value-store.js";
+import { PendingPublicationStore } from "../runtime/pending-publication.js";
 import { GroupRuntime } from "../runtime/group-runtime.js";
 import { linkPublicationRetention } from "../runtime/publication-retention.js";
 import { GroupSession, ingestResultDisposition, } from "../session/group-session.js";
@@ -509,11 +511,25 @@ export class MarmotGroup extends EventEmitter {
         }
         this.idStr = bytesToHex(this.id);
         this.log = logger.extend(`group:${this.idStr.slice(0, 8)}`);
+        const publicationStore = options.rewindStore ?? new InMemoryKeyValueStore();
         this.runtime = new GroupRuntime({
             welcomeDelivery: new NostrWelcomeDelivery({
                 signer: this.signer,
                 network: this.network,
             }),
+            pendingPublications: new PendingPublicationStore({
+                getItem: (key) => publicationStore.getItem(key),
+                setItem: async (key, value) => {
+                    await this.session.persistPublication(() => publicationStore.setItem(key, value));
+                    return value;
+                },
+                removeItem: (key) => this.session.persistPublication(() => publicationStore.removeItem(key)),
+                keys: () => publicationStore.keys(),
+                clear: () => this.session.persistPublication(() => publicationStore.clear()),
+            }, this.idStr),
+            restorePending: (pending) => this.session.restorePendingPublication(pending),
+            isApplied: (pending) => bytesToHex(this.state.confirmationTag) ===
+                bytesToHex(pending.newState.confirmationTag),
             getNetwork: () => this.network,
             getRelays: () => this.relays,
             getGroupRef: () => this.idStr,
@@ -529,10 +545,10 @@ export class MarmotGroup extends EventEmitter {
         linkPublicationRetention(this.runtime, this.session);
         this.mediaService = new GroupMediaService({
             media: this.media,
+            assertOpen: () => this.session.assertOutboundOpen(),
             getState: () => this.state,
             getCiphersuite: () => this.ciphersuite,
             getRetainedStates: () => this.session.retainedStates(),
-            getSigner: () => this.signer,
         });
         this.image = new GroupImageService({
             getState: () => this.state,
@@ -548,7 +564,14 @@ export class MarmotGroup extends EventEmitter {
             ...options,
             ciphersuite: cipherSuite,
         });
-        return group;
+        try {
+            await group.runtime.hydratePublication();
+            return group;
+        }
+        catch (error) {
+            group.dispose();
+            throw error;
+        }
     }
     /**
      * Realizes a persisted removal after the owning registry has attached its
@@ -720,6 +743,7 @@ export class MarmotGroup extends EventEmitter {
      */
     async submitIntent(intent) {
         this.#assertNotDisbanded();
+        await this.runtime.retryPendingPublication();
         await this.session.hydrateLifecycleEvidence();
         if (this.session.removalBlocked)
             throw new Error("Group removed or removal recovery pending");
@@ -756,6 +780,11 @@ export class MarmotGroup extends EventEmitter {
             if (signal?.aborted)
                 abort();
         });
+    }
+    /** Retry a retained commit after an uncertain relay result, without regenerating it. */
+    retryPendingPublication() {
+        this.#assertNotDisbanded();
+        return this.runtime.retryPendingPublication();
     }
     /** Atomically enables lifecycle-v1 for a legacy group and publishes it once. */
     async enableDisbanding() {
@@ -1019,6 +1048,7 @@ export class MarmotGroup extends EventEmitter {
      *   inbound-processing {@link Disposition}.
      */
     async *ingest(events, options) {
+        await this.runtime.hydratePublication();
         // The fork-history tree can grow during ingest (new commits / forks) without
         // the canonical state changing — track its size to emit `historyChanged`.
         const historySizeBefore = this.session.historyTree.size;
@@ -1144,9 +1174,7 @@ export class MarmotGroup extends EventEmitter {
         await this.session.finishRemovalRecovery();
     }
     /**
-     * Encrypts a media file for sharing in a group message, in the group's
-     * media format (`encrypted-media-v2` unless the group only carries the
-     * frozen v1 policy — see {@link GroupMediaService.mediaVersion}).
+     * Encrypts a media file for sharing in a group message (encrypted-media-v2).
      *
      * Derives the per-file key from the current MLS epoch, encrypts with
      * ChaCha20-Poly1305, and returns the ciphertext alongside a populated
@@ -1157,37 +1185,20 @@ export class MarmotGroup extends EventEmitter {
      * 1. Upload `encrypted` to a blob store (`ciphertextSha256` is the content id).
      * 2. Push a locator (`{ kind, value }`) onto `attachment.locators`.
      * 3. Serialize with `encodeMediaImetaTag` and include the tag on the rumor.
+     * 4. Preserve the returned `expectedParent` on the application send intent.
      */
     async encryptMedia(blob, metadata) {
         return this.mediaService.encryptMedia(blob, metadata);
     }
     /**
-     * Encrypts a media file and uploads the ciphertext to the group's Blossom
-     * endpoints (or `opts.servers`), returning an attachment with a
-     * `blossom-v1` locator ready for `encodeMediaImetaTag`. See
-     * {@link GroupMediaService.uploadMedia}.
-     */
-    async uploadMedia(blob, metadata, opts) {
-        return this.mediaService.uploadMedia(blob, metadata, opts);
-    }
-    /**
-     * Fetches, verifies and decrypts an attachment from its locators or the
-     * group's fallback endpoints. See {@link GroupMediaService.downloadMedia}.
-     */
-    async downloadMedia(attachment, opts) {
-        return this.mediaService.downloadMedia(attachment, opts);
-    }
-    /**
-     * Decrypts an encrypted-media attachment (v1 or v2) downloaded from a blob store.
+     * Decrypts an encrypted-media-v2 attachment downloaded from a blob store.
      *
-     * On the first call for a given file the plaintext bytes are derived via
-     * key-derivation + ChaCha20-Poly1305 decryption (after verifying the
-     * ciphertext and plaintext hashes) and stored in {`@link` media}. Subsequent
-     * calls for the same `attachment.ciphertextSha256` are served directly from
-     * the cache, skipping key-derivation entirely.
+     * Pass the authenticated sourceParent from the processed message or
+     * session.mediaSourceForRumor(). Omission selects the current state only.
+     * Cached plaintext never bypasses ciphertext and metadata validation.
      */
-    async decryptMedia(encrypted, attachment) {
-        return this.mediaService.decryptMedia(encrypted, attachment);
+    async decryptMedia(encrypted, attachment, sourceParent) {
+        return this.mediaService.decryptMedia(encrypted, attachment, sourceParent);
     }
     /**
      * Releases in-memory resources without touching persisted state (B5): cancels

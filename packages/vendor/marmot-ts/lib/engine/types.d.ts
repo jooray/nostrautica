@@ -86,6 +86,7 @@ export type CommitProposalInputs = (CommitProposalInput | CommitProposalInput[])
 export type SendIntent = {
     kind: "applicationMessage";
     payload: Uint8Array;
+    expectedParent?: string;
 } | {
     kind: "proposal";
     proposal: Proposal;
@@ -162,6 +163,8 @@ export type SendResult<TEnvelope> = {
 /** An envelope whose MLS message was successfully processed. */
 export type ProcessedIngestResult<TEnvelope> = {
     kind: "processed";
+    /** Exact authenticated media source. Absent when source material was pruned. */
+    sourceParent?: string;
     result: ProcessMessageResult;
     envelope: TEnvelope;
     message: MlsMessage;

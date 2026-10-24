@@ -5,60 +5,19 @@ import { expand as hkdf_expand } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
 import { bytesToHex, concatBytes, hexToBytes, randomBytes, } from "@noble/hashes/utils.js";
 import { mlsExporter } from "../../vendor/ts-mls/index.js";
-import { canonicalizeMimeType, canonicalizeMimeTypeV2 } from "./canonical.js";
-import { ENCRYPTED_MEDIA_VERSION_V1, ENCRYPTED_MEDIA_VERSION_V2, parseEncryptedMediaVersion, } from "./types.js";
+import { canonicalizeMimeType, isValidHex, validateMediaFilename, } from "./canonical.js";
+import { ENCRYPTED_MEDIA_VERSION, } from "./types.js";
 const enc = new TextEncoder();
+/** Scheme label used in all `encrypted-media-v2` cryptographic contexts. */
+const SCHEME = enc.encode(ENCRYPTED_MEDIA_VERSION);
 const SEP = new Uint8Array([0x00]);
 /** MLS exporter label and context used to obtain the base media secret. */
 const MLS_EXPORTER_LABEL = "marmot";
 const MLS_EXPORTER_CONTEXT = enc.encode("encrypted-media");
-/** Resolves and checks the media version of a crypto input. @internal */
-function versionOf(fields) {
-    if (fields.version === undefined)
-        return ENCRYPTED_MEDIA_VERSION_V1;
-    const version = parseEncryptedMediaVersion(fields.version);
-    if (!version) {
-        throw new Error(`unsupported encrypted media version: ${JSON.stringify(fields.version)}`);
-    }
-    return version;
-}
-/**
- * Throws unless `filename` satisfies the version's filename profile. v2:
- * 1..255 UTF-8 bytes with no U+0000, preserved exactly. v1: non-empty after
- * trimming (MDK `validate_outbound_file_name`).
- *
- * @internal
- */
-export function assertMediaFilename(filename, version) {
-    if (version === ENCRYPTED_MEDIA_VERSION_V2) {
-        const len = enc.encode(filename).length;
-        if (len === 0 || len > 255 || filename.includes("\0")) {
-            throw new Error("media file name must be 1..255 UTF-8 bytes and contain no NUL");
-        }
-    }
-    else if (filename.trim().length === 0) {
-        throw new Error("media file name cannot be empty");
-    }
-}
-/**
- * The media-type bytes that feed key derivation and the AAD. v1 canonicalizes
- * the given value; v2 requires it to already be canonical and never repairs it
- * (`features/encrypted-media.md` "Media Type Canonicalization").
- *
- * @internal
- */
-function cryptoMediaType(mediaType, version) {
-    if (version === ENCRYPTED_MEDIA_VERSION_V1)
-        return canonicalizeMimeType(mediaType);
-    if (canonicalizeMimeTypeV2(mediaType) !== mediaType) {
-        throw new Error("media type is not canonical for encrypted-media-v2");
-    }
-    return mediaType;
-}
 /**
  * Builds the `0x00`-separated field block shared by the key-derivation context
  * and the AEAD AAD: `plaintext_sha256_bytes || 0x00 || media_type || 0x00 ||
- * filename`. No length prefixes are used.
+ * filename`. The MIME type is canonicalized; no length prefixes are used.
  *
  * @internal
  */
@@ -67,39 +26,33 @@ function mediaFieldBlock(fields) {
         throw new Error("attachment.plaintextSha256 is required");
     if (!fields.mediaType)
         throw new Error("attachment.mediaType is required");
-    const version = versionOf(fields);
-    if (version === ENCRYPTED_MEDIA_VERSION_V2)
-        assertMediaFilename(fields.filename, version);
+    if (!isValidHex(fields.plaintextSha256, 32))
+        throw new Error("invalid plaintext hash");
+    validateMediaFilename(fields.filename);
     const plaintextHashBytes = hexToBytes(fields.plaintextSha256);
-    if (plaintextHashBytes.length !== 32)
-        throw new Error("attachment.plaintextSha256 must be 32 bytes");
-    const canonicalMime = enc.encode(cryptoMediaType(fields.mediaType, version));
+    const canonicalMime = enc.encode(canonicalizeMimeType(fields.mediaType));
     const filenameBytes = enc.encode(fields.filename);
     return concatBytes(plaintextHashBytes, SEP, canonicalMime, SEP, filenameBytes);
 }
 /**
- * Builds the ChaCha20-Poly1305 AAD:
- * `version || 0x00 || plaintext_sha256_bytes || 0x00 || media_type || 0x00 ||
- * filename`, where `version` is `"encrypted-media-v1"` or
- * `"encrypted-media-v2"`.
+ * Builds the ChaCha20-Poly1305 AAD for `encrypted-media-v2`:
+ * `"encrypted-media-v2" || 0x00 || plaintext_sha256_bytes || 0x00 ||
+ * media_type || 0x00 || filename`.
  *
  * @internal
  */
 function buildAad(fields) {
-    return concatBytes(enc.encode(versionOf(fields)), SEP, mediaFieldBlock(fields));
+    return concatBytes(SCHEME, SEP, mediaFieldBlock(fields));
 }
 /**
- * Derives the per-file encryption key for an encrypted-media attachment.
+ * Derives the per-file encryption key for an `encrypted-media-v2` attachment.
  *
  * ```
  * media_secret = MLS-Exporter("marmot", "encrypted-media", 32) at source_epoch
  * file_key     = HKDF-Expand(media_secret,
- *                  version || 0x00 || plaintext_sha256_bytes ||
+ *                  "encrypted-media-v2" || 0x00 || plaintext_sha256_bytes ||
  *                  0x00 || media_type || 0x00 || filename || 0x00 || "key", 32)
  * ```
- *
- * `version` is `attachment.version` (`"encrypted-media-v1"` when omitted, or
- * `"encrypted-media-v2"`). The exporter secret is the same for both versions.
  *
  * HKDF is HKDF-SHA256 with `media_secret` used directly as the PRK (Expand
  * only, no Extract). The key is deterministic for a given source epoch + file.
@@ -111,53 +64,37 @@ function buildAad(fields) {
  *
  * @param clientState - The MLS `ClientState` for the attachment's source epoch
  * @param ciphersuite - The ciphersuite implementation used by the group
- * @param attachment - Provides `version`, `plaintextSha256`, `mediaType`, and
- *   `filename`
+ * @param attachment - Provides `plaintextSha256`, `mediaType`, and `filename`
  * @returns 32-byte ChaCha20-Poly1305 encryption key
  */
 export async function deriveMediaEncryptionKey(clientState, ciphersuite, attachment) {
-    const mediaSecret = await exportMediaSecret(clientState, ciphersuite);
-    return deriveMediaFileKeyFromSecret(mediaSecret, attachment);
+    const mediaSecret = await mlsExporter(clientState.keySchedule.exporterSecret, MLS_EXPORTER_LABEL, MLS_EXPORTER_CONTEXT, 32, ciphersuite);
+    try {
+        return deriveMediaFileKey(mediaSecret, attachment);
+    }
+    finally {
+        mediaSecret.fill(0);
+    }
 }
-/**
- * Derives the per-file key from an already-exported 32-byte media secret
- * (`MLS-Exporter("marmot", "encrypted-media", 32)` at the source epoch). This is
- * the HKDF-Expand half of {@link deriveMediaEncryptionKey}, exposed so callers
- * that cache media secrets per epoch (as MDK does) can derive keys without the
- * `ClientState`, and so the derivation can be checked against fixed vectors.
- *
- * @param mediaSecret - 32-byte media exporter secret for the source epoch
- * @param attachment - Provides `version`, `plaintextSha256`, `mediaType`, `filename`
- */
-export function deriveMediaFileKeyFromSecret(mediaSecret, attachment) {
-    // info = version || 0x00 || plaintext_sha256 || 0x00 || media_type || 0x00 ||
-    //        filename || 0x00 || "key"
-    const info = concatBytes(enc.encode(versionOf(attachment)), SEP, mediaFieldBlock(attachment), SEP, enc.encode("key"));
+/** Derive from a retained 32-byte source-epoch media exporter, never a file key. */
+export function deriveMediaFileKey(mediaSecret, attachment) {
+    if (mediaSecret.length !== 32)
+        throw new Error("Media exporter must contain 32 bytes");
+    const info = concatBytes(SCHEME, SEP, mediaFieldBlock(attachment), SEP, enc.encode("key"));
     return hkdf_expand(sha256, mediaSecret, info, 32);
 }
 /**
- * Exports the group media secret `MLS-Exporter("marmot", "encrypted-media",
- * 32)` for `clientState`'s epoch. Key material: never log or transmit it.
- */
-export async function exportMediaSecret(clientState, ciphersuite) {
-    return mlsExporter(clientState.keySchedule.exporterSecret, MLS_EXPORTER_LABEL, MLS_EXPORTER_CONTEXT, 32, ciphersuite);
-}
-/**
- * Encrypts a media file for an encrypted-media attachment.
+ * Encrypts a media file for an `encrypted-media-v2` attachment.
  *
- * Uses ChaCha20-Poly1305 AEAD with a fresh random 12-byte nonce. The AAD binds
- * the format version, plaintext hash, canonical MIME type, and filename.
- * Computes `ciphertextSha256 = SHA256(encrypted)` and returns a
- * {@link MediaAttachment} with `locators` left empty for the caller to fill
- * after upload.
+ * Uses ChaCha20-Poly1305 AEAD with a random 12-byte nonce. The AAD binds the
+ * scheme version, plaintext hash, canonical MIME type, and filename. Computes
+ * `ciphertextSha256 = SHA256(encrypted)` and returns a {@link MediaAttachment}
+ * with `locators` left empty for the caller to fill after upload.
  *
  * @param file - The plaintext file bytes to encrypt
- * @param fileKey - 32-byte key from {@link deriveMediaEncryptionKey}, derived
- *   for the same `version`, hash, media type and filename
- * @param fields - Provides `plaintextSha256`, `mediaType`, `filename`, and
- *   `version` (default `encrypted-media-v1`); optional `dim`/`thumbhash` are
- *   carried through onto the result. For v2 the media type is canonicalized
- *   with the v2 algorithm before use and the filename profile is enforced.
+ * @param fileKey - 32-byte key from {@link deriveMediaEncryptionKey}
+ * @param fields - Provides `plaintextSha256`, `mediaType`, and `filename`;
+ *   optional `dim`/`thumbhash` are carried through onto the result
  * @returns Encrypted blob and a populated {@link MediaAttachment}
  */
 export function encryptMediaFile(file, fileKey, fields) {
@@ -165,16 +102,15 @@ export function encryptMediaFile(file, fileKey, fields) {
         throw new Error("attachment.plaintextSha256 is required");
     if (!fields.mediaType)
         throw new Error("attachment.mediaType is required");
-    const version = versionOf(fields);
-    assertMediaFilename(fields.filename, version);
-    const mediaType = version === ENCRYPTED_MEDIA_VERSION_V2
-        ? canonicalizeMimeTypeV2(fields.mediaType)
-        : canonicalizeMimeType(fields.mediaType);
+    const mediaType = canonicalizeMimeType(fields.mediaType);
+    if (!equalBytes(sha256(file), hexToBytes(fields.plaintextSha256))) {
+        throw new Error("plaintext hash does not match file");
+    }
     const nonce = randomBytes(12);
-    const aad = buildAad({ ...fields, version, mediaType });
+    const aad = buildAad({ ...fields, mediaType });
     const encrypted = chacha20poly1305(fileKey, nonce, aad).encrypt(file);
     const attachment = {
-        version,
+        version: ENCRYPTED_MEDIA_VERSION,
         locators: [],
         ciphertextSha256: bytesToHex(sha256(encrypted)),
         plaintextSha256: fields.plaintextSha256,
@@ -203,6 +139,13 @@ function prepareMediaDecrypt(encrypted, attachment) {
         throw new Error("attachment.mediaType is required");
     if (!attachment.nonce)
         throw new Error("attachment.nonce is required");
+    if (attachment.version !== ENCRYPTED_MEDIA_VERSION)
+        throw new Error("invalid media version");
+    if (canonicalizeMimeType(attachment.mediaType) !== attachment.mediaType)
+        throw new Error("non-canonical media type");
+    if (!isValidHex(attachment.ciphertextSha256, 32) ||
+        !isValidHex(attachment.nonce, 12))
+        throw new Error("invalid ciphertext hash or nonce");
     const nonce = hexToBytes(attachment.nonce);
     if (nonce.length !== 12) {
         throw new Error(`attachment.nonce must be 24 hex characters (12 bytes), got ${attachment.nonce.length} characters`);
@@ -210,12 +153,12 @@ function prepareMediaDecrypt(encrypted, attachment) {
     // Ciphertext integrity: fetched bytes MUST match ciphertext_sha256. This is
     // key-independent, so it runs once even when multiple candidate keys follow.
     if (!equalBytes(sha256(encrypted), hexToBytes(attachment.ciphertextSha256))) {
-        throw new Error(`${versionOf(attachment)} integrity check failed: ciphertext hash does not match ciphertext_sha256`);
+        throw new Error("encrypted-media-v2 integrity check failed: ciphertext hash does not match ciphertext_sha256");
     }
     return { nonce, aad: buildAad(attachment) };
 }
 /**
- * AEAD-opens a verified encrypted-media blob with one candidate key and
+ * AEAD-opens a verified `encrypted-media-v2` blob with one candidate key and
  * checks the plaintext hash. Returns the plaintext on success, or `undefined`
  * when the key fails authentication (the caller may try another epoch's key).
  * A successful AEAD open whose plaintext hash mismatches is a genuine integrity
@@ -223,7 +166,7 @@ function prepareMediaDecrypt(encrypted, attachment) {
  *
  * @internal
  */
-function openMediaFile(encrypted, fileKey, nonce, aad, plaintextSha256, version) {
+function openMediaFile(encrypted, fileKey, nonce, aad, plaintextSha256) {
     let decrypted;
     try {
         decrypted = chacha20poly1305(fileKey, nonce, aad).decrypt(encrypted);
@@ -235,12 +178,12 @@ function openMediaFile(encrypted, fileKey, nonce, aad, plaintextSha256, version)
     // The AEAD tag authenticated, so this is the right key; the plaintext hash
     // MUST match. A mismatch here is corruption, not a wrong-key signal.
     if (!equalBytes(sha256(decrypted), hexToBytes(plaintextSha256))) {
-        throw new Error(`${version} integrity check failed: plaintext hash does not match plaintext_sha256`);
+        throw new Error("encrypted-media-v2 integrity check failed: plaintext hash does not match plaintext_sha256");
     }
     return decrypted;
 }
 /**
- * Decrypts a fetched encrypted-media blob (v1 or v2, per `attachment.version`).
+ * Decrypts a fetched `encrypted-media-v2` blob.
  *
  * Performs the receive-side integrity checks in order
  * (`features/encrypted-media.md` — Validation):
@@ -257,22 +200,18 @@ function openMediaFile(encrypted, fileKey, nonce, aad, plaintextSha256, version)
  */
 export function decryptMediaFile(encrypted, fileKey, attachment) {
     const { nonce, aad } = prepareMediaDecrypt(encrypted, attachment);
-    const decrypted = openMediaFile(encrypted, fileKey, nonce, aad, attachment.plaintextSha256, versionOf(attachment));
+    const decrypted = openMediaFile(encrypted, fileKey, nonce, aad, attachment.plaintextSha256);
     if (!decrypted) {
-        throw new Error(`${versionOf(attachment)} decryption failed: ciphertext did not authenticate under the supplied key`);
+        throw new Error("encrypted-media-v2 decryption failed: ciphertext did not authenticate under the supplied key");
     }
     return decrypted;
 }
 /**
- * Decrypts a fetched encrypted-media blob, trying each candidate key in
+ * Decrypts a fetched `encrypted-media-v2` blob, trying each candidate key in
  * order until one authenticates the ciphertext.
  *
- * The media file key is derived from the source-epoch media exporter secret
- * (`features/encrypted-media.md` — Key Derivation), but the source epoch is not
- * carried in the `imeta` tag. Rather than thread the source epoch through every
- * caller, the receiver supplies one key per still-retained epoch (current epoch
- * first) and relies on the AEAD tag to identify the right one. The ciphertext
- * hash is verified once; only the cheap AEAD open is retried per key.
+ * This low-level helper accepts an explicit caller-managed key set. Client v2
+ * receiving uses exactly the authenticated source state instead of key probing.
  *
  * @param encrypted - The encrypted blob downloaded from a blob store
  * @param fileKeys - Candidate keys from {@link deriveMediaEncryptionKey}, one
@@ -286,9 +225,9 @@ export function decryptMediaFileWithKeys(encrypted, fileKeys, attachment) {
         throw new Error("decryptMediaFileWithKeys: at least one key is required");
     const { nonce, aad } = prepareMediaDecrypt(encrypted, attachment);
     for (const fileKey of fileKeys) {
-        const decrypted = openMediaFile(encrypted, fileKey, nonce, aad, attachment.plaintextSha256, versionOf(attachment));
+        const decrypted = openMediaFile(encrypted, fileKey, nonce, aad, attachment.plaintextSha256);
         if (decrypted)
             return decrypted;
     }
-    throw new Error(`${versionOf(attachment)} decryption failed: ciphertext did not authenticate under any retained epoch key`);
+    throw new Error("encrypted-media-v2 decryption failed: ciphertext did not authenticate under any retained epoch key");
 }

@@ -1,9 +1,7 @@
 /** @module @category Core - Encrypted Media */
-import { isLoopbackHost, rejectNonRoutableHost, } from "../components/host-safety.js";
-import { canonicalizeMimeType, canonicalizeMimeTypeV2, isValidHex, isValidHexAnyCase, } from "./canonical.js";
-import { assertMediaFilename } from "./crypto.js";
-import { BLOSSOM_LOCATOR_KIND, ENCRYPTED_MEDIA_VERSION_V1, ENCRYPTED_MEDIA_VERSION_V2, parseEncryptedMediaVersion, } from "./types.js";
-/** Single-occurrence `imeta` field names (both versions). */
+import { canonicalizeMimeType, isValidHex, validateMediaFilename, } from "./canonical.js";
+import { BLOSSOM_LOCATOR_KIND, ENCRYPTED_MEDIA_VERSION, } from "./types.js";
+/** Single-occurrence `imeta` field names for `encrypted-media-v2`. */
 const SINGLE_FIELDS = [
     "v",
     "ciphertext_sha256",
@@ -27,26 +25,23 @@ function reject(kind, message) {
     throw new MediaAttachmentRejection(kind, message);
 }
 /**
- * Serializes a {@link MediaAttachment} into an `imeta` tag array
- * (`features/encrypted-media.md` — Message Shape).
+ * Serializes a {@link MediaAttachment} into an `encrypted-media-v2` `imeta`
+ * tag array (`features/encrypted-media.md` — Message Shape).
  *
- * Field order follows the spec and MDK: `v`, `locator`…, `ciphertext_sha256`,
+ * Field order follows the spec: `v`, `locator`…, `ciphertext_sha256`,
  * `plaintext_sha256`, `nonce`, `m`, `filename`, optional `dim`, optional
- * `thumbhash`. The `v` value is `attachment.version`. The attachment MUST carry
- * at least one locator.
+ * `thumbhash`. The attachment MUST carry at least one locator.
  *
  * @param attachment - A populated attachment (locators filled in after upload)
  * @returns A Nostr tag array beginning with `"imeta"`
  */
 export function encodeMediaImetaTag(attachment) {
+    if (attachment.version !== ENCRYPTED_MEDIA_VERSION)
+        throw new Error("invalid media version");
     if (attachment.locators.length === 0) {
         throw new Error("encodeMediaImetaTag: attachment has no locators");
     }
-    const version = parseEncryptedMediaVersion(attachment.version ?? ENCRYPTED_MEDIA_VERSION_V1);
-    if (!version) {
-        throw new Error(`encodeMediaImetaTag: unsupported media version ${JSON.stringify(attachment.version)}`);
-    }
-    const parts = ["imeta", `v ${version}`];
+    const parts = ["imeta", `v ${ENCRYPTED_MEDIA_VERSION}`];
     for (const locator of attachment.locators) {
         parts.push(`locator ${locator.kind} ${locator.value}`);
     }
@@ -59,114 +54,8 @@ export function encodeMediaImetaTag(attachment) {
         parts.push(`dim ${attachment.dim}`);
     if (attachment.thumbhash !== undefined)
         parts.push(`thumbhash ${attachment.thumbhash}`);
+    parseMediaAttachment(parts);
     return parts;
-}
-/**
- * Throws if a v1 `blossom-v1` locator URL points at a hostile fetch target — an
- * unsafe host or cleartext `http` (`features/encrypted-media-v1.md`). v2 moved
- * destination safety to fetch time, so this applies to v1 only.
- *
- * @internal
- */
-function rejectUnsafeBlossomLocator(url) {
-    const scheme = url.protocol.replace(/:$/, "");
-    if (scheme !== "https") {
-        // Cleartext http (loopback or not) and any non-https scheme are rejected.
-        throw new Error("blossom-v1 locator must use https");
-    }
-    // Rejects loopback, private, CGNAT, link-local, documentation, multicast, etc.
-    rejectNonRoutableHost(url.hostname, "blossom-v1 locator");
-    // Defensive: rejectNonRoutableHost already covers loopback IPs/localhost.
-    if (isLoopbackHost(url.hostname)) {
-        throw new Error("blossom-v1 locator must not point at loopback");
-    }
-}
-/** Parses one v1 `locator <kind> <value>` field value. */
-function parseLocatorV1(value) {
-    const sp = value.indexOf(" ");
-    if (sp <= 0)
-        throw new Error("locator must be '<kind> <value>'");
-    const kind = value.slice(0, sp);
-    const locValue = value.slice(sp + 1).trim();
-    if (kind.length === 0)
-        throw new Error("locator kind must not be empty");
-    if (locValue.length === 0)
-        throw new Error("locator value must not be empty");
-    if (!URL.canParse(locValue))
-        throw new Error("locator value must parse as a URL");
-    if (kind === BLOSSOM_LOCATOR_KIND) {
-        rejectUnsafeBlossomLocator(new URL(locValue));
-    }
-    return { kind, value: locValue };
-}
-/**
- * Decodes the frozen `encrypted-media-v1` shape. Behaviour is unchanged from
- * the pre-v2 parser; failures are reported as `malformed_field` unless the
- * structure is clearly wrong.
- */
-function decodeImetaV1(tag) {
-    const single = new Map();
-    const locators = [];
-    for (const part of tag.slice(1)) {
-        const sp = part.indexOf(" ");
-        const key = sp === -1 ? part : part.slice(0, sp);
-        const value = sp === -1 ? "" : part.slice(sp + 1);
-        if (key === "blurhash") {
-            reject("malformed_field", "blurhash is invalid in encrypted-media-v1");
-        }
-        if (key === "locator") {
-            try {
-                locators.push(parseLocatorV1(value));
-            }
-            catch (err) {
-                reject("malformed_field", err.message);
-            }
-            continue;
-        }
-        if (SINGLE_FIELDS.includes(key)) {
-            if (single.has(key)) {
-                reject("duplicate_field", `duplicate single-occurrence field: ${key}`);
-            }
-            single.set(key, value);
-        }
-        // Unknown fields are ignored (only blurhash is explicitly forbidden).
-    }
-    if (locators.length === 0)
-        reject("missing_field", "no locator present");
-    const ciphertextSha256 = single.get("ciphertext_sha256");
-    const plaintextSha256 = single.get("plaintext_sha256");
-    const nonce = single.get("nonce");
-    const mediaTypeRaw = single.get("m");
-    const filename = single.get("filename");
-    if (!ciphertextSha256 || !isValidHex(ciphertextSha256, 32))
-        reject("malformed_field", "ciphertext_sha256 must be a 32-byte hex value");
-    if (!plaintextSha256 || !isValidHex(plaintextSha256, 32))
-        reject("malformed_field", "plaintext_sha256 must be a 32-byte hex value");
-    if (!nonce || !isValidHex(nonce, 12))
-        reject("malformed_field", "nonce must be 24 hex characters");
-    if (!mediaTypeRaw)
-        reject("missing_field", "m (media type) is required");
-    if (!filename)
-        reject("missing_field", "filename is required");
-    // Canonicalize the media type (also rejects an empty / slash-less value).
-    let mediaType;
-    try {
-        mediaType = canonicalizeMimeType(mediaTypeRaw);
-    }
-    catch (err) {
-        reject("malformed_field", err.message);
-    }
-    return {
-        version: ENCRYPTED_MEDIA_VERSION_V1,
-        locators,
-        ciphertextSha256,
-        plaintextSha256,
-        nonce,
-        mediaType,
-        filename,
-        ...(single.has("dim") ? { dim: single.get("dim") } : {}),
-        ...(single.has("thumbhash") ? { thumbhash: single.get("thumbhash") } : {}),
-    };
 }
 /**
  * Structural check of one v2 locator (MDK `validate_locator` for V2): kind and
@@ -252,11 +141,11 @@ function decodeImetaV2(tag) {
     const filename = required("filename");
     const mediaType = required("m");
     // Reference validation, in MDK `MediaAttachmentReference::validate` order.
-    if (!isValidHexAnyCase(ciphertextSha256, 32))
+    if (!isValidHex(ciphertextSha256, 32))
         reject("malformed_field", "media ciphertext_sha256 must be 32 hex bytes");
-    if (!isValidHexAnyCase(plaintextSha256, 32))
+    if (!isValidHex(plaintextSha256, 32))
         reject("malformed_field", "media plaintext_sha256 must be 32 hex bytes");
-    if (!isValidHexAnyCase(nonce, 12))
+    if (!isValidHex(nonce, 12))
         reject("malformed_field", "media nonce must be 12 bytes");
     if (locators.length === 0) {
         reject("missing_field", "media attachment must include at least one locator");
@@ -264,14 +153,14 @@ function decodeImetaV2(tag) {
     for (const locator of locators)
         validateLocatorV2(locator);
     try {
-        assertMediaFilename(filename, ENCRYPTED_MEDIA_VERSION_V2);
+        validateMediaFilename(filename);
     }
     catch (err) {
-        reject("malformed_field", err.message);
+        reject("malformed_field", `media file name is invalid: ${err.message}`);
     }
     let canonical;
     try {
-        canonical = canonicalizeMimeTypeV2(mediaType);
+        canonical = canonicalizeMimeType(mediaType);
     }
     catch (err) {
         reject("malformed_field", err.message);
@@ -280,7 +169,7 @@ function decodeImetaV2(tag) {
         reject("malformed_field", "media type is not canonical for encrypted-media-v2");
     }
     return {
-        version: ENCRYPTED_MEDIA_VERSION_V2,
+        version: ENCRYPTED_MEDIA_VERSION,
         locators,
         ciphertextSha256,
         plaintextSha256,
@@ -292,52 +181,32 @@ function decodeImetaV2(tag) {
     };
 }
 /**
- * Strictly decodes an encrypted-media attachment from an `imeta` tag, throwing
- * a typed {@link MediaAttachmentRejection} on failure.
- *
- * The `v` field is judged first, so the verdict for a tag with no `v`, a
- * duplicated `v`, or an unknown version (including legacy MIP-04 shapes) does
- * not depend on field order (MDK `parse_media_attachment`). `encrypted-media-v1`
- * tags are then decoded with the frozen v1 rules and `encrypted-media-v2` tags
- * with the v2 rules (`features/encrypted-media.md` — Validation). Fetchability
- * of a locator against group policy is NOT checked here.
- *
- * @throws {MediaAttachmentRejection}
+ * Strictly parses one current-profile v2 reference, throwing a typed rejection.
+ * Version errors take precedence over other fields, matching MDK. Historical
+ * v1 references remain available only through the explicit v1/history helpers.
  */
 export function parseMediaAttachment(tag) {
     if (tag[0] !== "imeta")
         reject("invalid_structure", "media tag must be imeta");
     let version;
     for (const field of tag.slice(1)) {
-        if (field === "v") {
+        if (field === "v")
             reject("invalid_structure", "media field v is missing its value");
-        }
         if (!field.startsWith("v "))
             continue;
-        if (version !== undefined) {
+        if (version !== undefined)
             reject("duplicate_field", "media tag must contain exactly one version");
-        }
-        version = parseEncryptedMediaVersion(field.slice(2));
-        if (!version)
+        version = field.slice(2);
+        if (version !== ENCRYPTED_MEDIA_VERSION)
             reject("unsupported_format", "media version is not supported");
     }
     if (!version)
         reject("unsupported_format", "media tag missing v");
-    return version === ENCRYPTED_MEDIA_VERSION_V2
-        ? decodeImetaV2(tag)
-        : decodeImetaV1(tag);
+    return decodeImetaV2(tag);
 }
 /**
- * Parses an `imeta` tag into a {@link MediaAttachment} (v1 or v2), or returns
- * `null` if the tag is not a valid encrypted-media reference. Use
- * {@link parseMediaAttachment} to learn why a tag was rejected.
- *
- * A `null` result means the media reference is invalid and MUST be dropped (the
- * containing message should be dropped too for a host-safety failure). Locator
- * fetchability against group policy is checked separately by
- * {@link selectFetchableLocators}.
- *
- * @param tag - A raw `imeta` tag array from a Nostr event
+ * Parse one v2 reference. Invalid references are attachment-local: retain the
+ * carrying caption and all valid sibling attachments.
  */
 export function parseMediaImetaTag(tag) {
     try {
@@ -348,10 +217,9 @@ export function parseMediaImetaTag(tag) {
     }
 }
 /**
- * Extracts all valid encrypted-media attachments (v1 and v2) from a tag list.
+ * Extracts all valid `encrypted-media-v2` attachments from a tag list.
  *
- * Non-`imeta` tags and `imeta` tags that fail validation are skipped. Use
- * {@link getMediaAttachmentOutcomes} to keep rejected attachments' positions.
+ * Non-`imeta` tags and `imeta` tags that fail validation are skipped.
  *
  * @param tags - The `tags` array from a Nostr event or rumor
  * @returns Array of valid {@link MediaAttachment} objects (may be empty)

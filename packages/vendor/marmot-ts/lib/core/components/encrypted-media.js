@@ -114,7 +114,7 @@ function normalizePolicy(policy) {
     };
 }
 /** Builds the default Blossom-backed policy for the given endpoint base URLs. */
-export function encryptedMediaBlossomDefault(baseUrls) {
+export function encryptedMediaBlossomDefaultV1(baseUrls) {
     return normalizePolicy({
         mediaFormat: ENCRYPTED_MEDIA_FORMAT_V1,
         allowedLocatorKinds: [BLOSSOM_LOCATOR_KIND_V1],

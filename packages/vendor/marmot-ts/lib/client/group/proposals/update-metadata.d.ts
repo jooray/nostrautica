@@ -1,6 +1,6 @@
 /** @module @category Client - Proposals */
 import { type Proposal } from "../../../vendor/ts-mls/index.js";
-import { type EncryptedMediaPolicyV1 } from "../../../core/components/index.js";
+import { type EncryptedMediaPolicyV2 } from "../../../core/components/index.js";
 import type { ProposalAction } from "../marmot-group.js";
 /** A partial update to a group's app-component metadata. */
 export interface UpdateGroupMetadata {
@@ -16,8 +16,8 @@ export interface UpdateGroupMetadata {
     nostrGroupId?: Uint8Array;
     /** New group avatar URL (group.avatar-url.v1). */
     avatarUrl?: string;
-    /** New encrypted-media policy (group.encrypted-media.v1). */
-    encryptedMedia?: EncryptedMediaPolicyV1;
+    /** New encrypted-media policy (group.encrypted-media.v2). */
+    encryptedMedia?: EncryptedMediaPolicyV2;
     /**
      * New message-retention window in seconds (message-retention.v1); `0` retains
      * indefinitely.
@@ -31,3 +31,9 @@ export interface UpdateGroupMetadata {
  * view. Touches only the components whose fields are present in `metadata`.
  */
 export declare function proposeUpdateMetadata(metadata: UpdateGroupMetadata): ProposalAction<Proposal[]>;
+/**
+ * Atomically activate/replace or remove v2 policy and its requirement.
+ * The engine validates admin authority and resulting member capabilities.
+ * Unsupported legacy-profile parents remain unsupported.
+ */
+export declare function proposeSetEncryptedMediaPolicy(policy: EncryptedMediaPolicyV2 | null, required?: boolean): ProposalAction<Proposal[]>;

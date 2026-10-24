@@ -1,6 +1,6 @@
 /** @module @category Core - App Components */
 import { appDataDictionaryExtensionType, appDataUpdateProposalType, defaultExtensionTypes, defaultProposalTypes, getAppDataDictionary, makeAppDataDictionaryExtension, getCredentialFromLeafIndex, nodeTypes, } from "../../vendor/ts-mls/index.js";
-import { getAdminPolicy, getAppComponents } from "./dictionary.js";
+import { getAdminPolicy, getAppComponents, getEncryptedMediaPolicy, } from "./dictionary.js";
 import { getGroupMemberPubkeys } from "../group-members.js";
 import { getCredentialPubkey } from "../credential.js";
 import { ACCOUNT_IDENTITY_PROOF_COMPONENT_ID, APP_COMPONENTS_COMPONENT_ID, GROUP_ADMIN_POLICY_COMPONENT_ID, GROUP_LIFECYCLE_COMPONENT_ID, SAFE_AAD_COMPONENT_ID, } from "./ids.js";
@@ -771,6 +771,12 @@ export function validateResultingProfileInvariants(args) {
     if (requiredComponents.includes(ENCRYPTED_MEDIA_V1_COMPONENT_ID) ||
         hasState(ENCRYPTED_MEDIA_V1_COMPONENT_ID))
         return fail("frozen encrypted-media v1 component 0x8008 is not permitted");
+    try {
+        getEncryptedMediaPolicy(args.resultingExtensions);
+    }
+    catch {
+        return fail("encrypted-media v2 policy does not decode");
+    }
     for (const mandatory of [
         GROUP_ADMIN_POLICY_COMPONENT_ID,
         ACCOUNT_IDENTITY_PROOF_COMPONENT_ID,

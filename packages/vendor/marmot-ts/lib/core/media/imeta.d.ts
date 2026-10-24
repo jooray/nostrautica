@@ -2,7 +2,7 @@ import { type MediaAttachment } from "./types.js";
 /**
  * Why an `imeta` tag was rejected. The categories and their precedence match
  * MDK's `MediaAttachmentRejectionKind` so every implementation reports the same
- * verdict for the same tag (`refs/mdk/fixtures/encrypted-media/imeta-v2.json`).
+ * verdict for the same tag (`fixtures/encrypted-media/imeta-v2.json` in MDK).
  */
 export type MediaAttachmentRejectionKind = "invalid_structure" | "unsupported_format" | "missing_field" | "duplicate_field" | "malformed_field";
 /** A typed `imeta` rejection. Rejection is attachment-local. */
@@ -21,50 +21,32 @@ export type MediaAttachmentOutcome = {
     rejection: MediaAttachmentRejection;
 };
 /**
- * Serializes a {@link MediaAttachment} into an `imeta` tag array
- * (`features/encrypted-media.md` — Message Shape).
+ * Serializes a {@link MediaAttachment} into an `encrypted-media-v2` `imeta`
+ * tag array (`features/encrypted-media.md` — Message Shape).
  *
- * Field order follows the spec and MDK: `v`, `locator`…, `ciphertext_sha256`,
+ * Field order follows the spec: `v`, `locator`…, `ciphertext_sha256`,
  * `plaintext_sha256`, `nonce`, `m`, `filename`, optional `dim`, optional
- * `thumbhash`. The `v` value is `attachment.version`. The attachment MUST carry
- * at least one locator.
+ * `thumbhash`. The attachment MUST carry at least one locator.
  *
  * @param attachment - A populated attachment (locators filled in after upload)
  * @returns A Nostr tag array beginning with `"imeta"`
  */
 export declare function encodeMediaImetaTag(attachment: MediaAttachment): string[];
 /**
- * Strictly decodes an encrypted-media attachment from an `imeta` tag, throwing
- * a typed {@link MediaAttachmentRejection} on failure.
- *
- * The `v` field is judged first, so the verdict for a tag with no `v`, a
- * duplicated `v`, or an unknown version (including legacy MIP-04 shapes) does
- * not depend on field order (MDK `parse_media_attachment`). `encrypted-media-v1`
- * tags are then decoded with the frozen v1 rules and `encrypted-media-v2` tags
- * with the v2 rules (`features/encrypted-media.md` — Validation). Fetchability
- * of a locator against group policy is NOT checked here.
- *
- * @throws {MediaAttachmentRejection}
+ * Strictly parses one current-profile v2 reference, throwing a typed rejection.
+ * Version errors take precedence over other fields, matching MDK. Historical
+ * v1 references remain available only through the explicit v1/history helpers.
  */
 export declare function parseMediaAttachment(tag: string[]): MediaAttachment;
 /**
- * Parses an `imeta` tag into a {@link MediaAttachment} (v1 or v2), or returns
- * `null` if the tag is not a valid encrypted-media reference. Use
- * {@link parseMediaAttachment} to learn why a tag was rejected.
- *
- * A `null` result means the media reference is invalid and MUST be dropped (the
- * containing message should be dropped too for a host-safety failure). Locator
- * fetchability against group policy is checked separately by
- * {@link selectFetchableLocators}.
- *
- * @param tag - A raw `imeta` tag array from a Nostr event
+ * Parse one v2 reference. Invalid references are attachment-local: retain the
+ * carrying caption and all valid sibling attachments.
  */
 export declare function parseMediaImetaTag(tag: string[]): MediaAttachment | null;
 /**
- * Extracts all valid encrypted-media attachments (v1 and v2) from a tag list.
+ * Extracts all valid `encrypted-media-v2` attachments from a tag list.
  *
- * Non-`imeta` tags and `imeta` tags that fail validation are skipped. Use
- * {@link getMediaAttachmentOutcomes} to keep rejected attachments' positions.
+ * Non-`imeta` tags and `imeta` tags that fail validation are skipped.
  *
  * @param tags - The `tags` array from a Nostr event or rumor
  * @returns Array of valid {@link MediaAttachment} objects (may be empty)

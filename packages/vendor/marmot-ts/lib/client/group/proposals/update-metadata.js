@@ -1,6 +1,6 @@
 /** @module @category Client - Proposals */
 import { appDataUpdateProposalType, } from "../../../vendor/ts-mls/index.js";
-import { adminPolicyEntry, encryptedMediaEntry, groupAvatarUrlEntry, groupProfileEntry, messageRetentionEntry, nostrRoutingEntry, } from "../../../core/components/index.js";
+import { adminPolicyEntry, appComponentsEntry, getAppComponents, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, encryptedMediaEntry, groupAvatarUrlEntry, groupProfileEntry, messageRetentionEntry, nostrRoutingEntry, } from "../../../core/components/index.js";
 /** Wraps a component entry in a full-replacement `app_data_update` proposal. */
 function componentUpdate(entry) {
     return {
@@ -49,5 +49,30 @@ export function proposeUpdateMetadata(metadata) {
             proposals.push(componentUpdate(messageRetentionEntry(metadata.messageRetention)));
         }
         return proposals;
+    };
+}
+/**
+ * Atomically activate/replace or remove v2 policy and its requirement.
+ * The engine validates admin authority and resulting member capabilities.
+ * Unsupported legacy-profile parents remain unsupported.
+ */
+export function proposeSetEncryptedMediaPolicy(policy, required = true) {
+    return async ({ state }) => {
+        const current = getAppComponents(state.groupContext.extensions) ?? [];
+        const next = current.filter((id) => id !== GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID);
+        if (policy && required)
+            next.push(GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID);
+        return [
+            componentUpdate(appComponentsEntry(next)),
+            policy
+                ? componentUpdate(encryptedMediaEntry(policy))
+                : {
+                    proposalType: appDataUpdateProposalType,
+                    appDataUpdate: {
+                        componentId: GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID,
+                        operation: "remove",
+                    },
+                },
+        ];
     };
 }

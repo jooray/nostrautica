@@ -27,7 +27,7 @@ export interface EncryptedMediaPolicyV1 {
     defaultBlobEndpoints: BlobStoreEndpointV1[];
 }
 /** Builds the default Blossom-backed policy for the given endpoint base URLs. */
-export declare function encryptedMediaBlossomDefault(baseUrls: string[]): EncryptedMediaPolicyV1;
+export declare function encryptedMediaBlossomDefaultV1(baseUrls: string[]): EncryptedMediaPolicyV1;
 /** Encodes an {@link EncryptedMediaPolicyV1} to its component `data` bytes. */
 export declare function encodeEncryptedMediaPolicyV1(policy: EncryptedMediaPolicyV1): Uint8Array;
 /**

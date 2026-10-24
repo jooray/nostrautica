@@ -71,6 +71,8 @@ export type GroupPublishResult = {
 export type GroupSessionSendIntent = {
     kind: "applicationMessage";
     payload: Uint8Array;
+    expectedParent?: string;
+    signal?: AbortSignal;
 } | {
     kind: "proposal";
     proposal: Proposal;
