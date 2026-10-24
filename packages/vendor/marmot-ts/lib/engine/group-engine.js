@@ -1,4 +1,7 @@
 /** @module @category Engine */
+import { parseMediaImetaTag } from "../core/media/imeta.js";
+import { getEncryptedMediaPolicy } from "../core/components/dictionary.js";
+import { mediaSourceStateToken, StaleMediaPreparationError, } from "../core/media/source-state.js";
 import { completeSettledRetentionOwner } from "./settled-retention-owner.js";
 import { bytesToHex, hexToBytes } from "@noble/hashes/utils.js";
 import { appDataDictionaryExtensionType, appDataUpdateProposalType, contentTypes, createApplicationMessage, createCommit, decode, createProposal, defaultProposalTypes, encode, getCredentialFromLeafIndex, isSelfRemoveProposal, mlsMessageEncoder, mlsMessageDecoder, nodeTypes, processMessage, proposalOrRefTypes, wireformats, } from "../vendor/ts-mls/index.js";
@@ -986,6 +989,32 @@ export class MarmotGroupEngine {
         switch (intent.kind) {
             case "applicationMessage": {
                 const sourceState = this.state;
+                if (intent.expectedParent !== undefined &&
+                    intent.expectedParent !== mediaSourceStateToken(sourceState))
+                    throw new StaleMediaPreparationError();
+                let outgoing;
+                try {
+                    outgoing = deserializeApplicationData(intent.payload);
+                }
+                catch {
+                    /* Opaque app bytes remain supported. */
+                }
+                if (outgoing?.kind === 9) {
+                    const mediaTags = outgoing.tags.filter((tag) => tag[0] === "imeta");
+                    if (mediaTags.length) {
+                        if (intent.expectedParent === undefined)
+                            throw new Error("Media messages require expectedParent from media preparation");
+                        const policy = getEncryptedMediaPolicy(sourceState.groupContext.extensions);
+                        if (!policy)
+                            throw new Error("Encrypted media v2 is not enabled");
+                        for (const tag of mediaTags) {
+                            const reference = parseMediaImetaTag(tag);
+                            if (!reference ||
+                                reference.locators.some((locator) => !policy.allowedLocatorKinds.includes(locator.kind)))
+                                throw new Error("Invalid or out-of-policy outbound v2 attachment");
+                        }
+                    }
+                }
                 let expiration;
                 try {
                     const { created_at } = deserializeApplicationData(intent.payload);
@@ -1682,6 +1711,37 @@ export class MarmotGroupEngine {
                 });
         }
     }
+    /** Restore an unapplied, locally persisted exact publish obligation. */
+    restorePendingPublication(pending) {
+        this.#assertMutationAllowed();
+        if (!pending.parentState ||
+            !pending.commitMessage ||
+            !pending.ownCommitStamp ||
+            (pending.kind !== "commit" && pending.kind !== "selfUpdate"))
+            throw new Error("Incomplete pending publication recovery state");
+        const parentTag = bytesToHex(pending.parentState.confirmationTag);
+        if (this.#lifecycle !== groupLifecycleStates.stable ||
+            mediaSourceStateToken(pending.parentState) !==
+                mediaSourceStateToken(this.#state) ||
+            framedEpoch(pending.commitMessage) !==
+                pending.parentState.groupContext.epoch ||
+            bytesToHex(pending.newState.groupContext.groupId) !==
+                bytesToHex(this.#state.groupContext.groupId) ||
+            bytesToHex(pending.parentState.groupContext.groupId) !==
+                bytesToHex(this.#state.groupContext.groupId) ||
+            pending.newState.groupContext.epoch !==
+                this.#state.groupContext.epoch + 1n)
+            throw new Error("Pending publication does not match canonical parent");
+        this.#rememberSent(pending.commitMessage);
+        this.#pendingConfirmations.add(pending);
+        this.#stagedCommit = {
+            parentTag,
+            sourceEpoch: Number(pending.parentState.groupContext.epoch),
+            childTag: bytesToHex(pending.newState.confirmationTag),
+            contentId: contentDedupId(pending.commitMessage),
+        };
+        this.#transitionLifecycle(groupLifecycleStates.pendingPublish, "restore_pending", pending.kind);
+    }
     /**
      * Applies staged state after publish confirmation (publish-before-apply).
      *
@@ -2268,16 +2328,31 @@ export class MarmotGroupEngine {
                 this.#state.groupActiveState.kind === "removedFromGroup")
                 return undefined;
             this.#rememberSeen(message);
-            this.#delivered.record({
-                epoch: Number(state.groupContext.epoch),
-                stateTag: tag,
+            const mediaSource = state.groupContext.epoch === sourceEpoch
+                ? state
+                : this.retainedStates().find((candidate) => candidate.groupContext.epoch === sourceEpoch);
+            {
+                const deliveryState = mediaSource ?? state;
+                const sourceTag = bytesToHex(deliveryState.confirmationTag);
+                this.#delivered.record({
+                    epoch: Number(deliveryState.groupContext.epoch),
+                    stateTag: sourceTag,
+                    envelope,
+                    message,
+                    payload: result.message,
+                    ...this.#deliveryAttribution(sourceTag, envelope, result.message),
+                });
+            }
+            this.#tree.updateSnapshot(tag, result.newState);
+            return {
+                kind: "processed",
+                result,
                 envelope,
                 message,
-                payload: result.message,
-                ...this.#deliveryAttribution(tag, envelope, result.message),
-            });
-            this.#tree.updateSnapshot(tag, result.newState);
-            return { kind: "processed", result, envelope, message };
+                sourceParent: mediaSource
+                    ? mediaSourceStateToken(mediaSource)
+                    : undefined,
+            };
         }
         return undefined;
     }

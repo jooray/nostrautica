@@ -28,6 +28,8 @@ export declare function createChatRumor(options: CreateChatRumorOptions): Rumor;
  * The rumor must be unsigned and is serialized per the Marmot spec before being
  * encrypted via MLS.
  */
-export declare function createApplicationMessageIntent(rumor: Rumor): Extract<GroupSessionSendIntent, {
+export declare function createApplicationMessageIntent(rumor: Rumor, options?: {
+    expectedParent?: string;
+}): Extract<GroupSessionSendIntent, {
     kind: "applicationMessage";
 }>;

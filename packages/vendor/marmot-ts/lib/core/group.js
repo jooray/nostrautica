@@ -4,7 +4,7 @@ import { appDataDictionaryExtensionType, createGroup as MLSCreateGroup, } from "
 import { marmotAuthService } from "./auth-service.js";
 import { defaultMarmotClientConfig } from "./client-config.js";
 import { marmotRequiredCapabilitiesExtension } from "./capabilities.js";
-import { adminPolicyEntry, appComponentsEntry, DEFAULT_ENCRYPTED_MEDIA_BLOB_ENDPOINTS, DEFAULT_GROUP_COMPONENT_IDS, encryptedMediaV2BlossomDefault, encryptedMediaV2Entry, GROUP_LIFECYCLE_COMPONENT_ID, groupLifecycleEntry, groupProtocolLifecycleValues, groupProfileEntry, makeAppComponentsExtension, nostrRoutingEntry, } from "./components/index.js";
+import { adminPolicyEntry, encryptedMediaEntry, getEncryptedMediaPolicy, GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID, appComponentsEntry, DEFAULT_GROUP_COMPONENT_IDS, GROUP_LIFECYCLE_COMPONENT_ID, groupLifecycleEntry, groupProtocolLifecycleValues, groupProfileEntry, makeAppComponentsExtension, nostrRoutingEntry, } from "./components/index.js";
 import { getCredentialPubkey } from "./credential.js";
 /** Thrown when caller-supplied GroupContext extensions are invalid. */
 export class InvalidGroupContextExtensionError extends Error {
@@ -54,6 +54,10 @@ export async function createGroup(params) {
         ...extensions,
         appDataExtension,
     ];
+    const mediaPolicy = getEncryptedMediaPolicy(groupExtensions);
+    if (requiredIds.includes(GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID) &&
+        !mediaPolicy)
+        throw new InvalidGroupContextExtensionError("Required encrypted-media v2 policy is missing");
     const clientState = await MLSCreateGroup({
         context: {
             cipherSuite: ciphersuiteImpl,
@@ -70,11 +74,8 @@ export async function createGroup(params) {
 /**
  * Creates a Marmot v2 group seeded with the default group components: a
  * `group.profile.v1` (name + description), an `admin-policy.v1` (the creator
- * plus any extra admins), a `group.encrypted-media.v2` media policy (unless
- * `options.encryptedMedia` is `false`), and — when relays are supplied — a
+ * plus any extra admins), and — when relays are supplied — a
  * `transport.nostr.routing.v1` carrying a fresh nostr group id and the relays.
- * Every seeded component is listed as required, so invitees must advertise
- * support for it (MDK requires `0x800b` the same way).
  */
 export async function createSimpleGroup(creatorKeyPackage, ciphersuiteImpl, groupName = "New Group", options) {
     // The creator is always an admin (matches darkmatter's create flow).
@@ -89,15 +90,8 @@ export async function createSimpleGroup(creatorKeyPackage, ciphersuiteImpl, grou
         }),
         adminPolicyEntry(adminPubkeys),
     ];
-    // Media-capable profile: new groups carry and require 0x800b, like MDK
-    // (`protocol-core/group-setup.md` "Creation flow"; MDK
-    // `encrypted_media_component_for_new_group`).
-    if (options?.encryptedMedia !== false) {
-        components.push(encryptedMediaV2Entry(options?.encryptedMedia ??
-            encryptedMediaV2BlossomDefault([
-                ...DEFAULT_ENCRYPTED_MEDIA_BLOB_ENDPOINTS,
-            ])));
-    }
+    if (options?.encryptedMedia)
+        components.push(encryptedMediaEntry(options.encryptedMedia));
     const relays = options?.relays ?? [];
     if (relays.length > 0) {
         components.push(nostrRoutingEntry({ nostrGroupId: randomBytes(32), relays }));

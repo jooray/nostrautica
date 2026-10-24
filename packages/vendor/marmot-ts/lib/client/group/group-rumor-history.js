@@ -1,4 +1,4 @@
-import { matchFilters } from "applesauce-core/helpers/filter";
+import { compileFilters } from "applesauce-core/helpers/filter";
 import { EventEmitter } from "eventemitter3";
 import { deserializeApplicationData } from "../../core/group-message.js";
 /** A group.history implementation that stores the parsed rumor events for a group and provies methods for querying */
@@ -61,6 +61,7 @@ export class GroupRumorHistory extends EventEmitter {
                 ? filters
                 : [filters]
             : [{}];
+        const matches = compileFilters(filtersArray);
         let version = 0;
         let observed = -1;
         let wake;
@@ -70,7 +71,7 @@ export class GroupRumorHistory extends EventEmitter {
             wake = undefined;
         };
         const inserted = (rumor) => {
-            if (matchFilters(filtersArray, rumor))
+            if (matches(rumor))
                 changed();
         };
         this.on("rumor", inserted);

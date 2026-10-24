@@ -1,5 +1,5 @@
 import { ClientState, GroupInfo } from "../vendor/ts-mls/index.js";
-import { type EncryptedMediaPolicyV1, type EncryptedMediaPolicyV2 } from "./components/index.js";
+import { type EncryptedMediaPolicyV2 } from "./components/index.js";
 import type { GroupBlossomImage, GroupProtocolLifecycleValue } from "./components/index.js";
 import { type GroupImageSource } from "./group-image.js";
 export { defaultMarmotClientConfig } from "./client-config.js";
@@ -28,16 +28,10 @@ export interface MarmotGroupView {
     /** URL-first rendering source; fetching failures cannot change this selection. */
     imageSource: GroupImageSource;
     /**
-     * Group encrypted-media policy (`group.encrypted-media.v1`, `0x8008`): the
+     * Group encrypted-media policy (`group.encrypted-media.v2`, `0x800b`): the
      * group-scoped blob-store endpoints and format, if set.
      */
-    encryptedMedia?: EncryptedMediaPolicyV1;
-    /**
-     * Group encrypted-media policy (`group.encrypted-media.v2`, `0x800b`), if
-     * set. This is the current-profile media policy; new media references in a
-     * group that carries it use `encrypted-media-v2`.
-     */
-    encryptedMediaV2?: EncryptedMediaPolicyV2;
+    encryptedMedia?: EncryptedMediaPolicyV2;
     /**
      * Message-retention window in seconds (`message-retention.v1`, `0x8005`), if
      * set; `0n` means retain indefinitely.

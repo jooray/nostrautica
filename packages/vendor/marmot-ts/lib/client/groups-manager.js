@@ -81,6 +81,10 @@ export class BoundedIdCache {
     }
 }
 const log = logger.extend("GroupsManager");
+/** Default first retry delay of a failed `connectAll` group connect. */
+const DEFAULT_RECONNECT_DELAY_MS = 2000;
+/** The retry delay stops doubling at this multiple of the first one. */
+const MAX_RECONNECT_BACKOFF = 32;
 function positiveInteger(value, fallback, name) {
     if (value === undefined)
         return fallback;
@@ -531,15 +535,20 @@ export class GroupsManager extends EventEmitter {
      */
     connectAll(options) {
         backfillBounds(options);
+        const reconnectDelayMs = options?.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
+        if (!Number.isFinite(reconnectDelayMs) || reconnectDelayMs < 0)
+            throw new Error("reconnectDelayMs must be a non-negative number");
         const records = new Map();
-        const connect = (group) => {
+        // A failed connect is retried with backoff for as long as this handle and
+        // the group live. Without it a group whose every relay rejected the
+        // backfill (a device that started offline) had no live subscription until
+        // the application called connectAll again.
+        const connect = (group, attempt = 0) => {
             if (records.has(group.idStr))
                 return;
             if (options?.signal?.aborted)
                 return;
-            const record = {
-                controller: new AbortController(),
-            };
+            const record = { controller: new AbortController() };
             records.set(group.idStr, record);
             void this.#connectGroup(group, {
                 ...options,
@@ -553,8 +562,19 @@ export class GroupsManager extends EventEmitter {
             })
                 .catch((err) => {
                 log("connectAll: failed to connect %s: %o", group.idStr, err);
-                if (records.get(group.idStr) === record)
+                if (records.get(group.idStr) !== record)
+                    return;
+                if (record.controller.signal.aborted || reconnectDelayMs === 0) {
                     records.delete(group.idStr);
+                    return;
+                }
+                const delay = reconnectDelayMs * Math.min(2 ** attempt, MAX_RECONNECT_BACKOFF);
+                record.retry = setTimeout(() => {
+                    if (records.get(group.idStr) !== record)
+                        return;
+                    records.delete(group.idStr);
+                    connect(group, attempt + 1);
+                }, delay);
             });
         };
         const disconnect = (groupId) => {
@@ -563,15 +583,18 @@ export class GroupsManager extends EventEmitter {
             if (!record)
                 return;
             record.controller.abort();
+            clearTimeout(record.retry);
             record.sub?.unsubscribe();
             records.delete(hex);
         };
+        // Listeners get the group alone, never an emitter argument as `attempt`.
+        const onGroup = (group) => connect(group);
         for (const group of this.loaded)
             connect(group);
-        this.on("created", connect);
-        this.on("joined", connect);
-        this.on("imported", connect);
-        this.on("loaded", connect);
+        this.on("created", onGroup);
+        this.on("joined", onGroup);
+        this.on("imported", onGroup);
+        this.on("loaded", onGroup);
         this.on("destroyed", disconnect);
         this.on("left", disconnect);
         this.on("unloaded", disconnect);
@@ -579,10 +602,10 @@ export class GroupsManager extends EventEmitter {
         this.on("disbanded", disconnect);
         const unsubscribe = () => {
             options?.signal?.removeEventListener("abort", unsubscribe);
-            this.off("created", connect);
-            this.off("joined", connect);
-            this.off("imported", connect);
-            this.off("loaded", connect);
+            this.off("created", onGroup);
+            this.off("joined", onGroup);
+            this.off("imported", onGroup);
+            this.off("loaded", onGroup);
             this.off("destroyed", disconnect);
             this.off("left", disconnect);
             this.off("unloaded", disconnect);
@@ -590,6 +613,7 @@ export class GroupsManager extends EventEmitter {
             this.off("disbanded", disconnect);
             for (const record of records.values()) {
                 record.controller.abort();
+                clearTimeout(record.retry);
                 record.sub?.unsubscribe();
             }
             records.clear();

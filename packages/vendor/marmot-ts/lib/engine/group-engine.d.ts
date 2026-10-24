@@ -257,6 +257,8 @@ export declare class MarmotGroupEngine<TEnvelope> {
     send(intent: SendIntent, 
     /** Ephemeral caller fence; checked after fallible commit preparation, never stored in state. */
     assertPreparation?: (proposals: readonly Proposal[]) => void): Promise<SendResult<TEnvelope>>;
+    /** Restore an unapplied, locally persisted exact publish obligation. */
+    restorePendingPublication(pending: PendingState): void;
     /**
      * Applies staged state after publish confirmation (publish-before-apply).
      *

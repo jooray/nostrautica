@@ -1,4 +1,6 @@
 /** @module @category Client - Session */
+import { pendingPublicationKey } from "../runtime/pending-publication.js";
+import { mediaSourceStateToken, StaleMediaPreparationError, } from "../../core/media/source-state.js";
 import { deserializeApplicationData } from "../../core/application-rumor.js";
 import { encodeDeliveredEvidence, decodeDeliveredEvidence, } from "./delivered-payload-store.js";
 import { getCredentialFromLeafIndex, appDataUpdateProposalType, } from "../../vendor/ts-mls/index.js";
@@ -355,15 +357,28 @@ export class GroupSession {
     }
     /** Serializable identity of the canonical parent, including same-epoch forks. */
     get parentToken() {
-        const { groupContext, confirmationTag } = this.state;
-        return bytesToHex(sha256(new TextEncoder().encode(JSON.stringify([
-            "marmot/group-parent/v1",
-            bytesToHex(groupContext.groupId),
-            groupContext.epoch.toString(),
-            bytesToHex(confirmationTag),
-            bytesToHex(groupContext.treeHash),
-            bytesToHex(groupContext.confirmedTranscriptHash),
-        ]))));
+        return mediaSourceStateToken(this.state);
+    }
+    /** Resolve persisted authenticated delivery evidence, never an imeta epoch. */
+    async mediaSourceForRumor(rumorId) {
+        await this.#deliveredHydrated;
+        if (this.#destroyed ||
+            this.#disposed ||
+            this.removalBlocked ||
+            this.#terminalTombstone)
+            return undefined;
+        const states = [this.state, ...this.retainedStates()];
+        for (const entry of this.#engine.exportDeliveredPayloads()) {
+            if (entry.rumorId !== rumorId)
+                continue;
+            const epoch = framedEpoch(entry.message);
+            const state = states.find((candidate) => candidate.groupContext.epoch === epoch &&
+                epoch === BigInt(entry.epoch) &&
+                bytesToHex(candidate.confirmationTag) === entry.stateTag);
+            if (state)
+                return mediaSourceStateToken(state);
+        }
+        return undefined;
     }
     /** Track a whole admitted operation, including engine I/O between awaits. */
     async #whileOpen(operation) {
@@ -758,8 +773,10 @@ export class GroupSession {
         const idHex = bytesToHex(this.id);
         await this.#removedMarkerStore?.removeItem(`${idHex}/removed`);
         await this.store.removeItem(idHex);
-        if (this.rewindStore)
+        if (this.rewindStore) {
             await GroupHistoryTree.purge(this.rewindStore, idHex);
+            await this.rewindStore.removeItem(pendingPublicationKey(idHex));
+        }
         if (this.ingestStateStore)
             for (const key of await this.ingestStateStore.keys())
                 if (key.startsWith(`${idHex}/`))
@@ -978,8 +995,10 @@ export class GroupSession {
         await this.history?.purgeMessages();
         // The decoder requires the tree; retire evidence before its provenance.
         await this.ingestStateStore?.removeItem(this.#deliveredKey());
-        if (this.rewindStore)
+        if (this.rewindStore) {
             await GroupHistoryTree.purge(this.rewindStore, idHex);
+            await this.rewindStore.removeItem(pendingPublicationKey(idHex));
+        }
     }
     async #resumeTerminalWork() {
         if (this.lifecycleStore && !this.#terminalProjectionComplete) {
@@ -1003,6 +1022,16 @@ export class GroupSession {
         this.#disposed = true;
         this.#clearPublications();
         this.#engine.dispose();
+    }
+    /** @internal Keep recovery writes inside the owner's destruction and retention barriers. */
+    async persistPublication(operation) {
+        await this.#write(operation);
+        this.assertOutboundOpen();
+    }
+    /** Restore the gate without making the retained pending state canonical. */
+    restorePendingPublication(pending) {
+        this.assertOutboundOpen();
+        this.#engine.restorePendingPublication(pending);
     }
     confirmPublished(pending) {
         this.assertOpen();
@@ -1112,7 +1141,8 @@ export class GroupSession {
         await this.#assertOutboundMembership();
         const admitted = { ...intent };
         return this.#prepareOutbound((associate) => this.#send(admitted, associate), () => {
-            if (admitted.kind === "commit")
+            if (admitted.kind === "commit" ||
+                admitted.kind === "applicationMessage")
                 admitted.signal?.throwIfAborted();
         });
     }
@@ -1121,9 +1151,14 @@ export class GroupSession {
         this.assertOpen();
         switch (intent.kind) {
             case "applicationMessage": {
+                intent.signal?.throwIfAborted();
+                if (intent.expectedParent !== undefined &&
+                    intent.expectedParent !== this.parentToken)
+                    throw new StaleMediaPreparationError();
                 const sendResult = await this.#engine.send({
                     kind: "applicationMessage",
                     payload: intent.payload,
+                    expectedParent: intent.expectedParent,
                 });
                 associate(sendResult);
                 this.assertOpen();

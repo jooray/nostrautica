@@ -16,6 +16,7 @@ import {
   createApplicationMessageIntent,
 } from "@internet-privacy/marmot-ts/client";
 import {
+  encryptedMediaBlossomDefaultV2,
   getKeyPackage,
   getNostrGroupIdHex,
   getPubkeyLeafNodes,
@@ -29,6 +30,19 @@ import { makeMarmotStores, purgeGroupState, expireStalePreparedWrappers } from "
 import { makeCoordinatorSigner } from "./signer.js";
 
 const { proposeRemoveUser, proposeUpdateMetadata } = Proposals;
+
+/**
+ * The Blossom servers a new room's encrypted-media policy (0x800b) names — MDK's
+ * defaults for new groups, which our marmot-ts fork used to add on its own.
+ * marmot-ts 0.8.0 adds no policy unless asked, but a room without one would not
+ * require 0x800b and White Noise members could not send media in it, so every
+ * room still gets the policy every MDK-created group carries.
+ */
+export const NEW_ROOM_MEDIA_ENDPOINTS = [
+  "https://blossom.divine.video",
+  "https://blossom.ditto.pub",
+  "https://cdn.hzrd149.com",
+];
 
 /**
  * Whether a stored group can still be run by this library generation.
@@ -294,6 +308,7 @@ export class MarmotClientMls implements ChatMls {
     const group = await this.client.groups.create(opts.name, {
       description: opts.description,
       relays: opts.relays,
+      encryptedMedia: encryptedMediaBlossomDefaultV2(NEW_ROOM_MEDIA_ENDPOINTS),
       ...(opts.adminPubkeys?.length ? { adminPubkeys: opts.adminPubkeys } : {}),
     });
     return {

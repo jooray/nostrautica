@@ -1,10 +1,10 @@
 /** @module @category Core - App Components */
+import { type EncryptedMediaPolicyV1 } from "./encrypted-media.js";
 import { AppDataDictionary, ComponentData, CustomExtension, GroupContextExtension } from "../../vendor/ts-mls/index.js";
 import { AppComponentId } from "./ids.js";
 import { GroupProfileV1 } from "./group-profile.js";
 import { NostrRoutingV1 } from "./nostr-routing.js";
 import { GroupAvatarUrlV1 } from "./avatar-url.js";
-import { EncryptedMediaPolicyV1 } from "./encrypted-media.js";
 import { EncryptedMediaPolicyV2 } from "./encrypted-media-v2.js";
 import { AgentTextStreamQuicPolicyV1 } from "./agent-text-stream.js";
 import { GroupProtocolLifecycleValue } from "./group-lifecycle.js";
@@ -74,10 +74,8 @@ export declare function getMessageRetention(extensions: GroupContextExtension[])
 export declare function getAgentTextStreamPolicy(extensions: GroupContextExtension[]): AgentTextStreamQuicPolicyV1 | undefined;
 /** The `group.avatar-url.v1` component (`0x8007`). */
 export declare function getGroupAvatarUrl(extensions: GroupContextExtension[]): GroupAvatarUrlV1 | undefined;
-/** The `group.encrypted-media.v1` policy (`0x8008`). */
-export declare function getEncryptedMediaPolicy(extensions: GroupContextExtension[]): EncryptedMediaPolicyV1 | undefined;
 /** The `group.encrypted-media.v2` policy (`0x800b`). */
-export declare function getEncryptedMediaPolicyV2(extensions: GroupContextExtension[]): EncryptedMediaPolicyV2 | undefined;
+export declare function getEncryptedMediaPolicy(extensions: GroupContextExtension[]): EncryptedMediaPolicyV2 | undefined;
 /** The `group.lifecycle.v1` protocol state (`0x800c`). */
 export declare function getGroupLifecycle(extensions: GroupContextExtension[]): GroupProtocolLifecycleValue | undefined;
 /** Builds the `app_components` advertising entry from a list of ids. */
@@ -94,9 +92,11 @@ export declare function messageRetentionEntry(seconds: number | bigint): Compone
 export declare function agentTextStreamEntry(policy: AgentTextStreamQuicPolicyV1): ComponentData;
 /** Builds the `group.avatar-url.v1` entry. */
 export declare function groupAvatarUrlEntry(avatar: GroupAvatarUrlV1): ComponentData;
-/** Builds the `group.encrypted-media.v1` entry. */
-export declare function encryptedMediaEntry(policy: EncryptedMediaPolicyV1): ComponentData;
 /** Builds the `group.encrypted-media.v2` entry. */
-export declare function encryptedMediaV2Entry(policy: EncryptedMediaPolicyV2): ComponentData;
+export declare function encryptedMediaEntry(policy: EncryptedMediaPolicyV2): ComponentData;
 /** Builds the `group.lifecycle.v1` entry. */
 export declare function groupLifecycleEntry(value: GroupProtocolLifecycleValue): ComponentData;
+/** Frozen historical policy reader; does not admit v1 current-profile state. */
+export declare function getEncryptedMediaPolicyV1(extensions: GroupContextExtension[]): EncryptedMediaPolicyV1 | undefined;
+export declare function encryptedMediaEntryV1(policy: EncryptedMediaPolicyV1): ComponentData;
+export { getEncryptedMediaPolicy as getEncryptedMediaPolicyV2, encryptedMediaEntry as encryptedMediaEntryV2, };

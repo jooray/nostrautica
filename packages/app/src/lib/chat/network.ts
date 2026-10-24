@@ -8,6 +8,8 @@
 import { NDKEvent } from "@nostr-dev-kit/ndk";
 import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
 import { getNdk, relaySet, fetchEvents, type Filter } from "$lib/nostr/ndk.js";
+import { streamEvents } from "$lib/nostr/stream.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
 import { latestDmRelayList, relayUrlsFromDmList } from "$lib/events/dm.js";
 
@@ -62,8 +64,15 @@ export function createMarmotNetwork(): MarmotNetwork {
 
     async request(relays, filters) {
       // Bounded fetch (UX-1): NDK's own fetchEvents can hang on a dead-relay
-      // majority; the wrapper resolves with partial results at the timeout.
-      const events = await fetchEvents(filters as unknown as Filter | Filter[], relays);
+      // majority, so this settles at a timeout too. But it must not RESOLVE then:
+      // marmot-ts 0.8.0 backfills one relay per call and records a resolved
+      // answer as "this relay holds nothing more in that window" in a persisted
+      // per-relay cursor, so partial results after a timeout would skip the
+      // rest of that window's history for good. Only an EOSE from every relay
+      // asked counts as an answer; anything else rejects and is retried.
+      const handle = streamEvents(filters as unknown as Filter | Filter[], { relays });
+      const events = await handle.ready;
+      if (!handle.allAnswered()) throw new RelaysUnansweredError();
       return events.map((e) => e.rawEvent());
     },
 

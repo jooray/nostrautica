@@ -28,9 +28,12 @@ export function createChatRumor(options) {
  * The rumor must be unsigned and is serialized per the Marmot spec before being
  * encrypted via MLS.
  */
-export function createApplicationMessageIntent(rumor) {
+export function createApplicationMessageIntent(rumor, options) {
     return {
         kind: "applicationMessage",
         payload: serializeApplicationRumor(rumor),
+        ...(options?.expectedParent !== undefined
+            ? { expectedParent: options.expectedParent }
+            : {}),
     };
 }

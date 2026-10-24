@@ -6,7 +6,7 @@ import { unixNow } from "../utils/nostr.js";
 import { isGreaseValue } from "./grease.js";
 import { calculateKeyPackageRef, isReusableKeyPackage } from "./key-package.js";
 import { ADDRESSABLE_KEY_PACKAGE_KIND, KEY_PACKAGE_APP_COMPONENTS_TAG, KEY_PACKAGE_CIPHER_SUITE_TAG, KEY_PACKAGE_CLIENT_TAG, KEY_PACKAGE_EXTENSIONS_TAG, KEY_PACKAGE_MLS_VERSION_TAG, KEY_PACKAGE_PROPOSALS_TAG, LAST_RESORT_EXTENSION_TYPE, } from "./protocol.js";
-import { SUPPORTED_APP_COMPONENT_IDS } from "./components/ids.js";
+import { getAppComponents } from "./components/dictionary.js";
 /** Require a stable publication slot generated once from 32 random bytes. */
 export function validateKeyPackageSlot(identifier) {
     if (typeof identifier !== "string" || !/^[0-9a-f]{64}$/.test(identifier))
@@ -101,8 +101,12 @@ async function createKeyPackageEventInternal(options) {
         if (!proposalTypes.includes(hexValue))
             proposalTypes.push(hexValue);
     }
-    // Supported Marmot app-component ids this implementation can encode/decode.
-    const appComponentIds = SUPPORTED_APP_COMPONENT_IDS.map((id) => `0x${id.toString(16).padStart(4, "0")}`);
+    // Advertise the signed leaf, not the capabilities of the running release.
+    // MDK's directory checks exact private-use component equality.
+    const appComponentIds = (getAppComponents(keyPackage.leafNode.extensions) ?? [])
+        .filter((id) => id >= 0x8000)
+        .sort((a, b) => a - b)
+        .map((id) => `0x${id.toString(16).padStart(4, "0")}`);
     // The spec forbids an `encoding` tag (transports/nostr.md "Transport byte
     // encoding"); content is always standard base64.
     tags.push([KEY_PACKAGE_MLS_VERSION_TAG, version], ["i", bytesToHex(keyPackageRef)], [KEY_PACKAGE_CIPHER_SUITE_TAG, ciphersuiteHex], [KEY_PACKAGE_EXTENSIONS_TAG, ...filteredExtensionTypes], [KEY_PACKAGE_PROPOSALS_TAG, ...proposalTypes], [KEY_PACKAGE_APP_COMPONENTS_TAG, ...appComponentIds]);

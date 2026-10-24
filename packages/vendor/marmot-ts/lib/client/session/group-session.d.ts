@@ -178,6 +178,8 @@ export declare class GroupSession<THistory extends GroupSessionHistory | undefin
     assertOutboundOpen(): void;
     /** Serializable identity of the canonical parent, including same-epoch forks. */
     get parentToken(): string;
+    /** Resolve persisted authenticated delivery evidence, never an imeta epoch. */
+    mediaSourceForRumor(rumorId: string): Promise<string | undefined>;
     save(force?: boolean): Promise<void>;
     /**
      * Re-scores the persisted fork history against the current tip and switches to
@@ -215,6 +217,10 @@ export declare class GroupSession<THistory extends GroupSessionHistory | undefin
     persistSelectedDisband(evidence: DisbandCandidateEvidence): Promise<DisbandTombstone>;
     /** Releases engine resources (the settle-check timer); call on teardown (B5). */
     dispose(): void;
+    /** @internal Keep recovery writes inside the owner's destruction and retention barriers. */
+    persistPublication(operation: () => Promise<unknown>): Promise<void>;
+    /** Restore the gate without making the retained pending state canonical. */
+    restorePendingPublication(pending: PendingState): void;
     confirmPublished(pending: PendingState): StateNotification[];
     publishFailed(pending: PendingState): void;
     proposalContext(): ProposalContext;

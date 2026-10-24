@@ -10,25 +10,38 @@ See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 fla
 ## Packages
 
 - **`marmot-ts/`** — `@internet-privacy/marmot-ts`, built from
-  [`jooray/marmot-ts`](https://github.com/jooray/marmot-ts) branch **`nostrautica-vendor`**:
-  upstream `marmot-protocol/marmot-ts` master plus the upstream PRs we need that have not
-  merged yet. The exact commit (and the bundled ts-mls commit) is recorded in
+  [`jooray/marmot-ts`](https://github.com/jooray/marmot-ts) branch **`nostrautica-vendor-0.8.0`**:
+  an upstream `marmot-protocol/marmot-ts` release plus the fixes we need that upstream does
+  not have yet. The exact commit (and the bundled ts-mls commit) is recorded in
   `marmot-ts/package.json` under `"vendoredFrom"` — that field, not this README, is the pin.
-  At the time of writing: `7c2725d` = upstream **v0.7.0** master `14a7d7f` + our two PRs
-  that are still open:
+  At the time of writing: `e8250fc` = upstream **v0.8.0** (`b5ef530`) + two commits:
 
-  - `#83` encrypted media v2 (`0x800b`). **Required, not optional**: every room the
-    pre-0.7.0 build created lists `0x800b` as a required component (as MDK groups do), and
-    upstream without it refuses to join those rooms ("Welcome requires unsupported
-    component") and makes KeyPackages that cannot be invited into them.
   - `#94` check a kind-30443's tags against its KeyPackage before inviting (MDK parity).
+    0.8.0 checks only `mls_proposals`; the `i` KeyPackageRef, `mls_extensions` and
+    `app_components` tags are still unchecked upstream.
+  - `connectAll()` retries a group whose connect failed (`reconnectDelayMs`). 0.8.0
+    requires the network adapter to REJECT a failed or timed-out backfill request, and then
+    drops a group whose every relay rejected, so a device that started offline never
+    subscribed live. Not yet proposed upstream.
 
-  The other 20 of our interop PRs (`#81`, `#84`–`#93`, `#95`–`#99`, `#101`–`#104`) are in
-  upstream, merged or superseded by equivalent upstream work in 0.7.0. When `#83` and `#94`
-  land, vendor upstream directly (`--repo https://github.com/marmot-protocol/marmot-ts.git
-  --ref <tag>`) and drop the fork. The previous pin (`0ab8336`, master `71999f56` + 22 PRs) is
-  kept as branch `nostrautica-vendor-pre-0.7.0` on the fork. The PR list is
+  `#83` (encrypted media v2, `0x800b`) is no longer carried: 0.8.0 ships its own, and it was
+  checked to be wire-identical to ours (same policy bytes for the same policy, each decodes the
+  other's, a file encrypted by either decrypts with the other, and both pass MDK's
+  `media-v2-rust.json` fixture). Unlike our fork, 0.8.0 adds no media policy to a new group
+  unless asked, so the coordinator passes `encryptedMedia` itself (`NEW_ROOM_MEDIA_ENDPOINTS`
+  in `coordinator/src/chat/mls.ts`): every room keeps requiring `0x800b`, as MDK groups do.
+
+  When both commits are upstream, vendor upstream directly (`--repo
+  https://github.com/marmot-protocol/marmot-ts.git --ref <tag>`) and drop the fork. Earlier
+  pins are kept as branches on the fork: `nostrautica-vendor` (v0.7.0 + #83 + #94, `7c2725d`)
+  and `nostrautica-vendor-pre-0.7.0` (`0ab8336`). The PR list is
   `gh pr list --repo marmot-protocol/marmot-ts --author jooray`.
+
+  0.8.0's network contract (docs/client/network.md upstream): `request` must reject when a
+  relay fails, closes the request or times out, because a resolved page advances a persisted
+  per-relay backfill cursor. The app's adapter (`app/src/lib/chat/network.ts`) rejects unless
+  every relay asked sent EOSE. The coordinator never calls `connect`/`connectAll`, so its
+  adapter is unaffected.
 
   0.7.0 reads state the previous pin wrote (coordinator SQLite and app IndexedDB groups,
   stored KeyPackages, including ones published under a `web-` slot); this was checked by

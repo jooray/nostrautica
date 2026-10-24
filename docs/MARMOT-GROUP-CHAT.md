@@ -107,9 +107,9 @@ paths, messages both ways, avatar commits followed by White Noise, and revoke.
 
 Both the app and the coordinator run `@internet-privacy/marmot-ts`, vendored pre-built
 in `packages/vendor/marmot-ts` (with its ts-mls fork bundled inside) from
-`jooray/marmot-ts` branch `nostrautica-vendor`, which is upstream (v0.7.0) plus the
-two upstream PRs we need before they merge (#83 encrypted media v2, #94 KeyPackage tag
-checks). `packages/vendor/README.md` has the pin, the
+`jooray/marmot-ts` branch `nostrautica-vendor-0.8.0`, which is upstream v0.8.0 plus two
+fixes upstream does not have yet (#94 KeyPackage tag checks, and `connectAll` retrying a
+group whose connect failed). `packages/vendor/README.md` has the pin, the
 carried patches and the one-command re-vendor (`node scripts/vendor-marmot.mjs`).
 
 This generation speaks the **current Marmot profile**. Every KeyPackage and leaf carries

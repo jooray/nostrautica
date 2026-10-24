@@ -51,6 +51,13 @@ export interface ConnectOptions {
      * advanced, so the remainder is retried on the next connect. Defaults to 50.
      */
     backfillMaxPages?: number;
+    /**
+     * `connectAll` only: delay before retrying a group whose connect failed
+     * (every relay rejected its backfill, e.g. the device started offline). It
+     * doubles after each further failure up to 32× this value, and resets once
+     * the group connects. Defaults to 2000 ms; 0 disables the retry.
+     */
+    reconnectDelayMs?: number;
 }
 /** Options for creating a new GroupsManager */
 export type GroupsManagerOptions<THistory extends BaseGroupHistory | undefined = undefined, TMedia extends BaseGroupMedia | undefined = undefined> = {

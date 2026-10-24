@@ -1,4 +1,6 @@
 /** @module @category Client - Key Package Manager */
+import { getAppComponents } from "../core/components/dictionary.js";
+import { GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID } from "../core/components/ids.js";
 import { bytesToHex } from "@noble/hashes/utils.js";
 import { EventEmitter } from "eventemitter3";
 import { getKeyPackageLifetime } from "../core/key-package-event.js";
@@ -162,10 +164,26 @@ export class KeyPackageManager extends EventEmitter {
         if (options.identifier !== undefined)
             validateKeyPackageSlot(options.identifier);
         const existing = await this.list();
-        const unused = existing.find((pkg) => !pkg.used && !pkg.nonCurrent);
+        const unused = existing.find((pkg) => {
+            if (pkg.used || pkg.nonCurrent)
+                return false;
+            try {
+                return (getAppComponents(pkg.publicPackage.leafNode
+                    .extensions)?.includes(GROUP_ENCRYPTED_MEDIA_V2_COMPONENT_ID) ?? false);
+            }
+            catch {
+                return false;
+            }
+        });
         if (unused)
             return unused;
-        return this.create(options);
+        // Replace the same addressable publication slot without deleting any old
+        // private bundle: a delayed Welcome may still reference it.
+        const previous = existing.find((pkg) => !pkg.used && !pkg.nonCurrent);
+        return this.create({
+            ...options,
+            identifier: options.identifier ?? previous?.identifier ?? this.clientId,
+        });
     }
     // ---------------------------------------------------------------------------
     // Rotation
