@@ -16,6 +16,7 @@ import dev.ipf.marmotkit.SendAcceptDispositionFfi
 import dev.ipf.marmotkit.TimelineMessageRecordFfi
 import dev.ipf.marmotkit.TimelineMessagesSubscription
 import dev.ipf.marmotkit.TimelinePageFfi
+import dev.ipf.marmotkit.marmotDeploymentWhiteNoise
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -114,6 +115,12 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             // stack (-PdevRelays=ws://127.0.0.1:7777 via `adb reverse`); MDK accepts
             // it for loopback alone, and only when asked. Real builds stay public-only.
             relayPolicy = if (today.cypherpunk.nostrautica.BuildConfig.DEV_RELAYS.isNotEmpty()) RelayPolicyFfi.ALLOW_LOOPBACK_RELAYS_AND_BLOBS else null,
+            // MDK 0.14 made the services 0.13 compiled in (recovery-operated relays,
+            // discovery indexers, media and image servers, KeyPackage ranking) a
+            // host choice. The White Noise preset keeps exactly what this app ran on,
+            // and our rooms are White Noise rooms. Its keychain service is unused:
+            // secrets go through KvSecretStore.
+            deployment = marmotDeploymentWhiteNoise(),
         )
         var attempt = 0
         val m = run {
