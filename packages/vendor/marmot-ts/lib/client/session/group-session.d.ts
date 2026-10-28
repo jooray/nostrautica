@@ -100,6 +100,8 @@ export type GroupSessionOptions<THistory extends GroupSessionHistory | undefined
     ingestionPool?: IngestionPoolOptions;
     history?: THistory;
     onStateChanged?: (state: ClientState) => void;
+    /** Lifecycle, convergence or membership authority changed. */
+    onChanged?: () => void;
     onStateSaved?: () => void;
     onApplicationMessage?: (message: Uint8Array) => void;
     onHistoryError?: (error: Error) => void;

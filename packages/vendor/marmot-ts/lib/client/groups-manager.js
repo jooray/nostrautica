@@ -1,3 +1,4 @@
+import { watchCurrent } from "../utils/watch-current.js";
 import { isReusableKeyPackage } from "../core/key-package.js";
 /** @module @category Client - Group Manager */
 import { bytesToHex } from "@noble/hashes/utils.js";
@@ -131,6 +132,39 @@ export class GroupsManager extends EventEmitter {
     #verifyEvent;
     /** Holds each group's backfill cursor alongside its ingest state. */
     #ingestStateStore;
+    #snapshot = Object.freeze([]);
+    #snapshotListeners = new Map();
+    /** Synchronous UI snapshots of loaded groups; stable until `changed`. No storage reads. */
+    get snapshot() {
+        return this.#snapshot;
+    }
+    #refreshSnapshot = () => {
+        const next = this.loaded.map((group) => group.snapshot);
+        if (next.length === this.#snapshot.length &&
+            next.every((snapshot, index) => snapshot === this.#snapshot[index]))
+            return;
+        this.#snapshot = Object.freeze(next);
+        this.emit("changed", this.#snapshot);
+    };
+    #trackSnapshots(groups) {
+        const live = new Set(groups);
+        for (const [group, detach] of this.#snapshotListeners)
+            if (!live.has(group))
+                detach();
+        for (const group of groups) {
+            if (this.#snapshotListeners.has(group) || group.closedSignal.aborted)
+                continue;
+            const detach = () => {
+                group.off("changed", this.#refreshSnapshot);
+                group.off("disposed", detach);
+                this.#snapshotListeners.delete(group);
+            };
+            this.#snapshotListeners.set(group, detach);
+            group.on("changed", this.#refreshSnapshot);
+            group.on("disposed", detach);
+        }
+        this.#refreshSnapshot();
+    }
     constructor(options) {
         super();
         const capacity = options.maxPendingImageMutations ?? 16;
@@ -179,7 +213,10 @@ export class GroupsManager extends EventEmitter {
             verifyEvent: this.#verifyEvent,
         });
         // Forward the registry's cache-level events as our own.
-        this.#registry.on("updated", (groups) => this.emit("updated", groups));
+        this.#registry.on("updated", (groups) => {
+            this.#trackSnapshots(groups);
+            this.emit("updated", groups);
+        });
         this.#registry.on("loaded", (group) => this.emit("loaded", group));
         this.#registry.on("removed", (group) => this.emit("removed", group.id));
         this.#registry.on("disbanded", (group, evidence) => this.emit("disbanded", group.id, evidence));
@@ -1125,6 +1162,16 @@ export class GroupsManager extends EventEmitter {
      * whenever the store changes.
      */
     watch(options) {
+        if (options?.includeStateChanges) {
+            return watchCurrent({
+                read: () => this.loaded,
+                subscribe: (changed) => {
+                    this.on("changed", changed);
+                    return () => this.off("changed", changed);
+                },
+                signal: options.signal,
+            });
+        }
         const manager = this;
         const signal = options?.signal;
         let cancelled = false;

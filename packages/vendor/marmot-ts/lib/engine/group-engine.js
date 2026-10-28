@@ -188,6 +188,7 @@ export class MarmotGroupEngine {
      */
     #sentContentIds = new Map();
     #onStateChanged;
+    #onChanged;
     #onSelectedDisband;
     /** Injectable wall-clock for the convergence quiescence window (B5). */
     #now;
@@ -227,6 +228,7 @@ export class MarmotGroupEngine {
         this.ciphersuite = options.ciphersuite;
         this.peeler = options.peeler;
         this.#onStateChanged = options.onStateChanged;
+        this.#onChanged = options.onChanged;
         this.#onSelectedDisband = options.onSelectedDisband;
         this.#now = options.now ?? (() => performance.now());
         this.#wallNow = Date.now;
@@ -411,6 +413,7 @@ export class MarmotGroupEngine {
                         identities.delete(id);
         }
         this.#mutationRevision++;
+        this.#onChanged?.();
     }
     /** @internal Observable retention pressure, including unfinished exact pins. */
     retentionIdentityCounts() {
@@ -1963,6 +1966,7 @@ export class MarmotGroupEngine {
                 this.admitConvergencePass();
                 this.#lastPassUnresolved = unresolved;
                 this.#lastPassBlocked = blocked;
+                this.#onChanged?.();
                 // The window just reset; arm the settle-check so queued outbound is
                 // re-evaluated once it elapses (B5). Reschedules any prior pending check.
                 this.#scheduleSettleCheck();
@@ -2462,6 +2466,7 @@ export class MarmotGroupEngine {
         // Preserve synchronous wakeup timing; own the callback until any returned promise settles.
         this.#activeAdmissions++;
         try {
+            this.#onChanged?.();
             return Promise.resolve(this.#onSettleCheck?.()).finally(async () => {
                 this.#activeAdmissions--;
                 if (!this.#activeAdmissions)
@@ -2735,6 +2740,7 @@ export class MarmotGroupEngine {
         const previous = this.#lifecycle;
         this.#lifecycle = transitionLifecycle(this.#lifecycle, next);
         this.#mutationRevision++;
+        this.#onChanged?.();
         this.#emitAudit({
             type: "epoch_state_changed",
             previous_state: auditEpochStateName(previous),

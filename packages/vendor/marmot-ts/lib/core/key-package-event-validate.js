@@ -35,7 +35,7 @@ function requireIdList(event, name, expected) {
  * incompatible", "the KeyPackageRef hint ... does not match").
  *
  * Mirrors MDK's `key_package_from_borrowed_record`
- * (`marmot-app/src/key_package_records.rs`), so marmot-ts rejects the same
+ * (`nostr-directory/src/published_records.rs` in MDK 0.14), so marmot-ts rejects the same
  * events White Noise rejects:
  *
  * - `d` and `i` are single non-empty tags and `mls_protocol_version` is `1.0`;

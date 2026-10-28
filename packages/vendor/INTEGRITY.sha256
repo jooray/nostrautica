@@ -36,8 +36,8 @@ c81b01cc319d49fa6d12dc51ea2c3f9017400b0e5fd0ea74ffa34b0f48be0d22  packages/vendo
 1e11e1163da5b60393db6958fc8d0cad0658e05b76b3fb006b8a63b274acf7ca  packages/vendor/marmot-ts/lib/client/group/index.js
 d18e929a5cf65a21dfacfa0a8d8c917ae9a9f82689b41f97cd21e78f2720737d  packages/vendor/marmot-ts/lib/client/group/invite.d.ts
 4548fc3768e6a26185dd7d0a9dc643c2a668116a005238a248169ece950a1688  packages/vendor/marmot-ts/lib/client/group/invite.js
-b518b3fd095ed7903a9bb76c7db88d731b951f7f631bf67f085b4b3380b68eff  packages/vendor/marmot-ts/lib/client/group/marmot-group.d.ts
-3a18d38f397dc31a2831d5a401ca6f19180f1e7c17172010c8cfb92a5fa8a460  packages/vendor/marmot-ts/lib/client/group/marmot-group.js
+778f7ffa9cafcec5ee77f4f2df4a7d4712ed5aa8f49132e02456b5475f114c45  packages/vendor/marmot-ts/lib/client/group/marmot-group.d.ts
+4647bb49e516f4088128e2dfd4e4fb031597a43d7663ad905b8b58a5701297f0  packages/vendor/marmot-ts/lib/client/group/marmot-group.js
 2c823775ff2ebef93042bcbe5724f161f1a2c40a7b4e4d521fb806c637b93d8d  packages/vendor/marmot-ts/lib/client/group/media-blob-transport.d.ts
 d022d69f09ed348e1b467ed24176da752d3f1559c9f6f7cb6ad4d81632a10852  packages/vendor/marmot-ts/lib/client/group/media-blob-transport.js
 a6f452f40add2ff3222e14cadfec5ce580a4d5d684bc281fbd572ef500442dad  packages/vendor/marmot-ts/lib/client/group/media-transfer.d.ts
@@ -56,8 +56,8 @@ b52a5c88870d528ccf686e71a6aee5f46c75b5668fd30e22e9ad7d56b4a0afe9  packages/vendo
 ab2a72afb9d7887c11b5eff0d9bae28bdf869ce5aa9dc052fd00f622f873af23  packages/vendor/marmot-ts/lib/client/group/proposals/update-metadata.js
 6d3c70b1ccdffb8680b347133835570f58b276b8f83f52cd5fe3bbaf74dd10e5  packages/vendor/marmot-ts/lib/client/group/wrapper-ledger.d.ts
 343cc7ac68dcf6ba2b1002cee24fe4762aa758e50eabe220814f893c5dd77998  packages/vendor/marmot-ts/lib/client/group/wrapper-ledger.js
-5fb3196a60a3d6ec8b006ec14bbcc4c49f98477fb2a71fa508a437e1db4827f2  packages/vendor/marmot-ts/lib/client/groups-manager.d.ts
-d11d03aeb3d7399fe7b72361489f46c167094c5d905a7ab2f2d911e3b608e032  packages/vendor/marmot-ts/lib/client/groups-manager.js
+2f4b626544872fbc5f895e226713b3cf4630914df11bbe9958ee986797fd7304  packages/vendor/marmot-ts/lib/client/groups-manager.d.ts
+3d1efe462704f2f06111ea7047b5b2d62f4a87c1548ee4c8515ec9d2181db28d  packages/vendor/marmot-ts/lib/client/groups-manager.js
 a3254192e3ddb8bf41bb02231c69155d1e564b6800e410c0c09122d59aabe6e8  packages/vendor/marmot-ts/lib/client/index.d.ts
 279d5290203108ac05e11c5c079aa882a17bfe645e7a0d351ba4834e74cfaf40  packages/vendor/marmot-ts/lib/client/index.js
 77275ddf6ab721271ce4a3390de904ab318ad0516c781d140abd7fffe9333f7e  packages/vendor/marmot-ts/lib/client/invite-manager.d.ts
@@ -86,8 +86,8 @@ aa7ce12bf7397f78bb8272d29b61a1f50d9c913b808221dd083c21566c57f906  packages/vendo
 188d0626181a8ba8e05eb36f28e364fa97bd099340aa0535f5501512c70d04d0  packages/vendor/marmot-ts/lib/client/session/delivered-payload-store.js
 0ba76cf262aeda34de07f624c09ce5092ec1a5288e5a56d6e5a192d3be8204df  packages/vendor/marmot-ts/lib/client/session/group-effects.d.ts
 8e609bb71c20b858c77f0e9f90bb1319db8477b13f9f965f1a1e18524bf50881  packages/vendor/marmot-ts/lib/client/session/group-effects.js
-8d12457b7cfc19551fbfbd0e940db8581e5599f9f6e530e0988ce3d1705e01a6  packages/vendor/marmot-ts/lib/client/session/group-session.d.ts
-1a1ed9834128c8374596e54b825f9ed5c264b4777485ce2c38362be5e4afe9fd  packages/vendor/marmot-ts/lib/client/session/group-session.js
+db553a6cfeb6689154b48598441c9528b012e83b79a92ccdd488c90cf7ec7db6  packages/vendor/marmot-ts/lib/client/session/group-session.d.ts
+57206351f4c9983ac513ab247582686a92103cec58eebd930b249266cb51bef1  packages/vendor/marmot-ts/lib/client/session/group-session.js
 4b02caa22c334b69bfa5e4c0f6756b8ba41192ae20ecd97d939411ae03d44c41  packages/vendor/marmot-ts/lib/client/transport/nostr/welcome-delivery.d.ts
 230ce9be94d6805576e2dbabc1200aab14e496e4a38c35982960375782878427  packages/vendor/marmot-ts/lib/client/transport/nostr/welcome-delivery.js
 aa9648d69e24fc13be5872fe6cf2ec2d40c1560c47fe44638b899aee634ebd4d  packages/vendor/marmot-ts/lib/client/verify.d.ts
@@ -196,8 +196,8 @@ a0e521647a1a229fd285932e976fb22fb8ec6ffe40b4617e1a0ffda79a2d0308  packages/vendo
 6bce2902cf28d423d8fc39af070a51b6f4809e9bb9d82024d005a5e9f627b821  packages/vendor/marmot-ts/lib/core/key-package-event-delete.js
 a8ba8026230bb3138641e8b5419c82e11891222ee4579ced69c12befbccfa2e5  packages/vendor/marmot-ts/lib/core/key-package-event-encode.d.ts
 f54f6a3a04eb025b4dd6b302adfd18c2ba9518bbb1850566d8c63a7882ffb3ae  packages/vendor/marmot-ts/lib/core/key-package-event-encode.js
-e5d56c3827f2ab5701c74c3887b77f514dd98021660af43dc1e0e8548aad83bc  packages/vendor/marmot-ts/lib/core/key-package-event-validate.d.ts
-0acf92e89af9c675fd4377fa02a48ccf6440178d920eefd9e89bc516e2593760  packages/vendor/marmot-ts/lib/core/key-package-event-validate.js
+8c016f960ef712aeb5f87da8ee7b31296283b4d3da607a02751deecbefd1a552  packages/vendor/marmot-ts/lib/core/key-package-event-validate.d.ts
+4265ad54abe2961918e6b0dbe1e087ab44375b01fcaa53113590df122bd444ff  packages/vendor/marmot-ts/lib/core/key-package-event-validate.js
 c0fd26f3f997f7713ac7a46563aff5291eac551b1c71421803f6c845cc08d0a4  packages/vendor/marmot-ts/lib/core/key-package-event.d.ts
 50e279209d5173efbf290558f7a0e6045bb125d793eecf4e4a401768ce5a5423  packages/vendor/marmot-ts/lib/core/key-package-event.js
 51278092ca110138334f5f00af0842402ec31b2e4dd3c290d78562c09cea7797  packages/vendor/marmot-ts/lib/core/key-package.d.ts
@@ -254,8 +254,8 @@ be8ae3fb81e6cf0ecfd01ec8acfb504542b50bc4487953d3da2604b7b0228132  packages/vendo
 4fcbd259d2ee24c462275f08bbec9c4d121cecf3143cb43c66b4addfeb13a8bf  packages/vendor/marmot-ts/lib/engine/disband-tombstone.js
 d9dadcab9bbbbe814d8a6d29291719c3bb8d6aa50f20423f57e62b40c71e6820  packages/vendor/marmot-ts/lib/engine/fork-recovery.d.ts
 58432b701fca029d81baf101eebb30df80923de9fbd1a7936753eb812ec3b901  packages/vendor/marmot-ts/lib/engine/fork-recovery.js
-59cb1c634269615d3bb18e9d82861ee586b4d6610bc0d24be1fbbf297215a01a  packages/vendor/marmot-ts/lib/engine/group-engine.d.ts
-2b3793c9fbbc803cc2d5ab48cd0c567099a07ec0a5cc2553b32cbfa5f2188ba7  packages/vendor/marmot-ts/lib/engine/group-engine.js
+8d9fd3902dad913256d5f0a8807c3a1921dccf27f6451f22cfae4fd8154389a0  packages/vendor/marmot-ts/lib/engine/group-engine.d.ts
+2dff2d5bfd1803e51d756723d7af83d900a50c986eb61ddb6b88d3afb0fff235  packages/vendor/marmot-ts/lib/engine/group-engine.js
 a14f54b351231a94f972d288f40da5f6bb80fd4b61279d3916b828e9ab5e4a2c  packages/vendor/marmot-ts/lib/engine/history-tree.d.ts
 d37312063bf6f1fcff3b66064c2fc00293412833100cb0f984ddd0a98b4f1239  packages/vendor/marmot-ts/lib/engine/history-tree.js
 5960e9225a93aafeacbf6c5267b689f8d387d27a0a447babc6a54d1e8c7155bd  packages/vendor/marmot-ts/lib/engine/index.d.ts
@@ -320,6 +320,8 @@ d938d5e693ef50bce799be993006329bf83635eadf4329c74f30ca5c20e687a2  packages/vendo
 b9fab0a2ebb502d78d457de21a22069f9724680c9f980fc0e1b4dbc1af4cb841  packages/vendor/marmot-ts/lib/utils/tag-cardinality.js
 bde8911a2bc3503eef30044b838340315ea4f4924c14a194541b8504b5331dc9  packages/vendor/marmot-ts/lib/utils/timestamp.d.ts
 0b8cc8be3bdf188e464c6991a43775f1fae78d82fc0b0bc1ea0cc39a9417200a  packages/vendor/marmot-ts/lib/utils/timestamp.js
+225357d2304dd683cb052dbf9c013525b63966754c4c40d615051ed294c328c2  packages/vendor/marmot-ts/lib/utils/watch-current.d.ts
+4d129de37db8ffe73bdc7b59e5c0ef7b14d5476e30b43021ed6e22b50d4fc104  packages/vendor/marmot-ts/lib/utils/watch-current.js
 af49a3320ef6c12eba88e583e7d4a48f3ae7430e2e58bdcdfc09c55a24835608  packages/vendor/marmot-ts/lib/vendor/ts-mls/LICENSE
 87d5ae87f71d56879bbe682de9fde724bcdbdf905109abf4c8fb65b1e4ac3738  packages/vendor/marmot-ts/lib/vendor/ts-mls/VERSION
 f497a2b26ef2e4d7acc59e09daaadd49211827e42ae0ec4479eb9e81aac322c3  packages/vendor/marmot-ts/lib/vendor/ts-mls/appDataDictionary.d.ts
@@ -530,4 +532,4 @@ b06b36b7720d998cdf5b8668547be4d4d4b9e0a94511b828a1330cf3b5e61d66  packages/vendo
 66540e50b5e6d9f871caa33c47821c6be5e0d917b662845fbda9289ef38ba931  packages/vendor/marmot-ts/lib/vendor/ts-mls/welcome.js
 aa8d85fc17e01bd59fdd9f1e3e4f927eb7992cd090b26adc0f64c3aec85f51dd  packages/vendor/marmot-ts/lib/vendor/ts-mls/wireformat.d.ts
 4fab957d8adc6b1b7df68a84d0b0a6dbae4336c15d42f4569a39253abf1e517a  packages/vendor/marmot-ts/lib/vendor/ts-mls/wireformat.js
-8a9f2f903734994bf9f1f101f55c197f9634a6b467a32017efd2f8b0e871bf29  packages/vendor/marmot-ts/package.json
+c9b4602d68834769d2ad2a658ffa66a5fb4916ac3918cfabdf626b09cfea43d7  packages/vendor/marmot-ts/package.json

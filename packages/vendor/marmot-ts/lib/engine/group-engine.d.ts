@@ -85,6 +85,8 @@ export type MarmotGroupEngineOptions<TEnvelope> = {
     ciphersuite: CiphersuiteImpl;
     peeler: GroupPeeler<TEnvelope>;
     onStateChanged?: (state: ClientState) => void;
+    /** Lifecycle or derived convergence inputs changed; read current getters. */
+    onChanged?: () => void;
     /** Synchronous terminal fence before exposing the selected state to observers. */
     onSelectedDisband?: (evidence: DisbandCandidateEvidence, state: ClientState) => void;
     /**

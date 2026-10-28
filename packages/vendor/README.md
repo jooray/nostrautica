@@ -10,19 +10,27 @@ See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 fla
 ## Packages
 
 - **`marmot-ts/`** — `@internet-privacy/marmot-ts`, built from
-  [`jooray/marmot-ts`](https://github.com/jooray/marmot-ts) branch **`nostrautica-vendor-0.8.0`**:
+  [`jooray/marmot-ts`](https://github.com/jooray/marmot-ts) branch **`nostrautica-vendor-0.9.0`**:
   an upstream `marmot-protocol/marmot-ts` release plus the fixes we need that upstream does
   not have yet. The exact commit (and the bundled ts-mls commit) is recorded in
   `marmot-ts/package.json` under `"vendoredFrom"` — that field, not this README, is the pin.
-  At the time of writing: `e8250fc` = upstream **v0.8.0** (`b5ef530`) + two commits:
+  At the time of writing: `039016c` = upstream **v0.9.0** (`a7dd0b6`) + the same two fixes
+  as the 0.8.0 pin (cherry-picked, plus a commit moving their CHANGELOG lines under
+  "Unreleased"):
 
   - `#94` check a kind-30443's tags against its KeyPackage before inviting (MDK parity).
-    0.8.0 checks only `mls_proposals`; the `i` KeyPackageRef, `mls_extensions` and
-    `app_components` tags are still unchecked upstream.
-  - `connectAll()` retries a group whose connect failed (`reconnectDelayMs`). 0.8.0
-    requires the network adapter to REJECT a failed or timed-out backfill request, and then
-    drops a group whose every relay rejected, so a device that started offline never
-    subscribed live. Not yet proposed upstream.
+    0.9.0 (and master `a17913b`) still check only `mls_proposals`; the `i` KeyPackageRef,
+    `mls_extensions` and `app_components` tags are unchecked upstream.
+  - `connectAll()` retries a group whose connect failed (`reconnectDelayMs`). Since 0.8.0
+    the network adapter must REJECT a failed or timed-out backfill request, and then
+    `connectAll()` drops a group whose every relay rejected, so a device that started
+    offline never subscribed live. Upstream PR `#121`. Unchanged in 0.9.0 and master.
+
+  0.9.0 itself adds only reactive UI snapshots (`MarmotGroup.snapshot`/`watch()`, a
+  `changed` and a `disposed` event, `groups.watch({ includeStateChanges })`); no wire,
+  MLS, event-kind or stored-state change, and the bundled ts-mls is the same `57a732c`.
+  State written by the 0.8.0 pin (coordinator SQLite group state, member stores, stored
+  KeyPackages) was loaded, committed on and messaged through by this build.
 
   `#83` (encrypted media v2, `0x800b`) is no longer carried: 0.8.0 ships its own, and it was
   checked to be wire-identical to ours (same policy bytes for the same policy, each decodes the
@@ -31,10 +39,11 @@ See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 fla
   unless asked, so the coordinator passes `encryptedMedia` itself (`NEW_ROOM_MEDIA_ENDPOINTS`
   in `coordinator/src/chat/mls.ts`): every room keeps requiring `0x800b`, as MDK groups do.
 
-  When both commits are upstream, vendor upstream directly (`--repo
+  When `#94` and `#121` are merged, vendor upstream directly (`--repo
   https://github.com/marmot-protocol/marmot-ts.git --ref <tag>`) and drop the fork. Earlier
-  pins are kept as branches on the fork: `nostrautica-vendor` (v0.7.0 + #83 + #94, `7c2725d`)
-  and `nostrautica-vendor-pre-0.7.0` (`0ab8336`). The PR list is
+  pins are kept as branches on the fork: `nostrautica-vendor-0.8.0` (v0.8.0 + #94 + #121,
+  `e8250fc`), `nostrautica-vendor` (v0.7.0 + #83 + #94, `7c2725d`) and
+  `nostrautica-vendor-pre-0.7.0` (`0ab8336`). The PR list is
   `gh pr list --repo marmot-protocol/marmot-ts --author jooray`.
 
   0.8.0's network contract (docs/client/network.md upstream): `request` must reject when a
@@ -70,7 +79,7 @@ Pure TypeScript (no WASM). All *other* dependencies (`@noble/*`, `@hpke/*`, `@sc
 ## Re-vendoring (one command)
 
 ```sh
-node scripts/vendor-marmot.mjs                          # jooray/marmot-ts@nostrautica-vendor
+node scripts/vendor-marmot.mjs                          # jooray/marmot-ts@nostrautica-vendor-0.9.0
 node scripts/vendor-marmot.mjs --ref <branch|tag|sha>
 node scripts/vendor-marmot.mjs --repo <url> --ref <ref>
 node scripts/vendor-marmot.mjs --src <clean local checkout>

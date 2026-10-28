@@ -7,6 +7,9 @@ import type { ProposalAction } from "../../engine/types.js";
 import type { GroupProfileSupport } from "../../core/components/account-identity-proof.js";
 import type { MediaAttachment } from "../../core/media.js";
 import type { AuditContextOptions, AuditSink } from "../../audit/index.js";
+import type { MarmotGroupView } from "../../core/client-state.js";
+import type { ConvergenceStatus } from "../../core/convergence-status.js";
+import type { GroupLifecycleState } from "../../core/group-lifecycle.js";
 import type { ConvergenceScheduler } from "../../engine/group-engine.js";
 import type { ConvergencePolicy } from "../../core/convergence.js";
 import type { GroupHistoryTree } from "../../engine/history-tree.js";
@@ -35,6 +38,26 @@ export declare class NoMarmotGroupDataError extends Error {
     constructor();
 }
 export type MarmotGroupStatus = "active" | "removed" | "disbanded";
+/** Read-only UI projection. Byte arrays are owned copies and must be treated as read-only. */
+export type GroupSnapshotValue<T> = T extends Uint8Array ? Readonly<Uint8Array> : T extends object ? {
+    readonly [K in keyof T]: GroupSnapshotValue<T[K]>;
+} : T;
+/** Cached UI state; never includes the MLS private state. */
+export interface MarmotGroupSnapshot {
+    readonly id: string;
+    readonly version: number;
+    readonly status: MarmotGroupStatus;
+    readonly profileSupport: GroupSnapshotValue<GroupProfileSupport>;
+    readonly groupData: GroupSnapshotValue<MarmotGroupView> | null;
+    readonly members: readonly string[];
+    readonly epoch: bigint;
+    readonly convergenceStatus: ConvergenceStatus;
+    readonly lifecycle: GroupLifecycleState;
+    readonly welcomeDeliveries: readonly GroupSnapshotValue<WelcomeDeliveryOutcome>[];
+    readonly pendingWelcomes: readonly GroupSnapshotValue<WelcomeDeliveryOutcome>[];
+    /** Revision of the fork-history tree structure, including changes without a new epoch. */
+    readonly historyVersion: number;
+}
 /** Stable typed refusal for every operation attempted after canonical disband. */
 export declare class GroupTerminalError extends Error {
     readonly reason: "group_disbanded";
@@ -214,6 +237,8 @@ export type MarmotGroupOptions<THistory extends BaseGroupHistory | undefined = u
 };
 /** Map of events that can be emitted by a MarmotGroup */
 export type MarmotGroupEvents<THistory extends BaseGroupHistory | undefined = any, TMedia extends BaseGroupMedia | undefined = any> = {
+    /** Emitted synchronously after a distinct UI snapshot is installed. */
+    changed: (group: MarmotGroup<THistory, TMedia>) => void;
     /** Reconciled results from ingestion, history recovery, and settlement. */
     ingestResult: (result: DispositionedIngestResult) => void;
     /** Emitted when the group state is updated */
@@ -222,6 +247,8 @@ export type MarmotGroupEvents<THistory extends BaseGroupHistory | undefined = an
     applicationMessage: (message: Uint8Array) => void;
     /** Emitted when the group state is saved */
     stateSaved: (group: MarmotGroup<THistory, TMedia>) => void;
+    /** Emitted once when in-memory resources and watchers are released. */
+    disposed: (group: MarmotGroup<THistory, TMedia>) => void;
     /** Emitted when the group is destroyed */
     destroyed: (group: MarmotGroup<THistory, TMedia>) => void;
     /**
@@ -250,6 +277,14 @@ export type MarmotGroupEvents<THistory extends BaseGroupHistory | undefined = an
  */
 export declare class MarmotGroup<THistory extends BaseGroupHistory | undefined = undefined, TMedia extends BaseGroupMedia | undefined = undefined> extends EventEmitter<MarmotGroupEvents<THistory, TMedia>> {
     #private;
+    /** Synchronous current UI state; reference-stable until `changed` fires. */
+    get snapshot(): MarmotGroupSnapshot;
+    /** Monotonically increasing revision of {@link snapshot}. */
+    get version(): number;
+    /** Yields the current snapshot first; abort/return/disposal ends the stream. */
+    watch(options?: {
+        signal?: AbortSignal;
+    }): AsyncGenerator<MarmotGroupSnapshot>;
     /** The key-value backend where serialized group state bytes are persisted */
     readonly store: GenericKeyValueStore<SerializedClientState>;
     /** The signer used for the clients identity */
@@ -300,15 +335,15 @@ export declare class MarmotGroup<THistory extends BaseGroupHistory | undefined =
      * (commit prepared, publish unconfirmed) and `Merging` (publish acked, staged
      * commit applying) and back to `Stable`.
      */
-    get lifecycle(): import("../../core/group-lifecycle.js").GroupLifecycleState;
+    get lifecycle(): GroupLifecycleState;
     /**
      * The group's derived convergence status (`group-state.md` §Convergence
      * status, B5): `Syncing` / `Resolving` / `Settled` / `Blocked`. Recomputed on
      * read against the clock, so it advances to `Settled` once the quiescence
      * window elapses with no further convergence-relevant input.
      */
-    get convergenceStatus(): import("../../core/convergence-status.js").ConvergenceStatus;
-    get groupData(): import("../../core/client-state.js").MarmotGroupView | null;
+    get convergenceStatus(): ConvergenceStatus;
+    get groupData(): MarmotGroupView | null;
     /** Complete group info/debug model for chat panels and diagnostics. */
     get info(): MarmotGroupInfo;
     /**

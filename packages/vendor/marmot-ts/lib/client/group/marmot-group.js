@@ -1,6 +1,8 @@
 import { bytesToHex } from "applesauce-core/helpers/event";
 import { EventEmitter } from "eventemitter3";
 import { defaultCryptoProvider, encode, mlsMessageEncoder, protocolVersions, wireformats, } from "../../vendor/ts-mls/index.js";
+import { watchCurrent } from "../../utils/watch-current.js";
+import { getGroupMemberPubkeys } from "../../core/group-members.js";
 import { mayReleaseOutbound } from "../../core/convergence-status.js";
 import { groupLifecycleStates } from "../../core/group-lifecycle.js";
 import { commitDigest } from "../../core/convergence.js";
@@ -28,6 +30,18 @@ export class NoMarmotGroupDataError extends Error {
     constructor() {
         super("MarmotGroupData not found in ClientState.");
     }
+}
+function snapshotCopy(value) {
+    const freeze = (item) => {
+        if (!item || typeof item !== "object" || ArrayBuffer.isView(item))
+            return;
+        for (const child of Object.values(item))
+            freeze(child);
+        Object.freeze(item);
+    };
+    const copy = structuredClone(value);
+    freeze(copy);
+    return copy;
 }
 /** Stable typed refusal for every operation attempted after canonical disband. */
 export class GroupTerminalError extends Error {
@@ -58,6 +72,94 @@ export function selectFairQueuedStateIntent(queue, settledQueueLength) {
  * @template THistory - The type of the history store to use for the group, must implement the {@link BaseGroupHistory} interface. (Default is no history store)
  */
 export class MarmotGroup extends EventEmitter {
+    #snapshot;
+    #stateRevision = 0;
+    #snapshotStateRevision = -1;
+    #snapshotDeliveries = [];
+    #snapshotTreeSize = -1;
+    #snapshotTreeRoot;
+    #historyVersion = 0;
+    #snapshotReady = false;
+    #watchController = new AbortController();
+    /** Synchronous current UI state; reference-stable until `changed` fires. */
+    get snapshot() {
+        return this.#snapshot;
+    }
+    /** Monotonically increasing revision of {@link snapshot}. */
+    get version() {
+        return this.#snapshot.version;
+    }
+    /** Yields the current snapshot first; abort/return/disposal ends the stream. */
+    watch(options) {
+        return watchCurrent({
+            read: () => this.snapshot,
+            subscribe: (changed) => {
+                this.on("changed", changed);
+                return () => this.off("changed", changed);
+            },
+            signal: options?.signal,
+            closed: this.#watchController.signal,
+        });
+    }
+    #refreshSnapshot() {
+        if (!this.#snapshotReady || this.#watchController.signal.aborted)
+            return;
+        const previous = this.#snapshot;
+        const state = this.state;
+        const status = this.status;
+        const lifecycle = this.lifecycle;
+        const convergenceStatus = this.convergenceStatus;
+        const tree = this.session.historyTree;
+        if (tree.size !== this.#snapshotTreeSize ||
+            tree.rootTag !== this.#snapshotTreeRoot) {
+            if (previous)
+                this.#historyVersion++;
+            this.#snapshotTreeSize = tree.size;
+            this.#snapshotTreeRoot = tree.rootTag;
+        }
+        const historyVersion = this.#historyVersion;
+        const deliveries = this.welcomeDeliveries;
+        const sameState = this.#snapshotStateRevision === this.#stateRevision;
+        const sameDeliveries = deliveries.length === this.#snapshotDeliveries.length &&
+            deliveries.every((value, index) => value === this.#snapshotDeliveries[index]);
+        if (previous &&
+            sameState &&
+            sameDeliveries &&
+            previous.status === status &&
+            previous.lifecycle === lifecycle &&
+            previous.convergenceStatus === convergenceStatus &&
+            previous.historyVersion === historyVersion)
+            return;
+        const welcomeDeliveries = sameDeliveries && previous
+            ? previous.welcomeDeliveries
+            : snapshotCopy(deliveries);
+        this.#snapshotStateRevision = this.#stateRevision;
+        this.#snapshotDeliveries = deliveries;
+        this.#snapshot = Object.freeze({
+            id: this.idStr,
+            version: previous ? previous.version + 1 : 0,
+            status,
+            profileSupport: sameState && previous
+                ? previous.profileSupport
+                : snapshotCopy(this.profileSupport),
+            groupData: sameState && previous?.status === status
+                ? previous.groupData
+                : snapshotCopy(this.groupData),
+            members: sameState && previous?.status === status
+                ? previous.members
+                : Object.freeze(status === "disbanded" ? [] : getGroupMemberPubkeys(state)),
+            epoch: state.groupContext.epoch,
+            lifecycle,
+            convergenceStatus,
+            welcomeDeliveries,
+            pendingWelcomes: sameDeliveries && previous
+                ? previous.pendingWelcomes
+                : Object.freeze(welcomeDeliveries.filter((outcome) => outcome.kind === "failed")),
+            historyVersion,
+        });
+        if (previous)
+            this.emit("changed", this);
+    }
     /** The key-value backend where serialized group state bytes are persisted */
     store;
     /** The signer used for the clients identity */
@@ -347,6 +449,7 @@ export class MarmotGroup extends EventEmitter {
     #settleWelcomeDelivery(delivery, outcome) {
         if (delivery.outcome?.kind !== "succeeded")
             delivery.outcome = outcome;
+        this.#refreshSnapshot();
         return delivery.outcome;
     }
     /**
@@ -400,6 +503,7 @@ export class MarmotGroup extends EventEmitter {
             encoded,
             deliveries,
         };
+        this.#refreshSnapshot();
         const outcomes = await this.runtime.welcomeDelivery.deliverMany({
             welcome: options.welcome,
             author: options.author,
@@ -492,11 +596,19 @@ export class MarmotGroup extends EventEmitter {
             auditContext: options.auditContext,
             // When the quiescence window elapses, release any queued outbound (B5).
             onSettleCheck: () => this.#settleAndDrive(),
-            onStateChanged: (newState) => this.emit("stateChanged", newState),
+            onChanged: () => this.#refreshSnapshot(),
+            onStateChanged: (newState) => {
+                this.#stateRevision++;
+                this.#refreshSnapshot();
+                this.emit("stateChanged", newState);
+            },
             onStateSaved: () => this.emit("stateSaved", this),
             onApplicationMessage: (message) => this.emit("applicationMessage", message),
             onHistoryError: (error) => this.emit("historyError", error),
-            onHistoryChanged: () => this.emit("historyChanged", this),
+            onHistoryChanged: () => {
+                this.#refreshSnapshot();
+                this.emit("historyChanged", this);
+            },
         });
         if (options.media) {
             if (typeof options.media === "function") {
@@ -555,6 +667,8 @@ export class MarmotGroup extends EventEmitter {
             getRetainedStates: () => this.session.retainedStates(),
             isClosed: () => this.closedSignal.aborted || this.session.destroyed,
         });
+        this.#snapshotReady = true;
+        this.#refreshSnapshot();
     }
     /** Creates a new {@link MarmotGroup} instance from a {@link ClientState} object */
     static async fromClientState(state, options) {
@@ -682,6 +796,7 @@ export class MarmotGroup extends EventEmitter {
         // WR-16: `ingest()` runs this identical trailing step, so neither rewind
         // path can drift from the other.
         await this.#realizeRemovalIfNeeded();
+        this.#refreshSnapshot();
     }
     /**
      * Performs a self-update commit (no proposals) to rotate this member's leaf key material.
@@ -934,6 +1049,7 @@ export class MarmotGroup extends EventEmitter {
         // window (which arms a fresh settle check). Resumed input that is not
         // convergence-relevant arms nothing, so this wake is the last chance.
         await this.#drainOutbound();
+        this.#refreshSnapshot();
     }
     /**
      * Resumes a durable terminal intent after hydration when preparation is
@@ -1141,6 +1257,7 @@ export class MarmotGroup extends EventEmitter {
         // reached no `processed` result (the session persisted it from engine
         // state). Idempotent: a no-op unless a tombstone awaits notification.
         await this.realizeDisbandIfNeeded();
+        this.#refreshSnapshot();
         if (this.session.historyTree.size !== historySizeBefore)
             this.emit("historyChanged", this);
     }
@@ -1206,10 +1323,14 @@ export class MarmotGroup extends EventEmitter {
      * timer/promise does not outlive the cached instance.
      */
     dispose() {
+        if (this.#watchController.signal.aborted)
+            return;
+        this.#watchController.abort();
         this.#closeController.abort();
         this.image.close();
         this.session.dispose();
         this.#rejectQueuedOutbound("Group unloaded; outbound cancelled.");
+        this.emit("disposed", this);
     }
     /** Destroys the group and purges the group history */
     async destroy() {

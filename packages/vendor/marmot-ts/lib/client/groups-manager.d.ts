@@ -1,3 +1,4 @@
+import type { MarmotGroupSnapshot } from "./group/marmot-group.js";
 import { EventSigner } from "applesauce-core";
 import { type NostrEvent } from "applesauce-core/helpers";
 import { EventEmitter } from "eventemitter3";
@@ -119,6 +120,8 @@ export type GroupsManagerOptions<THistory extends BaseGroupHistory | undefined =
 };
 /** Events emitted by {@link GroupsManager} */
 export type GroupsManagerEvents<THistory extends BaseGroupHistory | undefined = any, TMedia extends BaseGroupMedia | undefined = any> = {
+    /** Emitted after the loaded set or any loaded group snapshot changes. */
+    changed: (snapshots: readonly MarmotGroupSnapshot[]) => void;
     /** Emitted when the set of loaded groups changes */
     updated: (groups: MarmotGroup<THistory, TMedia>[]) => void;
     /** Emitted when a group is loaded from the store */
@@ -178,6 +181,8 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
     /** Crypto provider for cryptographic operations */
     cryptoProvider: CryptoProvider;
     readonly ingestPersistence: IngestPersistenceCapability;
+    /** Synchronous UI snapshots of loaded groups; stable until `changed`. No storage reads. */
+    get snapshot(): readonly MarmotGroupSnapshot[];
     constructor(options: GroupsManagerOptions<THistory, TMedia>);
     /** Returns the list of currently loaded group instances */
     get loaded(): MarmotGroup<THistory, TMedia>[];
@@ -329,6 +334,8 @@ export declare class GroupsManager<THistory extends BaseGroupHistory | undefined
      * whenever the store changes.
      */
     watch(options?: {
+        /** Watch loaded groups and their UI state without loading storage. Call loadAll() to hydrate first. */
+        includeStateChanges?: boolean;
         signal?: AbortSignal;
     }): AsyncGenerator<MarmotGroup<THistory, TMedia>[]>;
 }

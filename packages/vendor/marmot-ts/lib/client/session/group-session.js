@@ -88,6 +88,7 @@ export class GroupSession {
     #deliveredHydrated;
     #pendingRetractions = new Map();
     #onStateChanged;
+    #onChanged;
     #onStateSaved;
     #onApplicationMessage;
     #onHistoryError;
@@ -101,6 +102,7 @@ export class GroupSession {
         this.#removedMarkerStore = options.removedMarkerStore;
         this.history = options.history;
         this.#onStateChanged = options.onStateChanged;
+        this.#onChanged = options.onChanged;
         this.#onStateSaved = options.onStateSaved;
         this.#onApplicationMessage = options.onApplicationMessage;
         this.#onHistoryError = options.onHistoryError;
@@ -175,6 +177,10 @@ export class GroupSession {
                     await this.#write(() => this.lifecycleStore.clear());
                 },
             },
+            onChanged: () => {
+                if (!this.#destroyed && !this.#disposed)
+                    this.#onChanged?.();
+            },
             onStateChanged: (newState) => {
                 if (this.#destroyed || this.#disposed)
                     return;
@@ -224,6 +230,7 @@ export class GroupSession {
             ? undefined
             : await this.#removedMarkerStore?.getItem(`${bytesToHex(this.id)}/removed`);
         this.#removalFenced = !!bytes || marker === true;
+        this.#onChanged?.();
         if (!bytes)
             return;
         try {
@@ -264,6 +271,7 @@ export class GroupSession {
         if (!this.#removalFenced)
             this.#clearPublications();
         this.#removalFenced = true;
+        this.#onChanged?.();
         if (this.lifecycleStore)
             await this.#write(() => this.lifecycleStore.setItem(removalEvidenceKey(bytesToHex(this.id)), new TextEncoder().encode(JSON.stringify(evidence))));
         this.#removalEvidence = evidence;
@@ -629,6 +637,7 @@ export class GroupSession {
             !this.rewindStore)
             return;
         this.#removalFenced = true;
+        this.#onChanged?.();
         if (this.state.groupActiveState.kind === "removedFromGroup") {
             const removedState = this.state;
             const recovered = await this.#engine.recoverRemovedFromAnchor(evidence, evidence.recoveryPending?.selectedTip);
@@ -666,6 +675,7 @@ export class GroupSession {
         await this.#write(() => this.lifecycleStore.removeItem(removalEvidenceKey(bytesToHex(this.id))));
         this.#removalEvidence = undefined;
         this.#removalFenced = false;
+        this.#onChanged?.();
         this.#registerRetentionOwners();
     }
     async finishRemovalRecovery() {
@@ -909,6 +919,7 @@ export class GroupSession {
             tombstone,
             registryState: serializeClientState(scrubTerminalRegistryState(state)),
         };
+        this.#onChanged?.();
     }
     async #finishDisbandProjection() {
         if (this.#terminalProjectionComplete)
@@ -967,6 +978,7 @@ export class GroupSession {
             tombstone,
             registryState: serializeClientState(scrubTerminalRegistryState(this.state)),
         };
+        this.#onChanged?.();
         await this.#write(() => this.#finishDisbandProjection());
     }
     async #cleanupAfterDisband(idHex) {
