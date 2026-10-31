@@ -1071,7 +1071,12 @@ export function __resetAttendeeInflightForTests(): void {
   inflightDirectory.clear();
 }
 
-/** Fetch + decrypt the roster. Returns undefined if the user isn't approved. */
+/**
+ * Fetch + decrypt the roster. `undefined` means "could not read it": the user
+ * isn't approved (no ECK), no relay produced a roster record, it won't decrypt,
+ * or a page is missing. Never a synthetic empty roster, so callers can tell
+ * "unknown" from "nobody".
+ */
 export function fetchRoster(ctx: EventContext): Promise<RosterContent | undefined> {
   return fetchRosterFor(ctx, captureReadScope());
 }
@@ -1108,7 +1113,13 @@ async function fetchRosterOnce(
       isRosterPageFor(ctx.coordinate, page0Ds, e.tags),
     ),
   );
-  if (!latest) return { v: 2, eck_current: 1, attendees: [] };
+  // No roster record at all: nobody answered in time, the only relay that did
+  // lacks it, or nothing matched this space. That is "unknown", not "an empty
+  // roster" (audit K-2). The synthetic `{attendees: []}` this used to return was
+  // indistinguishable from a real empty roster, and chat read it as "the roster
+  // names no group, so this device is not a member" and re-enrolled, which the
+  // coordinator executes as remove + re-add.
+  if (!latest) return undefined;
   // The roster is authored by the coordinator (or E_id) — a trusted authority
   // (onlyVerified + directoryPublisher). Distinguish a newer-protocol roster
   // (prompt an update, NIP §2 / D2) from a garbled one (drop).

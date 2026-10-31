@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import dev.ipf.marmotkit.AccountSetupReadinessFfi
+import dev.ipf.marmotkit.GroupEventKindFfi
 import dev.ipf.marmotkit.Marmot
 import dev.ipf.marmotkit.MarmotAndroid
 import dev.ipf.marmotkit.MarmotEventFfi
@@ -34,6 +35,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import today.cypherpunk.nostrautica.nostr.RelayPool
 import today.cypherpunk.nostrautica.protocol.Bytes
 import today.cypherpunk.nostrautica.protocol.Nip19
@@ -62,8 +64,12 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
     private var refs = 0
     private var closeJob: Job? = null
     private var eventsJob: Job? = null
-    private val events = MutableSharedFlow<String>(extraBufferCapacity = 64)
+    private val events = MutableSharedFlow<Pair<String, ChatEngine.Change>>(extraBufferCapacity = 64)
     private val freshness = RuntimeFreshness()
+    /** Per device key: relays both its inbox and NIP-65 lists were seen to contain. */
+    private val relaysVerified = java.util.concurrent.ConcurrentHashMap<String, Set<String>>()
+    /** Per group: MDK stall/fork signals seen on the event stream since the last recovery. */
+    private val trouble = GroupTrouble()
 
     /** Hold the runtime open. Pair every call with [release]. */
     override suspend fun acquire() {
@@ -72,19 +78,32 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         // finished) gives it back: the caller never got it, so it never calls release(),
         // and a leaked ref kept the native runtime, its database and sockets open for the
         // life of the process (DS41-060).
+        //
+        // Bounded (review of audit K-6): the lock can be held by a close() or a
+        // refreshIfStale() whose native shutdown or start never returns, and an
+        // unbounded wait left the chat on "Connecting" forever. A timeout is an
+        // ordinary failure (the session shows its error and Try again), not a
+        // cancellation, which the session would take as "stopped" and show nothing.
         var counted = false
-        try {
-            withContext(Dispatchers.IO) {
-                lock.withLock {
-                    closeJob?.cancel(); closeJob = null
-                    if (marmot == null) marmot = open()
-                    refs++
-                    counted = true
+        val done = try {
+            withTimeoutOrNull(ACQUIRE_TIMEOUT_MS) {
+                withContext(Dispatchers.IO) {
+                    lock.withLock {
+                        closeJob?.cancel(); closeJob = null
+                        if (marmot == null) marmot = open()
+                        refs++
+                        counted = true
+                    }
                 }
+                true
             }
         } catch (e: Throwable) {
             if (counted) release()
             throw e
+        }
+        if (done == null) {
+            if (counted) release()
+            throw ChatEngineTimeout("the chat runtime did not open within ${ACQUIRE_TIMEOUT_MS / 1000} s")
         }
     }
 
@@ -122,20 +141,29 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             // secrets go through KvSecretStore.
             deployment = marmotDeploymentWhiteNoise(),
         )
-        var attempt = 0
+        val deadline = System.currentTimeMillis() + BUSY_WAIT_MS
         val m = run {
             while (true) {
                 try {
                     return@run Marmot.newWithConfiguration(root.path, bootstrapRelays, options)
                 } catch (e: MarmotKitException.RuntimeBusy) {
                     // A previous runtime of this process is still closing its root.
-                    if (++attempt > 20) throw e
+                    if (System.currentTimeMillis() >= deadline) throw ChatEngineTimeout("the chat store is still busy after ${BUSY_WAIT_MS / 1000} s")
                     delay(250)
                 }
             }
             @Suppress("UNREACHABLE_CODE") error("unreachable")
         }
-        m.start()
+        val started = try {
+            withTimeoutOrNull(START_TIMEOUT_MS) { m.start(); true }
+        } catch (e: Throwable) {
+            shutdownQuietly(m)
+            throw e
+        }
+        if (started == null) {
+            shutdownQuietly(m)
+            throw ChatEngineTimeout("the chat runtime did not start within ${START_TIMEOUT_MS / 1000} s")
+        }
         // start() registers the group subscriptions for every group the store holds.
         freshness.restarted()
         eventsJob = scope.launch {
@@ -143,7 +171,8 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             try {
                 while (isActive) {
                     val e = sub.next() ?: break
-                    labelOf(e)?.let { events.tryEmit(it) }
+                    noteTrouble(e)
+                    changeOf(e)?.let { events.tryEmit(it) }
                 }
             } catch (e: Exception) {
                 Log.w(TAG, "event stream ended: ${e.javaClass.simpleName}")
@@ -158,8 +187,15 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         val m = marmot ?: return
         marmot = null
         eventsJob?.cancel(); eventsJob = null
+        shutdownQuietly(m)
+    }
+
+    /** Shut [m] down, bounded: a native shutdown that never returns must not hold [lock] forever. */
+    private suspend fun shutdownQuietly(m: Marmot) {
         withContext(NonCancellable) {
-            runCatching { m.shutdownAndClose() }.onFailure { Log.w(TAG, "shutdown: ${it.javaClass.simpleName}") }
+            val r = runCatching { withTimeoutOrNull(SHUTDOWN_TIMEOUT_MS) { m.shutdownAndClose() } }
+            r.onFailure { Log.w(TAG, "shutdown: ${it.javaClass.simpleName}") }
+            if (r.isSuccess && r.getOrNull() == null) Log.w(TAG, "shutdown did not finish within ${SHUTDOWN_TIMEOUT_MS / 1000} s")
             runCatching { m.close() }
         }
     }
@@ -174,14 +210,60 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         }
     }
 
-    private fun labelOf(e: MarmotEventFfi): String? = when (e) {
-        is MarmotEventFfi.GroupJoined -> e.accountLabel
-        is MarmotEventFfi.GroupStateUpdated -> e.accountLabel
-        is MarmotEventFfi.GroupEvent -> e.accountLabel
-        is MarmotEventFfi.MessageReceived -> e.received.accountLabel
-        is MarmotEventFfi.WelcomeDeliveryPending -> e.accountLabel
-        is MarmotEventFfi.EpochStallEscalated -> e.accountLabel
-        else -> null
+    /**
+     * Account label and what happened. Messages are told apart from group state so a
+     * busy room doesn't re-read every group on every message (audit R-7): the open
+     * timeline renders messages itself.
+     */
+    private fun changeOf(e: MarmotEventFfi): Pair<String, ChatEngine.Change>? {
+        val state = ChatEngine.ChangeKind.STATE
+        val message = ChatEngine.ChangeKind.MESSAGE
+        val health = ChatEngine.ChangeKind.HEALTH
+        return when (e) {
+            is MarmotEventFfi.GroupJoined -> e.accountLabel to ChatEngine.Change(e.groupIdHex, state)
+            is MarmotEventFfi.GroupStateUpdated -> e.accountLabel to ChatEngine.Change(e.groupIdHex, state)
+            is MarmotEventFfi.GroupEvent -> e.accountLabel to ChatEngine.Change(e.groupIdHex, when (e.event) {
+                is GroupEventKindFfi.MessageReceived, is GroupEventKindFfi.AppMessageInvalidated,
+                is GroupEventKindFfi.TransportObjectResourceRefused -> message
+                is GroupEventKindFfi.GroupUnrecoverable -> health
+                else -> state
+            })
+            is MarmotEventFfi.MessageReceived -> e.received.accountLabel to ChatEngine.Change(e.received.message.groupIdHex, message)
+            is MarmotEventFfi.WelcomeDeliveryPending -> e.accountLabel to ChatEngine.Change(e.groupIdHex, state)
+            is MarmotEventFfi.EpochStallEscalated -> e.accountLabel to ChatEngine.Change(e.groupIdHex, health)
+            is MarmotEventFfi.GroupChangeSuperseded -> e.accountLabel to ChatEngine.Change(e.groupIdHex, health)
+            is MarmotEventFfi.HistoryNoticesChanged -> e.accountLabel to ChatEngine.Change(null, health)
+            else -> null
+        }
+    }
+
+    /** Record or clear a group's stall/fork signals (audit R-9). */
+    private fun noteTrouble(e: MarmotEventFfi) {
+        when (e) {
+            is MarmotEventFfi.EpochStallEscalated -> trouble.mark(e.groupIdHex, GroupTrouble.STALLED)
+            is MarmotEventFfi.GroupChangeSuperseded ->
+                if (GroupTrouble.supersededNeedsAttention(e.outcome)) trouble.mark(e.groupIdHex, GroupTrouble.SUPERSEDED)
+            is MarmotEventFfi.GroupEvent -> when (e.event) {
+                is GroupEventKindFfi.GroupUnrecoverable -> trouble.mark(e.groupIdHex, GroupTrouble.UNRECOVERABLE)
+                // The group moved on, or MDK says it recovered.
+                is GroupEventKindFfi.EpochChanged, is GroupEventKindFfi.GroupHydrationRecovered,
+                is GroupEventKindFfi.PendingCommitRecovered -> trouble.clear(e.groupIdHex, GroupTrouble.STALLED, GroupTrouble.SUPERSEDED)
+                is GroupEventKindFfi.LocalGroupCopyRestored -> trouble.clear(e.groupIdHex, GroupTrouble.STALLED, GroupTrouble.SUPERSEDED, GroupTrouble.UNRECOVERABLE)
+                else -> {}
+            }
+            else -> {}
+        }
+    }
+
+    override suspend fun syncHealth(account: String, groupIdHex: String, unrecoverable: Boolean): ChatEngine.SyncHealth = io {
+        val status = runCatching { groupRecoveryStatus(account, groupIdHex) }.getOrNull()
+        ChatEngine.SyncHealth(
+            stalled = trouble.has(groupIdHex, GroupTrouble.STALLED),
+            superseded = trouble.has(groupIdHex, GroupTrouble.SUPERSEDED),
+            unrecoverable = unrecoverable || trouble.has(groupIdHex, GroupTrouble.UNRECOVERABLE),
+            automaticRecoveryFailed = status?.automaticRecoveryFailed == true,
+            historyMayBeIncomplete = status?.historyMayBeIncomplete == true,
+        )
     }
 
     private fun m(): Marmot = marmot ?: throw IllegalStateException("chat engine is closed")
@@ -216,6 +298,9 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         // name this event's relays too, or the coordinator's Welcome lands nowhere
         // this device listens.
         val want = relays.map(RelayPool::normalize).toSet()
+        // Both lists already known to cover these relays in this process: skip the two
+        // native reads (audit S-2, they ran on every chat open and twice on some).
+        if (relaysVerified[device.pubkey]?.containsAll(want) == true) return@io label
         val inbox = runCatching { accountInboxRelays(label) }.getOrDefault(emptyList()).map(RelayPool::normalize).toSet()
         var changed = false
         if (!inbox.containsAll(want)) runCatching { setAccountInboxRelays(label, relays, bootstrap) }
@@ -225,6 +310,10 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             .onSuccess { changed = true }.onFailure { Log.w(TAG, "nip65 relays: ${it.javaClass.simpleName}") }
         // A fresh account has no group subscription to break; one that holds groups does.
         if (changed && runCatching { chatList(label, true).isNotEmpty() }.getOrDefault(false)) freshness.relayListsChanged()
+        // Remembered only once both lists are known to hold every wanted relay.
+        val nowInbox = if (changed) runCatching { accountInboxRelays(label) }.getOrDefault(emptyList()).map(RelayPool::normalize).toSet() else inbox
+        val nowNip65 = if (changed) runCatching { accountNip65Relays(label) }.getOrDefault(emptyList()).map(RelayPool::normalize).toSet() else nip65
+        if (nowInbox.containsAll(want) && nowNip65.containsAll(want)) relaysVerified[device.pubkey] = nowInbox.intersect(nowNip65)
         label
     }
 
@@ -232,25 +321,32 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         runCatching { accountSetupReadiness(account) == AccountSetupReadinessFfi.NETWORK_READY }.getOrDefault(false)
     }
 
+    /**
+     * Every group, or a failure: a row whose details can't be read fails the whole
+     * call instead of vanishing from the list (audit K-4 A-2). A silently shorter
+     * list read as "the room's group is not here", and the session attested, which
+     * makes the coordinator evict and re-add a device that was in the room all along.
+     */
     override suspend fun groups(account: String): List<GroupBinding.GroupInfo> = io {
-        chatList(account, true).mapNotNull { row ->
-            val d = runCatching { groupDetails(account, row.groupIdHex) }.getOrNull() ?: return@mapNotNull null
+        chatList(account, true).map { row ->
+            val d = groupDetails(account, row.groupIdHex)
             GroupBinding.GroupInfo(
                 groupIdHex = row.groupIdHex,
                 nostrGroupIdHex = d.group.nostrGroupIdHex,
-                welcomer = d.group.welcomerAccountIdHex,
-                members = d.members.flatMap { listOfNotNull(it.memberIdHex, it.account) }.map(::hexOf).distinct(),
+                welcomer = d.group.welcomerAccountIdHex?.let(::hexOf),
+                // MDK returns an empty list, never null, when it has no members to report.
+                members = d.members.flatMap { listOfNotNull(it.memberIdHex, it.account) }.map(::hexOf).distinct().takeIf { it.isNotEmpty() },
                 selfMember = d.group.selfMembership == SelfMembershipFfi.MEMBER,
                 pendingInvite = d.group.pendingConfirmation,
+                unrecoverable = d.group.unrecoverable,
             )
         }
     }
 
-    override suspend fun acceptInvite(account: String, groupIdHex: String) {
-        io {
-            runCatching { acceptGroupInvite(account, groupIdHex) }
-                .onFailure { Log.w(TAG, "accept: ${it.javaClass.simpleName}") }
-        }
+    override suspend fun acceptInvite(account: String, groupIdHex: String): Boolean = io {
+        runCatching { acceptGroupInvite(account, groupIdHex) }
+            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; Log.w(TAG, "accept: ${it.javaClass.simpleName}") }
+            .isSuccess
     }
 
     override suspend fun confirmRejoin(account: String, groupIdHex: String, coordinator: String): Boolean = io {
@@ -284,7 +380,7 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         io { deleteMessage(account, groupIdHex, messageId) }
     }
 
-    override fun changes(account: String): Flow<Unit> = events.filter { it == account }.map { }
+    override fun changes(account: String): Flow<ChatEngine.Change> = events.filter { it.first == account }.map { it.second }
 
     override fun timeline(account: String, groupIdHex: String, me: String): ChatEngine.TimelineHandle = object : ChatEngine.TimelineHandle {
         @Volatile private var sub: TimelineMessagesSubscription? = null
@@ -331,6 +427,12 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
     companion object {
         private const val TAG = "MarmotEngine"
         private const val GRACE_MS = 20_000L
+        /** The longest [acquire] waits for the runtime (lock, open and start together). */
+        private const val ACQUIRE_TIMEOUT_MS = 60_000L
+        /** How long a busy store root (a runtime still closing) is waited out. */
+        private const val BUSY_WAIT_MS = 15_000L
+        private const val START_TIMEOUT_MS = 30_000L
+        private const val SHUTDOWN_TIMEOUT_MS = 15_000L
         private val WINDOW = 200u
         @Volatile private var nativeReady = false
 

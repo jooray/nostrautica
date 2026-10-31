@@ -2,6 +2,8 @@
   import { onMount, onDestroy } from "svelte";
   import { session } from "$lib/signer/session.svelte.js";
   import { connectNdk } from "$lib/nostr/ndk.js";
+  import { isMarmotChatEnabled } from "@nostrautica/protocol";
+  import { chatSession } from "$lib/chat/session.svelte.js";
   import { loadEventContext, cachedEventContext, type EventContext } from "$lib/events/event-context.js";
   import { loadEventKeys, type EventKeys } from "$lib/events/keystore.js";
   import { fetchRoster, cachedRoster, fetchDirectory, cachedDirectory, receiveGrants } from "$lib/events/attendee.js";
@@ -9,6 +11,7 @@
     mergePending,
     visiblePending,
     buildApprovedPeople,
+    chatSyncStuckPubkeys,
     summarizeBulk,
     filterPeople,
     type AdminPerson,
@@ -594,6 +597,13 @@
       known: pending,
       directory,
       statuses: coordStatuses,
+      // Per-attendee chat status (audit U-3), from data this page already has:
+      // roster chat_keys, the 21606 statuses, and — when this browser's chat
+      // session is on THIS event and holds the room — the group's real members.
+      chat:
+        ctx && isMarmotChatEnabled(ctx.config)
+          ? { memberDevices: chatSession.naddr === naddr ? chatSession.memberDevices : undefined }
+          : undefined,
     }),
   );
   // Owner-scoped (audit U11): seeded from the owner+coordinate cache in
@@ -610,10 +620,31 @@
     saveDismissedStatuses(ctx.coordinate, [...dismissedStatuses]);
   }
 
-  // Only unresolved poison items the organizer hasn't dismissed.
+  // Attendees the coordinator could not add to the chat (audit R-3/U-3): one
+  // summary card with a single Retry (the `reprocess` command without a pubkey
+  // re-queues every poisoned chat sync), instead of one generic card each. A
+  // later `cleared` from the coordinator drops them (dedupeLatestStatuses).
+  const chatSyncStuck = $derived(chatSyncStuckPubkeys(coordStatuses));
+  let retryingChatSync = $state(false);
+  let chatSyncRetried = $state(false);
+  async function retryChatSync() {
+    if (!ctx?.config.coordinator || retryingChatSync) return;
+    retryingChatSync = true;
+    try {
+      await sendAdminCommand(ctx, "reprocess", {});
+      chatSyncRetried = true;
+    } catch (e) {
+      error = e instanceof Error ? e.message : String(e);
+    } finally {
+      retryingChatSync = false;
+    }
+  }
+
+  // Only unresolved poison items the organizer hasn't dismissed. Chat-sync
+  // poisons have their own summary card above.
   const poisonStatuses = $derived(
     coordStatuses.filter(
-      (s) => s.state === "poison" && !dismissedStatuses.has(statusId(s)),
+      (s) => s.state === "poison" && s.stage !== "chat_sync_member" && !dismissedStatuses.has(statusId(s)),
     ),
   );
 
@@ -653,7 +684,7 @@
       pendingCount: pendingRequests.length,
       approvedCount: approvedPeople.filter((p) => !p.revoked).length,
       missingIntros: approvedPeople.filter((p) => !p.revoked && !p.hasIntro).length,
-      failedJobs: poisonStatuses.length,
+      failedJobs: poisonStatuses.length + chatSyncStuck.length,
       talksAwaiting: visibleTalks.length,
       matchesAvailable: ctx?.config.matching === "on",
       hasCoordinator: !!ctx?.config.coordinator,
@@ -1340,6 +1371,16 @@
     </div>
   {/if}
 
+  {#if chatSyncStuck.length}
+    <div class="card" style="border-left:3px solid var(--danger);margin-bottom:0.75rem" role="status">
+      <strong>{tp("admin.chatSync.stuck", chatSyncStuck.length)}</strong>
+      <p class="muted" style="margin:0.25rem 0">{t("admin.chatSync.body")}</p>
+      <button class="btn inline" disabled={retryingChatSync} onclick={() => void retryChatSync()}>
+        {retryingChatSync ? t("admin.poison.retrying") : t("admin.poison.retry")}
+      </button>
+      {#if chatSyncRetried}<p class="muted" style="margin:0.25rem 0 0" role="status">{t("admin.chatSync.retried")}</p>{/if}
+    </div>
+  {/if}
   {#if poisonStatuses.length}
     <div class="stack" style="margin-bottom:0.75rem">
       {#each poisonStatuses as s (statusId(s))}

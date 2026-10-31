@@ -60,9 +60,9 @@ import java.util.Locale
 
 /**
  * "Chat devices" (ChatHandoffCard.svelte): this account's attested devices for the
- * event, from the roster's `chat_keys`. This device can be renamed (a re-attest,
- * which needs its own proof of possession, so no other device can be renamed
- * here); any device can be removed (21607 revoke, sealed by the account). The
+ * event, from the roster's `chat_keys`. This device can be renamed (saved on the
+ * phone and carried by its next attestation, never sent as one: audit K-5); any
+ * device can be removed (21607 revoke, sealed by the account). The
  * White Noise link card sits underneath, since a linked key is one more device.
  */
 @Composable
@@ -86,23 +86,18 @@ internal fun ChatDevicesSheet(session: ChatSession, ctx: EventContext, account: 
 
     fun refreshLater() = scope.launch { delay(4_000); session.refreshRoster() }
 
+    // A rename is NOT sent as a 21607 `add` (audit K-5): to the coordinator an `add`
+    // from a device that holds a leaf is a re-enrolment, so renaming removed this
+    // phone from the room and added it back. The label is saved here instead, and the
+    // next attestation the session has a real reason to send carries it.
     fun saveRename(d: ChatMembers.Device) {
         val label = renameDraft.trim()
         if (label.isEmpty()) return
-        busy = d.pubkey; notice = null
-        scope.launch {
-            try {
-                val dev = chat.keys.ensure(account)
-                // Remembered first, so every later re-attest carries the user's name, not ours.
-                chat.keys.saveLabel(dev.pubkey, label)
-                val delivered = chat.attest(ctx, ChatAttest.Op.ADD, dev.pubkey, label, dev.clientId, dev.secret)
-                devices = devices.map { if (it.pubkey == d.pubkey) it.copy(label = label) else it }
-                notice = s.t(if (delivered) "chat.devices.updated" else "chat.devices.queued")
-                renaming = null
-            } catch (e: Exception) {
-                notice = s.t("chat.devices.actionFailed")
-            } finally { busy = null; refreshLater() }
-        }
+        val dev = chat.keys.peek(account) ?: return
+        chat.keys.saveLabel(dev.pubkey, label)
+        devices = devices.map { if (it.pubkey == d.pubkey) it.copy(label = label) else it }
+        notice = s.t("chat.android.devices.renameSaved")
+        renaming = null
     }
 
     fun revoke(d: ChatMembers.Device) {
@@ -137,6 +132,7 @@ internal fun ChatDevicesSheet(session: ChatSession, ctx: EventContext, account: 
                         Column(Modifier.weight(1f)) {
                             if (renaming == d.pubkey) {
                                 Field(renameDraft, { renameDraft = it.take(60) }, s.t("chat.devices.renameLabel"))
+                                Dim(s.t("chat.android.devices.renameHint"), size = 12)
                             } else {
                                 Text(d.label?.trim()?.takeIf { it.isNotEmpty() } ?: (d.pubkey.take(12) + "…"), fontWeight = FontWeight.SemiBold)
                                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {

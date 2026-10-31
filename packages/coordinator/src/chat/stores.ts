@@ -36,6 +36,11 @@ export const MARMOT_NAMESPACES = {
   lifecycle: "lifecycle",
   ingestState: "ingest-state",
   removedMarker: "removed-marker",
+  // Ours, not marmot's: when each member leaf last sent or committed (audit K-1).
+  leafActivity: "leaf-activity",
+  // Ours: pending-publication records set aside because the group would not load
+  // with them (audit K-8). Kept for diagnosis, never read back by marmot.
+  pendingPublicationBackup: "pending-publication-bak",
 } as const;
 
 /** The namespaces whose keys are per group, keyed by (or prefixed with) the MLS group id hex. */
@@ -45,6 +50,8 @@ const PER_GROUP_NAMESPACES = [
   MARMOT_NAMESPACES.lifecycle,
   MARMOT_NAMESPACES.ingestState,
   MARMOT_NAMESPACES.removedMarker,
+  MARMOT_NAMESPACES.leafActivity,
+  MARMOT_NAMESPACES.pendingPublicationBackup,
 ];
 
 // ── structured-clone-safe string codec ───────────────────────────────────────
@@ -216,4 +223,55 @@ export function purgeGroupState(store: Store, mlsGroupIdHex: string): void {
       if (key.toLowerCase() === id || key.toLowerCase().startsWith(id)) store.marmotKvDelete(ns, key);
     }
   }
+}
+
+/**
+ * Where MarmotClientMls keeps its per-group leaf-activity map (audit K-1): one
+ * JSON string per group, keyed by the MLS group id hex.
+ *
+ * Persisted rather than in memory because the decision it feeds, "may this
+ * attestation evict a live leaf", must not get laxer on every restart, and a
+ * deploy restarts the daemon. An in-memory map would know nothing for the first
+ * half hour after each one, which is exactly when clients reconnect and
+ * re-attest. It rides marmot_kv, so it is NIP-44 encrypted at rest like the rest
+ * of the MLS state (it is membership metadata), needs no schema migration, and
+ * {@link purgeGroupState} drops it with the group.
+ */
+export interface LeafActivityStore {
+  get(mlsGroupIdHex: string): string | undefined;
+  set(mlsGroupIdHex: string, value: string): void;
+  delete(mlsGroupIdHex: string): void;
+}
+
+export function leafActivityStore(store: Store): LeafActivityStore {
+  return {
+    get: (id) => store.marmotKvGet(MARMOT_NAMESPACES.leafActivity, id.toLowerCase()),
+    set: (id, value) => store.marmotKvSet(MARMOT_NAMESPACES.leafActivity, id.toLowerCase(), value),
+    delete: (id) => store.marmotKvDelete(MARMOT_NAMESPACES.leafActivity, id.toLowerCase()),
+  };
+}
+
+/**
+ * marmot-ts's key for a group's retained pending publication, in the store it is
+ * given as `rewindStore` (`pendingPublicationKey()` in
+ * `client/runtime/pending-publication.js`, not exported).
+ */
+export function pendingPublicationKvKey(mlsGroupIdHex: string): string {
+  return `${mlsGroupIdHex.toLowerCase()}/pending-publication/v1`;
+}
+
+/**
+ * Move one group's pending-publication record out of marmot's way (audit K-8):
+ * copy the stored (still encrypted-at-rest) value to the backup namespace under
+ * `<key>.bak.<now>`, then delete the original. Returns the backup key, or
+ * undefined when there was no record. Touches nothing else of the group.
+ */
+export function quarantinePendingPublication(store: Store, mlsGroupIdHex: string, now: number): string | undefined {
+  const key = pendingPublicationKvKey(mlsGroupIdHex);
+  const value = store.marmotKvGet(MARMOT_NAMESPACES.rewind, key);
+  if (value === undefined) return undefined;
+  const backup = `${key}.bak.${now}`;
+  store.marmotKvSet(MARMOT_NAMESPACES.pendingPublicationBackup, backup, value);
+  store.marmotKvDelete(MARMOT_NAMESPACES.rewind, key);
+  return backup;
 }

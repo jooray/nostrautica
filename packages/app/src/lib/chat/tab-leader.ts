@@ -100,6 +100,15 @@ export interface TabCoordinatorOptions {
   rejoinTimeoutMs?: number;
 }
 
+/**
+ * Ping-election window per round, and how many silent rounds it takes to lead
+ * (audit R-10). It was one 300 ms window: a leader that was merely busy for
+ * 300 ms lost its followers to a second leader. 2 × 1.5 s only delays the
+ * fallback path (no Web Locks, or a rejected lock request).
+ */
+const DEFAULT_PING_WINDOW_MS = 1500;
+const PING_ROUNDS = 2;
+
 function defaultLocks(): LockManagerLike | null {
   if (typeof navigator !== "undefined" && "locks" in navigator) {
     return (navigator as unknown as { locks: LockManagerLike }).locks;
@@ -168,7 +177,7 @@ export class ChatTabCoordinator {
     this.locks = opts.locks !== undefined ? opts.locks : defaultLocks();
     const makeChannel = opts.createChannel ?? defaultChannel;
     this.channel = makeChannel(`nostrautica-chat:${opts.scope}`);
-    this.pingWindowMs = opts.pingWindowMs ?? 300;
+    this.pingWindowMs = opts.pingWindowMs ?? DEFAULT_PING_WINDOW_MS;
     this.ackTimeoutMs = opts.ackTimeoutMs ?? 8000;
     // A rejoin is revoke-publish → key-package rotate+publish → attest-publish →
     // join, i.e. several relay round-trips; the send timeout would fire mid-way and
@@ -249,10 +258,17 @@ export class ChatTabCoordinator {
       this.becomeLeader();
       return;
     }
-    this.channel.postMessage({ t: "who-leads", scope: this.scope } satisfies Wire);
-    await new Promise<void>((res) => setTimeout(res, this.pingWindowMs));
-    if (this.disposed || this.settled) return;
-    // Heard no leader-hello within the window → lead.
+    // Two pings, each with its own window, before concluding nobody leads (audit
+    // R-10). A leader busy in a long synchronous stretch (a history replay, an MLS
+    // commit) can miss one short window, and a wrong "nobody leads" puts a second
+    // MarmotClient on the shared IndexedDB MLS store: a local fork. A leader-hello
+    // in either window settles this tab as a follower (handleWire).
+    for (let round = 0; round < PING_ROUNDS; round++) {
+      this.channel.postMessage({ t: "who-leads", scope: this.scope } satisfies Wire);
+      await new Promise<void>((res) => setTimeout(res, this.pingWindowMs));
+      if (this.disposed || this.settled) return;
+    }
+    // Heard no leader-hello in any window → lead.
     this.becomeLeader();
   }
 

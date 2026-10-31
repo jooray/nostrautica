@@ -59,24 +59,37 @@ class Chat(internal val c: AppContainer) {
         clientId: String? = null,
         deviceSecret: ByteArray? = null,
         code: String? = null,
-    ): Boolean {
+    ): Boolean = attestTimed(ctx, op, chatPubkey, label, clientId, deviceSecret, code).published
+
+    /** One sent attestation: whether it reached a relay, the rumor's `created_at`, the wrap's id. */
+    data class Attested(val published: Boolean, val createdAt: Long, val wrapId: String)
+
+    /** [attest], also returning the `created_at` the coordinator orders attestations by. */
+    suspend fun attestTimed(
+        ctx: EventContext,
+        op: ChatAttest.Op,
+        chatPubkey: String,
+        label: String? = null,
+        clientId: String? = null,
+        deviceSecret: ByteArray? = null,
+        code: String? = null,
+    ): Attested {
         val coordinator = ctx.cfg.coordinator ?: throw IllegalStateException("chat attestation requires a coordinator")
         val account = c.accounts.pubkey
         val createdAt = nowSec()
         val content = ChatAttest.content(ctx.coordinate, account, op, chatPubkey, createdAt, label, clientId, deviceSecret, code)
         val wrap = c.accounts.wrap(coordinator, Kinds.CHAT_KEY_ATTESTATION, ChatAttest.json(content), listOf(listOf("a", ctx.coordinate)), createdAt)
-        return c.accounts.publishWrapToAccount(wrap, coordinator, ctx.relays, "chat") is Nostr.PublishResult.Published
+        return Attested(c.accounts.publishWrapToAccount(wrap, coordinator, ctx.relays, "chat") is Nostr.PublishResult.Published, createdAt, wrap.id)
     }
+
+    /** Take a queued attestation back out of the outbox, so it is never sent. */
+    suspend fun discardQueued(wrapId: String) = c.nostr.discard(wrapId)
 
     /**
      * A NIP-17 DM for `/msg` (events/dm.ts sendDm): one rumor, wrapped to the
      * recipient and to ourselves, through the DM service so it also shows in the
      * thread with that person.
      */
-    /** Whether the roster already lists [chatPubkey] as one of [account]'s chat devices. */
-    suspend fun isAttested(account: String, ctx: EventContext, chatPubkey: String): Boolean =
-        cachedRoster(account, ctx.coordinate)?.attendees?.firstOrNull { it.pubkey == account }?.chatKeys?.any { it.pubkey == chatPubkey } == true
-
     suspend fun sendDm(peer: String, text: String): Boolean =
         c.dms.send(peer, text) is Nostr.PublishResult.Published
 
@@ -87,6 +100,7 @@ class Chat(internal val c: AppContainer) {
      * own kind-0 is read from the general relays, never from the chat ones.
      */
     suspend fun publishDeviceProfile(device: ChatDeviceKeys.Device, relays: List<String>) {
+        // The account's kind-0 read is TTL-cached by Profiles (6 h), so this is cheap.
         runCatching { c.profiles.refresh(listOf(device.account)) }
         val meta = c.profiles.local(device.account)
         val npub = Nip19.npub(device.account)
@@ -95,14 +109,35 @@ class Chat(internal val c: AppContainer) {
             put("about", "Nostrautica MLS chat key for a Nostrautica event, not a person. Follow $npub for the main account this belongs to. Messages are end-to-end encrypted.")
             meta?.picture?.let { put("picture", it) }
         }.toString()
-        val ev = LocalSigner(device.secret).signNow(UnsignedEvent(device.pubkey, nowSec(), Kinds.PROFILE, emptyList(), content))
-        c.nostr.publish(ev, relays, device.account, null)
+        // Only when the content or the relay set changed, or a week went by (audit S-2):
+        // it went out on every chat open before.
+        val hash = DeviceProfileStamp.hash(content, relays.map(RelayPool::normalize))
+        val stampKey = "chat.profilestamp:${device.pubkey}"
+        val now = nowSec()
+        if (!DeviceProfileStamp.due(kv.get(stampKey), hash, now)) return
+        val ev = LocalSigner(device.secret).signNow(UnsignedEvent(device.pubkey, now, Kinds.PROFILE, emptyList(), content))
+        if (c.nostr.publish(ev, relays, device.account, null) is Nostr.PublishResult.Published) kv.put(stampKey, DeviceProfileStamp.stamp(hash, now))
     }
 
     suspend fun cachedRoster(account: String, coordinate: String): RosterContent? = c.members.cachedRoster(account, coordinate)
 
-    suspend fun fetchRoster(ctx: EventContext, account: String): RosterContent? =
-        runCatching { c.members.fetchRoster(ctx, account) }.getOrNull()
+    /** The last roster with attendees fetched per (account, event), and when, in this process. */
+    private val rosterMemo = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, RosterContent>>()
+
+    /**
+     * The roster from the relays, or one fetched no longer than [reuseMs] ago (audit
+     * S-2: every chat open fetched it again). Returns it with the time it was fetched,
+     * so the caller can tell how fresh it is. Only a roster with attendees is reused;
+     * an empty one is what the fetch returns when no relay had the roster at all.
+     */
+    suspend fun fetchRoster(ctx: EventContext, account: String, reuseMs: Long = 0): Pair<RosterContent, Long>? {
+        val key = "$account|${ctx.coordinate}"
+        val now = System.currentTimeMillis()
+        rosterMemo[key]?.let { (at, r) -> if (reuseMs > 0 && now - at < reuseMs) return r to at }
+        val r = runCatching { c.members.fetchRoster(ctx, account) }.getOrNull() ?: return null
+        if (r.attendees.isNotEmpty()) rosterMemo[key] = now to r
+        return r to now
+    }
 
     /** This attendee's own 21606 notices for the event (latest per stage). */
     suspend fun ownStatuses(account: String, coordinate: String): List<CoordinatorStatusContent> =

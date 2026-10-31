@@ -53,14 +53,36 @@ const makeCoordinator = (opts: TabCoordinatorOptions): ChatTabCoordinator =>
  * were that nothing new ever decrypted and a send failed. A reader who does not
  * send sees a quiet room and no explanation at all.
  */
-export type ChatSessionPhase = "idle" | "setup" | "ready" | "evicted" | "error";
+/**
+ * `unreachable` (audit U-1) is "we cannot tell yet": the roster did not arrive or
+ * would not decrypt, a group failed to load, or routing refuses a binding it
+ * cannot confirm. It is NOT eviction. Its remedy is to retry the read (which
+ * never attests while membership is unknown), and it never offers Rejoin:
+ * every Rejoin is a guaranteed visible kick (audit K-6).
+ */
+export type ChatSessionPhase = "idle" | "setup" | "unreachable" | "ready" | "evicted" | "error";
+
+/** What a Rejoin press did (audit K-6). */
+export type RejoinOutcome =
+  /** Revoke + fresh key package + re-attest sent (or a waiting re-add joined). */
+  | "requested"
+  /** Membership is not positively lost, so nothing was sent (only `force` overrides). */
+  | "skipped"
+  /** Pressed again inside the cooldown; nothing was sent. */
+  | "rate-limited";
+
+/** Minimum gap between two Rejoin requests (audit K-6): each one burns a key package and kicks. */
+export const REJOIN_COOLDOWN_MS = 60_000;
+/** How often an unreachable or damaged session re-checks on its own. */
+const RECHECK_INTERVAL_MS = 30_000;
 
 /**
- * This device holds no routable group for the event — it was removed, evicted, or
- * its binding is contradicted by the roster. Distinct from a send that failed on
- * the wire, because only this one is fixed by Rejoin (which revokes the device,
- * rotates its key package and re-attests: an MLS epoch change and a roster
- * republish, quite the wrong price for a dropped socket).
+ * This device is POSITIVELY not in the event's room (audit K-6): its leaf is gone
+ * from the room it holds, or the room the roster names is one it holds no state
+ * for. Distinct from a send that failed on the wire, and from a membership we
+ * merely could not confirm: only this one is fixed by Rejoin (which revokes the
+ * device, rotates its key package and re-attests: an MLS epoch change and a
+ * roster republish, quite the wrong price for a dropped socket).
  */
 export class ChatUnroutableError extends Error {
   constructor() {
@@ -109,6 +131,20 @@ class ChatSessionStore {
   readOnly = $state(false);
   /** A re-enrolment ({@link rejoin}) is in flight — the UI disables its button. */
   rejoining = $state(false);
+  /** Wall-clock ms before which another Rejoin press is refused (audit K-6). */
+  rejoinBlockedUntil = $state(0);
+  /**
+   * A group this device holds on disk failed to load (audit K-3). It is kept and
+   * re-tried, never discarded; meanwhile membership cannot be judged.
+   */
+  damaged = $state(false);
+  /**
+   * Events of this room that could not be decrypted or applied yet (audit R-9):
+   * "re-syncing, some messages may be missing". A fork or stall, never a reason
+   * to offer Rejoin.
+   */
+  resyncing = $state(0);
+  private recheckTimer?: ReturnType<typeof setTimeout>;
   /** The multi-tab coordinator (leader election + follower proxy). */
   private coordinator?: ChatTabCoordinator;
   /**
@@ -353,6 +389,7 @@ class ChatSessionStore {
       // trusting the roster, which the coordinator republishes on its own schedule.
       void this.syncMembers(tok, coordinator, ctx.coordinate);
     };
+    this.coordinatorForRecheck = coordinator;
     // First v2 chat session: best-effort retire the account's legacy 31602
     // chat-device-key backup (NIP §7.5). Leader-only + once-per-account gated, so
     // followers don't duplicate it. Fire-and-forget — never blocks the handshake.
@@ -361,12 +398,61 @@ class ChatSessionStore {
         deleteLegacyChatDeviceKeyBackup(signer, ctx.config.relays),
       )
       .catch(() => {});
-    // Publish the key package (+ attestation for device-key accounts) so the
-    // coordinator can add us, then listen for the welcome and 445 traffic.
-    await chat.ensurePublished();
+    // Bind the room first (audit S-5): a member's room is usable as soon as its
+    // group is confirmed, and its history replays in the background. Then decide
+    // whether this device needs enrolling at all — ensurePublished publishes and
+    // attests only on a positive "not a member" (audit K-2) — and listen for the
+    // welcome that follows. A welcome arriving in between is joined by the
+    // listener start() installed.
     await chat.start();
     await this.syncPhase(tok);
     await this.syncMembers(tok, coordinator, ctx.coordinate);
+    await chat.ensurePublished();
+    await this.syncPhase(tok);
+  }
+
+  /** The coordinator a recheck broadcasts membership on (the leader's). */
+  private coordinatorForRecheck?: ChatTabCoordinator;
+
+  /**
+   * Re-read what could not be read (audit U-1 "Retry", and the automatic retry
+   * while unreachable or damaged): re-try loading damaged groups, re-run the
+   * membership verdict, re-sync phase and members. It never attests on an
+   * unknown verdict: ensurePublished publishes only on a positive not-member,
+   * which is exactly the case where enrolling is the right thing to do.
+   */
+  async recheck(): Promise<void> {
+    const chat = this.chat;
+    if (!chat) {
+      await this.retry();
+      return;
+    }
+    const tok = this.token;
+    await Promise.resolve()
+      .then(() => chat.recheckDamaged())
+      .catch(() => undefined);
+    if (tok !== this.token) return;
+    await chat.ensurePublished().catch((err: unknown) => console.warn("chat: recheck failed", err));
+    if (tok !== this.token) return;
+    await this.syncPhase(tok);
+    const coordinator = this.coordinatorForRecheck;
+    if (coordinator && this.ctx) await this.syncMembers(tok, coordinator, this.ctx.coordinate);
+  }
+
+  /** Keep re-checking on our own while the room is unreachable or damaged. */
+  private scheduleRecheck(tok: number): void {
+    const needed = this.phase === "unreachable" || this.damaged;
+    if (!needed) {
+      clearTimeout(this.recheckTimer);
+      this.recheckTimer = undefined;
+      return;
+    }
+    if (this.recheckTimer) return;
+    this.recheckTimer = setTimeout(() => {
+      this.recheckTimer = undefined;
+      if (tok !== this.token) return;
+      void this.recheck();
+    }, RECHECK_INTERVAL_MS);
   }
 
   /**
@@ -431,19 +517,39 @@ class ChatSessionStore {
    * walk would be the same mistake in the other direction.
    */
   private async syncPhase(tok: number): Promise<void> {
-    const gid = await this.chat?.nostrGroupId().catch(() => undefined);
-    if (tok !== this.token || !gid) return;
+    const chat = this.chat;
+    if (!chat) return;
+    this.damaged = (chat.damagedGroupIds?.() ?? []).length > 0;
+    this.resyncing = chat.syncIssueCount?.() ?? 0;
+    const gid = await chat.nostrGroupId().catch(() => undefined);
+    if (tok !== this.token) return;
+    if (!gid) {
+      // Not routable. Which of "connecting" and "can't reach the room" this is
+      // depends on whether we KNOW we are not in it yet (audit U-1): a positive
+      // not-member is waiting on the coordinator's Add, which is Connecting; a
+      // verdict we could not reach (roster unreadable, a damaged group, a
+      // binding routing will not confirm) is Unreachable, and is retried.
+      const verdict = chat.lastVerdict;
+      if (verdict?.kind === "not-member" && verdict.evicted) this.phase = "evicted";
+      else if (this.damaged || verdict?.kind === "unknown" || verdict?.kind === "member") this.phase = "unreachable";
+      else if (this.phase !== "evicted") this.phase = "setup";
+      this.scheduleRecheck(tok);
+      return;
+    }
     const members = await Promise.resolve()
-      .then(() => this.chat?.groupMemberPubkeys())
+      .then(() => chat.groupMemberPubkeys())
       .catch(() => undefined);
     if (tok !== this.token) return;
-    const me = this.chat?.identity.pubkey;
+    const me = chat.identity.pubkey;
     this.phase = members && me && !members.includes(me) ? "evicted" : "ready";
+    this.scheduleRecheck(tok);
   }
 
   /** Re-run the handshake from scratch (the page's "Try again"). */
   async retry(): Promise<void> {
     if (!this.ctx || !this.signer) return;
+    clearTimeout(this.recheckTimer);
+    this.recheckTimer = undefined;
     this.chat?.dispose();
     this.chat = undefined;
     this.chatPubkey = undefined;
@@ -548,14 +654,38 @@ class ChatSessionStore {
     else await chat.retract(action.ids);
   }
 
-  /** Leader: drop back to `setup` when the client holds no routable group.
-   *  Returns whether the group is in fact unroutable (which is the membership
-   *  problem Rejoin exists for), as opposed to a transport failure. */
+  /** Leader, after a failed send: RECONCILE before concluding anything (audit
+   *  K-6). Returns whether this device is positively out of the room (the
+   *  membership problem Rejoin exists for), as opposed to a transport failure or
+   *  a membership we could not confirm.
+   *
+   *  "Unroutable" used to mean `nostrGroupId()` was undefined, which a slow
+   *  roster read or a damaged group also produces, and the remedy then offered
+   *  was Rejoin: a guaranteed kick for a member who was never out. Now a missing
+   *  route asks the full membership verdict; only a positive not-member counts,
+   *  and anything we could not tell becomes `unreachable` (retried, no Rejoin). */
   private async demoteIfUnroutable(): Promise<boolean> {
-    const gid = await this.chat?.nostrGroupId().catch(() => undefined);
+    const chat = this.chat;
+    if (!chat) return false;
+    const tok = this.token;
+    const gid = await chat.nostrGroupId().catch(() => undefined);
+    if (tok !== this.token) return false;
     if (!gid) {
-      if (this.phase === "ready") this.phase = "setup";
-      return true;
+      const verdict = await Promise.resolve()
+        .then(() => chat.membershipVerdict())
+        .catch(() => ({ kind: "unknown", reason: "roster-unavailable" }) as const);
+      if (tok !== this.token) return false;
+      chat.lastVerdict = verdict;
+      if (verdict.kind === "not-member") {
+        if (verdict.evicted) this.phase = "evicted";
+        else if (this.phase === "ready") this.phase = "setup";
+        // Positively not in: the ordinary bootstrap is the heal (it attests).
+        void chat.ensurePublished().catch(() => undefined);
+        return true;
+      }
+      this.phase = "unreachable";
+      this.scheduleRecheck(tok);
+      return false;
     }
     // Holding a group is not being in it (audit DS41-052): a removed member keeps
     // the group state, so `gid` resolves while every send fails. Ask about the
@@ -579,21 +709,30 @@ class ChatSessionStore {
    * asks the leader over the same BroadcastChannel that carries proxied sends. A
    * read-only follower has no leader to ask and throws, exactly like `send`.
    */
-  async rejoin(opts?: { force?: boolean }): Promise<void> {
-    if (this.rejoining) return;
+  async rejoin(opts?: { force?: boolean }): Promise<RejoinOutcome> {
+    if (this.rejoining) return "rate-limited";
+    // Rate-limited (audit K-6): every request revokes this device, burns a key
+    // package and makes the coordinator remove + re-add it — two visible
+    // membership changes for everyone in the room. Repeated presses only repeat
+    // that, and can race their own revokes.
+    if (Date.now() < this.rejoinBlockedUntil) return "rate-limited";
     this.rejoining = true;
     try {
       if (this.chat) {
-        this.phase = "setup";
         const tok = this.token;
-        await this.chat.rejoin(opts);
+        const before = this.phase;
+        this.phase = "setup";
+        const outcome = await this.chat.rejoin(opts);
+        if (outcome === "requested") this.rejoinBlockedUntil = Date.now() + REJOIN_COOLDOWN_MS;
+        else if (tok === this.token) this.phase = before;
         await this.syncPhase(tok);
-        return;
+        return outcome;
       }
       const c = this.coordinator;
       if (c && c.role === "follower" && !this.readOnly) {
         await c.proxyRejoin(opts?.force ?? false, this.ctx?.coordinate);
-        return;
+        this.rejoinBlockedUntil = Date.now() + REJOIN_COOLDOWN_MS;
+        return "requested";
       }
       throw new Error("no chat session");
     } finally {
@@ -616,6 +755,11 @@ class ChatSessionStore {
   dispose(): void {
     this.token++;
     this.starting = undefined;
+    clearTimeout(this.recheckTimer);
+    this.recheckTimer = undefined;
+    this.coordinatorForRecheck = undefined;
+    this.damaged = false;
+    this.resyncing = 0;
     // Release leadership so another tab can take over immediately.
     this.coordinator?.dispose();
     this.coordinator = undefined;

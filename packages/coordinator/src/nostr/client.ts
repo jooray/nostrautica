@@ -8,8 +8,10 @@
 import { SimplePool, useWebSocketImplementation as usePoolWebSocketImplementation } from "nostr-tools/pool";
 import { useWebSocketImplementation } from "nostr-tools/relay";
 import { normalizeURL } from "nostr-tools/utils";
+import { matchFilter } from "nostr-tools/filter";
 import type { Event as NostrEvent } from "nostr-tools/core";
 import { GuardedWebSocket } from "../net/relay-guard.js";
+import { logStamp } from "../log-line.js";
 
 // nostr-tools uses a global WebSocket; provide the SSRF-guarded one for Node (audit
 // C4): every relay connection is pinned to a public-address-only lookup, so a relay
@@ -32,6 +34,7 @@ export interface Filter {
   "#p"?: string[];
   "#d"?: string[];
   "#a"?: string[];
+  "#h"?: string[];
 }
 
 /** Hard cap on events accumulated by one `fetch()` (audit C3): a hostile relay can
@@ -40,7 +43,7 @@ export interface Filter {
 export const MAX_FETCH_EVENTS = 5000;
 
 function relayLog(msg: string): void {
-  const t = new Date().toISOString().slice(11, 19);
+  const t = logStamp();
   console.log(`[${t}] ${msg}`);
 }
 
@@ -53,6 +56,91 @@ function relayLog(msg: string): void {
  * nobody ever seeing it.
  */
 const RESUBSCRIBE_BACKOFF_MS = [5_000, 15_000, 60_000, 300_000];
+
+// ── subscription pressure (audit R-2) ────────────────────────────────────────
+//
+// The daemon held one REQ per long-lived subscription per relay: per installed
+// event its E_inbox, its config watcher, its E_id kind-0, its 445 ingest and its
+// 30443 watcher, on every relay the event names. Fifteen events put ~60-75
+// concurrent REQs on each shared relay, and strfry's default is 20 per
+// connection: relay.primal.net and nostr.oxtr.dev answered "too many concurrent
+// REQs" ~28,000 times a day, every refused REQ was a subscription that silently
+// never ran, and the pressure made publishes time out (the K-7 fork trigger).
+//
+// So long-lived subscriptions to the same relay are MULTIPLEXED: one REQ carries
+// up to MAX_FILTERS_PER_REQ filters, and events are dispatched back to each
+// subscriber by matchFilter. One-shot fetches get a per-relay concurrency cap with
+// a FIFO queue. A "too many REQs" NOTICE or CLOSED marks the relay degraded:
+// fewer fetches at once, no new REQs where an existing one can take the filter,
+// and refused REQs are re-sent after a back-off instead of a second later.
+
+/** Filters carried by one multiplexed long-lived REQ. */
+export const MAX_FILTERS_PER_REQ = 20;
+/** Long-lived REQs per relay before a new filter joins an existing REQ instead. */
+export const MAX_LONG_LIVED_REQS_PER_RELAY = 8;
+/** One-shot fetch REQs open at once per relay; the rest wait in a queue. With the
+ *  long-lived cap this stays under strfry's default of 20 subscriptions. */
+export const MAX_FETCH_REQS_PER_RELAY = 8;
+/** The fetch cap while a relay is degraded. */
+export const DEGRADED_FETCH_REQS_PER_RELAY = 2;
+/** How long a "too many REQs" answer keeps a relay degraded. */
+export const RELAY_DEGRADED_MS = 5 * 60_000;
+/** Re-send delays (ms) for a REQ a relay refused for pressure; the last repeats. */
+const REFUSED_REQ_RETRY_MS = [30_000, 60_000, 120_000, 300_000];
+/** A brand-new or changed multiplexed REQ waits this long for company, so a burst
+ *  of subscribes (a boot, a relay handover) is one REQ rather than many. */
+const DEFAULT_REQ_DEBOUNCE_MS = 500;
+/** How long a connect may take before the REQ counts as closed and is retried. */
+const CONNECT_TIMEOUT_MS = 3_000;
+
+/** A relay telling us it is over its subscription limit, as a NOTICE or a CLOSED. */
+export const TOO_MANY_REQS =
+  /too many (concurrent )?(reqs?|subscriptions?|subs)\b|max(imum)? (number of )?(concurrent )?(reqs|subscriptions)|subscription limit/i;
+
+/** A long-lived subscription's share of a multiplexed REQ: one filter, one sink. */
+interface Member {
+  filter: Filter;
+  deliver: (event: NostrEvent) => void;
+}
+
+/** One multiplexed long-lived REQ on one relay. */
+interface Bundle {
+  url: string;
+  /** Only filters of the same kind set share a REQ, so one busy kind cannot make
+   *  every re-send of an unrelated subscription re-download its history. */
+  classKey: string;
+  members: Map<number, Member>;
+  /** The REQ currently on the wire, if any. */
+  sub?: { close: () => void };
+  /** Bumped on every (re-)send and on close; callbacks of an older REQ are ignored. */
+  generation: number;
+  /** The current REQ has reached EOSE (real or nostr-tools' synthetic one). */
+  eosed: boolean;
+  timer?: ReturnType<typeof setTimeout>;
+  attempt: number;
+  closed: boolean;
+}
+
+/** Per-relay pressure bookkeeping. */
+interface RelayPressure {
+  bundles: Bundle[];
+  fetchActive: number;
+  fetchQueue: Array<{ start: () => void; cancelled: boolean }>;
+  degradedUntil: number;
+  /** When the degraded state was last logged, and what was suppressed since. */
+  loggedAt: number;
+  suppressed: number;
+  /** Already said that this relay needs more REQs than the cap. */
+  overCapLogged: boolean;
+}
+
+/** The parameters {@link NostrClient.openReq} hands to one relay-level REQ. */
+export interface ReqHandlers {
+  onevent: (event: NostrEvent) => void;
+  oneose: () => void;
+  /** The REQ ended without us closing it: refused, connection lost, or never opened. */
+  onclose: (reason: string) => void;
+}
 
 /**
  * Safety bound on {@link NostrClient.fetchAll}'s dense-cluster stepping (audit
@@ -133,6 +221,10 @@ class BoundedSeenIds {
  * them back to {@link NostrClient.subscribe}'s per-relay retry loop.
  */
 export class OrphanSafePool extends SimplePool {
+  /** Every NOTICE any relay sends (audit R-2), with the normalized relay url. Unset,
+   *  notices go to `console.debug` as nostr-tools does by default. */
+  onNotice?: (url: string, message: string) => void;
+
   /** Every relay url currently in the pool. */
   knownRelayUrls(): string[] {
     return [...this.relays.keys()];
@@ -147,6 +239,10 @@ export class OrphanSafePool extends SimplePool {
     if (relay) {
       relay.onclose = () => {
         if (this.relays.get(key) === relay) this.relays.delete(key);
+      };
+      relay.onnotice = (msg: string) => {
+        if (this.onNotice) this.onNotice(key, msg);
+        else console.debug(`NOTICE from ${key}: ${msg}`);
       };
     }
     return pending.catch((err: unknown) => {
@@ -163,6 +259,48 @@ export class OrphanSafePool extends SimplePool {
       throw err;
     });
   }
+}
+
+/**
+ * How one relay answered a publish (audit K-7).
+ *
+ * - `acked`: OK=true, or OK=false with "duplicate:"/"replaced:" (it holds the event).
+ * - `rejected`: the relay answered OK=false. It did not store the event.
+ * - `timeout`: no OK within the timeout. The relay may have stored it.
+ * - `transport`: the connection failed or closed around the send. The relay may
+ *   have stored it, and nothing here can tell.
+ */
+export interface RelayPublishOutcome {
+  url: string;
+  status: "acked" | "rejected" | "timeout" | "transport";
+  reason: string;
+}
+
+/** A publish no relay acked. `outcomes` says how each one failed. */
+export class PublishFailedError extends Error {
+  constructor(
+    message: string,
+    readonly outcomes: RelayPublishOutcome[],
+  ) {
+    super(message);
+    this.name = "PublishFailedError";
+  }
+}
+
+/**
+ * NIP-01 machine-readable prefixes of an OK=false. Only these are read as the
+ * relay's own refusal. Everything else nostr-tools rejects with (the closing
+ * socket's reason, a send error, its own "connection failure" strings) says
+ * nothing about whether the event reached the relay.
+ */
+const RELAY_REFUSAL = /^(pow|blocked|rate-limited|invalid|restricted|mute|error|auth-required|payment-required):/i;
+
+function classifyPublishFailure(err: unknown): "rejected" | "timeout" | "transport" {
+  if (!(err instanceof Error)) return "transport";
+  if (/^publish timed out$/i.test(err.message)) return "timeout";
+  // An OK=false with no reason at all arrives as `new Error(undefined)`.
+  if (err.message === "" || RELAY_REFUSAL.test(err.message)) return "rejected";
+  return "transport";
 }
 
 export class NostrClient {
@@ -187,11 +325,281 @@ export class NostrClient {
   /** Excluded URLs already reported once, so the log names each one a single time. */
   private readonly reportedExcluded = new Set<string>();
 
+  /** Per-relay multiplexing and back-pressure state (audit R-2), by normalized url. */
+  private readonly pressure = new Map<string, RelayPressure>();
+  private memberSeq = 0;
+  private readonly reqDebounceMs: number;
+  private readonly now: () => number;
+
   constructor(
     private readonly defaultRelays: string[],
-    opts: { exclude?: string[] } = {},
+    opts: { exclude?: string[]; reqDebounceMs?: number; now?: () => number } = {},
   ) {
     this.excluded = new Set((opts.exclude ?? []).map((u) => normalizeURL(u)));
+    this.reqDebounceMs = opts.reqDebounceMs ?? DEFAULT_REQ_DEBOUNCE_MS;
+    this.now = opts.now ?? (() => Date.now());
+    this.pool.onNotice = (url, msg) => this.handleNotice(url, msg);
+  }
+
+  private relayPressure(url: string): RelayPressure {
+    let p = this.pressure.get(url);
+    if (!p) {
+      p = { bundles: [], fetchActive: 0, fetchQueue: [], degradedUntil: 0, loggedAt: 0, suppressed: 0, overCapLogged: false };
+      this.pressure.set(url, p);
+    }
+    return p;
+  }
+
+  /** True while `url` is backing off after a "too many REQs" answer (audit R-2). */
+  isDegraded(url: string): boolean {
+    return (this.pressure.get(normalizeURL(url))?.degradedUntil ?? 0) > this.now();
+  }
+
+  /** Diagnostics/tests: how many long-lived REQs and fetches are open on `url`. */
+  reqCounts(url: string): { longLived: number; fetches: number; queuedFetches: number } {
+    const p = this.pressure.get(normalizeURL(url));
+    return {
+      longLived: p?.bundles.filter((b) => b.sub).length ?? 0,
+      fetches: p?.fetchActive ?? 0,
+      queuedFetches: p?.fetchQueue.filter((q) => !q.cancelled).length ?? 0,
+    };
+  }
+
+  /**
+   * A relay said it is over its subscription limit (audit R-2). Mark it degraded
+   * for {@link RELAY_DEGRADED_MS}, say so once per window, and re-send — later —
+   * every long-lived REQ on it that had not reached EOSE yet: a NOTICE names no
+   * subscription, and a REQ the relay refused gets neither events nor EOSE, so
+   * "not answered yet" is the best evidence of which one it dropped.
+   */
+  private handleNotice(url: string, msg: string): void {
+    if (!TOO_MANY_REQS.test(msg)) {
+      console.debug(`NOTICE from ${url}: ${msg}`);
+      return;
+    }
+    this.noteBackpressure(url, msg);
+    for (const b of this.relayPressure(url).bundles) {
+      if (b.sub && !b.eosed && !b.closed) this.requeueRefused(b);
+    }
+  }
+
+  private noteBackpressure(url: string, msg: string): void {
+    const p = this.relayPressure(url);
+    const now = this.now();
+    p.degradedUntil = Math.max(p.degradedUntil, now + RELAY_DEGRADED_MS);
+    if (now - p.loggedAt < RELAY_DEGRADED_MS) {
+      p.suppressed++;
+      return;
+    }
+    const open = p.bundles.filter((b) => b.sub).length;
+    relayLog(
+      `[relay] ${url} is refusing REQs ("${msg.slice(0, 120)}") — backing off for ${RELAY_DEGRADED_MS / 60_000} min: ` +
+        `at most ${DEGRADED_FETCH_REQS_PER_RELAY} fetches at a time and refused subscriptions re-sent later ` +
+        `(${open} long-lived REQ(s), ${p.fetchActive} fetch(es) open)` +
+        (p.suppressed > 0 ? `; ${p.suppressed} more refusal(s) since the last line` : ""),
+    );
+    p.loggedAt = now;
+    p.suppressed = 0;
+  }
+
+  /** Drop a REQ the relay refused and send it again after a pressure back-off. */
+  private requeueRefused(b: Bundle): void {
+    const old = b.sub;
+    b.sub = undefined;
+    b.generation++;
+    try {
+      old?.close();
+    } catch {
+      /* already gone */
+    }
+    const delay = REFUSED_REQ_RETRY_MS[Math.min(b.attempt, REFUSED_REQ_RETRY_MS.length - 1)]!;
+    b.attempt++;
+    this.scheduleFire(b, delay, true);
+  }
+
+  /**
+   * Open one relay-level REQ carrying `filters`. The only place a long-lived REQ
+   * touches nostr-tools, so tests replace this method instead of faking a pool.
+   *
+   * nostr-tools' reconnect rewrites every filter of a re-sent REQ to
+   * `since = <newest created_at seen> + 1`. With several filters in one REQ, one
+   * filter's fresh event would cut the history of all the others, and for gift
+   * wraps, whose created_at is randomized into the past (NIP-59), even a lone
+   * filter loses live events that way (see R-45). So the rewrite is switched off
+   * for these subscriptions: a reconnect re-reads each filter's own window, and
+   * the per-subscriber dedupe drops what was already delivered.
+   */
+  protected openReq(url: string, filters: Filter[], handlers: ReqHandlers): { close: () => void } {
+    let cancelled = false;
+    let sub: { close: (reason?: string) => void } | undefined;
+    this.pool.ensureRelay(url, { connectionTimeout: CONNECT_TIMEOUT_MS }).then(
+      (relay) => {
+        if (cancelled) return;
+        try {
+          const s = relay.subscribe(filters as any, {
+            onevent: (e: NostrEvent) => handlers.onevent(e),
+            oneose: () => handlers.oneose(),
+            onclose: (reason: string) => {
+              if (!cancelled) handlers.onclose(reason);
+            },
+          });
+          Object.defineProperty(s, "lastEmitted", { get: () => undefined, set: () => {}, configurable: true });
+          sub = s;
+        } catch (err) {
+          handlers.onclose(err instanceof Error ? err.message : String(err));
+        }
+      },
+      (err: unknown) => {
+        if (!cancelled) handlers.onclose(err instanceof Error ? err.message : String(err));
+      },
+    );
+    return {
+      close: () => {
+        cancelled = true;
+        try {
+          sub?.close();
+        } catch {
+          /* already closed */
+        }
+      },
+    };
+  }
+
+  /** Where a new long-lived filter of `classKey` goes on `url` (see the R-2 notes above). */
+  private bundleFor(url: string, classKey: string): Bundle {
+    const p = this.relayPressure(url);
+    const sameClass = p.bundles.filter((b) => b.classKey === classKey && b.members.size < MAX_FILTERS_PER_REQ);
+    // 1. A REQ of this class that has not gone out yet: joining it is free.
+    const pending = sameClass.find((b) => !b.sub);
+    if (pending) return pending;
+    // 2. Room for another REQ, and the relay is not pushing back: a new REQ, so no
+    //    REQ already on the wire has to be re-sent (which re-reads its history).
+    const degraded = p.degradedUntil > this.now();
+    if (!degraded && p.bundles.length < MAX_LONG_LIVED_REQS_PER_RELAY) return this.newBundle(p, url, classKey);
+    // 3. Join the emptiest REQ of this class; it is re-sent with the filter added.
+    const emptiest = sameClass.sort((a, b) => a.members.size - b.members.size)[0];
+    if (emptiest) return emptiest;
+    // 4. Nowhere to put it. A subscription is never dropped: one more REQ, said once.
+    if (p.bundles.length >= MAX_LONG_LIVED_REQS_PER_RELAY && !p.overCapLogged) {
+      p.overCapLogged = true;
+      relayLog(
+        `[relay] ${url}: more than ${MAX_LONG_LIVED_REQS_PER_RELAY} long-lived REQs needed (${p.bundles.length + 1}) — opening another rather than dropping a subscription`,
+      );
+    }
+    return this.newBundle(p, url, classKey);
+  }
+
+  private newBundle(p: RelayPressure, url: string, classKey: string): Bundle {
+    const b: Bundle = { url, classKey, members: new Map(), generation: 0, eosed: false, attempt: 0, closed: false };
+    p.bundles.push(b);
+    return b;
+  }
+
+  /** (Re-)send `b` after `delayMs`. A pending send is kept unless `replace`. */
+  private scheduleFire(b: Bundle, delayMs: number, replace = false): void {
+    if (b.closed) return;
+    if (b.timer) {
+      if (!replace) return;
+      clearTimeout(b.timer);
+    }
+    const timer = setTimeout(() => {
+      if (b.timer === timer) b.timer = undefined;
+      this.fire(b);
+    }, delayMs);
+    if (typeof (timer as any).unref === "function") (timer as any).unref();
+    b.timer = timer;
+  }
+
+  /** Put `b`'s current filters on the wire: open the new REQ, then close the old. */
+  private fire(b: Bundle): void {
+    if (b.closed) return;
+    if (b.members.size === 0) {
+      this.closeBundle(b);
+      return;
+    }
+    const gen = ++b.generation;
+    const old = b.sub;
+    b.eosed = false;
+    // Fresh copies (audit R-45): nostr-tools keeps the array it is given.
+    const filters = [...b.members.values()].map((m) => ({ ...m.filter }));
+    b.sub = this.openReq(b.url, filters, {
+      onevent: (e) => {
+        if (gen !== b.generation) return;
+        for (const m of b.members.values()) if (matchFilter(m.filter as any, e)) m.deliver(e);
+      },
+      oneose: () => {
+        if (gen !== b.generation) return;
+        b.eosed = true;
+        // EOSE is the relay answering, so the back-off ladder starts over.
+        b.attempt = 0;
+      },
+      onclose: (reason) => {
+        if (gen !== b.generation || b.closed) return;
+        b.sub = undefined;
+        if (TOO_MANY_REQS.test(reason)) {
+          this.noteBackpressure(b.url, reason);
+          b.generation++;
+          const delay = REFUSED_REQ_RETRY_MS[Math.min(b.attempt, REFUSED_REQ_RETRY_MS.length - 1)]!;
+          b.attempt++;
+          this.scheduleFire(b, delay, true);
+          return;
+        }
+        const delay = RESUBSCRIBE_BACKOFF_MS[Math.min(b.attempt, RESUBSCRIBE_BACKOFF_MS.length - 1)]!;
+        // Never silent: an operator diagnosing a stuck event has to be able to see
+        // that this relay went away and that we are still trying.
+        relayLog(
+          `[relay] subscription closed on ${b.url}: ${reason || "no reason given"} — resubscribing in ${delay}ms (attempt ${b.attempt + 1}, ${b.members.size} filter(s))`,
+        );
+        b.attempt++;
+        this.scheduleFire(b, delay, true);
+      },
+    });
+    old?.close();
+  }
+
+  private closeBundle(b: Bundle): void {
+    if (b.closed) return;
+    b.closed = true;
+    b.generation++;
+    if (b.timer) clearTimeout(b.timer);
+    b.timer = undefined;
+    b.sub?.close();
+    b.sub = undefined;
+    const p = this.pressure.get(b.url);
+    if (p) p.bundles = p.bundles.filter((x) => x !== b);
+  }
+
+  /**
+   * Run `start` once `url` has a free fetch slot (audit R-2). Returns a cancel for a
+   * fetch that finishes (or times out) while still queued. `start` receives the
+   * slot's release, which must be called exactly once.
+   */
+  private withFetchSlot(url: string, start: (release: () => void) => void): () => void {
+    const p = this.relayPressure(url);
+    const entry = { start: () => {}, cancelled: false };
+    entry.start = () => {
+      p.fetchActive++;
+      let released = false;
+      start(() => {
+        if (released) return;
+        released = true;
+        p.fetchActive--;
+        this.pumpFetches(p);
+      });
+    };
+    p.fetchQueue.push(entry);
+    this.pumpFetches(p);
+    return () => {
+      entry.cancelled = true;
+    };
+  }
+
+  private pumpFetches(p: RelayPressure): void {
+    const cap = p.degradedUntil > this.now() ? DEGRADED_FETCH_REQS_PER_RELAY : MAX_FETCH_REQS_PER_RELAY;
+    while (p.fetchActive < cap && p.fetchQueue.length > 0) {
+      const next = p.fetchQueue.shift()!;
+      if (!next.cancelled) next.start();
+    }
   }
 
   /**
@@ -240,71 +648,48 @@ export class NostrClient {
    * pool's own reconnect still handles the "was up, socket dropped" case (it does
    * not surface an `onclose` in that branch, so the two cannot double up), and a
    * deliberate close stops both.
+   *
+   * MULTIPLEXED per relay (audit R-2). The filter joins a shared REQ on each relay
+   * with other subscriptions of the same kind set (see `bundleFor`), and events
+   * come back to this subscriber only when they match its own filter. Retry,
+   * back-off and back-pressure are per shared REQ. The dedupe across relays is per
+   * subscriber, as before.
    */
   subscribe(
     filter: Filter,
     onEvent: (event: NostrEvent) => void,
     relays: string[] = this.defaultRelays,
   ): () => void {
-    let closingDeliberately = false;
     const seen = new BoundedSeenIds();
-    const open = new Map<string, { close: (reason?: string) => Promise<void> | void }>();
-    const timers = new Set<ReturnType<typeof setTimeout>>();
-
-    const subscribeOne = (url: string, attempt: number): void => {
-      if (closingDeliberately) return;
-      // A fresh copy per relay and per resubscribe (audit R-45). nostr-tools keeps
-      // the object it is given as `sub.filters` and, on a reconnect, writes
-      // `filters[f].since = lastEmitted + 1` into it, where `lastEmitted` advances
-      // on every EVENT frame, including ones that fail verification or the filter.
-      // With one shared object, a single relay sending a far-future `created_at`
-      // and then dropping the socket set `since` for EVERY relay's subscription,
-      // and nostr-tools' own matchFilter then discarded live events from all of
-      // them. The `since` a relay earns now stays on that relay's copy.
-      const sub = this.pool.subscribe([url], { ...filter } as any, {
-        onevent: (e: NostrEvent) => {
-          // The pool deduped across the group for us; per-relay subs must do it
-          // themselves or the same wrap is handled once per relay.
-          if (seen.seenBefore(e.id)) return;
-          onEvent(e);
-        },
-        // EOSE is the relay answering this subscription, so the backoff ladder
-        // starts over. Without it `attempt` only ever grew, and after a day of
-        // uptime every blip on a relay waited the full 300 s ceiling.
-        oneose: () => {
-          attempt = 0;
-        },
-        // nostr-tools >= 2.24 reports `{ url, reason }` per relay, not a bare string.
-        onclose: (reasons: { url: string; reason: string }[]) => {
-          if (closingDeliberately) return;
-          const why =
-            reasons
-              .map((r) => r?.reason)
-              .filter(Boolean)
-              .join("; ") || "no reason given";
-          const delay = RESUBSCRIBE_BACKOFF_MS[Math.min(attempt, RESUBSCRIBE_BACKOFF_MS.length - 1)]!;
-          // Never silent: an operator diagnosing a stuck event has to be able to see
-          // that this relay went away and that we are still trying.
-          relayLog(`[relay] subscription closed on ${url}: ${why} — resubscribing in ${delay}ms (attempt ${attempt + 1})`);
-          const timer = setTimeout(() => {
-            timers.delete(timer);
-            subscribeOne(url, attempt + 1);
-          }, delay);
-          if (typeof (timer as any).unref === "function") (timer as any).unref();
-          timers.add(timer);
-        },
-      });
-      open.set(url, sub);
+    let closed = false;
+    const deliver = (e: NostrEvent) => {
+      // Per subscriber, across relays: without it every wrap is handled once per relay.
+      if (closed || seen.seenBefore(e.id)) return;
+      onEvent(e);
     };
-
-    for (const url of new Set(this.usable(relays))) subscribeOne(url, 0);
-
+    const classKey = JSON.stringify([...(filter.kinds ?? [])].sort((a, b) => a - b));
+    const joined: Array<{ bundle: Bundle; id: number }> = [];
+    const urls = new Set<string>();
+    for (const url of this.usable(relays)) urls.add(normalizeURL(url));
+    for (const url of urls) {
+      const bundle = this.bundleFor(url, classKey);
+      const id = ++this.memberSeq;
+      bundle.members.set(id, { filter: { ...filter }, deliver });
+      joined.push({ bundle, id });
+      // A REQ already on the wire is re-sent with the new filter; a pending one
+      // simply goes out with it. Both after the debounce.
+      this.scheduleFire(bundle, this.reqDebounceMs);
+    }
     return () => {
-      closingDeliberately = true;
-      for (const timer of timers) clearTimeout(timer);
-      timers.clear();
-      for (const sub of open.values()) void sub.close();
-      open.clear();
+      if (closed) return;
+      closed = true;
+      for (const { bundle, id } of joined) {
+        bundle.members.delete(id);
+        if (bundle.members.size === 0) this.closeBundle(bundle);
+        // Re-sent without the filter, so the relay stops serving it. Debounced, so
+        // a make-before-break replacement (open new, close old) is one re-send.
+        else this.scheduleFire(bundle, this.reqDebounceMs);
+      }
     };
   }
 
@@ -406,7 +791,17 @@ export class NostrClient {
     return all;
   }
 
-  /** One-shot fetch: collect events until EOSE or timeout, then close. */
+  /**
+   * One-shot fetch: collect events until every relay reached EOSE (or closed), or
+   * until the timeout, then close.
+   *
+   * One REQ per relay, each behind that relay's fetch slot (audit R-2): a relay
+   * already serving MAX_FETCH_REQS_PER_RELAY fetches (two while it is degraded)
+   * queues the rest instead of being sent REQs it will refuse. The timeout covers
+   * the wait in the queue too, so a fetch never takes longer than it did; a relay
+   * that gets no slot in time simply contributes nothing to this fetch, like one
+   * that did not answer.
+   */
   fetch(
     filter: Filter,
     relays: string[] = this.defaultRelays,
@@ -416,33 +811,68 @@ export class NostrClient {
     return new Promise((resolve) => {
       const events: NostrEvent[] = [];
       const seen = new Set<string>();
+      const urls = [...new Set(this.usable(relays).map((u) => normalizeURL(u)))];
+      const subs: Array<{ close: () => void }> = [];
+      const releases: Array<() => void> = [];
+      const cancels: Array<() => void> = [];
+      let outstanding = urls.length;
       let finished = false;
       const done = () => {
         if (finished) return;
         finished = true;
         clearTimeout(timer);
-        try {
-          sub.close();
-        } catch {
-          /* already closed */
+        for (const c of cancels) c();
+        for (const sub of subs) {
+          try {
+            sub.close();
+          } catch {
+            /* already closed */
+          }
         }
+        for (const r of releases) r();
         resolve(events);
       };
-      // Copied for the same reason as in subscribe() (audit R-45): the pool may
-      // write `since` into it, and the caller's filter is not ours to edit.
-      const sub = this.pool.subscribe(this.usable(relays), { ...filter } as any, {
-        onevent: (e: NostrEvent) => {
-          if (!seen.has(e.id)) {
-            seen.add(e.id);
-            events.push(e);
-            // Bounded accumulation (audit C3): stop once the cap is hit so a relay
-            // flooding history can't grow this array without limit.
-            if (events.length >= maxEvents) done();
-          }
-        },
-        oneose: () => done(),
-      });
       const timer = setTimeout(done, timeoutMs);
+      if (outstanding === 0) {
+        done();
+        return;
+      }
+      for (const url of urls) {
+        cancels.push(
+          this.withFetchSlot(url, (release) => {
+            if (finished) {
+              release();
+              return;
+            }
+            releases.push(release);
+            let settled = false;
+            const relayDone = () => {
+              if (settled) return;
+              settled = true;
+              if (--outstanding === 0) done();
+            };
+            // Copied for the same reason as in subscribe() (audit R-45): the pool may
+            // write `since` into it, and the caller's filter is not ours to edit.
+            const sub = this.pool.subscribe([url], { ...filter } as any, {
+              onevent: (e: NostrEvent) => {
+                if (finished || seen.has(e.id)) return;
+                seen.add(e.id);
+                events.push(e);
+                // Bounded accumulation (audit C3): stop once the cap is hit so a relay
+                // flooding history can't grow this array without limit.
+                if (events.length >= maxEvents) done();
+              },
+              oneose: relayDone,
+              onclose: (reasons: { url: string; reason: string }[] | string) => {
+                const why = Array.isArray(reasons) ? reasons.map((r) => r?.reason ?? "").join("; ") : String(reasons ?? "");
+                if (TOO_MANY_REQS.test(why)) this.noteBackpressure(url, why);
+                relayDone();
+              },
+            });
+            subs.push(sub);
+          }),
+        );
+      }
     });
   }
 
@@ -512,8 +942,24 @@ export class NostrClient {
    * loudly instead. It is self-correcting — the competing event is still newer on
    * that relay, so the next publish to the same coordinate hits "replaced" again,
    * this time with a fair chance of being the first outcome seen.
+   *
+   * 3. A total failure said nothing about HOW each relay failed (audit K-7). "The
+   *    relay answered OK=false" means it did not store the event; "the OK never
+   *    came" or "the socket died after we sent it" means it may well have. Marmot
+   *    needs that difference: rolling back a commit that a relay quietly stored
+   *    forks the coordinator off its own group. So a total failure now rejects
+   *    with a {@link PublishFailedError} whose `outcomes` classify every relay,
+   *    and a success reports which relays had acked by then.
+   *
+   * `opts.timeoutMs` replaces nostr-tools' 4.4 s per-relay OK timeout for this one
+   * publish. Group commits use it: an OK arriving after 4.4 s is still an OK, and
+   * counting it as a failure is what turned a slow relay into a fork.
    */
-  async publish(event: NostrEvent, requested: string[] = this.defaultRelays): Promise<{ replaced?: boolean }> {
+  async publish(
+    event: NostrEvent,
+    requested: string[] = this.defaultRelays,
+    opts: { timeoutMs?: number } = {},
+  ): Promise<{ replaced?: boolean; acked?: string[] }> {
     // One entry per NORMALIZED url (audit DS41-025). nostr-tools' pool rejects a
     // repeat spelling of a url already in the list with the bare string
     // "duplicate url", in the same tick and before anything is sent. Event relays
@@ -529,7 +975,13 @@ export class NostrClient {
       keys.add(key);
       relays.push(url);
     }
-    type Outcome = { url: string; ok: boolean; replaced: boolean; reason: string };
+    type Outcome = {
+      url: string;
+      ok: boolean;
+      replaced: boolean;
+      reason: string;
+      status: RelayPublishOutcome["status"];
+    };
     let settledCount = 0;
     let resolvedToCaller = false;
     const outcomes: Outcome[] = [];
@@ -550,21 +1002,21 @@ export class NostrClient {
         // A "replaced: have newer" (not a plain "duplicate") means a competing event
         // superseded ours — flag it so the coordinator reconciles (audit COORD-27):
         // with clock skew this can otherwise silently drop the newest event.
-        return { url, ok: true, replaced: /\breplaced\b/i.test(reason), reason };
+        return { url, ok: true, replaced: /\breplaced\b/i.test(reason), reason, status: "acked" };
       }
-      return { url, ok: false, replaced: false, reason };
+      return { url, ok: false, replaced: false, reason, status: classifyPublishFailure(err) };
     };
 
-    // `this.pool.publish` returns one promise per relay, in the order given.
-    const wrapped = this.pool.publish(relays, event).map((p, i) => {
+    // One promise per relay, in the order given.
+    const wrapped = this.relayPublishes(relays, event, opts.timeoutMs).map((p, i) => {
       const url = relays[i] ?? "(unknown relay)";
       return p.then(
-        (): Outcome => ({ url, ok: true, replaced: false, reason: "OK" }),
+        (): Outcome => ({ url, ok: true, replaced: false, reason: "OK", status: "acked" }),
         (err: unknown): Outcome => classify(url, err),
       );
     });
 
-    return await new Promise<{ replaced?: boolean }>((resolve, reject) => {
+    return await new Promise<{ replaced?: boolean; acked?: string[] }>((resolve, reject) => {
       if (wrapped.length === 0) {
         reject(new Error(`publish of kind ${event.kind} ${event.id.slice(0, 8)}: no relays configured`));
         return;
@@ -579,7 +1031,10 @@ export class NostrClient {
             resolvedToCaller = true;
             // Whatever is known AT THIS MOMENT — including a "replaced" that landed
             // in the same tick as, or before, the first plain ack.
-            resolve({ replaced: outcomes.some((x) => x.replaced) });
+            resolve({
+              replaced: outcomes.some((x) => x.replaced),
+              acked: outcomes.filter((x) => x.ok).map((x) => x.url),
+            });
           } else if (o.replaced && resolvedToCaller) {
             console.warn(
               `[nostr] kind ${event.kind} ${event.id.slice(0, 8)}: ${o.url} answered "replaced/have newer" AFTER ` +
@@ -592,13 +1047,45 @@ export class NostrClient {
             // operator's log and the organizer's status notice actually show.
             const why = outcomes.map((x) => `${x.url}: ${x.reason}`).join("; ");
             reject(
-              new Error(
+              new PublishFailedError(
                 `publish of kind ${event.kind} ${event.id.slice(0, 8)} failed on all ${wrapped.length} relay(s) — ${why}`,
+                outcomes.map(({ url, status, reason }) => ({ url, status, reason })),
               ),
             );
           }
         });
       }
+    });
+  }
+
+  /**
+   * One publish promise per relay. Without `timeoutMs` this is nostr-tools' own
+   * `pool.publish`. With it, the same steps by hand (connect through the pool,
+   * then `relay.publish`), because the OK timeout is a property of the shared
+   * relay object and the pool has no per-call override. `relay.publish` reads it
+   * only in its synchronous prologue, where the timer is armed, so setting it
+   * around that one call cannot leak into a concurrent publish on the same relay.
+   * Rejections keep the pool's shapes: a connect failure is a bare string, a relay
+   * answer or a timeout an Error.
+   */
+  private relayPublishes(relays: string[], event: NostrEvent, timeoutMs?: number): Promise<unknown>[] {
+    if (!timeoutMs) return this.pool.publish(relays, event);
+    return relays.map(async (url) => {
+      let relay: Awaited<ReturnType<OrphanSafePool["ensureRelay"]>>;
+      try {
+        relay = await this.pool.ensureRelay(url, { connectionTimeout: 3_000 });
+      } catch (err) {
+        throw "connection failure: " + String(err);
+      }
+      const previous = relay.publishTimeout;
+      relay.publishTimeout = timeoutMs;
+      let sent: Promise<string>;
+      try {
+        sent = relay.publish(event);
+      } finally {
+        relay.publishTimeout = previous;
+      }
+      return sent;
     });
   }
 

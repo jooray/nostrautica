@@ -18,6 +18,7 @@ import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { ONBOARDING_RELAY_LIST, DM_RELAY_LIST } from "$lib/nostr/relays.js";
 import { mergeProfileContent, mergeFollowTags, removeFollowTag, type Tag } from "./onboarding.js";
 import { t } from "$lib/i18n/i18n.svelte.js";
+import { rememberOwnProfile } from "./social.js";
 
 async function latest(kind: number, pubkey: string) {
   const events = await fetchEvents({ kinds: [kind], authors: [pubkey] });
@@ -38,13 +39,19 @@ export async function publishProfile(
   const content = mergeProfileContent(existing?.content, edits);
   // Monotonic (R6): kind-0 is replaceable; two quick profile edits must converge
   // on the later one rather than tie on created_at and lose the id tie-break.
+  let publishedAt: number | undefined;
   await publishMonotonic({
     kind: KIND_PROFILE,
     author: pubkey,
     owner: pubkey,
-    sign: (created_at) =>
-      signer.signEvent({ kind: KIND_PROFILE, created_at, tags: [], content }) as Promise<VerifiedEvent>,
+    sign: (created_at) => {
+      publishedAt = created_at;
+      return signer.signEvent({ kind: KIND_PROFILE, created_at, tags: [], content }) as Promise<VerifiedEvent>;
+    },
   });
+  // The next read of our own profile (the join form, the header) must see what we
+  // just published, not the pre-publish miss — see rememberOwnProfile.
+  if (publishedAt !== undefined) rememberOwnProfile(pubkey, content, publishedAt);
 }
 
 /** Publish kind-10002 relay defaults IF the user has none yet (spec §5.4 item 2). */

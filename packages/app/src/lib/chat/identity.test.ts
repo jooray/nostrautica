@@ -152,6 +152,57 @@ describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", 
     return ct.slice(4);
   };
 
+  // Audit K-8: logout bounds the lock with a deadline and moves on, so a slow
+  // NIP-46 encrypt can finish after the user has already logged back in. The late
+  // lock then deleted the live plaintext MLS state the new session was using, and
+  // the next chat start re-enrolled the device.
+  it("a lock that finishes after a re-login does not delete the live state", async () => {
+    const account = "9".repeat(64);
+    const stores = makeMarmotStores(marmotKvBackend(), account);
+    await stores.groupStateStore.setItem("g1", { epoch: 7 } as never);
+
+    let releaseEncrypt!: () => void;
+    const gate = new Promise<void>((r) => (releaseEncrypt = r));
+    const lock = lockChatIdentityForLogout(account, async (pt) => {
+      await gate;
+      return selfEncrypt(pt);
+    });
+    // Logout gave up waiting; the user signs straight back in.
+    await unlockChatIdentityForLogin(account, selfDecrypt);
+    releaseEncrypt();
+    await lock;
+
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 7 });
+  });
+
+  it("an unlock that starts while a lock is writing waits for it, then restores", async () => {
+    const account = "8".repeat(64);
+    const inner = new InMemoryKvBackend();
+    let releaseSet!: () => void;
+    const setGate = new Promise<void>((r) => (releaseSet = r));
+    __setMarmotKvBackendForTests({
+      get: (k) => inner.get(k),
+      // Hold the snapshot write, i.e. the lock is mid-way through its destructive half.
+      set: async (k, v) => {
+        if (k.includes("__chat_locked__")) await setGate;
+        return inner.set(k, v);
+      },
+      del: (k) => inner.del(k),
+      keysWithPrefix: (p) => inner.keysWithPrefix(p),
+      clearPrefix: (p) => inner.clearPrefix(p),
+    });
+    const stores = makeMarmotStores(marmotKvBackend(), account);
+    await stores.groupStateStore.setItem("g1", { epoch: 3 } as never);
+
+    const lock = lockChatIdentityForLogout(account, selfEncrypt);
+    await new Promise((r) => setTimeout(r, 5)); // the lock reaches its snapshot write
+    const unlock = unlockChatIdentityForLogin(account, selfDecrypt);
+    releaseSet();
+    await Promise.all([lock, unlock]);
+
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 3 });
+  });
+
   it("is a no-op when chat was never used on this device", async () => {
     const account = "a".repeat(64);
     await expect(lockChatIdentityForLogout(account, selfEncrypt)).resolves.toBeUndefined();

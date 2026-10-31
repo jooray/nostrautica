@@ -42,7 +42,7 @@ READY_MARK="watching for installs, submissions, admin commands"
 # satisfied by a name that merely contained the marker, so a deploy could report a
 # hung daemon as ready. The real line is printed bare by console.log in main.ts;
 # every record that carries attendee text goes through log(), which prefixes a
-# "[HH:MM:SS] " timestamp and escapes newlines, so it can never equal this line.
+# "[MM-DD HH:MM:SS] " timestamp and escapes newlines, so it can never equal this line.
 READY_LINE="[coordinator] running — $READY_MARK"
 ready_seen() { tail -c "+$((log_offset + 1))" "$LOG" 2>/dev/null | grep -qxF "$READY_LINE"; }
 STOP_TIMEOUT=45   # > the 30s drain, so a normally-draining daemon is given time to exit

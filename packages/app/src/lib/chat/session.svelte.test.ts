@@ -116,6 +116,12 @@ function fakeChat() {
     // Real MLS membership. The member list is derived from this now, not from the
     // roster's attested `chat_keys`, so the double has to answer it.
     groupMemberPubkeys: vi.fn().mockResolvedValue(groupMembers),
+    membershipVerdict: vi.fn().mockResolvedValue({ kind: "member" }),
+    lastVerdict: undefined as unknown,
+    damagedGroupIds: vi.fn(() => [] as string[]),
+    recheckDamaged: vi.fn().mockResolvedValue([]),
+    syncIssueCount: vi.fn(() => 0),
+    rejoin: vi.fn().mockResolvedValue("requested"),
     onMessage: undefined,
     onStateChange: undefined,
   };
@@ -410,18 +416,43 @@ describe("chat session — a failed send says WHICH failure it was", () => {
     expect(chatSession.phase).toBe("ready");
   });
 
-  it("a send with no routable group is a ChatUnroutableError, and demotes the room", async () => {
+  it("a send with no route and a POSITIVE not-member is a ChatUnroutableError, and demotes the room", async () => {
     await chatSession.ensure("naddr1", ctx, signer, OWNER);
     await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
     const chat = chatSession.chat as unknown as {
       send: ReturnType<typeof vi.fn>;
       nostrGroupId: ReturnType<typeof vi.fn>;
+      membershipVerdict: ReturnType<typeof vi.fn>;
     };
     chat.send.mockRejectedValue(new Error("no joined chat group yet"));
-    chat.nostrGroupId.mockResolvedValue(undefined); // removed from the group
+    chat.nostrGroupId.mockResolvedValue(undefined);
+    // The fresh roster names a room this device holds no state for.
+    chat.membershipVerdict.mockResolvedValue({ kind: "not-member", evicted: false });
 
     await expect(chatSession.send("hi")).rejects.toBeInstanceOf(ChatUnroutableError);
     expect(chatSession.phase).toBe("setup");
+  });
+
+  // Audit K-6: "unroutable" used to mean only that nostrGroupId() was undefined,
+  // which a slow roster read also produces, and the remedy offered was Rejoin.
+  it("a send with no route but UNKNOWN membership reconciles to unreachable, not Rejoin", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
+    const chat = chatSession.chat as unknown as {
+      send: ReturnType<typeof vi.fn>;
+      nostrGroupId: ReturnType<typeof vi.fn>;
+      membershipVerdict: ReturnType<typeof vi.fn>;
+    };
+    chat.send.mockRejectedValue(new Error("no joined chat group yet"));
+    chat.nostrGroupId.mockResolvedValue(undefined);
+    chat.membershipVerdict.mockResolvedValue({ kind: "unknown", reason: "roster-unavailable" });
+
+    const thrown = await chatSession.send("hi").then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(thrown).not.toBeInstanceOf(ChatUnroutableError);
+    expect(chatSession.phase).toBe("unreachable");
   });
 
   // DS41-052: a removed member still holds the group (a "corpse"), so the group id
@@ -666,5 +697,131 @@ describe("chat session — reactions, edits and deletes", () => {
     await chatSession.toggleReaction("m1", "🙏");
     expect(received).toEqual([{ action: { type: "react", target: "m1", emoji: "🙏" }, coordinate: COORD }]);
     leaderTab.dispose();
+  });
+});
+
+/**
+ * Audit U-1 / K-6 / K-3 / R-9: the session keeps "we can't tell yet" apart from
+ * "this device is out", and only the latter ever leads to Rejoin.
+ */
+describe("chat session — unknown is not eviction (audit U-1, K-6)", () => {
+  let locks: FakeLockManager;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    FakeChannel.buses.clear();
+    locks = new FakeLockManager();
+    resolveChatIdentity.mockResolvedValue({ pubkey: "c".repeat(64) });
+    chatCreate.mockImplementation(async () => fakeChat());
+    __setChatCoordinatorFactoryForTests(
+      (opts: TabCoordinatorOptions) =>
+        new ChatTabCoordinator({
+          ...opts,
+          locks: locks as never,
+          createChannel: (n: string) => new FakeChannel(n) as never,
+        }),
+    );
+  });
+
+  afterEach(() => {
+    chatSession.dispose();
+    __setChatCoordinatorFactoryForTests(null);
+  });
+
+  it("an unconfirmable membership with no route is `unreachable`, never `evicted`", async () => {
+    chatCreate.mockImplementation(async () => {
+      const chat = fakeChat();
+      chat.nostrGroupId = vi.fn().mockResolvedValue(undefined);
+      chat.ensurePublished = vi.fn(async () => {
+        chat.lastVerdict = { kind: "unknown", reason: "roster-unavailable" };
+      });
+      return chat;
+    });
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.phase).toBe("unreachable"));
+  });
+
+  it("a positive not-member waiting for its Add is `setup` (Connecting)", async () => {
+    chatCreate.mockImplementation(async () => {
+      const chat = fakeChat();
+      chat.nostrGroupId = vi.fn().mockResolvedValue(undefined);
+      chat.ensurePublished = vi.fn(async () => {
+        chat.lastVerdict = { kind: "not-member", evicted: false };
+      });
+      return chat;
+    });
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.chat?.ensurePublished).toHaveBeenCalled());
+    expect(chatSession.phase).toBe("setup");
+  });
+
+  // Audit S-5: the room is bound before the enrolment decision, not after it.
+  it("starts (binds) the room before deciding whether to enrol", async () => {
+    const order: string[] = [];
+    chatCreate.mockImplementation(async () => {
+      const chat = fakeChat();
+      chat.start = vi.fn(async () => void order.push("start"));
+      chat.ensurePublished = vi.fn(async () => void order.push("ensurePublished"));
+      return chat;
+    });
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    expect(order).toEqual(["start", "ensurePublished"]);
+  });
+
+  it("a damaged group is reported, re-checked, and the room recovers without a reload", async () => {
+    let damaged = ["beef"];
+    chatCreate.mockImplementation(async () => {
+      const chat = fakeChat();
+      chat.damagedGroupIds = vi.fn(() => damaged);
+      chat.nostrGroupId = vi.fn().mockResolvedValue(undefined);
+      chat.recheckDamaged = vi.fn(async () => (damaged = []));
+      return chat;
+    });
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.phase).toBe("unreachable"));
+    expect(chatSession.damaged).toBe(true);
+
+    const chat = chatSession.chat as unknown as { nostrGroupId: ReturnType<typeof vi.fn> };
+    chat.nostrGroupId.mockResolvedValue("gid");
+    await chatSession.recheck();
+    expect(chatSession.damaged).toBe(false);
+    expect(chatSession.phase).toBe("ready");
+  });
+
+  // Audit R-9: a fork or stall reads as "re-syncing", and the room stays usable.
+  it("unreadable room events show as re-syncing, never as eviction", async () => {
+    chatCreate.mockImplementation(async () => {
+      const chat = fakeChat();
+      chat.syncIssueCount = vi.fn(() => 3);
+      return chat;
+    });
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.phase).toBe("ready"));
+    expect(chatSession.resyncing).toBe(3);
+  });
+
+  it("rate-limits Rejoin: a second press inside the cooldown sends nothing", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
+    const chat = chatSession.chat as unknown as { rejoin: ReturnType<typeof vi.fn> };
+    chatSession.rejoinBlockedUntil = 0;
+
+    expect(await chatSession.rejoin()).toBe("requested");
+    expect(await chatSession.rejoin({ force: true })).toBe("rate-limited");
+    expect(chat.rejoin).toHaveBeenCalledTimes(1);
+    expect(chatSession.rejoinBlockedUntil).toBeGreaterThan(Date.now());
+    chatSession.rejoinBlockedUntil = 0;
+  });
+
+  it("an unforced Rejoin that finds no positive eviction sends nothing and starts no cooldown", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.phase).toBe("ready"));
+    const chat = chatSession.chat as unknown as { rejoin: ReturnType<typeof vi.fn> };
+    chat.rejoin.mockResolvedValue("skipped");
+    chatSession.rejoinBlockedUntil = 0;
+
+    expect(await chatSession.rejoin()).toBe("skipped");
+    expect(chatSession.rejoinBlockedUntil).toBe(0);
+    expect(chatSession.phase).toBe("ready");
   });
 });

@@ -402,6 +402,27 @@ export async function publishSigned(
   event: VerifiedEvent,
   relays?: string[],
 ): Promise<RelayPublishOutcome[]> {
+  const outcomes = await publishSignedOutcomes(event, relays);
+  if (outcomes.some((o) => o.ok)) return outcomes;
+  // Zero relays took it. Keep NDK's wording — isBenignRelayError and the outbox UI
+  // both key off "not enough relays received", and publishOrQueue turns this into
+  // a durable queue entry rather than a lost event.
+  throw new Error(
+    `Not enough relays received the event (0 published, 1 required): ` +
+      outcomes.map((o) => `${o.url}: ${o.reason ?? "declined"}`).join("; "),
+  );
+}
+
+/**
+ * {@link publishSigned} without the zero-acks throw: every relay's own outcome,
+ * always. For a caller that has to tell "a relay said no" from "a relay never
+ * answered" (the marmot network adapter, audit K-7), which the thrown message
+ * flattens into one string.
+ */
+export async function publishSignedOutcomes(
+  event: VerifiedEvent,
+  relays?: string[],
+): Promise<RelayPublishOutcome[]> {
   const instance = getNdk();
   const ndkEvent = new NDKEvent(instance, event as any);
   const set = relaySet(relays) ?? (await calculateRelaySetFromEvent(instance, ndkEvent, 1));
@@ -427,17 +448,8 @@ export async function publishSigned(
   // Every per-relay promise is created with its handlers already attached, so a
   // relay refusing the kind can neither reject into the void nor throw.
   const outcomes = await Promise.all(targets.map((relay) => publishToRelay(relay, ndkEvent)));
-  const accepted = outcomes.filter((o) => o.ok);
-  ndkEvent.publishStatus = accepted.length > 0 ? "success" : "error";
-  if (accepted.length > 0) return outcomes;
-
-  // Zero relays took it. Keep NDK's wording — isBenignRelayError and the outbox UI
-  // both key off "not enough relays received", and publishOrQueue turns this into
-  // a durable queue entry rather than a lost event.
-  throw new Error(
-    `Not enough relays received the event (0 published, 1 required): ` +
-      outcomes.map((o) => `${o.url}: ${o.reason ?? "declined"}`).join("; "),
-  );
+  ndkEvent.publishStatus = outcomes.some((o) => o.ok) ? "success" : "error";
+  return outcomes;
 }
 
 /** Subscribe with a filter; caller handles events and cleanup. */

@@ -5,8 +5,19 @@
    * and performs the actual revoke/reprocess/details actions (which mutate its data
    * model), told via callbacks. Same shape as AdminTalks.
    */
-  import type { AdminPerson } from "$lib/events/admin-people.js";
+  import type { AdminPerson, ChatAttendeeStatus } from "$lib/events/admin-people.js";
+  import type { MessageKey } from "$lib/i18n/messages.js";
   import { t, tp } from "$lib/i18n/i18n.svelte.js";
+
+  /** Badge label and its tooltip, per chat status (audit U-3). */
+  const CHAT_STATUS: Record<ChatAttendeeStatus, [MessageKey, MessageKey]> = {
+    "in-room": ["admin.chat.inRoom", "admin.chat.inRoomHint"],
+    waiting: ["admin.chat.waiting", "admin.chat.waitingHint"],
+    attested: ["admin.chat.attested", "admin.chat.attestedHint"],
+    "not-yet": ["admin.chat.notYet", "admin.chat.notYetHint"],
+    stuck: ["admin.chat.stuck", "admin.chat.stuckHint"],
+    refused: ["admin.chat.refused", "admin.chat.refusedHint"],
+  };
   import PersonId from "$lib/components/PersonId.svelte";
 
   let {
@@ -54,6 +65,16 @@
         {#if person.role === "organizer"}<span class="badge">{t("admin.people.organizer")}</span>{/if}
         {#if person.media?.length}<span class="badge">{tp("admin.requests.video", person.media.length)}</span>{/if}
         {#if person.op === "failed"}<span class="badge warn">{t("admin.people.failed")}</span>{/if}
+        {#if person.chat}
+          <!-- Group-chat status (audit U-3). "stuck" and "refused" are the ones an
+               organizer must see: the member is out of the chat and nothing on
+               their side will fix it. -->
+          <span
+            class="badge"
+            class:warn={person.chat === "stuck" || person.chat === "refused"}
+            title={t(CHAT_STATUS[person.chat][1])}>{t(CHAT_STATUS[person.chat][0])}</span
+          >
+        {/if}
         {#if !person.intakeAvailable && !person.revoked}
           <!-- UX-A1: a roster member whose intake aged out of the backfill window
                still gets a card + working controls, never silently omitted. -->

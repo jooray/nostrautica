@@ -4,7 +4,7 @@
   // Under per-device keys each browser/device mints and attests its own chat key
   // (attest.ts / NIP §10.2), joining the group on its own. This card lists the
   // account's attested devices for THIS event (from the ECK roster's chat_keys),
-  // lets the user rename THIS device's label (re-attest with proof of possession),
+  // lets the user rename THIS device (saved locally, sent with its next attestation),
   // and revoke any device (21607 op:revoke, sealed by the account key — no proof
   // needed). Renaming another device is impossible by design: only the holder of a
   // device's secret can produce its proof of possession, so "rename" is offered for
@@ -48,7 +48,7 @@
 
   async function refresh(): Promise<void> {
     if (!account) return;
-    const roster = await fetchRoster(ctx).catch(() => cachedRoster(ctx.coordinate));
+    const roster = (await fetchRoster(ctx).catch(() => undefined)) ?? cachedRoster(ctx.coordinate);
     devices = devicesForAccount(roster, account);
   }
 
@@ -61,8 +61,30 @@
     void refresh().finally(() => (loading = false));
   });
 
+  /**
+   * This device's locally saved label when it differs from what the roster
+   * shows (audit K-5): a rename is kept here until the device next attests, so
+   * this device shows it at once and says it isn't shared yet.
+   */
+  let pendingLabel = $state<string | undefined>(undefined);
+  $effect(() => {
+    const me = myChatPubkey;
+    if (!me) return;
+    void import("$lib/chat/identity.js")
+      .then(({ loadDeviceLabel }) => loadDeviceLabel(me))
+      .then((saved) => {
+        if (myChatPubkey === me) pendingLabel = saved;
+      })
+      .catch(() => {});
+  });
+
+  function localLabel(d: Device): string | undefined {
+    if (d.pubkey !== myChatPubkey || !pendingLabel) return undefined;
+    return pendingLabel !== d.label ? pendingLabel : undefined;
+  }
+
   function labelFor(d: Device): string {
-    return d.label?.trim() || d.pubkey.slice(0, 12) + "…";
+    return localLabel(d) ?? (d.label?.trim() || d.pubkey.slice(0, 12) + "…");
   }
   function addedLabel(d: Device): string {
     try {
@@ -85,7 +107,7 @@
 
   function startRename(d: Device): void {
     renaming = d.pubkey;
-    renameDraft = d.label ?? "";
+    renameDraft = localLabel(d) ?? d.label ?? "";
     confirmingRevoke = null;
   }
 
@@ -99,32 +121,24 @@
       // it lazily (pulls the marmot bundle only when the user actually renames).
       const { resolveChatIdentity, saveDeviceLabel } = await import("$lib/chat/identity.js");
       const id = await resolveChatIdentity(session.signer);
-      // Remember the choice locally BEFORE publishing. Every chat open re-attests
-      // this device, and it used to send `defaultDeviceLabel()` — which the
-      // coordinator's `label = COALESCE(excluded.label, …)` upsert always prefers
-      // over the stored one. So a rename held only until the next chat start and
-      // then silently reverted to "Chrome on macOS". Persisting first means even a
-      // publish that only reaches the outbox still ends with the right label going
-      // out whenever the device next attests.
+      // Saved LOCALLY only, and not attested (audit K-5, interim). The only way to
+      // tell the coordinator a new label is a 21607 op:"add", and the coordinator
+      // reads every add from a device it still holds a leaf for as "re-enrol me":
+      // it removes the device from the room and adds it back. Renaming kicked the
+      // device. The saved label rides the next real attestation instead —
+      // ensurePublished sends `loadDeviceLabel() ?? defaultDeviceLabel()`, which
+      // is also what stopped renames reverting (the coordinator's
+      // `label = COALESCE(excluded.label, …)` upsert prefers any incoming label).
+      // Until the protocol can say "refresh, don't evict" (audit K-1's `intent`),
+      // other members see the new name the next time this device joins.
       await saveDeviceLabel(id.pubkey, label);
-      const delivered = await sendChatKeyAttestation(session.signer, ctx, {
-        op: "add",
-        chatPubkey: id.pubkey,
-        clientId: id.clientId,
-        label,
-        deviceSecretKey: id.secretKey,
-      });
-      // Optimistic: reflect the new label locally; the coordinator republishes the
-      // roster when it records the attestation (its `onRosterChanged` hook), and
-      // the refresh below picks that up.
-      devices = devices.map((x) => (x.pubkey === d.pubkey ? { ...x, label } : x));
-      notice = t(delivered ? "chat.devices.updated" : "chat.devices.queued");
+      pendingLabel = label;
+      notice = t("chat.devices.renamedLocal");
       renaming = null;
     } catch {
       notice = t("chat.devices.actionFailed");
     } finally {
       busy = null;
-      setTimeout(() => void refresh(), 4000);
     }
   }
 
@@ -185,6 +199,7 @@
                 <span class="name">{labelFor(d)}</span>
                 {#if isThis}<span class="badge-you">{t("chat.devices.thisDevice")}</span>{/if}
                 {#if d.external && labelFor(d) !== t("chat.wn.badge")}<span class="badge-ext">{t("chat.wn.badge")}</span>{/if}
+                {#if localLabel(d)}<span class="added">{t("chat.devices.renamePending")}</span>{/if}
                 <span class="added">{addedLabel(d)}</span>
               {/if}
             </div>

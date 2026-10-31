@@ -85,6 +85,73 @@ export function visiblePending(
 /** Operational state of an approved person, derived from 21606 statuses. */
 export type PersonOpState = "ok" | "processing" | "failed";
 
+/**
+ * One approved person's group-chat status, for the organizer (audit U-3).
+ *
+ * - `in-room`: one of their devices holds a leaf in this event's MLS group. Only
+ *   knowable when THIS browser's chat session holds the room (the organizer's own
+ *   device is a member) — `memberDevices` is that session's group roster.
+ * - `waiting`: they have a device attested (roster `chat_keys`) but it is not in
+ *   the room this session can see.
+ * - `attested`: a device is attested and membership cannot be seen from here (no
+ *   live chat session for this event in this browser).
+ * - `not-yet`: no chat device at all; they have not opened the chat.
+ * - `stuck`: the coordinator gave up adding them (21606 poison, stage
+ *   `chat_sync_member`). Retrying is a coordinator-side action.
+ * - `refused`: the coordinator refused their device (21606 poison, stage
+ *   `chat_attestation`) — only if the coordinator also seals that to E_id; today
+ *   it seals it to the attendee, so organizers rarely see it.
+ */
+export type ChatAttendeeStatus = "in-room" | "waiting" | "attested" | "not-yet" | "stuck" | "refused";
+
+/** 21606 stages that are about one attendee's chat membership. */
+export const CHAT_SYNC_STAGE = "chat_sync_member";
+export const CHAT_ATTESTATION_STAGE = "chat_attestation";
+
+/**
+ * Attendees the coordinator currently could not add to the chat (audit R-3/U-3):
+ * the latest 21606 for stage `chat_sync_member` and that pubkey is a poison
+ * (coordinator error_category `chat_sync_incomplete`). A later `cleared` for the
+ * same stage and pubkey resolves it. Distinct pubkeys, input order.
+ */
+export function chatSyncStuckPubkeys(statuses: CoordinatorStatusContent[] | undefined): string[] {
+  const latest = new Map<string, CoordinatorStatusContent>();
+  for (const s of statuses ?? []) {
+    if (s.stage !== CHAT_SYNC_STAGE || !s.pubkey) continue;
+    if (s.state !== "poison" && s.state !== "cleared") continue;
+    const prev = latest.get(s.pubkey);
+    if (!prev || s.at > prev.at) latest.set(s.pubkey, s);
+  }
+  return [...latest.values()].filter((s) => s.state === "poison").map((s) => s.pubkey!);
+}
+
+/**
+ * Derive {@link ChatAttendeeStatus} from data Admin already holds: the roster's
+ * `chat_keys`, the 21606 statuses sealed to E_id, and (when this browser's chat
+ * session is on this event) the group's real member list. A `cleared` status
+ * newer than a poison on the same stage resolves it.
+ */
+export function chatStatusFor(
+  pubkey: string,
+  chatKeys: { pubkey: string }[] | undefined,
+  statuses: CoordinatorStatusContent[] | undefined,
+  memberDevices: string[] | undefined,
+): ChatAttendeeStatus {
+  const latestPoison = (stage: string): boolean => {
+    const mine = (statuses ?? [])
+      .filter((s) => s.pubkey === pubkey && s.stage === stage && (s.state === "poison" || s.state === "cleared"))
+      .sort((a, b) => b.at - a.at);
+    return mine[0]?.state === "poison";
+  };
+  const keys = (chatKeys ?? []).map((k) => k.pubkey);
+  const inRoom = !!memberDevices && keys.some((k) => memberDevices.includes(k));
+  if (inRoom) return "in-room";
+  if (latestPoison(CHAT_SYNC_STAGE)) return "stuck";
+  if (latestPoison(CHAT_ATTESTATION_STAGE)) return "refused";
+  if (keys.length === 0) return "not-yet";
+  return memberDevices ? "waiting" : "attested";
+}
+
 export interface AdminPerson {
   pubkey: string;
   role: "attendee" | "organizer";
@@ -118,6 +185,8 @@ export interface AdminPerson {
   withdrawn: boolean;
   /** They also asked for their data to be purged (`delete_data`). */
   withdrawalRequestedPurge: boolean;
+  /** Group-chat status (audit U-3); absent when the event has no chat. */
+  chat?: ChatAttendeeStatus;
 }
 
 export interface BuildPeopleParams {
@@ -129,6 +198,11 @@ export interface BuildPeopleParams {
   known: PendingRequest[];
   directory?: DirectoryEntryContent[];
   statuses?: CoordinatorStatusContent[];
+  /**
+   * Set only for a chat-enabled event (audit U-3). `memberDevices` is this
+   * browser's chat session's group roster for THIS event, when it has one.
+   */
+  chat?: { memberDevices?: string[] };
 }
 
 /** True when an approved-person op state should read "failed" for this pubkey. */
@@ -152,7 +226,7 @@ function opStateFor(
  * instead of silently re-entering the pending queue.
  */
 export function buildApprovedPeople(params: BuildPeopleParams): AdminPerson[] {
-  const { roster, sessionApproved, revoked, known, directory, statuses } = params;
+  const { roster, sessionApproved, revoked, known, directory, statuses, chat } = params;
   const rosterByPk = new Map(
     (roster?.attendees ?? []).map((a) => [a.pubkey, a] as const),
   );
@@ -196,6 +270,9 @@ export function buildApprovedPeople(params: BuildPeopleParams): AdminPerson[] {
       inRoster: rosterByPk.has(pubkey),
       withdrawn: !!req?.withdrawn,
       withdrawalRequestedPurge: !!req?.withdrawalRequestedPurge,
+      ...(chat
+        ? { chat: chatStatusFor(pubkey, rosterEntry?.chat_keys, statuses, chat.memberDevices) }
+        : {}),
     };
   });
 }

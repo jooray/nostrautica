@@ -363,6 +363,32 @@ describe("reading a paginated roster", () => {
     expect((await promise)?.attendees).toHaveLength(2);
   });
 
+  // Audit K-2: "no roster record arrived" used to come back as a synthetic
+  // `{attendees: []}`, which chat read as "the roster names no group for me" and
+  // re-enrolled the device (remove + re-add on the coordinator).
+  it("answers 'unknown' (undefined), not an empty roster, when no record arrives", async () => {
+    const promise = fetchRoster(ctx);
+    await settleMicrotasks();
+    ofKind(KIND_ROSTER)[0].settle([]);
+    expect(await promise).toBeUndefined();
+  });
+
+  it("a record for another space only is 'unknown' too", async () => {
+    const promise = fetchRoster(ctx);
+    await settleMicrotasks();
+    const neighbour = finalizeEvent(
+      {
+        kind: KIND_ROSTER,
+        created_at: 500,
+        tags: [["d", "warm-event"], ["a", makeCoordinate(getPublicKey(generateSecretKey()), "warm-event")]],
+        content: eckEncrypt(generateEck(), JSON.stringify({ v: 2, eck_current: 1, attendees: [] })),
+      },
+      coordSk,
+    );
+    ofKind(KIND_ROSTER)[0].settle([neighbour]);
+    expect(await promise).toBeUndefined();
+  });
+
   it("a roster that fits still costs exactly one relay read", async () => {
     const promise = fetchRoster(ctx);
     await settleMicrotasks();

@@ -166,7 +166,8 @@ import type { ChatMls } from "./chat/mls.js";
 import { discoverKeyPackages } from "./chat/key-package-discovery.js";
 import { profilePicture } from "./chat/avatar.js";
 import { sanitizeRelayUrls, type RelayPolicy } from "./net/relay-urls.js";
-import { sanitizeLogText } from "./log-line.js";
+import { describeError, LogThrottle, logStamp, sanitizeLogText } from "./log-line.js";
+import { retryInBackground } from "./background-retry.js";
 import {
   sanitizeLlmText,
   sanitizeAiProfile,
@@ -278,8 +279,9 @@ const INBOX_RESCAN_INTERVAL_MS = 120_000;
  * people's relay budget to shave minutes off something nobody is waiting on.
  */
 const PROFILE_REFRESH_INTERVAL_MS = 3_600_000;
-/** Retry cadence for an R-53 roster address upgrade that a relay refused or timed out. */
-const ROSTER_MIGRATION_RETRY_MS = 600_000;
+/** Retry gaps for an R-53 roster address upgrade that a relay refused or timed out
+ *  (audit O-5: backing off, the last repeats). */
+const ROSTER_MIGRATION_RETRY_MS = [600_000, 1_200_000, 2_400_000, 4_800_000, 7_200_000];
 /**
  * How long after an event ends the sweep keeps watching its attendees' profiles.
  *
@@ -490,7 +492,7 @@ const short = (pk: string) => pk.slice(0, 8);
  *  cover one inbox rescan's worth of junk without becoming a leak of its own. */
 const MAX_UNDECRYPTABLE_MEMO = 10_000;
 function log(msg: string): void {
-  const t = new Date().toISOString().slice(11, 19);
+  const t = logStamp();
   // One choke point for attendee-controlled text (names, titles, skills): it must
   // never start a new line, least of all a forged readiness marker (audit R-48).
   console.log(`[${t}] ${sanitizeLogText(msg)}`);
@@ -521,6 +523,42 @@ function relayKey(relays: string[]): string {
  * or an inbox, so there is nothing left for them to race over.
  */
 const RESTORE_CONCURRENCY = 4;
+
+/** Window of {@link Coordinator.chatErrorThrottle} (audit R-5). */
+const CHAT_ERROR_LOG_WINDOW_MS = 5 * 60_000;
+
+/**
+ * The daemon-wide 30443 watcher (audit R-1). Debounce of a re-subscribe after an
+ * eligibility change: an approval or an attestation burst is one re-subscribe.
+ */
+const KP_RESUBSCRIBE_DEBOUNCE_MS = 2_000;
+/** Authors per 30443 filter. Relays cap the size of a filter (strfry and others
+ *  refuse very long `authors` lists), so a big roster is split across filters. */
+export const KP_AUTHORS_PER_FILTER = 200;
+/** How far back a (re-)subscribe asks for key packages. Older ones are found by
+ *  the roster scan and syncMember's fetch, which read by author without `since`. */
+const KP_SINCE_SEC = 3_600;
+/** Safety net: re-derive the eligible author set this often even without a hook
+ *  firing, so an eligibility change on a path nothing hooked heals by itself. */
+const KP_REFRESH_INTERVAL_MS = 5 * 60_000;
+
+/** The 21606 `error_category` of a poisoned `chat_sync_member` (audit R-3). */
+export const CHAT_SYNC_POISON_CATEGORY = "chat_sync_incomplete";
+
+/** Gap between two restored events' chat subscriptions at boot (audit S-4). */
+const CHAT_BOOT_SUBSCRIBE_STAGGER_MS = 300;
+/** How often a commit whose publish was uncertain is re-sent (audit K-7 point 2). */
+const PENDING_PUBLICATION_RETRY_MS = 60_000;
+/**
+ * The method names a MarmotClientMls may expose for re-sending commits whose
+ * publish was uncertain (audit K-7). It is being added separately; until it lands
+ * the sweep is a no-op, so the coordinator looks for it instead of requiring it.
+ */
+const PENDING_PUBLICATION_RETRY_METHODS = [
+  "retryPendingPublications",
+  "retryPendingPublication",
+  "sweepPendingPublications",
+] as const;
 
 /**
  * Whether the roster is also published at its pre-R-53 address, the bare event
@@ -706,6 +744,9 @@ export interface CoordinatorDeps {
   wrapRetryDelaysMs?: number[];
   /** Re-check delays for a 21601 that arrived before its own 21600. Default [250, 750, 1500]. */
   enrollmentWaitMs?: number[];
+  /** Debounce of the daemon-wide 30443 re-subscribe after an eligibility change
+   *  (audit R-1). Default {@link KP_RESUBSCRIBE_DEBOUNCE_MS}. */
+  keyPackageResubscribeDebounceMs?: number;
   /** Max simultaneously installed events (audit COORD-3). Default 50. */
   maxEvents?: number;
   /**
@@ -850,6 +891,21 @@ export class Coordinator {
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly wrapRetryDelaysMs: number[];
   private readonly enrollmentWaitMs: number[];
+  private readonly kpResubscribeDebounceMs: number;
+  /** The ONE daemon-wide 30443 subscription (audit R-1) and the author set it was
+   *  opened for, as `key`. */
+  private kpSub?: { key: string; close: () => void };
+  /** Chat identity → the events it is eligible for, as of the last re-subscribe.
+   *  The watcher dispatches by this, so one delivery reaches every event the
+   *  device belongs to and a stranger's key package reaches none. */
+  private kpAuthorIndex = new Map<string, Set<string>>();
+  private kpResubscribeTimer?: ReturnType<typeof setTimeout>;
+  /** Tail of the daemon-wide chat commit queue ({@link withChatCommitLock}). */
+  private chatCommitChain: Promise<unknown> = Promise.resolve();
+  /** Next stagger slot for a boot-time chat subscription ({@link subscribeChatStaggered}). */
+  private bootChatSubSlots = 0;
+  /** Overlap guard for the pending-publication retry sweep. */
+  private pendingPublicationSweepRunning = false;
   /** In-flight {@link awaitEnrollment} waits, bounded by MAX_ENROLLMENT_WAITS. */
   private enrollmentWaits = 0;
   private readonly maxEvents: number;
@@ -965,6 +1021,9 @@ export class Coordinator {
   /** Events already warned about the roster ceiling (audit B-8) — once per process,
    *  so a burst of approvals near the limit produces one notice, not one per person. */
   private readonly rosterWarned = new Set<string>();
+  /** Rate limit for chat handler failures (audit R-5): once per handler+event per
+   *  window, with a count of what was suppressed. */
+  private readonly chatErrorThrottle = new LogThrottle(CHAT_ERROR_LOG_WINDOW_MS, () => this.now());
   /** Per-phase boot accounting, live only for the duration of {@link start} — the
    *  same code paths run for a live install, where the numbers would be noise. */
   private boot?: BootPhases;
@@ -974,6 +1033,7 @@ export class Coordinator {
     this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
     this.wrapRetryDelaysMs = deps.wrapRetryDelaysMs ?? [5_000, 30_000];
     this.enrollmentWaitMs = deps.enrollmentWaitMs ?? [250, 750, 1_500];
+    this.kpResubscribeDebounceMs = deps.keyPackageResubscribeDebounceMs ?? KP_RESUBSCRIBE_DEBOUNCE_MS;
     this.maxEvents = deps.maxEvents ?? DEFAULT_MAX_EVENTS;
     this.allowedEidPubkeys = new Set(deps.allowedEidPubkeys ?? []);
     this.relayPolicy = deps.relayPolicy ?? {};
@@ -1025,7 +1085,7 @@ export class Coordinator {
         // because an attestation burst is one roster.
         onRosterChanged: (coordinate) => {
           const state = this.events.get(coordinate);
-          if (state) void this.publishRosterCoalesced(state).catch(() => {});
+          if (state) void this.publishRosterCoalesced(state).catch((e) => this.logChatFailure("roster republish", coordinate, e));
         },
         // Attestation refusals reach the person who can act on them. Each one is a
         // dead end the device cannot detect on its own: it published a key package,
@@ -1040,6 +1100,17 @@ export class Coordinator {
         },
         log,
       });
+      // Every eligibility change, from whichever side, ends in invalidateEligibility:
+      // approval and revoke here, attestation, device revoke, rename and link
+      // inside MarmotAdmin (its `rosterChanged`). That is exactly when the
+      // daemon-wide 30443 filter's `authors` goes stale (audit R-1), so hook it
+      // once here instead of chasing every call site.
+      const marmot = this.marmot;
+      const invalidate = marmot.invalidateEligibility.bind(marmot);
+      marmot.invalidateEligibility = (coordinate: string) => {
+        invalidate(coordinate);
+        this.scheduleKeyPackageResubscribe();
+      };
     }
     this.jobs = new JobRunner(deps.store, {
       now: this.now,
@@ -1283,6 +1354,17 @@ export class Coordinator {
         // how the organizer finds out if it never resolves.
         if (!synced) {
           throw new Error(`chat sync for ${short(p.pubkey)} did not complete (a device was left out of the group)`);
+        }
+        // A sync that poisoned earlier and has now gone through (re-queued at boot or
+        // by an organizer reprocess, audit R-3): the member and the organizer were
+        // both told it was stuck, and both cache that notice, so tell them it is not.
+        if (this.deps.store.clearPoisonStatus(p.coordinate, "chat_sync_member", p.pubkey) > 0) {
+          const st = this.events.get(p.coordinate);
+          if (st) {
+            await this.announceCleared(st, p.pubkey, "chat_sync_member").catch((e) =>
+              log(`[status] could not announce cleared chat sync for ${short(p.pubkey)}: ${describeError(e)}`),
+            );
+          }
         }
         await this.scheduleEnrolmentRecheck(p.coordinate, p.pubkey, p.recheck, p.chain);
       });
@@ -1764,6 +1846,7 @@ export class Coordinator {
       map.delete(grant.coordinate);
     }
     this.events.delete(grant.coordinate);
+    this.scheduleKeyPackageResubscribe(); // its authors leave the 30443 filter (R-1)
     const prev = this.suspended.get(grant.coordinate);
     const attempts = (prev?.attempts ?? 0) + 1;
     const delaysMs = this.wrapRetryDelaysMs;
@@ -3297,7 +3380,12 @@ export class Coordinator {
    * (audit H4): no transcript/summary/profile/embedding/scoring work — and thus
    * no provider billing — for an event that disabled AI matching.
    */
-  private enqueueProcess(coordinate: string, pubkey: string, kind0Bio?: string): EnqueueOutcome | "skipped" {
+  private enqueueProcess(
+    coordinate: string,
+    pubkey: string,
+    kind0Bio?: string,
+    opts: { quietDedupe?: boolean } = {},
+  ): EnqueueOutcome | "skipped" {
     const state = this.events.get(coordinate);
     if (state?.matching === "off") return "skipped";
     const attendee = this.deps.store.getAttendee(coordinate, pubkey);
@@ -3353,11 +3441,17 @@ export class Coordinator {
     // sat without profiles for two weeks (see the `reprocess` handler): a poisoned
     // row makes its key permanently un-runnable, and a sweep that logs nothing
     // would hide that state indefinitely instead of surfacing it.
-    return this.jobs.enqueue("process_attendee", key, {
-      coordinate,
-      pubkey,
-      sourceRevision: attendee?.source_revision ?? null,
-    });
+    return this.jobs.enqueue(
+      "process_attendee",
+      key,
+      {
+        coordinate,
+        pubkey,
+        sourceRevision: attendee?.source_revision ?? null,
+      },
+      0,
+      opts,
+    );
   }
 
   /** Account-addressed gift wraps must reach both event-local and reader-default relays. */
@@ -3703,7 +3797,9 @@ export class Coordinator {
       await this.deps.transport.publish(grant, this.accountRelays(state));
       await this.publishDirectory(state, a.pubkey);
       // Rebuild matches under our authorship (the prior 31605s are undecryptable to us).
-      if (state.matching === "on") this.enqueueProcess(state.coordinate, a.pubkey);
+      // Quiet (audit O-1): an attendee this daemon already processed is "done", which
+      // is the expected outcome here, not lost work.
+      if (state.matching === "on") this.enqueueProcess(state.coordinate, a.pubkey, undefined, { quietDedupe: true });
     }
     await this.publishRosterCoalesced(state);
     log(`[handover] ${state.coordinate}: seeded ${seeded}, republished directory/roster/grants under this coordinator`);
@@ -4049,6 +4145,8 @@ export class Coordinator {
 
   /** Settles when the boot-time R-53 address upgrade has finished. Tests await it. */
   rosterAddressMigration?: Promise<void>;
+  /** Events whose R-53 upgrade is in a failure streak, so it is logged once (O-5). */
+  private readonly rosterUpgradeFailing = new Set<string>();
 
   /**
    * Upgrade step for the derived roster/matrix address (audit R-53,
@@ -4099,9 +4197,17 @@ export class Coordinator {
           await this.publishMatrix(state);
           this.deps.store.nextPublishCreatedAt(matrixDone, Math.floor(this.now() / 1000));
         }
+        if (this.rosterUpgradeFailing.delete(state.coordinate)) {
+          log(`[roster] address upgrade for ${state.coordinate} went through after earlier failures`);
+        }
       } catch (e) {
         failed++;
-        log(`[roster] address upgrade failed for ${state.coordinate}: ${e instanceof Error ? e.message : e}`);
+        // Once per failure streak per event (audit O-5): the retry pass runs again
+        // and again while relays are refusing, and every pass used to say so.
+        if (!this.rosterUpgradeFailing.has(state.coordinate)) {
+          this.rosterUpgradeFailing.add(state.coordinate);
+          log(`[roster] address upgrade failed for ${state.coordinate}: ${describeError(e)} — retried in the background`);
+        }
       }
     }
     if (republished > 0) log(`[roster] republished ${republished} roster(s) at the derived address (R-53 upgrade)`);
@@ -5274,6 +5380,13 @@ export class Coordinator {
       await this.reevaluateBilling(coordinate);
       this.resumeParkedWork(coordinate);
       const pubkey = String(args.pubkey ?? "");
+      // A poisoned chat sync is as much "stuck work" as a poisoned profile run
+      // (audit R-3), and until now nothing but a restart could revive one. The
+      // attendee's, when the command names one; otherwise the whole event's.
+      if (this.marmot) {
+        const requeued = this.requeuePoisonedChatSyncs(`reprocess`, pubkey ? { coordinate, pubkey } : { coordinate });
+        if (requeued > 0) log(`[admin] reprocess ${coordinate}: re-queued ${requeued} poisoned chat sync(s)`);
+      }
       if (pubkey) {
         // Forget this attendee's finished/poisoned processing rows first, or the
         // enqueue below is silently dropped: the key is fixed (`:manual`), so
@@ -5631,6 +5744,7 @@ export class Coordinator {
     this.deps.store.recordDetachedEvent(coordinate, purgeAfter, Math.floor(this.now() / 1000));
     // Drop live state and DELETE key custody (D6).
     this.events.delete(coordinate);
+    this.scheduleKeyPackageResubscribe(); // its authors leave the 30443 filter (R-1)
     this.completedInstallGen.delete(coordinate);
     // A later re-install that hits a budget must notify again (audit SB-32).
     this.budgetNotified.delete(coordinate);
@@ -5873,7 +5987,9 @@ export class Coordinator {
       // event every time a relay had a bad minute.
       if (!kind0) continue;
       const bio = extractProfileBio(kind0.content) ?? "";
-      const outcome = this.enqueueProcess(state.coordinate, a.pubkey, bio);
+      // Quiet: "already done" is the expected answer for nearly everyone, and the
+      // outcome is inspected right below (audit O-1).
+      const outcome = this.enqueueProcess(state.coordinate, a.pubkey, bio, { quietDedupe: true });
       if (outcome === "enqueued") {
         refreshed++;
         log(`[profile-refresh] ${short(a.pubkey)}: kind-0 bio changed since the last run — re-enriching + re-matching`);
@@ -6266,18 +6382,61 @@ export class Coordinator {
     try {
       await this.setUpChat(state);
     } finally {
-      this.subscribeChat(state);
+      if (this.boot) this.subscribeChatStaggered(state);
+      else this.subscribeChat(state);
     }
+  }
+
+  /**
+   * At boot, open each restored event's chat subscriptions one slot after the
+   * previous one instead of all at once (audit S-4). Four restores used to open
+   * their kind-0 and 445 REQs in the same burst as their config fetches, roster
+   * scans and commits, which is when relays refused REQs and commit publishes
+   * timed out (K-7). Not on the readiness path: the timers are unref'd, the slot
+   * is short, and a detach or re-install in the meantime wins (the check below).
+   */
+  private subscribeChatStaggered(state: EventState): void {
+    const slot = this.bootChatSubSlots++;
+    const timer = setTimeout(() => {
+      this.closers.delete(cancel);
+      if (this.events.get(state.coordinate) !== state || !state.chat) return;
+      this.subscribeChat(state);
+    }, slot * CHAT_BOOT_SUBSCRIBE_STAGGER_MS);
+    const cancel = () => clearTimeout(timer);
+    this.closers.add(cancel);
+    if (typeof (timer as any).unref === "function") (timer as any).unref();
+  }
+
+  /**
+   * Run one chat commit at a time across ALL events (audit K-7 point 4). Each
+   * restoring event's setup may commit (admins, routing relays, avatar), and with
+   * RESTORE_CONCURRENCY = 4 those commits went out together, into relays that
+   * were already refusing REQs. A commit whose publish times out is the fork
+   * trigger, so they queue instead. Per-group serialization inside
+   * MarmotClientMls is unchanged; this only stops different groups' commits from
+   * overlapping. The roster scan is left outside it: it is mostly a relay read,
+   * and serializing it would put every event's read on the readiness path in turn.
+   */
+  private withChatCommitLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.chatCommitChain.then(fn, fn);
+    this.chatCommitChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 
   private async setUpChat(state: EventState): Promise<void> {
     await this.phase("chat:ensure-group", () =>
-      this.marmot!.ensureGroup({
-        coordinate: state.coordinate,
-        name: state.scoringCtx.title,
-        description: state.scoringCtx.summary,
-        relays: state.configRelays,
-      }),
+      // ensureGroup commits when it has to reconcile the admin set (syncAdmins).
+      this.withChatCommitLock(() =>
+        this.marmot!.ensureGroup({
+          coordinate: state.coordinate,
+          name: state.scoringCtx.title,
+          description: state.scoringCtx.summary,
+          relays: state.configRelays,
+        }),
+      ),
     );
     // Self-heal: additively fold the Whitenoise relays into the group's own
     // routing state, even for a group that already existed before this was
@@ -6291,14 +6450,17 @@ export class Coordinator {
     // published where it could not see them, and once the removed relay went away
     // the room split silently. `ensureRelays` is additive and idempotent — it was
     // simply being handed the wrong list.
-    await this.phase("chat:ensure-relays", () => this.marmot!.ensureRelays(state.coordinate, chatRelaysFor(state)));
+    await this.phase("chat:ensure-relays", () =>
+      this.withChatCommitLock(() => this.marmot!.ensureRelays(state.coordinate, chatRelaysFor(state))),
+    );
     // The group avatar mirrors the event icon (E_id kind-0 `picture`). Before the
     // roster scan, so a freshly created group already carries it when the first
     // members are added. A failed read leaves the avatar alone rather than
-    // clearing it — "could not fetch" is not "the icon was removed".
+    // clearing it — "could not fetch" is not "the icon was removed". The read
+    // stays outside the commit lock; only the commit queues.
     await this.phase("chat:ensure-avatar", async () => {
       if (await this.refreshEidProfile(state)) {
-        await this.marmot!.ensureAvatar(state.coordinate, state.eidProfile?.picture);
+        await this.withChatCommitLock(() => this.marmot!.ensureAvatar(state.coordinate, state.eidProfile?.picture));
       }
     });
     await this.phase("chat:roster-scan", () => this.marmot!.backfillApproved(state.coordinate));
@@ -6347,6 +6509,24 @@ export class Coordinator {
       .catch((e) => log(`[chat] avatar update for ${state.coordinate} failed: ${e instanceof Error ? e.message : e}`));
   }
 
+  /**
+   * A chat handler failed: say so, rate-limited per handler and event (audit R-5).
+   *
+   * These handlers used to end in `.catch(() => {})`. A commit the coordinator
+   * could not process (a fork, a decrypt failure, a policy rejection) or a key
+   * package it could not add left no trace at all, which is why the 28-Oct audit
+   * could not rule several kick/rejoin causes in or out. They fire once per relay
+   * delivery, so the line is throttled rather than printed per message.
+   */
+  private logChatFailure(what: string, coordinate: string, e: unknown): void {
+    const suppressed = this.chatErrorThrottle.admit(`${what}|${coordinate}`);
+    if (suppressed === undefined) return;
+    log(
+      `[chat] ${what} failed for ${coordinate}: ${describeError(e)}` +
+        (suppressed > 0 ? ` (${suppressed} similar failure(s) suppressed in the last ${CHAT_ERROR_LOG_WINDOW_MS / 60_000} min)` : ""),
+    );
+  }
+
   /** Subscribe to 30443 key packages (add/heal) and 445 group traffic (ingest). */
   private subscribeChat(state: EventState): void {
     if (!this.marmot) return;
@@ -6357,15 +6537,10 @@ export class Coordinator {
     const key = `${group?.nostr_group_id ?? "nogroup"}|${relayKey(chatRelays)}`;
     this.replaceSubscription(this.chatSubs, state.coordinate, key, () => {
       const closers: Array<() => void> = [];
-      // 30443 watcher: the in-handler authentication (approved attendee's authorized
-      // chat identity) is the gate, so a broad kind filter on the event relays is safe
-      // and needs no re-subscription as the author set changes on approve/attest.
-      const kpCloser = (this.deps.transport as any).subscribe?.(
-        { kinds: [KIND_KEY_PACKAGE] },
-        (e: NostrEvent) => void this.marmot!.handleKeyPackageEvent(state.coordinate, e as any).catch(() => {}),
-        chatRelays,
-      );
-      if (kpCloser) closers.push(kpCloser);
+      // No per-event 30443 watcher any more (audit R-1): one daemon-wide
+      // subscription, filtered to the eligible authors, covers every event — see
+      // {@link refreshKeyPackageSubscription}. This event's relays and authors join
+      // it on the next (debounced) re-subscribe.
       // The event identity's kind-0: its `picture` is the group avatar.
       const profileCloser = (this.deps.transport as any).subscribe?.(
         { kinds: [KIND_PROFILE], authors: [state.eidPubkey] },
@@ -6378,7 +6553,10 @@ export class Coordinator {
       if (group) {
         const msgCloser = (this.deps.transport as any).subscribe?.(
           { kinds: [KIND_GROUP_MESSAGE], "#h": [group.nostr_group_id] },
-          (e: NostrEvent) => void this.marmot!.ingest(state.coordinate, [e as any]).catch(() => {}),
+          (e: NostrEvent) =>
+            void this.marmot!.ingest(state.coordinate, [e as any]).catch((err) =>
+              this.logChatFailure("445 ingest", state.coordinate, err),
+            ),
           chatRelays,
         );
         if (msgCloser) closers.push(msgCloser);
@@ -6387,7 +6565,143 @@ export class Coordinator {
         for (const c of closers) c();
       };
     });
-    log(`[chat] watching 30443 + 445 for "${state.scoringCtx.title}"`);
+    this.scheduleKeyPackageResubscribe();
+    log(`[chat] watching 445 for "${state.scoringCtx.title}" (30443 via the daemon-wide watcher)`);
+  }
+
+  /**
+   * Re-derive the daemon-wide 30443 subscription soon (audit R-1), coalescing a
+   * burst of eligibility changes into one re-subscribe. During boot it waits for
+   * the end of {@link start}, which opens the subscription once for every
+   * restored event instead of once per event.
+   */
+  private scheduleKeyPackageResubscribe(): void {
+    if (!this.marmot || this.boot || this.kpResubscribeTimer) return;
+    this.kpResubscribeTimer = setTimeout(() => {
+      this.kpResubscribeTimer = undefined;
+      try {
+        this.refreshKeyPackageSubscription();
+      } catch (e) {
+        log(`[chat] 30443 re-subscribe failed: ${describeError(e)} — the safety-net refresh retries`);
+      }
+    }, this.kpResubscribeDebounceMs);
+    if (typeof (this.kpResubscribeTimer as any).unref === "function") (this.kpResubscribeTimer as any).unref();
+  }
+
+  /**
+   * ONE 30443 subscription for the whole daemon (audit R-1), on the union of the
+   * chat relays, filtered to `authors` = the union of every chat event's eligible
+   * chat identities.
+   *
+   * It used to be one UNFILTERED `{kinds:[30443]}` per chat-enabled event on every
+   * chat relay. Each stranger's key package was then delivered once per event
+   * (9× in production), held 9×, and logged 9×: 154,870 "holding 30443" lines in
+   * six days, and the most likely reason relay.primal.net and nostr.oxtr.dev
+   * answered ~28k REQs a day with "too many concurrent REQs".
+   *
+   * What the `authors` filter costs is the key package published BEFORE its 21607
+   * (the out-of-order enrolment MarmotAdmin "holds" for): its author is not in the
+   * filter yet, so the watcher never sees it. Two reads still find it. The
+   * attestation's syncMember fetches by author with no `since`, and the attestation
+   * changes eligibility, which re-subscribes here with the device now in `authors`
+   * and `since` an hour back.
+   *
+   * Idempotent: re-opens only when the author or relay set changed, and
+   * make-before-break, like {@link replaceSubscription}.
+   */
+  refreshKeyPackageSubscription(): void {
+    if (!this.marmot) return;
+    const index = new Map<string, Set<string>>();
+    const relays: string[] = [];
+    const seenRelays = new Set<string>();
+    let chatEvents = 0;
+    for (const state of this.events.values()) {
+      if (!state.chat) continue;
+      chatEvents++;
+      for (const r of chatRelaysFor(state)) {
+        if (seenRelays.has(r)) continue;
+        seenRelays.add(r);
+        relays.push(r);
+      }
+      for (const author of this.marmot.eligibleChatAuthors(state.coordinate)) {
+        let coords = index.get(author);
+        if (!coords) index.set(author, (coords = new Set()));
+        coords.add(state.coordinate);
+      }
+    }
+    // Swapped in before the subscribe, so the very first delivery of the new
+    // subscription (a stored event, synchronously in a test transport) already
+    // dispatches by the new index.
+    this.kpAuthorIndex = index;
+    const authors = [...index.keys()].sort();
+    const key = authors.length === 0 || relays.length === 0 ? "" : `${authors.join(",")}|${relayKey(relays)}`;
+    if ((this.kpSub?.key ?? "") === key) return;
+    const previous = this.kpSub;
+    this.kpSub = undefined;
+    if (key) {
+      const since = Math.floor(this.now() / 1000) - KP_SINCE_SEC;
+      const raw: Array<() => void> = [];
+      for (let i = 0; i < authors.length; i += KP_AUTHORS_PER_FILTER) {
+        const closer = (this.deps.transport as any).subscribe?.(
+          { kinds: [KIND_KEY_PACKAGE], authors: authors.slice(i, i + KP_AUTHORS_PER_FILTER), since },
+          (e: NostrEvent) => this.dispatchKeyPackage(e),
+          relays,
+        );
+        if (closer) raw.push(closer);
+      }
+      let closed = false;
+      const close = () => {
+        if (closed) return;
+        closed = true;
+        this.closers.delete(close);
+        for (const c of raw) c();
+      };
+      this.closers.add(close);
+      this.kpSub = { key, close };
+      log(
+        `[chat] watching 30443 for ${authors.length} eligible chat identit${authors.length === 1 ? "y" : "ies"} across ${chatEvents} chat event(s) on ${relays.length} relay(s)`,
+      );
+    }
+    previous?.close();
+  }
+
+  /**
+   * One pass of the pending-publication retry (audit K-7 point 2): ask the MLS
+   * layer to re-send the exact bytes of any commit whose publish was uncertain, so
+   * a relay that stored it without acking does not leave the coordinator one
+   * epoch behind its members. Tolerant by design: a MarmotClientMls without such
+   * a method makes this a no-op, and a pass still running skips the next tick.
+   * Returns whether a retry method was found (for tests).
+   */
+  async retryPendingPublications(): Promise<boolean> {
+    const mls = this.deps.chatMls as unknown as Record<string, unknown> | undefined;
+    if (!mls) return false;
+    const name = PENDING_PUBLICATION_RETRY_METHODS.find((m) => typeof mls[m] === "function");
+    if (!name) return false;
+    if (this.pendingPublicationSweepRunning) return true;
+    this.pendingPublicationSweepRunning = true;
+    try {
+      // Through the commit queue, so a re-send never overlaps another event's commit.
+      await this.withChatCommitLock(() => (mls[name] as () => Promise<unknown>).call(mls));
+    } catch (e) {
+      this.logChatFailure("pending-publication retry", "*", e);
+    } finally {
+      this.pendingPublicationSweepRunning = false;
+    }
+    return true;
+  }
+
+  /** One 30443 from the daemon-wide watcher → every event its author is eligible for. */
+  private dispatchKeyPackage(e: NostrEvent): void {
+    if (!this.marmot) return;
+    const coordinates = this.kpAuthorIndex.get(e.pubkey);
+    if (!coordinates) return; // not eligible anywhere (yet, or any more)
+    for (const coordinate of coordinates) {
+      if (!this.events.get(coordinate)?.chat) continue;
+      void this.marmot
+        .handleKeyPackageEvent(coordinate, e as any)
+        .catch((err) => this.logChatFailure("30443 watcher", coordinate, err));
+    }
   }
 
   // ── event loop ──────────────────────────────────────────────────────────────
@@ -6410,6 +6724,16 @@ export class Coordinator {
     // is expired, so reset it to claimable before the loop begins.
     const reclaimed = this.jobs.recoverStrandedJobs();
     if (reclaimed > 0) log(`[jobs] recovered ${reclaimed} stranded job(s) from a previous run`);
+    // Once per boot, every poisoned chat sync gets another full retry tail (audit
+    // R-3). Once: a sync that poisons again during this run stays poisoned (and
+    // surfaced) until the next boot or an organizer reprocess.
+    if (this.marmot) {
+      try {
+        this.requeuePoisonedChatSyncs("boot");
+      } catch (e) {
+        log(`[boot] re-queueing poisoned chat syncs failed: ${describeError(e)}`);
+      }
+    }
 
     // Restore installed events from the store. Each is REVALIDATED against its newest
     // 31600 before resuming (NIP §3.5, P0-5): a config that no longer names this
@@ -6497,25 +6821,23 @@ export class Coordinator {
     // R-53 address upgrade: in the background, AFTER the retention sweep (so an
     // event it just expired is not republished) and never on the readiness path.
     let migrationStopped = false;
+    // Retried until a pass completes with no failure, backing off from 10 minutes
+    // to two hours and logged once per failure streak (audit O-5): it is background
+    // work, and a relay that timed out at boot usually answers later.
+    const migration = retryInBackground({
+      label: "[roster] address upgrade (R-53)",
+      attempt: async () => {
+        const failed = await this.migrateRosterAddresses(() => migrationStopped);
+        if (failed > 0 && !migrationStopped) throw new Error(`${failed} event(s) not upgraded yet`);
+      },
+      delaysMs: ROSTER_MIGRATION_RETRY_MS,
+      log,
+    });
     this.closers.add(() => {
       migrationStopped = true;
+      migration.stop();
     });
-    // Retried every 10 minutes until a pass completes with no failure: it is
-    // background work, and a relay that timed out at boot usually answers later.
-    let migrationTimer: ReturnType<typeof setTimeout> | undefined;
-    this.closers.add(() => clearTimeout(migrationTimer));
-    const migrate = (): Promise<void> =>
-      this.migrateRosterAddresses(() => migrationStopped)
-        .catch((e) => {
-          log(`[roster] address upgrade failed: ${e instanceof Error ? e.message : e}`);
-          return 1;
-        })
-        .then((failed) => {
-          if (failed === 0 || migrationStopped) return;
-          migrationTimer = setTimeout(() => void migrate(), ROSTER_MIGRATION_RETRY_MS);
-          if (typeof (migrationTimer as any).unref === "function") (migrationTimer as any).unref();
-        });
-    this.rosterAddressMigration = migrate();
+    this.rosterAddressMigration = migration.first.then(() => undefined);
     // Profile-refresh sweep: pick up kind-0 bios edited outside Nostrautica (see
     // {@link profileRefreshSweep} for the user report this fixes).
     //
@@ -6572,7 +6894,15 @@ export class Coordinator {
     // an abandoned group lingers on a quiet daemon.
     if (this.marmot) {
       const marmot = this.marmot;
-      const linkTimer = setInterval(() => void marmot.sweepExpiredLinks().catch(() => {}), 600_000);
+      // Re-send commits whose publish was uncertain (audit K-7 point 2), once a
+      // minute, until a relay acks. Only if the MLS layer offers the method.
+      const retryTimer = setInterval(() => void this.retryPendingPublications(), PENDING_PUBLICATION_RETRY_MS);
+      if (typeof (retryTimer as any).unref === "function") (retryTimer as any).unref();
+      this.closers.add(() => clearInterval(retryTimer));
+      const linkTimer = setInterval(
+        () => void marmot.sweepExpiredLinks().catch((e) => this.logChatFailure("link sweep", "*", e)),
+        600_000,
+      );
       if (typeof (linkTimer as any).unref === "function") (linkTimer as any).unref();
       this.closers.add(() => clearInterval(linkTimer));
     }
@@ -6605,6 +6935,27 @@ export class Coordinator {
     this.closers.add(() => clearInterval(rescanTimer));
     // Note: installEvent() already subscribes each event's inbox (idempotently),
     // so restored events are covered by the loop above.
+
+    // The daemon-wide 30443 watcher (audit R-1), opened ONCE for every restored
+    // event: scheduleKeyPackageResubscribe is a no-op while `this.boot` is set, so
+    // the restores above did not each re-subscribe it. Then a safety-net refresh,
+    // which is a no-op unless the eligible set moved on a path no hook covered.
+    if (this.marmot) {
+      try {
+        this.refreshKeyPackageSubscription();
+      } catch (e) {
+        log(`[boot] 30443 watcher setup failed: ${describeError(e)} — the safety-net refresh retries`);
+      }
+      const kpTimer = setInterval(() => {
+        try {
+          this.refreshKeyPackageSubscription();
+        } catch (e) {
+          log(`[chat] 30443 safety-net refresh failed: ${describeError(e)}`);
+        }
+      }, KP_REFRESH_INTERVAL_MS);
+      if (typeof (kpTimer as any).unref === "function") (kpTimer as any).unref();
+      this.closers.add(() => clearInterval(kpTimer));
+    }
 
     // Print where the boot actually went, BEFORE start() returns — main.ts prints
     // the readiness line the deploy script measures right after this resolves, so
@@ -7691,12 +8042,12 @@ export class Coordinator {
    * caller's `> 0` guard; a stuck banner past a relay outage is the residual cost,
    * and it clears on the attendee's next real failure/success cycle).
    */
-  private async announceCleared(state: EventState, pubkey: string): Promise<void> {
+  private async announceCleared(state: EventState, pubkey: string, stage = "process_attendee"): Promise<void> {
     const content: import("@nostrautica/protocol").CoordinatorStatusContent = {
       v: 2,
       a: state.coordinate,
       pubkey,
-      stage: "process_attendee",
+      stage,
       state: "cleared",
       retryable: false,
       at: Math.floor(this.now() / 1000),
@@ -7704,7 +8055,35 @@ export class Coordinator {
     const relays = this.accountRelays(state);
     await this.publish(buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, content), relays);
     await this.publish(buildCoordinatorStatus(this.deps.coordSk, pubkey, content), relays);
-    log(`[status] announced cleared process_attendee for ${short(pubkey)} to organizer + attendee`);
+    log(`[status] announced cleared ${stage} for ${short(pubkey)} to organizer + attendee`);
+  }
+
+  /**
+   * Give poisoned `chat_sync_member` rows a fresh retry budget (audit R-3), all
+   * of them at boot, or one event's (optionally one member's) on an organizer
+   * `reprocess`. Two Plan B members sat out of the chat from 10-08 and 10-10
+   * because their syncs had poisoned and nothing ever looked again. A sync is
+   * cheap, and the reason it failed (a key package that had not propagated, a
+   * relay that did not ack) has usually changed since.
+   */
+  private requeuePoisonedChatSyncs(why: string, scope: { coordinate?: string; pubkey?: string } = {}): number {
+    const rows = this.deps.store.requeuePoisonedJobs("chat_sync_member", scope);
+    for (const row of rows) {
+      let coordinate = "?";
+      let pubkey = "?";
+      try {
+        const p = JSON.parse(row.payload) as { coordinate?: string; pubkey?: string };
+        coordinate = p.coordinate ?? coordinate;
+        pubkey = p.pubkey ?? pubkey;
+      } catch {
+        /* the log line says "?" */
+      }
+      log(
+        `[chat] ${why}: re-queued poisoned chat_sync_member #${row.id} for ${short(pubkey)} in ${coordinate} ` +
+          `(was: ${(row.last_error ?? "no error recorded").slice(0, 160)}) — fresh retry budget`,
+      );
+    }
+    return rows.length;
   }
 
   private async surfacePoison(info: import("./pipeline/jobs.js").PoisonInfo): Promise<void> {
@@ -7720,7 +8099,15 @@ export class Coordinator {
     // enum is `poison | cleared`, and to every reader of that field the meaning is
     // the same one ("this stage stopped and needs you"), so this needs no wire
     // change. `retryable` is true, which is the honest part: parked work revives.
-    const category = info.parked ? errorCategory(info.parked.reason) : errorCategory(info.error);
+    // A chat sync gets its own category (audit R-3): whatever the last error was,
+    // what the member and the organizer need to know is "this person could not be
+    // added to the chat". `error_category` is a free-form string on the wire, so a
+    // new value is not a wire change; older apps show it as a generic failure.
+    const category = info.parked
+      ? errorCategory(info.parked.reason)
+      : info.type === "chat_sync_member"
+        ? CHAT_SYNC_POISON_CATEGORY
+        : errorCategory(info.error);
     this.deps.store.recordJobStatus({
       coordinate,
       stage: info.type,
@@ -7759,6 +8146,8 @@ export class Coordinator {
   }
 
   stop(): void {
+    clearTimeout(this.kpResubscribeTimer);
+    this.kpResubscribeTimer = undefined;
     for (const c of [...this.closers]) c();
     this.closers.clear();
   }

@@ -31,9 +31,11 @@ import { retireStaleGroups } from "./chat/retire.js";
 import { isCliSubcommand, runCli } from "./cli.js";
 import { releaseSummary, coordinatorRelease, provenanceIsKnown } from "./release.js";
 import { installExitLogging } from "./lifecycle.js";
+import { retryInBackground } from "./background-retry.js";
 
-/** Background retry of a failed boot-time 31611 announce: every 10 minutes, at most 12 times. */
-const ANNOUNCE_RETRY_MS = 600_000;
+/** Background retry of a failed boot-time 31611 announce (audit O-5): backing off from
+ *  10 minutes to an hour, at most 12 attempts in all. */
+const ANNOUNCE_RETRY_MS = [600_000, 1_200_000, 2_400_000, 3_600_000];
 const ANNOUNCE_RETRY_LIMIT = 12;
 
 async function runDaemon(): Promise<void> {
@@ -309,33 +311,30 @@ async function runDaemon(): Promise<void> {
     // out under the startup burst, which left the previous release's announcement
     // (and its privacy disclosure) live until the next restart. Rebuilt per attempt
     // so a retry carries a fresh created_at.
-    const announceOnce = async (): Promise<boolean> => {
-      try {
+    //
+    // Backing off, and logged once per failure streak (audit O-5): a fixed
+    // 10-minute retry logged every failed attempt, a dozen identical lines for one
+    // afternoon's relay trouble.
+    const announce = retryInBackground({
+      label: "[coordinator] announce (kind 31611)",
+      attempt: async () => {
         const content = buildAnnounceContent(config, disclosureFromRoutes(roles));
         // Release provenance (§13.9): the announce wire schema has no version field,
         // so surface the release id in the existing `about` text (bounded at 2000).
         const relTag = `nostrautica ${coordinatorRelease().releaseId}`;
         content.about = (content.about ? `${content.about}\n\n${relTag}` : relTag).slice(0, 2000);
-        const announce = buildCoordinatorAnnounce(coordSk, content);
-        await client.publish(announce as any, config.relays.default);
+        const event = buildCoordinatorAnnounce(coordSk, content);
+        await client.publish(event as any, config.relays.default);
         console.log(
           `[coordinator] announced as "${config.coordinator.name}" (kind 31611, pricing=${config.pricing.model})`,
         );
-        return true;
-      } catch (e) {
-        console.warn("[coordinator] announce publish failed:", e instanceof Error ? e.message : e);
-        return false;
-      }
-    };
-    if (!(await announceOnce())) {
-      let attempts = 0;
-      const retry = setInterval(() => {
-        void announceOnce().then((ok) => {
-          if (ok || ++attempts >= ANNOUNCE_RETRY_LIMIT) clearInterval(retry);
-        });
-      }, ANNOUNCE_RETRY_MS);
-      retry.unref();
-    }
+      },
+      delaysMs: ANNOUNCE_RETRY_MS,
+      maxAttempts: ANNOUNCE_RETRY_LIMIT,
+      log: (m) => console.warn(m),
+    });
+    // The first attempt stays where it was, before the readiness line.
+    await announce.first;
   }
 
   console.log("[coordinator] running — watching for installs, submissions, admin commands");

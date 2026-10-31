@@ -3,6 +3,8 @@ import {
   mergePending,
   visiblePending,
   buildApprovedPeople,
+  chatStatusFor,
+  chatSyncStuckPubkeys,
   summarizeBulk,
   filterPeople,
   type BulkItem,
@@ -167,6 +169,73 @@ describe("buildApprovedPeople (UX-A1: roster is the source of truth)", () => {
       statuses,
     });
     expect(people[0].op).toBe("failed");
+  });
+});
+
+/**
+ * Audit U-3: two Plan B members sat outside the chat for three weeks behind a
+ * poisoned chat_sync_member job, and nothing told the organizer.
+ */
+describe("chatStatusFor / buildApprovedPeople chat status (audit U-3)", () => {
+  const dev = (c: string) => ({ pubkey: c.repeat(64), added_at: 1 });
+  const st = (stage: string, state: "poison" | "cleared", at: number): CoordinatorStatusContent => ({
+    v: 2,
+    a: "31923:eid:ev",
+    pubkey: pk("a"),
+    stage,
+    state,
+    at,
+  });
+
+  it("in the room when a device of theirs holds a leaf in the group this session sees", () => {
+    expect(chatStatusFor(pk("a"), [dev("1"), dev("2")], [], ["2".repeat(64)])).toBe("in-room");
+  });
+
+  it("waiting when attested but not in the room; attested when the room is not visible here", () => {
+    expect(chatStatusFor(pk("a"), [dev("1")], [], ["9".repeat(64)])).toBe("waiting");
+    expect(chatStatusFor(pk("a"), [dev("1")], [], undefined)).toBe("attested");
+  });
+
+  it("not yet when they have no chat device", () => {
+    expect(chatStatusFor(pk("a"), undefined, [], undefined)).toBe("not-yet");
+  });
+
+  it("stuck on a chat_sync_member poison, until a newer cleared resolves it", () => {
+    expect(chatStatusFor(pk("a"), [dev("1")], [st("chat_sync_member", "poison", 5)], undefined)).toBe("stuck");
+    expect(
+      chatStatusFor(
+        pk("a"),
+        [dev("1")],
+        [st("chat_sync_member", "poison", 5), st("chat_sync_member", "cleared", 6)],
+        undefined,
+      ),
+    ).toBe("attested");
+  });
+
+  it("refused on a chat_attestation poison; another stage's poison is not a chat status", () => {
+    expect(chatStatusFor(pk("a"), [dev("1")], [st("chat_attestation", "poison", 5)], undefined)).toBe("refused");
+    expect(chatStatusFor(pk("a"), [dev("1")], [st("process_attendee", "poison", 5)], undefined)).toBe("attested");
+  });
+
+  it("lists attendees whose chat sync is poisoned, dropping those a newer cleared resolved", () => {
+    const s = (p: string, state: "poison" | "cleared", at: number, stage = "chat_sync_member") =>
+      ({ v: 2, a: "31923:eid:ev", pubkey: pk(p), stage, state, at, error_category: "chat_sync_incomplete" }) as CoordinatorStatusContent;
+    expect(
+      chatSyncStuckPubkeys([
+        s("a", "poison", 5),
+        s("b", "poison", 5),
+        s("b", "cleared", 9),
+        s("c", "poison", 5, "process_attendee"),
+      ]),
+    ).toEqual([pk("a")]);
+  });
+
+  it("is only set for a chat-enabled event", () => {
+    const r = roster([pk("a")]);
+    r.attendees[0]!.chat_keys = [dev("1")];
+    const base = { roster: r, sessionApproved: new Set<string>(), revoked: new Set<string>(), known: [] };
+    expect(buildApprovedPeople(base)[0]!.chat).toBeUndefined();
+    expect(buildApprovedPeople({ ...base, chat: { memberDevices: ["1".repeat(64)] } })[0]!.chat).toBe("in-room");
   });
 });
 

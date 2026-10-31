@@ -10,12 +10,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import today.cypherpunk.nostrautica.domain.EventContext
 import today.cypherpunk.nostrautica.protocol.RosterContent
+import today.cypherpunk.nostrautica.protocol.nowSec
 
 /**
  * One event's chat on this phone (chat/session.svelte.ts + chat/client.ts).
@@ -27,9 +29,11 @@ import today.cypherpunk.nostrautica.protocol.RosterContent
  *    an MDK account advertising the event's chat relays — MDK publishes its 10002,
  *    10050 and key package;
  * 2. the device's own kind-0 goes to the chat relays (NIP §10.3);
- * 3. unless already in the room, a 21607 `add` with proof of possession tells the
- *    coordinator to add this device (and an evicted device rotates its key package
- *    first, because the old one was spent on the Add it was removed from);
+ * 3. only on positive evidence that it is out of the room ([ChatPolicy]), a 21607
+ *    `add` with proof of possession tells the coordinator to add this device (and an
+ *    evicted device rotates its key package first, because the old one was spent on
+ *    the Add it was removed from). "Can't tell yet" never attests: to the
+ *    coordinator an `add` from a device that holds a leaf is a re-enrolment;
  * 4. MDK receives the Welcome; the group is bound to the event only when its Nostr
  *    group id equals the roster's `nostr_group_id` and the coordinator sealed it,
  *    and only then is the pending invite accepted and the timeline shown.
@@ -47,6 +51,14 @@ class ChatSession internal constructor(
 
     enum class Attest { NONE, SENT, QUEUED, FAILED }
 
+    /** Why setup is not moving although nothing is known to be wrong with membership. */
+    enum class Problem {
+        /** MDK's group list (or one group's details) could not be read. */
+        GROUPS_UNREADABLE,
+        /** The room's invitation is here but accepting it failed. */
+        INVITE_FAILED,
+    }
+
     data class State(
         val phase: Phase = Phase.STARTING,
         val chatPubkey: String? = null,
@@ -60,8 +72,23 @@ class ChatSession internal constructor(
         val attest: Attest = Attest.NONE,
         /** A group sealed by the coordinator exists but the roster doesn't name it (yet). */
         val unverifiedGroup: Boolean = false,
+        /** The newest `chat_attestation` refusal from the coordinator, as a string key. */
+        val refusalKey: String? = null,
         val setupSince: Long = System.currentTimeMillis(),
         val rejoining: Boolean = false,
+        /**
+         * Positive eviction ([ChatPolicy.offerRejoin]): the only state in which
+         * "Rejoin" (a guaranteed remove + add) is offered.
+         */
+        val offerRejoin: Boolean = false,
+        /**
+         * The room's local copy is stalled, forked or frozen, or its history may be
+         * incomplete (MDK, audit R-9): "re-syncing, some messages may be missing".
+         * Never a reason to offer Rejoin.
+         */
+        val resyncing: Boolean = false,
+        /** A local read or the invitation accept is failing; retried on every reconcile. */
+        val problem: Problem? = null,
         val error: String? = null,
     )
 
@@ -75,35 +102,60 @@ class ChatSession internal constructor(
     private var boundGroup: String? = null
     private var timeline: ChatEngine.TimelineHandle? = null
     private var timelineJob: Job? = null
-    private var enrolled = false
-    /** The roster has been fetched (or the fetch failed) at least once this run. */
-    @Volatile private var rosterChecked = false
+    /** When this process last sent an automatic `add` (0: never). Survives [retry] on purpose. */
+    private var lastAttestMs = 0L
+    private var lastAttestSec = 0L
+    /** One extra attempt after a fixable refusal of an attestation this process sent. */
+    private var refusalRetried = false
+    /** When a roster with attendees was last fetched from the relays (0: not yet). */
+    @Volatile private var rosterFreshAtMs = 0L
+    /** Since when the device has been seen removed from the room, in a row. */
+    private var evictedSinceMs: Long? = null
     private var rejoinRequested = false
     private val coordinator get() = ctx.cfg.coordinator
 
     val groupId: String? get() = boundGroup
 
+    /** A run [stop] cancelled that may still be unwinding (its finally unbinds and releases). */
+    private var stopping: Job? = null
+
+    /**
+     * Start (or resume) the session. The phase goes back to STARTING: whatever the
+     * last run knew (READY included) is not known of this one until it reconciles,
+     * and a READY carried over with no bound group made the first send fail as
+     * "unroutable" and offer Rejoin (audit K-6).
+     */
     @Synchronized
     fun start() {
         if (job?.isActive == true) return
-        job = chat.scope.launch { run() }
+        val old = stopping
+        stopping = null
+        job = chat.scope.launch {
+            old?.join()
+            _state.update { it.copy(phase = Phase.STARTING, setupSince = System.currentTimeMillis(), offerRejoin = false, error = null) }
+            run()
+        }
     }
 
     @Synchronized
     fun stop() {
         job?.cancel()
+        stopping = job ?: stopping
         job = null
     }
 
-    /** "Try again": tear down and start from scratch (the old run fully ends first). */
+    /**
+     * "Try again": tear down and start from scratch (the old run fully ends first).
+     * It never attests by itself: the automatic-attestation spacing survives it, so a
+     * press can't turn into a re-enrolment (K-6).
+     */
     @Synchronized
     fun retry() {
-        val old = job
+        val old = job ?: stopping
+        stopping = null
         job = chat.scope.launch {
             old?.cancelAndJoin()
-            enrolled = false
-            rosterChecked = false
-            _state.update { State(roster = it.roster, chatPubkey = it.chatPubkey) }
+            _state.update { State(roster = it.roster, chatPubkey = it.chatPubkey, messages = it.messages, hasMoreBefore = it.hasMoreBefore) }
             run()
         }
     }
@@ -121,7 +173,10 @@ class ChatSession internal constructor(
             if (d != null && !engine.hasAccount(d.pubkey)) {
                 val stored = d
                 val imported = runCatching { engine.ensureAccount(stored, ChatDeviceKeys.mergeRelays(chat.keys.advertisedRelays(stored.pubkey), chatRelays), chatRelays) }
-                if (imported.isFailure && !chat.isAttested(account, ctx, stored.pubkey)) {
+                // Replacing the key is only safe when a FRESH roster shows it was never
+                // attested (K-4): a cached roster can predate the attestation, and a new
+                // key for a device the coordinator holds a leaf for strands that leaf.
+                if (imported.isFailure && ChatPolicy.rosterSays(fetchRosterNow(), true, account, stored.pubkey) == ChatPolicy.RosterSays.NOT_LISTED) {
                     Log.w(TAG, "device key import failed (${imported.exceptionOrNull()?.javaClass?.simpleName}); minting a new one")
                     chat.keys.discard(account)
                     d = null
@@ -143,21 +198,26 @@ class ChatSession internal constructor(
             coroutineScope {
                 launch { runCatching { chat.publishDeviceProfile(d, chatRelays) }.onFailure { Log.w(TAG, "device profile: ${it.javaClass.simpleName}") } }
                 launch {
-                    chat.fetchRoster(ctx, account)?.let { r -> _state.update { it.copy(roster = r) }; chat.warmProfiles(r, chatRelays) }
-                    rosterChecked = true
+                    // Coming back to the screen within a minute reuses the last roster (S-2).
+                    fetchRosterNow(ChatPolicy.ROSTER_REUSE_MS)?.let { r -> chat.warmProfiles(r, chatRelays) }
                     reconcile()
                 }
-                launch { engine.changes(ref).conflate().collect { reconcile(); delay(300) } }
+                launch {
+                    engine.changes(ref)
+                        .filter { ChatPolicy.needsReconcile(it.kind, _state.value.phase == Phase.READY && boundGroup != null) }
+                        .conflate().collect { reconcile(); delay(300) }
+                }
                 launch {
                     // While not in the room, keep looking: the Welcome, a roster that now
-                    // names the group, the coordinator's refusal. Stops costing anything
-                    // once joined.
-                    var tick = 0
+                    // names the group, the coordinator's refusal. Every 8 s for the first
+                    // two minutes, then every 60 s (R-8); once joined, only the 60 s backstop.
+                    var notReadySince = System.currentTimeMillis()
                     while (true) {
-                        delay(if (_state.value.phase == Phase.READY) 60_000 else 8_000)
-                        tick++
+                        val ready = _state.value.phase == Phase.READY
+                        if (ready) notReadySince = System.currentTimeMillis()
+                        delay(ChatPolicy.pollDelayMs(ready, System.currentTimeMillis() - notReadySince))
                         if (_state.value.phase != Phase.READY) {
-                            if (tick % 3 == 0) chat.fetchRoster(ctx, account)?.let { r -> _state.update { it.copy(roster = r) } }
+                            if (System.currentTimeMillis() - rosterFreshAtMs >= ChatPolicy.POLL_ROSTER_MS) fetchRosterNow()
                             if (!_state.value.keyPackageReady) _state.update { it.copy(keyPackageReady = engine.networkReady(ref)) }
                         }
                         reconcile()
@@ -175,6 +235,10 @@ class ChatSession internal constructor(
             timelineJob?.cancel(); timelineJob = null
             timeline?.close(); timeline = null
             boundGroup = null
+            // A reconcile from send() after this would act on a released runtime.
+            accountRef = null
+            // Nothing is bound any more, so nothing is READY (the phantom READY after stop()).
+            _state.update { if (it.phase == Phase.READY) it.copy(phase = Phase.STARTING) else it }
             if (acquired) engine.release()
         }
     }
@@ -185,12 +249,24 @@ class ChatSession internal constructor(
         val d = device ?: return@withLock
         val coord = coordinator
         try {
-            var groups = engine.groups(ref)
+            var groups = try {
+                engine.groups(ref)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // Say so instead of waiting in silence; the next reconcile retries.
+                Log.w(TAG, "groups: ${e.javaClass.simpleName}")
+                _state.update { it.copy(problem = Problem.GROUPS_UNREADABLE) }
+                return@withLock
+            }
             val rosterGid = _state.value.roster?.nostrGroupId
             // Accept only the invitation the roster names, sealed by this coordinator.
+            var acceptFailed = false
+            var accepted = false
             GroupBinding.acceptable(groups, coord).filter { rosterGid != null && it.nostrGroupIdHex.equals(rosterGid, true) }.forEach {
-                engine.acceptInvite(ref, it.groupIdHex)
+                if (engine.acceptInvite(ref, it.groupIdHex)) accepted = true else acceptFailed = true
             }
+            if (accepted) groups = engine.groups(ref)
             var binding = GroupBinding.select(groups, rosterGid, coord)
             // A re-add Welcome into a group we hold stale state for comes as a rejoin
             // offer. Taking it is right when we are out of the room, or asked to rejoin.
@@ -210,52 +286,96 @@ class ChatSession internal constructor(
                 groups = engine.groups(ref)
                 binding = GroupBinding.select(groups, rosterGid, coord)
             }
-            val phase = when (GroupBinding.phase(binding)) {
-                GroupBinding.Phase.READY -> Phase.READY
-                GroupBinding.Phase.EVICTED -> Phase.EVICTED
-                GroupBinding.Phase.SETUP -> Phase.SETUP
-            }
-            val bound = (binding as? GroupBinding.Result.Bound)?.group
-            val unverified = bound == null && coord != null && groups.any { it.welcomer == coord }
-            if (phase == Phase.READY) rejoinRequested = false
-            _state.update {
-                it.copy(
-                    phase = phase,
-                    groupDevices = bound?.members,
-                    unverifiedGroup = unverified,
-                    setupSince = if (it.phase != Phase.SETUP && phase == Phase.SETUP) System.currentTimeMillis() else it.setupSince,
-                    keyPackageReady = it.keyPackageReady || phase == Phase.READY,
-                )
-            }
-            if (bound != null && bound.groupIdHex != boundGroup) bindTimeline(ref, bound.groupIdHex, d.pubkey)
-            // Never ask to be added while we may already be in the room and just can't
-            // prove it yet (no roster id at hand): a fresh attestation from a device
-            // that holds a leaf makes the coordinator remove and re-add it, and every
-            // message in between is lost to it for good.
-            val maybeInRoom = binding is GroupBinding.Result.Unverified &&
-                groups.any { it.selfMember && (it.welcomer == null || it.welcomer == coord) }
-            val rosterKnown = rosterChecked || _state.value.roster != null
-            if (phase != Phase.READY && !enrolled && rosterKnown && !maybeInRoom) enroll(ref, d, evicted = phase == Phase.EVICTED)
+            settle(ref, d, groups, binding, if (acceptFailed) Problem.INVITE_FAILED else null)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            // Unknown, so nothing is decided from it: no phase change, no attestation.
             Log.w(TAG, "reconcile: ${e.javaClass.simpleName}")
         }
     }
 
-    /** Ask the coordinator to add this device (client.ts ensurePublished). Once per session. */
-    private suspend fun enroll(ref: String, d: ChatDeviceKeys.Device, evicted: Boolean) {
-        enrolled = true
-        if (evicted) runCatching { engine.rotateKeyPackage(ref) }.onFailure { Log.w(TAG, "rotate: ${it.javaClass.simpleName}") }
+    /** Phase, binding and (only on positive evidence, [ChatPolicy]) an attestation. */
+    private suspend fun settle(ref: String, d: ChatDeviceKeys.Device, groups: List<GroupBinding.GroupInfo>, binding: GroupBinding.Result, problem: Problem?) {
+        val coord = coordinator
+        val now = System.currentTimeMillis()
+        val gphase = GroupBinding.phase(binding)
+        val phase = when (gphase) {
+            GroupBinding.Phase.READY -> Phase.READY
+            GroupBinding.Phase.EVICTED -> Phase.EVICTED
+            GroupBinding.Phase.SETUP -> Phase.SETUP
+        }
+        evictedSinceMs = if (phase == Phase.EVICTED) evictedSinceMs ?: now else null
+        val evictedFor = evictedSinceMs?.let { now - it }
+        val bound = (binding as? GroupBinding.Result.Bound)?.group
+        val held = bound ?: (binding as? GroupBinding.Result.Unconfirmed)?.group
+        val health = held?.let { g ->
+            runCatching { engine.syncHealth(ref, g.groupIdHex, g.unrecoverable) }.onFailure { if (it is CancellationException) throw it }.getOrNull()
+        }
+        val unverified = bound == null && coord != null && groups.any { it.welcomer == coord }
+        if (phase == Phase.READY) rejoinRequested = false
+        // The coordinator's word on our attestation (21606, from the local cache).
+        val statuses = if (phase == Phase.READY) emptyList() else runCatching { chat.ownStatuses(account, ctx.coordinate) }.getOrDefault(emptyList())
+        val refusal = statuses.filter { it.stage == ExternalLink.ATTESTATION_STAGE && it.state == "poison" }.maxByOrNull { it.at }
+        val refusalRetry = !refusalRetried && lastAttestSec > 0 && refusal != null && refusal.at >= lastAttestSec &&
+            refusal.errorCategory in ChatPolicy.RETRYABLE_REFUSALS
+        val roster = _state.value.roster
+        val says = ChatPolicy.rosterSays(roster, now - rosterFreshAtMs < ChatPolicy.ROSTER_FRESH_MS, account, d.pubkey)
+        val decision = ChatPolicy.decide(groups, binding, says, roster?.nostrGroupId, coord, evictedFor, refusalRetry)
+        val refusalKey = if (phase == Phase.READY) null else ExternalLink.setupRefusalKey(statuses)
+        _state.update {
+            it.copy(
+                phase = phase,
+                groupDevices = bound?.members,
+                unverifiedGroup = unverified,
+                refusalKey = refusalKey,
+                offerRejoin = ChatPolicy.offerRejoin(gphase, evictedFor, says, refusalKey != null),
+                resyncing = if (held == null) false else health?.resyncing ?: it.resyncing,
+                problem = problem,
+                // A fresh "Connecting" window when the room is lost, not on the first
+                // STARTING → SETUP step of a start (start() opened that window).
+                setupSince = if ((it.phase == Phase.READY || it.phase == Phase.EVICTED) && phase == Phase.SETUP) now else it.setupSince,
+                keyPackageReady = it.keyPackageReady || phase == Phase.READY,
+            )
+        }
+        if (bound != null && bound.groupIdHex != boundGroup) bindTimeline(ref, bound.groupIdHex, d.pubkey)
+        if (ChatPolicy.attestAllowed(decision, lastAttestMs, now, refusalRetry)) {
+            Log.i(TAG, "attesting: ${decision.why}")
+            if (refusalRetry) refusalRetried = true
+            enroll(ref, d, (decision as ChatPolicy.Decision.Attest).rotate)
+        } else if (phase != Phase.READY) {
+            Log.d(TAG, "not attesting: ${decision.why}")
+        }
+    }
+
+    /** Ask the coordinator to add this device (client.ts ensurePublished). */
+    private suspend fun enroll(ref: String, d: ChatDeviceKeys.Device, rotate: Boolean) {
+        lastAttestMs = System.currentTimeMillis()
+        if (rotate) runCatching { engine.rotateKeyPackage(ref) }.onFailure { Log.w(TAG, "rotate: ${it.javaClass.simpleName}") }
         _state.update { it.copy(keyPackageReady = it.keyPackageReady || engine.networkReady(ref)) }
         sendAdd(d)
     }
 
+    /**
+     * Fetch the roster from the relays, or reuse one fetched under [reuseMs] ago. Only
+     * a roster with attendees is applied and counts as fresh: an empty one is what the
+     * fetch returns when no relay had it.
+     */
+    private suspend fun fetchRosterNow(reuseMs: Long = 0): RosterContent? {
+        val (r, at) = chat.fetchRoster(ctx, account, reuseMs) ?: return null
+        if (r.attendees.isEmpty()) return null
+        rosterFreshAtMs = maxOf(rosterFreshAtMs, at)
+        _state.update { it.copy(roster = r) }
+        return r
+    }
+
     private suspend fun sendAdd(d: ChatDeviceKeys.Device) {
         val label = chat.keys.label(d.pubkey) ?: MarmotEngine.defaultDeviceLabel()
-        val r = runCatching { chat.attest(ctx, ChatAttest.Op.ADD, d.pubkey, label, d.clientId, d.secret) }
+        lastAttestSec = nowSec()
+        val r = runCatching { chat.attestTimed(ctx, ChatAttest.Op.ADD, d.pubkey, label, d.clientId, d.secret) }
         r.onFailure { Log.w(TAG, "attest: ${it.javaClass.simpleName}") }
-        _state.update { it.copy(attest = r.fold({ ok -> if (ok) Attest.SENT else Attest.QUEUED }, { Attest.FAILED })) }
+        r.getOrNull()?.let { lastAttestSec = it.createdAt }
+        _state.update { it.copy(attest = r.fold({ a -> if (a.published) Attest.SENT else Attest.QUEUED }, { Attest.FAILED })) }
     }
 
     private fun unbindTimeline() {
@@ -283,9 +403,14 @@ class ChatSession internal constructor(
 
     class Unroutable : Exception("this device is not in the event's chat group")
 
-    /** Send a kind-9. Throws [Unroutable] when the device is out of the room. */
+    /**
+     * Send a kind-9. Throws [Unroutable] when the device is not (or not yet) routed
+     * to the room, and only after a reconcile still says so: a send right after
+     * resuming used to fail on the not-yet-rebound group (K-6).
+     */
     suspend fun send(text: String): Boolean {
         val ref = accountRef ?: throw Unroutable()
+        if (boundGroup == null || _state.value.phase != Phase.READY) reconcile()
         val gid = boundGroup
         if (gid == null || _state.value.phase != Phase.READY) throw Unroutable()
         return try {
@@ -339,21 +464,37 @@ class ChatSession internal constructor(
      * key package (a new event id the coordinator has not consumed), re-attest.
      * Same device key, label and device slot. A re-add Welcome already waiting is
      * taken instead, since revoking would remove the leaf it is for.
+     *
+     * The revoke must have REACHED a relay before the add goes out: the coordinator
+     * orders attestations by `created_at`, so a revoke left in the outbox and
+     * published after the add would remove the re-added device for good. That is
+     * [RevokeNotPublished]: the queued revoke is discarded and nothing else is sent.
+     * The add also carries a
+     * `created_at` at least one second after the revoke's, as the web app's does.
      */
     suspend fun rejoin(force: Boolean = true) {
         if (_state.value.rejoining) return
         val ref = accountRef ?: throw IllegalStateException("no chat session")
         val d = device ?: throw IllegalStateException("no chat session")
         if (!force && _state.value.phase == Phase.READY) return
+        val before = _state.value
         _state.update { it.copy(rejoining = true, phase = Phase.SETUP, setupSince = System.currentTimeMillis()) }
         try {
             rejoinRequested = true
             val gid = boundGroup
             val coord = coordinator
             if (gid != null && coord != null && engine.confirmRejoin(ref, gid, coord)) { reconcile(); return }
-            chat.attest(ctx, ChatAttest.Op.REVOKE, d.pubkey)
+            val revoke = chat.attestTimed(ctx, ChatAttest.Op.REVOKE, d.pubkey)
+            if (!revoke.published) {
+                // Take it back out of the outbox (sent later it would land out of order),
+                // leave the room state as it was, and say why.
+                runCatching { chat.discardQueued(revoke.wrapId) }
+                _state.update { it.copy(phase = before.phase, setupSince = before.setupSince) }
+                throw RevokeNotPublished()
+            }
             engine.rotateKeyPackage(ref)
-            enrolled = true
+            while (nowSec() <= revoke.createdAt) delay(200)
+            lastAttestMs = System.currentTimeMillis()
             sendAdd(d)
             reconcile()
         } finally {
@@ -361,16 +502,17 @@ class ChatSession internal constructor(
         }
     }
 
+    /** The revoke of a rejoin only reached the outbox, so the rejoin stopped there. */
+    class RevokeNotPublished : Exception("the revoke has not reached a relay")
+
     /** Re-read the roster (after a device rename/revoke, or when the screen asks). */
     suspend fun refreshRoster() {
-        chat.fetchRoster(ctx, account)?.let { r -> _state.update { it.copy(roster = r) } }
+        fetchRosterNow()
     }
 
     fun applyRoster(r: RosterContent?) { if (r != null) _state.update { it.copy(roster = r) } }
 
     companion object {
         private const val TAG = "ChatSession"
-        /** chat/EventChat.svelte: the "taking longer than usual" hint. */
-        const val SETUP_SLOW_MS = 25_000L
     }
 }

@@ -936,7 +936,7 @@
       <span class="muted"
         >{st.stage === "process_talk"
           ? t("event.ownStatus.talk")
-          : st.stage === "chat_attestation"
+          : st.stage === "chat_attestation" || st.stage === "chat_sync_member"
             ? t("event.ownStatus.chat")
             : t("event.ownStatus.submission")}</span
       >

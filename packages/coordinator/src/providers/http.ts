@@ -16,6 +16,8 @@
  * Cashu-paying caller can treat the reservation as ambiguous via `payment.fail()`.
  */
 
+import { logStamp } from "../log-line.js";
+
 /** A provider request exceeded its total deadline (connect + headers + body). */
 export class ProviderTimeoutError extends Error {
   constructor(
@@ -177,7 +179,7 @@ export function isPaymentFailure(status: number, body: string): boolean {
 
 /** Timestamp prefix matching the coordinator's own `log()` format. */
 function stamp(): string {
-  return new Date().toISOString().slice(11, 19);
+  return logStamp();
 }
 
 /**

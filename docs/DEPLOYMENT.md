@@ -165,6 +165,26 @@ If the slowest line is a per-event phase and there are simply more events than
 there used to be, the next lever is `RESTORE_CONCURRENCY` — not deferring work
 past the readiness line, which only makes the metric lie.
 
+### Reading the log
+
+Every line the daemon writes through its log helpers starts with
+`[MM-DD HH:MM:SS]`, UTC month-day and time. Builds before the 28-Oct audit fixes
+printed the time alone (`[HH:MM:SS]`). Lines printed bare by `main.ts`, including the readiness line
+above, have no prefix. To read one day: `grep -a '^\[10-29 ' <log>`.
+
+Lines worth knowing, because each one is printed once per episode, not once
+per occurrence:
+
+| Line | Meaning |
+|---|---|
+| `[relay] <url> is refusing REQs ("…") — backing off for 5 min …` | The relay answered "too many concurrent REQs" (or similar). It is degraded for 5 minutes: at most 2 fetches at a time, and any subscription it refused is re-sent after 30 s, then 60 s, 120 s, 300 s. Printed again at most once per 5 minutes, with the count of refusals in between. |
+| `[relay] <url>: more than 8 long-lived REQs needed …` | Long-lived subscriptions are multiplexed (up to 20 filters per REQ, 8 REQs per relay). Past that the daemon opens another REQ rather than drop a subscription. Said once per relay. |
+| `[chat] watching 30443 for N eligible chat identities across M chat event(s) …` | The single daemon-wide key-package watcher, re-opened when the eligible set changes (approval, attestation, revoke). |
+| `[chat] <handler> failed for <event>: … (N similar failure(s) suppressed …)` | A chat watcher, 445 ingest, link sweep or roster republish threw. At most once per handler and event per 5 minutes. |
+| `[chat] boot: re-queued poisoned chat_sync_member #N for … — fresh retry budget` | Every boot gives poisoned chat syncs one more full retry tail. An organizer `reprocess` does the same for its event. |
+| `[jobs] queue: …` | The queue heartbeat. Printed when the queue changes, and repeated at most every 10 minutes while it does not. |
+| `[coordinator] announce (kind 31611) failed: … retrying in the background …` / `[roster] address upgrade (R-53) failed: …` | Background retries back off and log the first failure of a streak, then the success or the give-up, with the count. |
+
 ### Runtime
 
 The Dockerfile and systemd unit are reference deployment material, not a complete production runbook. The coordinator needs Node 22.13+ (`node:sqlite` is behind a flag before 22.13), ffmpeg/ffprobe, protected provider credentials, a stable coordinator identity, relay connectivity, and durable writable SQLite storage.

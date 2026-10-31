@@ -7,7 +7,14 @@
  */
 import { NDKEvent } from "@nostr-dev-kit/ndk";
 import type { NDKFilter, NDKSubscription } from "@nostr-dev-kit/ndk";
-import { getNdk, relaySet, fetchEvents, type Filter } from "$lib/nostr/ndk.js";
+import {
+  getNdk,
+  relaySet,
+  fetchEvents,
+  publishSignedOutcomes,
+  type Filter,
+  type RelayPublishOutcome,
+} from "$lib/nostr/ndk.js";
 import { streamEvents } from "$lib/nostr/stream.js";
 import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { KIND_DM_RELAY_LIST } from "@nostrautica/protocol";
@@ -18,6 +25,30 @@ interface PublishResponse {
   from: string;
   ok: boolean;
   message?: string;
+  /** No answer from the relay: it may have stored it, so marmot retries the same bytes. */
+  uncertain?: boolean;
+}
+
+/**
+ * NIP-01 machine-readable OK=false prefixes: the relay answered and did NOT store
+ * the event. Anything else on a failed publish (our own timeout, a closed socket,
+ * "Relay is disconnected") is the absence of an answer, not a refusal.
+ */
+const RELAY_REFUSAL = /^(blocked|rate-limited|invalid|pow|restricted|error|auth-required|mute):/i;
+
+/** One relay's publish outcome as marmot's three-valued response (audit K-7). */
+export function classifyRelayOutcome(o: RelayPublishOutcome): PublishResponse {
+  if (o.ok) return { from: o.url, ok: true };
+  const reason = (o.reason ?? "").trim();
+  // "duplicate:" means the relay already holds exactly this event, i.e. stored.
+  if (/^duplicate:/i.test(reason)) return { from: o.url, ok: true, message: reason };
+  if (RELAY_REFUSAL.test(reason)) return { from: o.url, ok: false, message: reason };
+  return { from: o.url, ok: false, message: reason || "no answer", uncertain: true };
+}
+
+function sameRelay(a: string, b: string): boolean {
+  const norm = (u: string) => u.trim().toLowerCase().replace(/\/+$/, "");
+  return norm(a) === norm(b);
 }
 /** Minimal Observer/Subscribable (marmot's interop Observable shape). */
 interface Observer<T> {
@@ -45,19 +76,35 @@ export interface MarmotNetwork {
 export function createMarmotNetwork(): MarmotNetwork {
   return {
     async publish(relays, event) {
-      const ndkEvent = new NDKEvent(getNdk(), event as unknown as NostrEventLike);
+      // Per relay, three outcomes, not two (audit K-7). marmot-ts keeps a commit's
+      // exact bytes for retry ONLY when a response is marked `uncertain`; a plain
+      // `ok:false` everywhere makes it roll the commit back
+      // (group-runtime.js `#publishToGroupRelays`). Reporting a timeout as a
+      // definite failure therefore forked the committer: a relay that stored the
+      // commit but whose OK arrived late (or never) let every other member apply
+      // epoch N+1 while this device stayed at N and later committed a DIFFERENT
+      // N+1. So `ok:false` only when the relay explicitly said no; a timeout, a
+      // dropped socket or a transport error is "may have been stored": uncertain.
       const result: Record<string, PublishResponse> = {};
+      let outcomes: RelayPublishOutcome[];
       try {
-        const reached = await ndkEvent.publish(relaySet(relays));
-        // NDK returns the set of relays that accepted the event.
-        const ok = new Set<string>();
-        reached.forEach((r) => ok.add(r.url));
-        for (const url of relays) result[url] = { from: url, ok: ok.has(url) };
-        // Include any accepting relay not in the requested list (pool fallback).
-        for (const url of ok) if (!(url in result)) result[url] = { from: url, ok: true };
+        outcomes = await publishSignedOutcomes(
+          event as unknown as Parameters<typeof publishSignedOutcomes>[0],
+          relays,
+        );
       } catch (err) {
+        // Nothing went out (no relay set could be built). Not a refusal by any
+        // relay, so it stays uncertain rather than a definite "no".
         const message = err instanceof Error ? err.message : String(err);
-        for (const url of relays) result[url] = { from: url, ok: false, message };
+        for (const url of relays) result[url] = { from: url, ok: false, message, uncertain: true };
+        return result;
+      }
+      for (const o of outcomes) result[o.url] = classifyRelayOutcome(o);
+      // A requested relay with no outcome of its own (NDK normalized the URL, or
+      // dropped it from the set) never told us anything: uncertain.
+      for (const url of relays) {
+        if (url in result || outcomes.some((o) => sameRelay(o.url, url))) continue;
+        result[url] = { from: url, ok: false, message: "no answer", uncertain: true };
       }
       return result;
     },

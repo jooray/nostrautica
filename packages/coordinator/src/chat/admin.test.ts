@@ -1,7 +1,14 @@
 import { describe, it, expect } from "vitest";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import { Store } from "../store/db.js";
-import { MarmotAdmin, HELD_KEY_PACKAGE_TTL_MS, MAX_HELD_KEY_PACKAGES } from "./admin.js";
+import {
+  MarmotAdmin,
+  HELD_KEY_PACKAGE_TTL_MS,
+  MAX_HELD_KEY_PACKAGES,
+  REENROL_ACTIVITY_WINDOW_MS,
+  REENROL_KP_LEAD_SEC,
+  RECENT_INVITE_RECHECK_MS,
+} from "./admin.js";
 import type { ChatMls } from "./mls.js";
 import {
   makeChatDeviceProof,
@@ -80,6 +87,11 @@ class FakeMls implements ChatMls {
   }
   async isMember(group: string, pubkey: string): Promise<boolean> {
     return this.members.get(group)?.has(pubkey) ?? false;
+  }
+  /** What `lastActivity` reports per pubkey (audit K-1); absent = no record. */
+  activity = new Map<string, { ageMs: number; epoch: number; currentEpoch: number }>();
+  async lastActivity(_group: string, pubkey: string) {
+    return this.activity.get(pubkey);
   }
   async invite(group: string, kp: AnyEvent): Promise<void> {
     if (this.throwOnInvite.has(kp.pubkey)) {
@@ -2261,5 +2273,184 @@ describe("MarmotAdmin.ensureAvatar — the group avatar follows the event icon",
     const { mls, admin } = setup();
     await admin.ensureAvatar(COORD, "https://img.example.com/a.png");
     expect(mls.avatarCommits).toEqual([]);
+  });
+});
+
+  // Audit K-1 point 1. Every 21607 add from a device still in the room used to be
+  // an eviction warrant: a routine re-attest, a rename, the Retry button. The
+  // coordinator sees the leaf's traffic, so a leaf that is talking is alive.
+describe("re-enrolment needs a dead leaf (audit K-1)", () => {
+    async function enrolled(logs: string[]) {
+      const store = freshStore();
+      const mls = new FakeMls();
+      const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+      await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+      store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+      store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+      await admin.syncMember(COORD, ACCOUNT);
+      expect(mls.invited).toEqual([CHATKEY]);
+      const admin2 = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp-rotated")], (m) => logs.push(m));
+      return { store, mls, admin2 };
+    }
+
+    it("does not evict a device whose leaf sent a message a minute ago", async () => {
+      const logs: string[] = [];
+      const { mls, admin2, store } = await enrolled(logs);
+      mls.activity.set(CHATKEY, { ageMs: 60_000, epoch: 3, currentEpoch: 5 });
+      expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+      expect(mls.removed).toEqual([]);
+      expect(mls.invited).toEqual([CHATKEY]);
+      expect(store.isKpConsumed(COORD, "kp-rotated")).toBe(false);
+      expect(logs.some((l) => /keeping .* its leaf is active \(last seen 60s ago, in epoch 3 of 5\) — attestation treated as a refresh/.test(l))).toBe(true);
+    });
+
+    it("re-enrols a leaf silent past the window even when the epoch has not moved since", async () => {
+      // A quiet room: the device's last message is still in the current epoch, but it
+      // has lost its state since. Gating on the epoch would strand it until someone
+      // else committed.
+      const { mls, admin2 } = await enrolled([]);
+      mls.activity.set(CHATKEY, { ageMs: 6 * 60 * 60 * 1000, epoch: 5, currentEpoch: 5 });
+      expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+      expect(mls.removed).toEqual([[CHATKEY]]);
+    });
+
+    it("the window is minutes, not half an hour: a leaf that posted 6 min ago is re-enrolled", async () => {
+      // A member who posted and then forked must not wait half an hour to get back in.
+      const { mls, admin2 } = await enrolled([]);
+      mls.activity.set(CHATKEY, { ageMs: 6 * 60 * 1000, epoch: 4, currentEpoch: 5 });
+      expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+      expect(mls.removed).toEqual([[CHATKEY]]);
+    });
+
+    it("re-enrols a leaf that has been silent past the window in an older epoch", async () => {
+      const { mls, admin2 } = await enrolled([]);
+      mls.activity.set(CHATKEY, { ageMs: REENROL_ACTIVITY_WINDOW_MS + 1, epoch: 4, currentEpoch: 5 });
+      expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+      expect(mls.removed).toEqual([[CHATKEY]]);
+      expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+    });
+
+    it("re-enrols a leaf with no activity on record at all", async () => {
+      const { mls, admin2 } = await enrolled([]);
+      expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+      expect(mls.removed).toEqual([[CHATKEY]]);
+    });
+
+  // Audit K-1 point 3: one commit, so members see one change and the device is
+  // never out of the room without an Add already on its way.
+  it("a real re-enrolment is ONE Remove + Add commit when the MLS layer offers it", async () => {
+    class SingleCommitMls extends FakeMls {
+      reenrolled: string[] = [];
+      async reenrol(group: string, kp: AnyEvent): Promise<void> {
+        this.reenrolled.push(kp.pubkey);
+        (this.members.get(group) ?? this.members.set(group, new Set()).get(group)!).add(kp.pubkey);
+      }
+    }
+    const store = freshStore();
+    const mls = new SingleCommitMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    const admin2 = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp2")]);
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(mls.reenrolled).toEqual([CHATKEY]);
+    expect(mls.removed).toEqual([]); // no separate Remove commit
+    expect(mls.invited).toEqual([CHATKEY]); // and no separate Add
+    expect(store.isKpConsumed(COORD, "kp2")).toBe(true);
+  });
+
+  // Audit K-1 point 2: a key package minted for another event minutes earlier
+  // is not this device's re-enrolment.
+  it("does not evict on a key package five minutes older than the attestation", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    const fiveMinOld = { ...kpEvent(CHATKEY, "kp-5min"), created_at: CREATED_AT - 5 * 60 };
+    const admin2 = makeAdmin(store, mls, [fiveMinOld]);
+    expect(await admin2.syncMember(COORD, ACCOUNT, { reenrolling: CHATKEY, reenrollAt: CREATED_AT })).toBe(false);
+    expect(mls.removed).toEqual([]);
+    expect(REENROL_KP_LEAD_SEC).toBe(120);
+  });
+});
+
+// Audit K-8: a co-admin's commit that wins fork resolution against the
+// coordinator's Add rewinds it away, after invite() had already returned success.
+describe("an Add undone by a competing commit is re-queued (audit K-8)", () => {
+  class EpochMovingMls extends FakeMls {
+    async ingest(_group: string, events: AnyEvent[]) {
+      this.ingested.push(events);
+      return { epochBefore: 5, epochAfter: 6, commits: [], autoCommits: [], forks: [], failures: [], removedSelf: false };
+    }
+  }
+
+  async function addedThenIngest(opts: { lostLeaf: boolean; afterMs: number }) {
+    const store = freshStore();
+    const mls = new EpochMovingMls();
+    const clock = { now: CREATED_AT };
+    const synced: [string, string][] = [];
+    const logs: string[] = [];
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], (m) => logs.push(m), {
+      now: () => clock.now,
+      enqueueSync: (c, p) => void synced.push([c, p]),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+    if (opts.lostLeaf) mls.members.get("mls-1")!.delete(CHATKEY); // the rewind
+    clock.now += opts.afterMs;
+    await admin.ingest(COORD, [groupEvent([["h", "ng-1"]])]);
+    return { synced, logs };
+  }
+
+  it("re-queues the member's sync when a recent Add no longer holds a leaf", async () => {
+    const { synced, logs } = await addedThenIngest({ lostLeaf: true, afterMs: 30_000 });
+    expect(synced).toEqual([[COORD, ACCOUNT]]);
+    expect(logs.some((l) => /was added 30s ago but holds no leaf after epoch 5→6 .* re-queueing its sync/.test(l))).toBe(true);
+  });
+
+  it("leaves a recent Add alone while it still holds its leaf", async () => {
+    const { synced } = await addedThenIngest({ lostLeaf: false, afterMs: 30_000 });
+    expect(synced).toEqual([]);
+  });
+
+  it("stops watching an Add after the recheck window", async () => {
+    const { synced } = await addedThenIngest({ lostLeaf: true, afterMs: RECENT_INVITE_RECHECK_MS + 1 });
+    expect(synced).toEqual([]);
+  });
+});
+
+// Audit O-3: 154,870 "holding 30443 from <stranger>" lines in six days.
+describe("the held-key-package log line (audit O-3)", () => {
+  it("is written once per author per hold TTL, across events and redeliveries", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const clock = { now: 1_000_000 };
+    const logs: string[] = [];
+    const admin = makeAdmin(store, mls, [], (m) => logs.push(m), { now: () => clock.now });
+    const OTHER = "31923:" + "f".repeat(64) + ":other";
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    await admin.ensureGroup({ coordinate: OTHER, name: "n", description: "d", relays: [] });
+    const stranger = "5".repeat(64);
+    const holds = () => logs.filter((l) => l.includes(`holding 30443 from ${stranger.slice(0, 8)}`)).length;
+
+    for (let i = 0; i < 5; i++) {
+      await admin.handleKeyPackageEvent(COORD, kpEvent(stranger, `kp-${i}`));
+      await admin.handleKeyPackageEvent(OTHER, kpEvent(stranger, `kp-${i}`));
+    }
+    expect(holds()).toBe(1);
+    // Still held in both events: only the log line is throttled.
+    expect(admin.heldKeyPackageCount()).toBe(2);
+
+    clock.now += HELD_KEY_PACKAGE_TTL_MS;
+    await admin.handleKeyPackageEvent(COORD, kpEvent(stranger, "kp-later"));
+    expect(holds()).toBe(2);
   });
 });

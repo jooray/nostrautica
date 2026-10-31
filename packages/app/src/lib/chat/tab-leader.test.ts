@@ -432,6 +432,54 @@ describe("ChatTabCoordinator — no Web Locks (ping fallback, read-only follower
   });
 });
 
+// Audit R-10: one 300 ms window meant a leader busy for 300 ms (a history replay,
+// an MLS commit) lost a newcomer to a second leader — two MarmotClients on one
+// shared IndexedDB MLS store.
+describe("ChatTabCoordinator — ping fallback tolerates a busy leader (audit R-10)", () => {
+  it("a leader that misses the first ping but answers the second keeps its follower", async () => {
+    const bus = new FakeBus();
+    // A hand-driven 'leader' tab: deaf to the first who-leads, answers the next.
+    const busyLeader = bus.make(`nostrautica-chat:${SCOPE}`);
+    let pings = 0;
+    busyLeader.addEventListener("message", ({ data }) => {
+      if ((data as { t?: string }).t !== "who-leads") return;
+      pings++;
+      if (pings >= 2) busyLeader.postMessage({ t: "leader-hello", scope: SCOPE });
+    });
+    const newcomer = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks: null,
+      createChannel: bus.make,
+      onRoleChange: () => {},
+      pingWindowMs: 10,
+    });
+    await newcomer.whenSettled;
+    expect(pings).toBe(2);
+    expect(newcomer.role).toBe("follower");
+    newcomer.dispose();
+  });
+
+  it("leads only after two silent windows", async () => {
+    const bus = new FakeBus();
+    const listener = bus.make(`nostrautica-chat:${SCOPE}`);
+    let pings = 0;
+    listener.addEventListener("message", ({ data }) => {
+      if ((data as { t?: string }).t === "who-leads") pings++;
+    });
+    const lone = new ChatTabCoordinator({
+      scope: SCOPE,
+      locks: null,
+      createChannel: bus.make,
+      onRoleChange: () => {},
+      pingWindowMs: 10,
+    });
+    await lone.whenSettled;
+    expect(pings).toBe(2);
+    expect(lone.role).toBe("leader");
+    lone.dispose();
+  });
+});
+
 describe("ChatTabCoordinator — neither Web Locks nor BroadcastChannel", () => {
   it("assumes a single tab and leads", async () => {
     const c = new ChatTabCoordinator({

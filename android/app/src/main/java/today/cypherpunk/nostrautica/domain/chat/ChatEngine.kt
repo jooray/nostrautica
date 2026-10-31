@@ -18,6 +18,9 @@ data class ChatMessage(
     data class Reaction(val emoji: String, val count: Int, val mine: Boolean)
 }
 
+/** The chat runtime did not get through a step in time: an ordinary, retryable failure. */
+class ChatEngineTimeout(message: String) : Exception(message)
+
 /** A bounded timeline window as MDK materializes it. */
 data class ChatPage(val messages: List<ChatMessage>, val hasMoreBefore: Boolean)
 
@@ -62,9 +65,11 @@ interface ChatEngine {
     /** The initial key package and relay lists have been published (MDK NETWORK_READY). */
     suspend fun networkReady(account: String): Boolean
 
+    /** Every local group, or a throw: never a silently partial list (audit K-4). */
     suspend fun groups(account: String): List<GroupBinding.GroupInfo>
 
-    suspend fun acceptInvite(account: String, groupIdHex: String)
+    /** Accept a pending invitation. Returns false when MDK refused or failed it. */
+    suspend fun acceptInvite(account: String, groupIdHex: String): Boolean
 
     /**
      * Confirm a pending rejoin offer (a re-add Welcome into a group we hold stale
@@ -102,8 +107,47 @@ interface ChatEngine {
     /** Live timeline windows for one group, newest last. */
     fun timeline(account: String, groupIdHex: String, me: String): TimelineHandle
 
-    /** Fires whenever MDK reports a group/state change for [account]. */
-    fun changes(account: String): Flow<Unit>
+    /**
+     * Whether this device's copy of [groupIdHex] is out of step with the room (audit
+     * R-9). [unrecoverable] is the group record's own flag, already read by [groups].
+     */
+    suspend fun syncHealth(account: String, groupIdHex: String, unrecoverable: Boolean): SyncHealth
+
+    /**
+     * MDK's fork and stall signals for one group. Every one of them means "re-syncing,
+     * some history may be missing", and none is evidence of being out of the room:
+     * MDK documents `automaticRecoveryFailed` as "not membership evidence", and a
+     * Rejoin (remove + add) would only add a kick to the stall.
+     */
+    data class SyncHealth(
+        /** MDK `EpochStallEscalated`: armed backfills did not catch the group up. */
+        val stalled: Boolean = false,
+        /** MDK `GroupChangeSuperseded` with an outcome other than `reissued`. */
+        val superseded: Boolean = false,
+        /** The local copy is frozen pending verified repair. */
+        val unrecoverable: Boolean = false,
+        /** `GroupRecoveryStatus.automaticRecoveryFailed`. */
+        val automaticRecoveryFailed: Boolean = false,
+        /** `GroupRecoveryStatus.historyMayBeIncomplete`. */
+        val historyMayBeIncomplete: Boolean = false,
+    ) {
+        val resyncing: Boolean get() = stalled || superseded || unrecoverable || automaticRecoveryFailed || historyMayBeIncomplete
+    }
+
+    /** What MDK reported for [account], reduced to what the session reacts to. */
+    fun changes(account: String): Flow<Change>
+
+    /** One MDK runtime event. [groupIdHex] is null for an account-wide one. */
+    data class Change(val groupIdHex: String?, val kind: ChangeKind)
+
+    enum class ChangeKind {
+        /** Membership, epoch, invitation or other group state. */
+        STATE,
+        /** An application message (the open timeline renders it by itself). */
+        MESSAGE,
+        /** Sync health: a stalled epoch, a superseded change, history that may be incomplete. */
+        HEALTH,
+    }
 
     interface TimelineHandle {
         val pages: Flow<ChatPage>

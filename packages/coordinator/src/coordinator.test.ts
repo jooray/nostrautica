@@ -55,7 +55,7 @@ import {
   type EckVersion,
 } from "@nostrautica/protocol";
 import { Store, DETACHED_NO_DEADLINE_GRACE_SEC } from "./store/db.js";
-import { Coordinator, sanitizeMatchList, fitTalkContent, type Transport } from "./coordinator.js";
+import { Coordinator, KP_AUTHORS_PER_FILTER, sanitizeMatchList, fitTalkContent, type Transport } from "./coordinator.js";
 import { MockStt, MockLlm } from "./providers/mock.js";
 import type { RoleRoutes } from "./providers/types.js";
 import type { ChatMls } from "./chat/mls.js";
@@ -364,6 +364,8 @@ async function setup(
     /** Enable Marmot chat on the seeded 31600 (needs chatMls too). */
     chat?: boolean;
     chatMls?: ChatMls;
+    /** Debounce of the daemon-wide 30443 re-subscribe (audit R-1). */
+    kpDebounceMs?: number;
     /** Install guards (COORD-3). */
     maxEvents?: number;
     allowedEidPubkeys?: string[];
@@ -542,6 +544,7 @@ async function setup(
     batchSize: opts.batchSize,
     prefilter: opts.prefilter,
     chatMls: opts.chatMls,
+    ...(opts.kpDebounceMs !== undefined ? { keyPackageResubscribeDebounceMs: opts.kpDebounceMs } : {}),
     maxEvents: opts.maxEvents,
     allowedEidPubkeys: opts.allowedEidPubkeys,
     now: () => clock.t,
@@ -2026,6 +2029,32 @@ describe("audit R-53 — same-named spaces on one coordinator get their own addr
       expect(newestAt(a, spaceRecordsD(b.coordinate))).toBeDefined();
     } finally {
       a.coordinator.stop();
+    }
+  });
+
+  // Audit O-5: the background pass re-runs while relays refuse, and every pass
+  // used to log every event's failure again.
+  it("logs an event's upgrade failure once per streak, and its recovery", async () => {
+    const h = await setup();
+    try {
+      await h.coordinator.start();
+      await h.coordinator.rosterAddressMigration;
+      h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: getPublicKey(generateSecretKey()), status: "approved", now: h.clock.t });
+      const migrate = () => (h.coordinator as any).migrateRosterAddresses(() => false) as Promise<number>;
+      const out = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        h.transport.failPublishes = 999;
+        for (let i = 0; i < 3; i++) expect(await migrate()).toBe(1);
+        const lines = () => out.mock.calls.map((c) => c.join(" "));
+        expect(lines().filter((l) => l.includes(`address upgrade failed for ${h.coordinate}`))).toHaveLength(1);
+        h.transport.failPublishes = 0;
+        expect(await migrate()).toBe(0);
+        expect(lines().filter((l) => l.includes(`address upgrade for ${h.coordinate} went through after earlier failures`))).toHaveLength(1);
+      } finally {
+        out.mockRestore();
+      }
+    } finally {
+      h.coordinator.stop();
     }
   });
 
@@ -3728,7 +3757,11 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
     const mls = new StubMls();
     const h = await setup(0, { chat: true, chatMls: mls });
     const interop = ["wss://relay.us.whitenoise.chat", "wss://relay.eu.whitenoise.chat"];
-    const kpSub = h.transport.subs.find((s: any) => s.filter?.kinds?.includes(30443));
+    // The daemon-wide watcher (audit R-1) only exists once someone is eligible.
+    const pk = await join(h, generateSecretKey(), "crypto");
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: getPublicKey(generateSecretKey()), now: h.clock.t });
+    (h.coordinator as any).refreshKeyPackageSubscription();
+    const kpSub = h.transport.subs.find((s: any) => !s.closed && s.filter?.kinds?.includes(30443));
     expect(kpSub).toBeDefined();
     expect(kpSub!.relays).toEqual(["wss://test", ...interop]);
     // Every non-chat subscription stays on the event's own relays.
@@ -3837,8 +3870,59 @@ describe("audit COORD-9 — MLS membership runs through the durable job runner",
       }),
     ).rejects.toThrow(/no relay ack/);
     const open = h.transport.subs.filter((s: any) => !s.closed);
-    expect(open.some((s: any) => s.filter?.kinds?.includes(30443))).toBe(true);
     expect(open.some((s: any) => s.filter?.kinds?.includes(445))).toBe(true);
+    // The 30443 side is the daemon-wide watcher now (audit R-1): the event must be
+    // part of it, i.e. its relays are in the next re-subscribe's relay union.
+    const pk = await join(h, generateSecretKey(), "crypto");
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: getPublicKey(generateSecretKey()), now: h.clock.t });
+    (h.coordinator as any).refreshKeyPackageSubscription();
+    const kp = h.transport.subs.find((s: any) => !s.closed && s.filter?.kinds?.includes(30443));
+    expect(kp?.relays).toContain("wss://test");
+  });
+
+  // Audit R-5: the 445 ingest handler ended in `.catch(() => {})`, so a commit the
+  // coordinator could not process (a fork, a decrypt failure) left no trace. Since
+  // the chat layer's own fix, MarmotAdmin.ingest catches and reports the failure
+  // itself (once per group per INGEST_FAILURE_LOG_EVERY_MS), so the daemon-level
+  // catch no longer sees it: this asserts the line that actually reaches the log.
+  it("logs a failing 445 ingest with its cause, once per window rather than per message", async () => {
+    class FailingIngestMls extends StubMls {
+      override async ingest(): Promise<void> {
+        throw new Error("could not apply commit", { cause: new Error("epoch 7 is behind the group's epoch 9") });
+      }
+    }
+    const h = await setup(0, { chat: true, chatMls: new FailingIngestMls() });
+    const sub = h.transport.subs.find((s: any) => !s.closed && s.filter?.kinds?.includes(445));
+    expect(sub).toBeDefined();
+    const ng = sub!.filter["#h"][0];
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 5; i++) {
+        const msg = finalizeEvent(
+          { kind: 445, created_at: Math.floor(Date.now() / 1000) + i, tags: [["h", ng]], content: `x${i}` },
+          generateSecretKey(),
+        ) as unknown as NostrEvent;
+        sub!.onEvent(msg);
+      }
+      await new Promise((r) => setTimeout(r, 10));
+      const lines = out.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes(": ingest failed:"));
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatch(/could not apply commit.*epoch 7 is behind/);
+      // A window later the next failure prints again, carrying the suppressed count.
+      h.clock.t += 6 * 60_000;
+      sub!.onEvent(
+        finalizeEvent(
+          { kind: 445, created_at: Math.floor(Date.now() / 1000) + 9, tags: [["h", ng]], content: "y" },
+          generateSecretKey(),
+        ) as unknown as NostrEvent,
+      );
+      await new Promise((r) => setTimeout(r, 10));
+      const again = out.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes(": ingest failed:"));
+      expect(again).toHaveLength(2);
+      expect(again[1]).toMatch(/\+4 more since the last report/);
+    } finally {
+      out.mockRestore();
+    }
   });
 
   it("detach freezes the group and emits a chat-orphaned 21606 (reliability tail 6e)", async () => {
@@ -7113,8 +7197,16 @@ describe("profile refresh — a kind-0 edited OUTSIDE Nostrautica re-enriches an
 
     // Every subsequent sweep over the same bio must be a pure no-op. If this ever
     // fails, the hourly timer is re-billing the whole roster every hour.
-    await h.coordinator.profileRefreshSweep();
-    await h.coordinator.profileRefreshSweep();
+    // And it must be a SILENT no-op (audit O-1): "already done" is the expected
+    // answer, not a "this work will NOT run" alarm per attendee per hour.
+    const warn = vi.spyOn(console, "warn");
+    try {
+      await h.coordinator.profileRefreshSweep();
+      await h.coordinator.profileRefreshSweep();
+      expect(warn.mock.calls.map((c) => c.join(" ")).join("\n")).not.toMatch(/enqueue DISCARDED/);
+    } finally {
+      warn.mockRestore();
+    }
     expect(processJobKeys(h, pk)).toEqual(baseline);
   });
 
@@ -7325,6 +7417,333 @@ describe("the suspended-event retry timer exists even when nothing was suspended
  * later, when it prewarms chat. Nothing looked again, so the member's first open
  * waited on the passive 30443 watcher.
  */
+/**
+ * Audit R-1. The 30443 watcher used to be one UNFILTERED `{kinds:[30443]}` per
+ * chat-enabled event, so every stranger's key package on the chat relays was
+ * delivered, held and logged once per event: 154,870 lines in six days, and the
+ * likeliest cause of the "too many concurrent REQs" refusals.
+ */
+describe("audit R-1 — one daemon-wide 30443 watcher, filtered to eligible authors", () => {
+  const kp = (pubkey: string, id: string) =>
+    ({ kind: 30443, pubkey, created_at: 1, id, tags: [], content: "", sig: "" }) as any;
+  const openKpSubs = (h: Harness) => h.transport.subs.filter((s: any) => !s.closed && s.filter?.kinds?.includes(30443));
+  const settle = () => new Promise((r) => setTimeout(r, 10));
+
+  async function withDevices(n: number) {
+    const mls = new StubMls();
+    const h = await setup(0, { chat: true, chatMls: mls, kpDebounceMs: 20 });
+    const devices: string[] = [];
+    for (let i = 0; i < n; i++) {
+      const pk = await join(h, generateSecretKey(), "crypto");
+      const device = getPublicKey(generateSecretKey());
+      h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: device, now: h.clock.t });
+      devices.push(device);
+    }
+    await h.coordinator.jobs.drain();
+    mls.invited = [];
+    await new Promise((r) => setTimeout(r, 40)); // let the joins' debounced re-subscribes land
+    (h.coordinator as any).refreshKeyPackageSubscription();
+    return { h, mls, devices };
+  }
+
+  it("opens ONE subscription with authors + since, and a stranger's key package reaches no event", async () => {
+    const { h, mls, devices } = await withDevices(2);
+    const subs = openKpSubs(h);
+    expect(subs).toHaveLength(1);
+    expect(subs[0]!.filter.authors).toEqual([...devices].sort());
+    expect(subs[0]!.filter.since).toBeGreaterThan(0);
+
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      subs[0]!.onEvent(kp(getPublicKey(generateSecretKey()), "stranger"));
+      await settle();
+      expect(mls.invited).toEqual([]);
+      expect(out.mock.calls.map((c) => c.join(" ")).join("\n")).not.toMatch(/holding 30443/);
+    } finally {
+      out.mockRestore();
+    }
+    subs[0]!.onEvent(kp(devices[0]!, "kp-d0"));
+    await settle();
+    expect(mls.invited).toEqual([devices[0]]);
+  });
+
+  it("re-subscribes once, debounced, after a burst of eligibility changes (make-before-break)", async () => {
+    const { h, devices } = await withDevices(1);
+    const before = openKpSubs(h)[0]!;
+    // A second device attests; MarmotAdmin invalidates eligibility (twice, as an
+    // attestation followed by its roster republish does).
+    const pk = await join(h, generateSecretKey(), "design");
+    const device = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: device, now: h.clock.t });
+    const opensBefore = h.transport.subs.length;
+    (h.coordinator as any).marmot.invalidateEligibility(h.coordinate);
+    (h.coordinator as any).marmot.invalidateEligibility(h.coordinate);
+    expect(before.closed).toBe(false); // nothing yet: debounced
+    await new Promise((r) => setTimeout(r, 60));
+    const after = openKpSubs(h);
+    expect(after).toHaveLength(1);
+    expect(after[0]!.filter.authors).toEqual([...devices, device].sort());
+    expect(before.closed).toBe(true);
+    // ONE new 30443 subscription for the burst, not one per invalidation.
+    expect(h.transport.subs.slice(opensBefore).filter((s: any) => s.filter?.kinds?.includes(30443))).toHaveLength(1);
+    h.coordinator.stop();
+  });
+
+  it("dispatches one delivery to EVERY event the author is eligible for", async () => {
+    const { h, devices } = await withDevices(1);
+    const c = h.coordinator as any;
+    // A second chat event sharing the device (the shared 30443 slot of K-1).
+    const other = { ...c.events.get(h.coordinate), coordinate: "31923:other:event", configRelays: ["wss://other"] };
+    c.events.set(other.coordinate, other);
+    const handled: string[] = [];
+    vi.spyOn(c.marmot, "handleKeyPackageEvent").mockImplementation(async (coordinate: any) => void handled.push(coordinate));
+    const eligible = vi.spyOn(c.marmot, "eligibleChatAuthors").mockImplementation(() => devices);
+    c.refreshKeyPackageSubscription();
+    const subs = openKpSubs(h);
+    expect(subs).toHaveLength(1);
+    expect(subs[0]!.relays).toContain("wss://other");
+    subs[0]!.onEvent(kp(devices[0]!, "kp-shared"));
+    expect(handled.sort()).toEqual([h.coordinate, other.coordinate].sort());
+    eligible.mockRestore();
+  });
+
+  it("splits a big author set across filters rather than one unbounded `authors` list", async () => {
+    const { h } = await withDevices(0);
+    const c = h.coordinator as any;
+    const many = Array.from({ length: 2 * KP_AUTHORS_PER_FILTER + 50 }, () => getPublicKey(generateSecretKey()));
+    const eligible = vi.spyOn(c.marmot, "eligibleChatAuthors").mockImplementation(() => many);
+    c.refreshKeyPackageSubscription();
+    const sizes = openKpSubs(h).map((s: any) => s.filter.authors.length);
+    expect(sizes).toEqual([KP_AUTHORS_PER_FILTER, KP_AUTHORS_PER_FILTER, 50]);
+    eligible.mockRestore();
+  });
+
+  // The out-of-order enrolment MarmotAdmin "holds" for: the device published its
+  // 30443 BEFORE its 21607, so its author was not in the watcher's filter and the
+  // watcher never saw it. The attestation's sync must still find it, by author.
+  it("a key package published before its attestation is still found, and the watcher then covers the device", async () => {
+    const { h, mls } = await withDevices(1);
+    const pk = await join(h, generateSecretKey(), "music");
+    await h.coordinator.jobs.drain();
+    mls.invited = [];
+    const device = getPublicKey(generateSecretKey());
+    // 1. The key package lands on the relay first; the watcher is not asking for it.
+    h.transport.seed.push(kp(device, "kp-early"));
+    expect(openKpSubs(h)[0]!.filter.authors).not.toContain(device);
+    // 2. The attestation binds the device (as MarmotAdmin.handleAttestation does:
+    //    bind, invalidate eligibility, durable sync).
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: device, now: h.clock.t });
+    (h.coordinator as any).marmot.invalidateEligibility(h.coordinate);
+    h.coordinator.jobs.enqueue("chat_sync_member", `chat-sync:${h.coordinate}:${pk}:attest`, {
+      coordinate: h.coordinate,
+      pubkey: pk,
+    });
+    await h.coordinator.jobs.drain();
+    // syncMember fetched by author with no `since`, and found it.
+    expect(mls.invited).toEqual([device]);
+    expect(h.transport.fetches.some((f: any) => f.kinds?.includes(30443) && f.authors?.includes(device))).toBe(true);
+    // And the re-subscribe puts the device in the watcher's filter for its next rotation.
+    await new Promise((r) => setTimeout(r, 60));
+    expect(openKpSubs(h)[0]!.filter.authors).toContain(device);
+    h.coordinator.stop();
+  });
+});
+
+/**
+ * Audit R-3. Two Plan B members sat out of the chat from 10-08 and 10-10: their
+ * chat_sync_member rows had poisoned, nothing re-ran them, and nothing told them.
+ */
+describe("audit R-3 — poisoned chat syncs are surfaced and revived", () => {
+  async function poisonedSync() {
+    const mls = new StubMls();
+    mls.failIsMember = true;
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const sk = generateSecretKey();
+    const pk = await join(h, sk, "crypto");
+    const devicePk = getPublicKey(generateSecretKey());
+    h.store.upsertChatKey({ coordinate: h.coordinate, accountPubkey: pk, chatPubkey: devicePk, now: h.clock.t });
+    h.transport.seed.push({ kind: 30443, pubkey: devicePk, created_at: 1, id: "kp-1", tags: [], content: "", sig: "" } as any);
+    await h.coordinator.jobs.drain();
+    for (let i = 0; i < 60 && !h.store.poisonStatuses(h.coordinate).some((p) => p.stage === "chat_sync_member"); i++) {
+      h.clock.t += 4 * 60 * 60_000;
+      await h.coordinator.jobs.drain();
+    }
+    expect(h.store.poisonJobs().some((j) => j.type === "chat_sync_member")).toBe(true);
+    return { h, mls, sk, pk, devicePk };
+  }
+  /** The 21606 statuses sealed to `sk`, oldest first. */
+  function statusesFor(h: Harness, sk: Uint8Array) {
+    return h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => {
+        try {
+          return unwrapRumor(e as any, sk);
+        } catch {
+          return null;
+        }
+      })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
+  }
+
+  it("tells the MEMBER, over 21606, that they could not be added — with a chat-specific category", async () => {
+    const { h, sk, pk } = await poisonedSync();
+    const mine = statusesFor(h, sk).filter((s) => s.stage === "chat_sync_member");
+    expect(mine.at(-1)).toMatchObject({ pubkey: pk, state: "poison", error_category: "chat_sync_incomplete", retryable: true });
+    // And the organizer's copy carries the same category.
+    const org = statusesFor(h, h.eidSk).filter((s) => s.stage === "chat_sync_member");
+    expect(org.at(-1)?.error_category).toBe("chat_sync_incomplete");
+  });
+
+  it("re-queues poisoned syncs once at boot with a fresh budget, and announces 'cleared' when one goes through", async () => {
+    const { h, mls, sk, devicePk } = await poisonedSync();
+    mls.failIsMember = false; // whatever blocked it has cleared since
+    const out = vi.spyOn(console, "log");
+    try {
+      await h.coordinator.start();
+      expect(out.mock.calls.map((c) => c.join(" ")).join("\n")).toMatch(
+        /\[chat\] boot: re-queued poisoned chat_sync_member #\d+ for .* — fresh retry budget/,
+      );
+    } finally {
+      out.mockRestore();
+    }
+    const row = h.store.poisonJobs().find((j) => j.type === "chat_sync_member");
+    expect(row).toBeUndefined();
+    await h.coordinator.jobs.drain();
+    expect(mls.invited).toContain(devicePk);
+    expect(h.store.poisonStatuses(h.coordinate).some((p) => p.stage === "chat_sync_member")).toBe(false);
+    const mine = statusesFor(h, sk).filter((s) => s.stage === "chat_sync_member");
+    expect(mine.at(-1)?.state).toBe("cleared");
+    h.coordinator.stop();
+  });
+
+  it("an organizer `reprocess` for the attendee re-queues their poisoned chat sync", async () => {
+    const { h, mls, pk, devicePk } = await poisonedSync();
+    mls.failIsMember = false;
+    await admin(h, "reprocess", { pubkey: pk });
+    expect(h.store.poisonJobs().some((j) => j.type === "chat_sync_member")).toBe(false);
+    await h.coordinator.jobs.drain();
+    expect(mls.invited).toContain(devicePk);
+  });
+});
+
+/**
+ * Audit K-7 point 4 / S-4. Four restores committed (admins, routing relays,
+ * avatar) and opened their chat REQs in the same burst, into relays already
+ * refusing REQs; a commit whose publish times out is the fork trigger.
+ */
+describe("audit K-7/S-4 — boot-time chat commits and subscriptions do not burst", () => {
+  it("runs chat commits one at a time across events, and a failed one does not wedge the queue", async () => {
+    const h = await setup(0, { chat: true, chatMls: new StubMls() });
+    const c = h.coordinator as any;
+    let inFlight = 0;
+    let peak = 0;
+    const commit = (fail = false) => async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      await new Promise((r) => setTimeout(r, 5));
+      inFlight--;
+      if (fail) throw new Error("publish timed out");
+      return "ok";
+    };
+    const results = await Promise.allSettled([
+      c.withChatCommitLock(commit()),
+      c.withChatCommitLock(commit(true)),
+      c.withChatCommitLock(commit()),
+      c.withChatCommitLock(commit()),
+    ]);
+    expect(peak).toBe(1);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "rejected", "fulfilled", "fulfilled"]);
+  });
+
+  it("routes the setup's group, relay and avatar commits through that queue", async () => {
+    const h = await setup(0, { chat: true, chatMls: new StubMls() });
+    const c = h.coordinator as any;
+    const lock = vi.spyOn(c, "withChatCommitLock");
+    await c.setUpChat(c.events.get(h.coordinate));
+    // ensure-group (syncAdmins), ensure-relays, ensure-avatar.
+    expect(lock.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("staggers boot-time chat subscriptions, one slot per event", async () => {
+    const h = await setup(0, { chat: true, chatMls: new StubMls() });
+    const c = h.coordinator as any;
+    const state = c.events.get(h.coordinate);
+    const other = { ...state, coordinate: "31923:other:event" };
+    c.events.set(other.coordinate, other);
+    vi.useFakeTimers();
+    try {
+      const subscribed: string[] = [];
+      vi.spyOn(c, "subscribeChat").mockImplementation((s: any) => void subscribed.push(s.coordinate));
+      c.subscribeChatStaggered(state);
+      c.subscribeChatStaggered(other);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(subscribed).toEqual([h.coordinate]);
+      await vi.advanceTimersByTimeAsync(300);
+      expect(subscribed).toEqual([h.coordinate, other.coordinate]);
+      // An event detached before its slot is not subscribed.
+      const third = { ...state, coordinate: "31923:third:event" };
+      c.events.set(third.coordinate, third);
+      c.subscribeChatStaggered(third);
+      c.events.delete(third.coordinate);
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(subscribed).not.toContain(third.coordinate);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // K-7 point 2: the MLS layer is getting a method that re-sends a commit whose
+  // publish was uncertain. The coordinator drives it if (and only if) it exists.
+  it("calls the MLS pending-publication retry when it exists, and is a no-op when it does not", async () => {
+    const plain = await setup(0, { chat: true, chatMls: new StubMls() });
+    await expect((plain.coordinator as any).retryPendingPublications()).resolves.toBe(false);
+
+    class RetryingMls extends StubMls {
+      calls = 0;
+      fail = false;
+      async retryPendingPublications() {
+        this.calls++;
+        if (this.fail) throw new Error("no relay acked the re-send");
+      }
+    }
+    const mls = new RetryingMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    await expect((h.coordinator as any).retryPendingPublications()).resolves.toBe(true);
+    expect(mls.calls).toBe(1);
+    // A failing re-send is logged, not thrown out of a timer.
+    mls.fail = true;
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await expect((h.coordinator as any).retryPendingPublications()).resolves.toBe(true);
+      expect(out.mock.calls.map((c) => c.join(" ")).join("\n")).toMatch(/pending-publication retry failed/);
+    } finally {
+      out.mockRestore();
+    }
+  });
+
+  it("drives that retry from a 60 s timer once the daemon is running", async () => {
+    class RetryingMls extends StubMls {
+      calls = 0;
+      async retryPendingPublications() {
+        this.calls++;
+      }
+    }
+    const mls = new RetryingMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    vi.useFakeTimers();
+    try {
+      await h.coordinator.start();
+      expect(mls.calls).toBe(0);
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(mls.calls).toBe(1);
+    } finally {
+      vi.useRealTimers();
+      h.coordinator.stop();
+    }
+  });
+});
+
 describe("chat enrolment is re-checked for a bounded window after the grant", () => {
   it("picks the device up on a re-check when it appears after the approval", async () => {
     const mls = new StubMls();

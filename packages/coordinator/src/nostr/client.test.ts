@@ -1,5 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
-import { NostrClient, MAX_FETCH_EVENTS, MAX_FETCH_ALL_EVENTS, type NostrEvent, type Filter } from "./client.js";
+import {
+  NostrClient,
+  MAX_FETCH_EVENTS,
+  MAX_FETCH_ALL_EVENTS,
+  MAX_FETCH_REQS_PER_RELAY,
+  MAX_LONG_LIVED_REQS_PER_RELAY,
+  DEGRADED_FETCH_REQS_PER_RELAY,
+  type NostrEvent,
+  type Filter,
+  type ReqHandlers,
+} from "./client.js";
 
 /**
  * Paginated full-history fetch (audit R4). The one-shot fetch caps at
@@ -247,7 +257,7 @@ describe("NostrClient.publish outcomes", () => {
     const client = new NostrClient(["wss://fast.example", "wss://slow.example"]);
     withPool(client, () => [later(1, "ok"), later(5_000, "ok")]);
     const started = Date.now();
-    await expect(client.publish(EVENT)).resolves.toEqual({ replaced: false });
+    await expect(client.publish(EVENT)).resolves.toMatchObject({ replaced: false });
     expect(Date.now() - started).toBeLessThan(500);
   });
 
@@ -256,7 +266,7 @@ describe("NostrClient.publish outcomes", () => {
     withPool(client, () => [failLater(1, "replaced: have newer event"), later(200, "ok")]);
     // "replaced" is an ACK for publish's purposes (the data is durably there) AND the
     // signal the coordinator reconciles on.
-    await expect(client.publish(EVENT)).resolves.toEqual({ replaced: true });
+    await expect(client.publish(EVENT)).resolves.toMatchObject({ replaced: true });
   });
 
   it("a LATE \"have newer\" is no longer swallowed — it is logged, loudly", async () => {
@@ -282,7 +292,7 @@ describe("NostrClient.publish outcomes", () => {
   it("a plain `duplicate` is an ack but is NOT a reconcile signal", async () => {
     const client = new NostrClient(["wss://a.example"]);
     withPool(client, () => [failLater(1, "duplicate: already have this event")]);
-    await expect(client.publish(EVENT)).resolves.toEqual({ replaced: false });
+    await expect(client.publish(EVENT)).resolves.toMatchObject({ replaced: false });
   });
 
   /**
@@ -332,56 +342,62 @@ describe("NostrClient.publish outcomes", () => {
 describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
   interface FakeSub {
     url: string;
-    params: { onevent: (e: NostrEvent) => void; oneose?: () => void; onclose: (r: { url: string; reason: string }[]) => void };
+    filters: Record<string, unknown>[];
+    handlers: ReqHandlers;
     closed: boolean;
   }
-  /** A pool that records each per-relay subscribe and lets the test drive closes. */
-  function fakePool(client: NostrClient): FakeSub[] {
+  /** Replace the one place a long-lived REQ touches nostr-tools (`openReq`). */
+  function fakeReqs(client: NostrClient): FakeSub[] {
     const subs: FakeSub[] = [];
-    (client as any).pool = {
-      subscribe(relays: string[], _f: unknown, params: FakeSub["params"]) {
-        const sub: FakeSub = { url: relays[0]!, params, closed: false };
-        subs.push(sub);
-        return { close: () => (sub.closed = true) };
-      },
-      close() {},
+    (client as any).openReq = (url: string, filters: Record<string, unknown>[], handlers: ReqHandlers) => {
+      const sub: FakeSub = { url, filters, handlers, closed: false };
+      subs.push(sub);
+      return { close: () => (sub.closed = true) };
     };
     return subs;
   }
+  const flush = () => vi.advanceTimersByTimeAsync(0);
 
   const ev = (id: string): NostrEvent =>
     ({ id, pubkey: "a".repeat(64), kind: 1059, created_at: 1, tags: [], content: "", sig: "s" }) as unknown as NostrEvent;
 
-  it("opens ONE subscription per relay, not one group subscription", () => {
-    const client = new NostrClient([]);
-    const subs = fakePool(client);
-    const close = client.subscribe({ kinds: [1059] }, () => {}, ["wss://a", "wss://b", "wss://a"]);
-    expect(subs.map((s) => s.url)).toEqual(["wss://a", "wss://b"]); // deduped
-    close();
-    expect(subs.every((s) => s.closed)).toBe(true);
+  it("opens ONE subscription per relay, not one group subscription", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const subs = fakeReqs(client);
+      const close = client.subscribe({ kinds: [1059] }, () => {}, ["wss://a", "wss://b", "wss://a"]);
+      await flush();
+      expect(subs.map((s) => s.url)).toEqual(["wss://a/", "wss://b/"]); // deduped
+      close();
+      expect(subs.every((s) => s.closed)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("resubscribes the one relay that closed, and leaves the healthy one alone", async () => {
     vi.useFakeTimers();
     try {
-      const client = new NostrClient([]);
-      const subs = fakePool(client);
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const subs = fakeReqs(client);
       const close = client.subscribe({ kinds: [1059] }, () => {}, ["wss://down", "wss://up"]);
+      await flush();
       expect(subs).toHaveLength(2);
 
-      // The unreachable relay's subscribe fails: nostr-tools calls onclose for it.
-      subs[0]!.params.onclose([{ url: "", reason: "connection failed" }]);
+      // The unreachable relay's subscribe fails: its REQ reports a close.
+      subs[0]!.handlers.onclose("connection failed");
       await vi.advanceTimersByTimeAsync(5_000);
       expect(subs).toHaveLength(3);
-      expect(subs[2]!.url).toBe("wss://down");
+      expect(subs[2]!.url).toBe("wss://down/");
 
       // Still down: it keeps trying, with a longer gap each time.
-      subs[2]!.params.onclose([{ url: "", reason: "connection failed" }]);
+      subs[2]!.handlers.onclose("connection failed");
       await vi.advanceTimersByTimeAsync(5_000);
       expect(subs).toHaveLength(3); // 15s backoff, not yet
       await vi.advanceTimersByTimeAsync(10_000);
       expect(subs).toHaveLength(4);
-      expect(subs[3]!.url).toBe("wss://down");
+      expect(subs[3]!.url).toBe("wss://down/");
 
       close();
       await vi.advanceTimersByTimeAsync(600_000);
@@ -396,21 +412,22 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
     // every blip on a relay cost the full 300 s ceiling before the next try.
     vi.useFakeTimers();
     try {
-      const client = new NostrClient([]);
-      const subs = fakePool(client);
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const subs = fakeReqs(client);
       client.subscribe({ kinds: [1059] }, () => {}, ["wss://flaky"]);
+      await flush();
 
       // Climb the ladder: 5 s, 15 s, 60 s, 300 s.
       for (const wait of [5_000, 15_000, 60_000, 300_000]) {
-        subs.at(-1)!.params.onclose([{ url: "", reason: "connection failed" }]);
+        subs.at(-1)!.handlers.onclose("connection failed");
         await vi.advanceTimersByTimeAsync(wait);
       }
       expect(subs).toHaveLength(5);
 
       // The relay is back and answers the subscription...
-      subs.at(-1)!.params.oneose?.();
+      subs.at(-1)!.handlers.oneose();
       // ...then drops again: the retry comes after 5 s, not 300 s.
-      subs.at(-1)!.params.onclose([{ url: "", reason: "relay connection closed" }]);
+      subs.at(-1)!.handlers.onclose("relay connection closed");
       await vi.advanceTimersByTimeAsync(5_000);
       expect(subs).toHaveLength(6);
     } finally {
@@ -424,46 +441,251 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
     // the `since` of any other relay's subscription, or of the caller's filter.
     vi.useFakeTimers();
     try {
-      const client = new NostrClient([]);
-      const filters: Record<string, unknown>[] = [];
-      const subs: FakeSub[] = [];
-      (client as any).pool = {
-        subscribe(relays: string[], f: Record<string, unknown>, params: FakeSub["params"]) {
-          filters.push(f);
-          const sub: FakeSub = { url: relays[0]!, params, closed: false };
-          subs.push(sub);
-          return { close: () => (sub.closed = true) };
-        },
-        close() {},
-      };
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const subs = fakeReqs(client);
       const callerFilter = { kinds: [31600], authors: ["a".repeat(64)] };
       client.subscribe(callerFilter, () => {}, ["wss://evil", "wss://good"]);
-      filters[0]!.since = 4_000_000_000; // what the pool does after evil's reconnect
-      expect(filters[1]!.since).toBeUndefined();
+      await flush();
+      subs[0]!.filters[0]!.since = 4_000_000_000; // what the pool does after evil's reconnect
+      expect(subs[1]!.filters[0]!.since).toBeUndefined();
       expect((callerFilter as Record<string, unknown>).since).toBeUndefined();
-      subs[1]!.params.onclose([{ url: "", reason: "connection failed" }]);
+      subs[1]!.handlers.onclose("connection failed");
       await vi.advanceTimersByTimeAsync(5_000);
-      expect(filters[2]).not.toBe(filters[0]);
-      expect(filters[2]!.since).toBeUndefined();
+      expect(subs[2]!.filters[0]).not.toBe(subs[0]!.filters[0]);
+      expect(subs[2]!.filters[0]!.since).toBeUndefined();
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it("dedupes by event id across relays (the group subscribe used to do this)", () => {
+  it("dedupes by event id across relays (the group subscribe used to do this)", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const subs = fakeReqs(client);
+      const got: string[] = [];
+      client.subscribe({ kinds: [1059] }, (e) => got.push(e.id), ["wss://a", "wss://b"]);
+      await flush();
+      subs[0]!.handlers.onevent(ev("w1"));
+      subs[1]!.handlers.onevent(ev("w1")); // same wrap, second relay
+      subs[1]!.handlers.onevent(ev("w2"));
+      expect(got).toEqual(["w1", "w2"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+/**
+ * Audit R-2. Fifteen events held ~60-75 concurrent REQs on each shared relay
+ * against strfry's default of 20, and relay.primal.net / nostr.oxtr.dev answered
+ * "too many concurrent REQs" ~28,000 times a day.
+ */
+describe("NostrClient subscription pressure (audit R-2)", () => {
+  interface FakeSub {
+    url: string;
+    filters: Record<string, any>[];
+    handlers: ReqHandlers;
+    closed: boolean;
+  }
+  function fakeReqs(client: NostrClient): FakeSub[] {
+    const subs: FakeSub[] = [];
+    (client as any).openReq = (url: string, filters: Record<string, any>[], handlers: ReqHandlers) => {
+      const sub: FakeSub = { url, filters, handlers, closed: false };
+      subs.push(sub);
+      return { close: () => (sub.closed = true) };
+    };
+    return subs;
+  }
+  const open = (subs: FakeSub[]) => subs.filter((s) => !s.closed);
+  const wrap = (id: string, p: string): NostrEvent =>
+    ({ id, pubkey: "a".repeat(64), kind: 1059, created_at: 1, tags: [["p", p]], content: "", sig: "s" }) as unknown as NostrEvent;
+
+  it("multiplexes many subscriptions to one relay into one REQ and routes events by filter", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 100 });
+      const subs = fakeReqs(client);
+      const got = new Map<string, string[]>();
+      for (const inbox of ["i1", "i2", "i3"]) {
+        got.set(inbox, []);
+        client.subscribe({ kinds: [1059], "#p": [inbox] }, (e) => got.get(inbox)!.push(e.id), ["wss://primal"]);
+      }
+      await vi.advanceTimersByTimeAsync(100);
+      expect(subs).toHaveLength(1);
+      expect(subs[0]!.filters.map((f) => f["#p"][0])).toEqual(["i1", "i2", "i3"]);
+      subs[0]!.handlers.onevent(wrap("w2", "i2"));
+      subs[0]!.handlers.onevent(wrap("w3", "i3"));
+      expect(got.get("i1")).toEqual([]);
+      expect(got.get("i2")).toEqual(["w2"]);
+      expect(got.get("i3")).toEqual(["w3"]);
+      expect(client.reqCounts("wss://primal").longLived).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps different kind sets in different REQs, and caps the REQs per relay", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const subs = fakeReqs(client);
+      client.subscribe({ kinds: [1059], "#p": ["x"] }, () => {}, ["wss://r"]);
+      client.subscribe({ kinds: [445], "#h": ["g"] }, () => {}, ["wss://r"]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(subs).toHaveLength(2);
+      // Fill up to the cap with already-sent REQs, then one more: it must JOIN an
+      // existing REQ of its class instead of becoming REQ number cap+1.
+      for (let i = 0; i < MAX_LONG_LIVED_REQS_PER_RELAY; i++) {
+        client.subscribe({ kinds: [1059], "#p": [`p${i}`] }, () => {}, ["wss://r"]);
+        await vi.advanceTimersByTimeAsync(0);
+      }
+      expect(client.reqCounts("wss://r").longLived).toBeLessThanOrEqual(MAX_LONG_LIVED_REQS_PER_RELAY);
+      expect(open(subs).reduce((n, s) => n + s.filters.length, 0)).toBe(MAX_LONG_LIVED_REQS_PER_RELAY + 2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a closer drops its filter, and the last closer closes the REQ", async () => {
+    vi.useFakeTimers();
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 10 });
+      const subs = fakeReqs(client);
+      const a = client.subscribe({ kinds: [1059], "#p": ["a"] }, () => {}, ["wss://r"]);
+      const b = client.subscribe({ kinds: [1059], "#p": ["b"] }, () => {}, ["wss://r"]);
+      await vi.advanceTimersByTimeAsync(10);
+      a();
+      await vi.advanceTimersByTimeAsync(10);
+      expect(open(subs)).toHaveLength(1);
+      expect(open(subs)[0]!.filters.map((f) => f["#p"][0])).toEqual(["b"]);
+      b();
+      expect(open(subs)).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("treats a 'too many concurrent REQs' NOTICE as back-pressure: logged once, refused REQ re-sent later", async () => {
+    vi.useFakeTimers();
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    const dbg = vi.spyOn(console, "debug").mockImplementation(() => {});
+    try {
+      let t = 1_000_000;
+      const client = new NostrClient([], { reqDebounceMs: 0, now: () => t });
+      const subs = fakeReqs(client);
+      client.subscribe({ kinds: [1059], "#p": ["a"] }, () => {}, ["wss://primal"]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(subs).toHaveLength(1);
+      // The relay refuses the REQ with a NOTICE (strfry's wording) and never answers it.
+      const pool = (client as any).pool;
+      for (let i = 0; i < 50; i++) pool.onNotice("wss://primal/", "ERROR: too many concurrent REQs");
+      expect(client.isDegraded("wss://primal")).toBe(true);
+      expect(subs[0]!.closed).toBe(true);
+      const lines = () => out.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes("is refusing REQs"));
+      expect(lines()).toHaveLength(1); // once per window, not 50 times
+      expect(dbg).not.toHaveBeenCalled();
+      // Not resubscribed a second later...
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(subs).toHaveLength(1);
+      // ...but after the pressure back-off.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(subs).toHaveLength(2);
+      expect(subs[1]!.closed).toBe(false);
+      // A REQ that already reached EOSE was accepted, so a later NOTICE leaves it alone.
+      subs[1]!.handlers.oneose();
+      pool.onNotice("wss://primal/", "ERROR: too many concurrent REQs");
+      expect(subs[1]!.closed).toBe(false);
+      // The window passes: the relay is healthy again.
+      t += 6 * 60_000;
+      expect(client.isDegraded("wss://primal")).toBe(false);
+      // Other notices are passed through as before.
+      pool.onNotice("wss://primal/", "hello");
+      expect(dbg).toHaveBeenCalledTimes(1);
+    } finally {
+      out.mockRestore();
+      dbg.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a CLOSED 'too many subscriptions' backs off instead of retrying after 5 s", async () => {
+    vi.useFakeTimers();
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const subs = fakeReqs(client);
+      client.subscribe({ kinds: [1059] }, () => {}, ["wss://oxtr"]);
+      await vi.advanceTimersByTimeAsync(0);
+      subs[0]!.handlers.onclose("error: too many subscriptions");
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(subs).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(25_000);
+      expect(subs).toHaveLength(2);
+      expect(client.isDegraded("wss://oxtr")).toBe(true);
+    } finally {
+      out.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("queues fetches beyond the per-relay cap, and lowers the cap while degraded", async () => {
+    let t = 0;
+    const client = new NostrClient([], { now: () => t });
+    const reqs: Array<{ params: { oneose?: () => void } }> = [];
+    (client as any).pool = {
+      subscribe(_relays: string[], _f: unknown, params: { oneose?: () => void }) {
+        reqs.push({ params });
+        return { close() {} };
+      },
+      close() {},
+    };
+    const pending = Array.from({ length: MAX_FETCH_REQS_PER_RELAY + 3 }, () => client.fetch({ kinds: [1] }, ["wss://r"], 60_000));
+    expect(reqs).toHaveLength(MAX_FETCH_REQS_PER_RELAY);
+    expect(client.reqCounts("wss://r").queuedFetches).toBe(3);
+    // One answers: its slot goes to the next in the queue.
+    reqs[0]!.params.oneose?.();
+    await pending[0];
+    expect(reqs).toHaveLength(MAX_FETCH_REQS_PER_RELAY + 1);
+    // Degraded: nothing more starts until the open count is under the lower cap.
+    (client as any).noteBackpressure("wss://r/", "too many concurrent REQs");
+    vi.spyOn(console, "log").mockImplementation(() => {});
+    reqs[1]!.params.oneose?.();
+    await pending[1];
+    expect(reqs).toHaveLength(MAX_FETCH_REQS_PER_RELAY + 1);
+    for (let i = 2; i < MAX_FETCH_REQS_PER_RELAY + 1; i++) reqs[i]!.params.oneose?.();
+    await Promise.all(pending.slice(2, MAX_FETCH_REQS_PER_RELAY + 1));
+    expect(reqs.length).toBeGreaterThan(MAX_FETCH_REQS_PER_RELAY + 1);
+    expect(client.reqCounts("wss://r").fetches).toBeLessThanOrEqual(DEGRADED_FETCH_REQS_PER_RELAY);
+    for (const r of reqs) r.params.oneose?.();
+    for (const r of reqs) r.params.oneose?.();
+    await Promise.all(pending);
+    t = 0;
+    vi.restoreAllMocks();
+  });
+
+  it("a fetch still waiting in the queue gives up at its own timeout", async () => {
     const client = new NostrClient([]);
-    const subs = fakePool(client);
-    const got: string[] = [];
-    client.subscribe({ kinds: [1059] }, (e) => got.push(e.id), ["wss://a", "wss://b"]);
-    subs[0]!.params.onevent(ev("w1"));
-    subs[1]!.params.onevent(ev("w1")); // same wrap, second relay
-    subs[1]!.params.onevent(ev("w2"));
-    expect(got).toEqual(["w1", "w2"]);
+    const reqs: Array<{ params: { oneose?: () => void } }> = [];
+    (client as any).pool = {
+      subscribe(_relays: string[], _f: unknown, params: { oneose?: () => void }) {
+        reqs.push({ params });
+        return { close() {} };
+      },
+      close() {},
+    };
+    for (let i = 0; i < MAX_FETCH_REQS_PER_RELAY; i++) void client.fetch({ kinds: [1] }, ["wss://r"], 60_000);
+    const started = Date.now();
+    await expect(client.fetch({ kinds: [1] }, ["wss://r"], 30)).resolves.toEqual([]);
+    expect(Date.now() - started).toBeLessThan(1_000);
+    expect(client.reqCounts("wss://r").queuedFetches).toBe(0); // cancelled, not left to start later
+    for (const r of reqs) r.params.oneose?.();
   });
 });
 
 describe("NostrClient relays.exclude", () => {
-  /** Records every relay set the client hands the pool, per call. */
+  /** Records every relay set the client hands the pool (fetch, publish) or opens a
+   *  long-lived REQ on (subscribe), per call. */
   function recordingPool(client: NostrClient) {
     const dialled: string[][] = [];
     (client as any).pool = {
@@ -478,16 +700,22 @@ describe("NostrClient relays.exclude", () => {
       },
       close() {},
     };
+    (client as any).openReq = (url: string) => {
+      dialled.push([url]);
+      return { close() {} };
+    };
     return dialled;
   }
-  const EXCLUDE = { exclude: ["wss://relay.nostr.net"] };
+  const EXCLUDE = { exclude: ["wss://relay.nostr.net"], reqDebounceMs: 0 };
+  const flush = () => new Promise((r) => setTimeout(r, 5));
   const ev = { id: "e".repeat(64), kind: 1, pubkey: "a".repeat(64), created_at: 1, tags: [], content: "", sig: "s" } as unknown as NostrEvent;
 
-  it("never subscribes to an excluded relay, however the URL is spelled", () => {
+  it("never subscribes to an excluded relay, however the URL is spelled", async () => {
     const client = new NostrClient([], EXCLUDE);
     const dialled = recordingPool(client);
     client.subscribe({ kinds: [1059] }, () => {}, ["wss://nos.lol", "wss://relay.nostr.net/", "wss://Relay.Nostr.Net"]);
-    expect(dialled).toEqual([["wss://nos.lol"]]);
+    await flush();
+    expect(dialled).toEqual([["wss://nos.lol/"]]);
   });
 
   it("drops excluded relays from fetch and publish", async () => {
@@ -495,14 +723,15 @@ describe("NostrClient relays.exclude", () => {
     const dialled = recordingPool(client);
     await client.fetch({ kinds: [1] }, ["wss://relay.nostr.net", "wss://nos.lol"]);
     await client.publish(ev, ["wss://relay.nostr.net", "wss://nos.lol"]);
-    expect(dialled).toEqual([["wss://nos.lol"], ["wss://nos.lol"]]);
+    expect(dialled).toEqual([["wss://nos.lol/"], ["wss://nos.lol"]]);
   });
 
-  it("keeps the original set when every relay in it is excluded, rather than going deaf", () => {
+  it("keeps the original set when every relay in it is excluded, rather than going deaf", async () => {
     const client = new NostrClient([], EXCLUDE);
     const dialled = recordingPool(client);
     client.subscribe({ kinds: [1059] }, () => {}, ["wss://relay.nostr.net"]);
-    expect(dialled).toEqual([["wss://relay.nostr.net"]]);
+    await flush();
+    expect(dialled).toEqual([["wss://relay.nostr.net/"]]);
   });
 
   it("never lets an all-excluded candidate set pass a handover probe", async () => {
@@ -512,10 +741,11 @@ describe("NostrClient relays.exclude", () => {
     expect(dialled).toEqual([]);
   });
 
-  it("excludes nothing when constructed without the option", () => {
-    const client = new NostrClient([]);
+  it("excludes nothing when constructed without the option", async () => {
+    const client = new NostrClient([], { reqDebounceMs: 0 });
     const dialled = recordingPool(client);
     client.subscribe({ kinds: [1059] }, () => {}, ["wss://relay.nostr.net"]);
-    expect(dialled).toEqual([["wss://relay.nostr.net"]]);
+    await flush();
+    expect(dialled).toEqual([["wss://relay.nostr.net/"]]);
   });
 });

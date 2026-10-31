@@ -43,7 +43,6 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -68,7 +67,7 @@ import today.cypherpunk.nostrautica.domain.chat.ChatMembers
 import today.cypherpunk.nostrautica.domain.chat.ChatMessage
 import today.cypherpunk.nostrautica.domain.chat.ChatSession
 import today.cypherpunk.nostrautica.domain.chat.DmCommand
-import today.cypherpunk.nostrautica.domain.chat.ExternalLink
+import today.cypherpunk.nostrautica.domain.chat.ChatPolicy
 import today.cypherpunk.nostrautica.domain.chat.Mentions
 import today.cypherpunk.nostrautica.domain.chat.MessageActions
 import today.cypherpunk.nostrautica.domain.chat.chat
@@ -192,24 +191,22 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         MentionLook(::mentionName, ::pictureOf, ::accountOf, { pk -> accountOf(pk) == myAccount || pk == account.pubkey }, ::openProfile)
     }
 
-    // ── refusal / setup-slow ────────────────────────────────────────────────
+    // ── connecting / refusal (audit U-1) ───────────────────────────────────
+    // "Connecting" for the first CONNECTING_MS of a start: no actions at all. After
+    // that, either "this device isn't in the room" (positive eviction only, the one
+    // state that offers Rejoin) or "can't reach the room, retrying" (unknown, whose
+    // Try again never attests). Elapsed time alone never offers Rejoin (K-6).
     val setupLike = st.phase == ChatSession.Phase.SETUP || st.phase == ChatSession.Phase.STARTING
-    var setupSlow by remember { mutableStateOf(false) }
+    var connecting by remember { mutableStateOf(true) }
     LaunchedEffect(setupLike, st.setupSince) {
-        setupSlow = false
+        connecting = true
         if (!setupLike) return@LaunchedEffect
-        val wait = ChatSession.SETUP_SLOW_MS - (System.currentTimeMillis() - st.setupSince)
+        val wait = ChatPolicy.CONNECTING_MS - (System.currentTimeMillis() - st.setupSince)
         if (wait > 0) delay(wait)
-        setupSlow = true
+        connecting = false
         chat.scanNotices()
     }
-    val refusal by produceState<String?>(null, setupLike, setupSlow) {
-        while (setupLike) {
-            value = ExternalLink.setupRefusalKey(chat.ownStatuses(account.pubkey, ev.coordinate))?.let { s.t(it) }
-            delay(10_000)
-        }
-        value = null
-    }
+    val refusal = st.refusalKey?.let { s.t(it) }
 
     // ── composer state ──────────────────────────────────────────────────────
     var sending by remember { mutableStateOf(false) }
@@ -253,12 +250,19 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     val mentionStyle = SpanStyle(color = t.accent, fontWeight = FontWeight.SemiBold)
     val mentionTransform = remember(profiles, deviceMap, mentionStyle) { MentionTransformation(::mentionName, mentionStyle) }
 
+    // Rejoin removes this device from the room and adds it back, so it always asks first.
+    var confirmRejoin by remember { mutableStateOf(false) }
     fun rejoin() {
+        confirmRejoin = false
         sendError = null; sendUnroutable = false; rejoinNote = null
         scope.launch {
-            rejoinNote = runCatching { session.rejoin(force = true) }.fold({ s.t("chat.rejoinRequested") }, { s.t("chat.rejoinFailed") })
+            rejoinNote = runCatching { session.rejoin(force = true) }.fold(
+                { s.t("chat.rejoinRequested") },
+                { e -> if (e is ChatSession.RevokeNotPublished) s.t("chat.android.rejoinRevokeQueued") else s.t("chat.rejoinFailed") },
+            )
         }
     }
+    fun askRejoin() { if (!st.rejoining) confirmRejoin = true }
 
     // ── edit / delete your own messages (EventChat.svelte) ─────────────────
     // MDK builds both events (MarmotKit editMessage / deleteMessage), so the
@@ -272,7 +276,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         scope.launch {
             try { fn() }
             catch (e: CancellationException) { throw e }
-            catch (e: ChatSession.Unroutable) { actionError = s.t("chat.sendFailed") }
+            catch (e: ChatSession.Unroutable) { actionError = s.t("chat.android.sendUnroutable") }
             catch (e: Exception) { actionError = s.t("chat.actionFailed") }
         }
     }
@@ -302,7 +306,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
             } catch (x: CancellationException) {
                 throw x
             } catch (x: ChatSession.Unroutable) {
-                actionError = s.t("chat.sendFailed")
+                actionError = s.t("chat.android.sendUnroutable")
             } catch (x: Exception) {
                 actionError = s.t("chat.actionFailed")
             } finally { sending = false }
@@ -339,7 +343,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                 setDraft("")
                 rejoinNote = null
             } catch (e: ChatSession.Unroutable) {
-                sendUnroutable = true; sendError = s.t("chat.sendFailed")
+                sendUnroutable = true; sendError = s.t("chat.android.sendUnroutable")
             } catch (e: Exception) {
                 sendError = s.t("chat.sendFailedTransport")
             } finally { sending = false }
@@ -391,12 +395,25 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
             Spacer(Modifier.width(8.dp))
             Dim(s.t("chat.disclosure.body"), size = 12)
         }
+        // Stalled, forked or frozen (R-9): MDK re-syncs on its own. No action, and above
+        // all no Rejoin, which would add a kick to the stall.
+        if (st.resyncing && st.phase != ChatSession.Phase.EVICTED) {
+            Box(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
+                SoftCard(color = t.warnSoft) {
+                    Text(s.t("chat.android.resyncing.title"), fontWeight = FontWeight.SemiBold)
+                    Dim(s.t("chat.android.resyncing.body"))
+                }
+            }
+        }
         if (st.phase == ChatSession.Phase.EVICTED) {
             Box(Modifier.padding(horizontal = 16.dp, vertical = 4.dp)) {
                 SoftCard(color = t.warnSoft) {
                     Text(s.t("chat.evicted.title"), fontWeight = FontWeight.SemiBold)
                     Dim(s.t("chat.evicted.body"))
-                    SmallButton(if (st.rejoining) s.t("chat.rejoining") else s.t("chat.rejoin"), ::rejoin, enabled = !st.rejoining)
+                    // The coordinator's re-add usually follows the removal by seconds:
+                    // Rejoin (another remove + add) only once that grace has run out.
+                    if (st.offerRejoin) SmallButton(if (st.rejoining) s.t("chat.rejoining") else s.t("chat.rejoin"), ::askRejoin, enabled = !st.rejoining)
+                    else Dim(s.t("chat.android.evictedWaiting"), size = 13)
                 }
             }
         }
@@ -426,7 +443,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
             } else if (rows.isEmpty()) {
                 Column(Modifier.fillMaxSize().padding(16.dp), verticalArrangement = Arrangement.Center, horizontalAlignment = Alignment.CenterHorizontally) {
                     if (setupLike) {
-                        SetupProgress(st, refusal, setupSlow, onRetry = { session.retry() }, onRejoin = ::rejoin)
+                        SetupProgress(st, refusal, connecting, onRetry = { session.retry() }, onRejoin = ::askRejoin)
                     } else {
                         Dim(s.t("chat.empty"))
                     }
@@ -546,11 +563,20 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
         sendError?.let { err ->
             Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 2.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(err, Modifier.weight(1f), color = t.danger, fontSize = 13.sp)
-                if (sendUnroutable) SmallButton(if (st.rejoining) s.t("chat.rejoining") else s.t("chat.rejoin"), ::rejoin, enabled = !st.rejoining)
-                else SmallButton(if (sending) s.t("chat.sending") else s.t("chat.sendRetry"), ::send, enabled = !sending)
+                // A failed send is never evidence of eviction (K-6): retry the send, no Rejoin.
+                SmallButton(if (sending) s.t("chat.sending") else s.t("chat.sendRetry"), ::send, enabled = !sending && (!sendUnroutable || composerEnabled))
             }
         }
         rejoinNote?.let { Dim(it, Modifier.padding(horizontal = 16.dp, vertical = 2.dp), size = 12) }
+    }
+
+    if (confirmRejoin) {
+        AlertDialog(
+            onDismissRequest = { confirmRejoin = false },
+            confirmButton = { TextButton(::rejoin) { Text(s.t("chat.rejoin"), color = t.danger) } },
+            dismissButton = { TextButton({ confirmRejoin = false }) { Text(s.t("chat.cancel")) } },
+            text = { Text(s.t("chat.android.rejoinConfirm")) },
+        )
     }
 
     confirmDelete?.let { m ->
@@ -570,14 +596,21 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
 }
 
 @Composable
-private fun SetupProgress(st: ChatSession.State, refusal: String?, slow: Boolean, onRetry: () -> Unit, onRejoin: () -> Unit) {
+private fun SetupProgress(st: ChatSession.State, refusal: String?, connecting: Boolean, onRetry: () -> Unit, onRejoin: () -> Unit) {
     val s = LocalStrings.current
     val t = LocalTokens.current
     Card {
         Row(verticalAlignment = Alignment.CenterVertically) {
             CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
             Spacer(Modifier.width(10.dp))
-            Text(s.t("chat.setup"), fontSize = 15.sp)
+            Text(
+                when {
+                    connecting -> s.t("chat.android.connecting")
+                    st.offerRejoin -> s.t("chat.android.notInRoom.title")
+                    else -> s.t("chat.android.retrying.title")
+                },
+                fontSize = 15.sp, fontWeight = FontWeight.SemiBold,
+            )
         }
         Step(st.keyPackageReady, if (st.keyPackageReady) s.t("chat.android.steps.keyPackage") else s.t("chat.android.steps.keyPackageWaiting"))
         val (done, label) = when (st.attest) {
@@ -588,12 +621,20 @@ private fun SetupProgress(st: ChatSession.State, refusal: String?, slow: Boolean
         }
         Step(done, label, error = st.attest == ChatSession.Attest.FAILED)
         Step(false, if (st.unverifiedGroup) s.t("chat.android.steps.unverified") else s.t("chat.android.steps.welcome"))
+        when (st.problem) {
+            ChatSession.Problem.GROUPS_UNREADABLE -> Step(false, s.t("chat.android.steps.groupsUnreadable"), error = true)
+            ChatSession.Problem.INVITE_FAILED -> Step(false, s.t("chat.android.steps.inviteFailed"), error = true)
+            null -> {}
+        }
         if (refusal != null) Text(refusal, color = t.danger, fontSize = 14.sp)
-        if (slow) {
-            if (refusal == null) Dim(s.t("chat.setupSlow"))
-            SmallButton(s.t("chat.retry"), onRetry)
-            Dim(s.t("chat.rejoinHint"))
-            SecondaryButton(if (st.rejoining) s.t("chat.rejoining") else s.t("chat.rejoin"), onRejoin, enabled = !st.rejoining)
+        if (!connecting) {
+            if (st.offerRejoin) {
+                Dim(s.t("chat.android.notInRoom.body"))
+                SecondaryButton(if (st.rejoining) s.t("chat.rejoining") else s.t("chat.rejoin"), onRejoin, enabled = !st.rejoining)
+            } else {
+                Dim(s.t("chat.android.retrying.body"))
+                SmallButton(s.t("chat.retry"), onRetry)
+            }
         }
     }
 }

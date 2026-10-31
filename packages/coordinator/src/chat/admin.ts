@@ -17,7 +17,7 @@
  */
 import { verifyEvent } from "nostr-tools/pure";
 import type { Store, MarmotChatLinkRow } from "../store/db.js";
-import { keyPackageProfile, type ChatMls } from "./mls.js";
+import { keyPackageProfile, causeChain, type ChatMls, type IngestReport } from "./mls.js";
 import { normalizeAvatarUrl } from "./avatar.js";
 import {
   verifyChatDeviceProof,
@@ -188,13 +188,46 @@ export const HELD_KEY_PACKAGE_TTL_MS = 120_000;
  */
 export const MAX_HELD_KEY_PACKAGES = 256;
 
+/** Bound on the per-author "holding 30443" log throttle (audit O-3). */
+const MAX_HELD_LOG_AUTHORS = 4096;
+
 /**
  * How long an attestation's re-enrolment warrant lasts. A Rejoin completes in
  * seconds to minutes; this bounds how long a durable retry may still evict a leaf.
  */
 export const REENROL_WARRANT_MS = 60 * 60 * 1000;
-/** How much older than its re-enrolment request a rotated key package may be. */
-export const REENROL_KP_LEAD_SEC = 15 * 60;
+/**
+ * How much older than its re-enrolment request a rotated key package may be.
+ *
+ * 120 s, down from 15 minutes (audit K-1 point 2). A real re-enrolment rotates
+ * the key package and attests within seconds. The device has ONE 30443 slot for
+ * every event, rotated whenever it joins any of them, so a key package minted
+ * for event B fourteen minutes earlier passed as "fresh" in event A and evicted a
+ * healthy leaf there.
+ */
+export const REENROL_KP_LEAD_SEC = 120;
+
+/**
+ * A leaf that sent a message or made a commit this recently is not evicted by a
+ * re-enrolment attestation (audit K-1 point 1). A device that really lost its MLS
+ * state cannot produce activity from that leaf, while a healthy one re-attests for many reasons that are
+ * not "I lost the room" (an app start, a rename, the Retry button, a false
+ * "not a member" result) and every one of them used to remove and re-add it.
+ *
+ * 5 minutes, down from 30. "Activity" is a message or commit, and the coordinator
+ * makes the commits, so this only ever shields members who just posted; a reader
+ * is never active, however long their tab is open. Since 0.17 the web and Android
+ * clients attest only when positively out of the room, so what is left to guard
+ * against is mostly pre-0.17 Android installs (no auto-update) evicting someone
+ * mid-conversation. The cost runs the other way: a member who posted and then
+ * forked or lost the Welcome is refused for the whole window, and those are the
+ * real re-enrolments. Five minutes covers a conversation and keeps that wait short.
+ */
+export const REENROL_ACTIVITY_WINDOW_MS = 5 * 60 * 1000;
+// Deliberately time-only. "Active in the current epoch" was tried and dropped: in a
+// quiet room the epoch can stand still for days, so a device that sent one message
+// and then genuinely lost its state (cleared storage, reinstall) could not rejoin
+// until somebody else's commit moved the epoch on.
 
 function kpCreatedAt(kp: AnyEvent): number {
   return typeof kp.created_at === "number" ? kp.created_at : 0;
@@ -499,6 +532,30 @@ export class MarmotAdmin {
     this.heldKeyPackages.set(key, { kp, expiresAt: now + HELD_KEY_PACKAGE_TTL_MS });
   }
 
+  /** When the "holding 30443 from" line was last logged, per author (audit O-3). */
+  private readonly holdLogged = new Map<string, number>();
+
+  /**
+   * Whether to log a hold for `author` now: once per author per
+   * {@link HELD_KEY_PACKAGE_TTL_MS}, across all events. The 30443 watcher sees
+   * every key package on the chat relays, once per relay and once per
+   * chat-enabled event, so the line was written ~155,000 times in six days of
+   * production log, burying the ~30 lines that mattered. Bounded like the hold
+   * itself: anyone can publish a 30443.
+   */
+  private shouldLogHold(author: string): boolean {
+    const now = this.now();
+    const last = this.holdLogged.get(author);
+    if (last !== undefined && now - last < HELD_KEY_PACKAGE_TTL_MS) return false;
+    if (this.holdLogged.size >= MAX_HELD_LOG_AUTHORS) {
+      for (const [k, at] of this.holdLogged) if (now - at >= HELD_KEY_PACKAGE_TTL_MS) this.holdLogged.delete(k);
+      if (this.holdLogged.size >= MAX_HELD_LOG_AUTHORS) this.holdLogged.clear();
+    }
+    this.holdLogged.delete(author);
+    this.holdLogged.set(author, now);
+    return true;
+  }
+
   /** The key package held for `author`, if one is still within its TTL. */
   private heldKeyPackage(coordinate: string, author: string): AnyEvent | undefined {
     const key = this.heldKey(coordinate, author);
@@ -729,8 +786,21 @@ export class MarmotAdmin {
    * author must be an approved attendee's authorized chat identity; otherwise it
    * is ignored (an unauthenticated key package is never added). Unknown authors
    * are dropped against the cached eligible set BEFORE any DB hit (COORD-17).
+   *
+   * Never throws: the watcher calls it with `.catch(() => {})`, which hid every
+   * failure here (audit R-5). It is logged instead.
    */
   async handleKeyPackageEvent(coordinate: string, event: AnyEvent): Promise<void> {
+    try {
+      await this.handleKeyPackageEventInner(coordinate, event);
+    } catch (e) {
+      this.log(
+        `[chat] handling 30443 ${String(event.id).slice(0, 8)} from ${String(event.pubkey).slice(0, 8)} in ${coordinate} failed: ${causeChain(e)}`,
+      );
+    }
+  }
+
+  private async handleKeyPackageEventInner(coordinate: string, event: AnyEvent): Promise<void> {
     if (!this.eligibleAuthorSet(coordinate).has(event.pubkey)) {
       // HELD, not dropped (see {@link heldKeyPackages}). An enrolling client
       // publishes its 30443 and its 21607 with no ordering between them; when the
@@ -740,9 +810,11 @@ export class MarmotAdmin {
       // authorization decision, NOT a relaxation of it: nothing is added until an
       // authenticated 21607 with a valid §10.2 possession proof binds this author.
       this.holdKeyPackage(coordinate, event);
-      this.log(
-        `[chat] holding 30443 from ${event.pubkey.slice(0, 8)}: not an authorized chat identity yet — will re-check when its 21607 arrives`,
-      );
+      if (this.shouldLogHold(event.pubkey)) {
+        this.log(
+          `[chat] holding 30443 from ${event.pubkey.slice(0, 8)}: not an authorized chat identity yet — will re-check when its 21607 arrives`,
+        );
+      }
       return;
     }
     // An eligible author's key package supersedes anything we were holding for it.
@@ -919,6 +991,20 @@ export class MarmotAdmin {
       return false;
     }
     if (member) {
+      // Evidence before eviction (audit K-1): the coordinator decrypts every 445,
+      // so it knows whether this leaf is still in use. If it is, the device is
+      // fine and this attestation is a refresh, whatever the client believed.
+      const seen = this.mls.lastActivity
+        ? await this.mls.lastActivity(mlsGroupId, kp.pubkey).catch(() => undefined)
+        : undefined;
+      if (seen && seen.ageMs <= REENROL_ACTIVITY_WINDOW_MS) {
+        this.log(
+          `[chat] keeping ${kp.pubkey.slice(0, 8)} in ${coordinate}: its leaf is active (last seen ${Math.round(seen.ageMs / 1000)}s ago, in epoch ${seen.epoch} of ${seen.currentEpoch}) — attestation treated as a refresh`,
+        );
+        return true; // a deliberate keep: nothing to retry
+      }
+    }
+    if (member) {
       // Reaching here means THIS device attested re-enrolment for THIS event (the
       // guard above), so the two sides genuinely disagree about whether it is in
       // the room — and the device is the one that can tell: it only re-attests
@@ -933,10 +1019,13 @@ export class MarmotAdmin {
       // 30443 watcher, nor for any sync this device didn't ask for: one key-package
       // slot is shared across events, so a rotation driven by ANOTHER event would
       // otherwise churn this group's epoch — or evict a healthy member outright.
+      //
+      // One commit where the library allows it (audit K-1 point 3): the Remove
+      // and the Add together, below, after the authorization re-check.
       this.log(
-        `[chat] re-enrolling ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} from a device we still hold a leaf for — removing it first`,
+        `[chat] re-enrolling ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} from a device we still hold a leaf for — ${this.mls.reenrol ? "replacing its leaf in one commit" : "removing it first"}`,
       );
-      await this.mls.removePubkeys(mlsGroupId, [kp.pubkey]);
+      if (!this.mls.reenrol) await this.mls.removePubkeys(mlsGroupId, [kp.pubkey]);
     }
     // Re-check authorization at the last synchronous point before the Add (audit
     // DS41-048). Everything above awaited — the relay fetch in syncMember, the
@@ -954,8 +1043,13 @@ export class MarmotAdmin {
       return true; // nothing to retry — the member or device is gone
     }
     try {
-      await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
+      if (member && this.mls.reenrol) {
+        await this.mls.reenrol(mlsGroupId, kp); // Remove + Add in one commit, + Welcome
+      } else {
+        await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
+      }
       this.store.markKpConsumed(coordinate, kp.id);
+      this.noteInvited(coordinate, kp.pubkey);
       this.log(`[chat] added ${kp.pubkey.slice(0, 8)} to ${coordinate} from 30443 ${kp.id.slice(0, 8)}`);
       // An organizer device can only be promoted once it holds a leaf.
       if (this.desiredAdminPubkeys(coordinate).includes(kp.pubkey)) {
@@ -1627,7 +1721,15 @@ export class MarmotAdmin {
   }
 
   // ── 445 ingest ─────────────────────────────────────────────────────────────
-  /** Ingest kind-445 traffic so the coordinator's leaf stays converged (§4.1). */
+  /**
+   * Ingest kind-445 traffic so the coordinator's leaf stays converged (§4.1).
+   *
+   * Never throws, and says what happened (audit R-5). The live watcher calls this
+   * with `.catch(() => {})`, and nothing here logged either, so a commit the
+   * coordinator failed to process, a co-admin's Add or Remove, an auto-committed
+   * self_remove and a fork were all invisible. Section 1.1 of the audit could not
+   * rule any of them out as the cause of a kick for exactly that reason.
+   */
   async ingest(coordinate: string, events: AnyEvent[]): Promise<void> {
     const group = this.store.getMarmotGroup(coordinate);
     if (!group) return; // ingest even when frozen — stay converged
@@ -1637,9 +1739,118 @@ export class MarmotAdmin {
     // Anything else would reach the MLS session and leave a durable wrapper row.
     const admissible = events.filter((e) => isAdmissibleGroupEvent(e, group.nostr_group_id));
     if (admissible.length === 0) return;
-    await this.mls.ingest(group.mls_group_id, admissible);
+    let report: IngestReport | void;
+    try {
+      report = await this.mls.ingest(group.mls_group_id, admissible);
+    } catch (e) {
+      this.reportIngestFailure(coordinate, `ingest failed: ${causeChain(e)}`);
+      return;
+    }
+    if (!report) return;
+    this.logIngest(coordinate, report);
+    if (report.epochAfter !== report.epochBefore || report.forks.some((f) => f.adopted)) {
+      await this.recheckRecentInvites(coordinate, group.mls_group_id, report);
+    }
+  }
+
+  /** Per coordinate: chat pubkeys this coordinator added recently, and when. */
+  private readonly recentInvites = new Map<string, Map<string, number>>();
+
+  private noteInvited(coordinate: string, chatPubkey: string): void {
+    let map = this.recentInvites.get(coordinate);
+    if (!map) this.recentInvites.set(coordinate, (map = new Map()));
+    map.set(chatPubkey, this.now());
+  }
+
+  /**
+   * After an ingest moved the epoch, check that every device added in the last
+   * {@link RECENT_INVITE_RECHECK_MS} still holds a leaf (audit K-8).
+   *
+   * An Add that marmot acknowledged can still lose: a co-admin's commit for the
+   * same epoch that wins fork resolution rewinds the coordinator past it. The
+   * invite had returned success, the key package was marked consumed, and
+   * nothing would ever try again, so the device sat on "Setting up…" with a
+   * Welcome for a dead branch. Re-queueing the member's sync re-adds it.
+   */
+  private async recheckRecentInvites(coordinate: string, mlsGroupId: string, report: IngestReport): Promise<void> {
+    const map = this.recentInvites.get(coordinate);
+    if (!map) return;
+    const now = this.now();
+    for (const [chatPubkey, at] of [...map]) {
+      if (now - at > RECENT_INVITE_RECHECK_MS) {
+        map.delete(chatPubkey);
+        continue;
+      }
+      const member = await this.mls.isMember(mlsGroupId, chatPubkey).catch(() => true);
+      if (member) continue;
+      map.delete(chatPubkey);
+      const account = this.store.getChatKey(coordinate, chatPubkey)?.account_pubkey;
+      this.log(
+        `[chat] ${coordinate}: ${chatPubkey.slice(0, 8)} was added ${Math.round((now - at) / 1000)}s ago but holds no leaf after epoch ${report.epochBefore}→${report.epochAfter} (a competing commit won) — ${account && this.enqueueSync ? "re-queueing its sync" : "no retry queue to re-add it"}`,
+      );
+      if (account && this.enqueueSync) this.enqueueSync(coordinate, account);
+    }
+    if (map.size === 0) this.recentInvites.delete(coordinate);
+  }
+
+  /** One line per applied inbound commit, auto-commit and fork; failures rate-limited. */
+  private logIngest(coordinate: string, report: IngestReport): void {
+    for (const c of report.commits) {
+      const changes = [
+        ...(c.added.length ? [`+add ${c.added.map(short).join(", ")}`] : []),
+        ...(c.removed.length ? [`−remove ${c.removed.map(short).join(", ")}`] : []),
+      ];
+      this.log(
+        `[chat] ${coordinate}: epoch ${c.fromEpoch}→${c.toEpoch} by ${c.committer ? short(c.committer) : "an unknown leaf"}: ${changes.length ? changes.join(", ") : "no membership change"}`,
+      );
+    }
+    for (const a of report.autoCommits) {
+      this.log(
+        `[chat] ${coordinate}: auto-committed the self_remove of ${a.removed.length ? a.removed.map(short).join(", ") : "a departing leaf"}${a.published ? "" : " — publish failed, a later ingest retries it"}`,
+      );
+    }
+    for (const f of report.forks) {
+      this.log(
+        `[chat] FORK? competing commit at epoch ${f.epoch} in ${coordinate} (445 ${f.eventId.slice(0, 8)}): ${f.adopted ? "fork resolution moved us onto its branch" : "not on our chain, kept out"}`,
+      );
+    }
+    if (report.removedSelf) {
+      this.log(`[chat] !!! ${coordinate}: an inbound commit REMOVED THE COORDINATOR from its own group`);
+    }
+    for (const f of report.failures) this.reportIngestFailure(coordinate, f);
+  }
+
+  /** Per coordinate: when an ingest failure was last logged, and how many were not since. */
+  private readonly ingestFailureLog = new Map<string, { at: number; suppressed: number }>();
+
+  /**
+   * Log an ingest failure, at most once per {@link INGEST_FAILURE_LOG_EVERY_MS}
+   * per group. Anyone who knows a group's public `h` can post undecryptable 445s
+   * to it, so an unthrottled line per event would be a log flood on demand. The
+   * count of what was held back goes out with the next line.
+   */
+  private reportIngestFailure(coordinate: string, what: string): void {
+    const now = this.now();
+    const last = this.ingestFailureLog.get(coordinate);
+    if (last && now - last.at < INGEST_FAILURE_LOG_EVERY_MS) {
+      last.suppressed++;
+      return;
+    }
+    const more = last?.suppressed ? ` (+${last.suppressed} more since the last report)` : "";
+    this.ingestFailureLog.set(coordinate, { at: now, suppressed: 0 });
+    this.log(`[chat] ${coordinate}: ${what}${more}`);
   }
 }
+
+function short(pubkey: string): string {
+  return pubkey.slice(0, 8);
+}
+
+/** How long after an Add the coordinator re-checks, on epoch changes, that it held (audit K-8). */
+export const RECENT_INVITE_RECHECK_MS = 10 * 60_000;
+
+/** At most one ingest-failure line per group per this long (audit R-5). */
+export const INGEST_FAILURE_LOG_EVERY_MS = 60_000;
 
 const U64_MAX = (1n << 64n) - 1n;
 

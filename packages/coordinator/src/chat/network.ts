@@ -21,9 +21,24 @@ import { sanitizeRelayUrls, type RelayPolicy } from "../net/relay-urls.js";
 type AnyEvent = { id: string; pubkey: string; kind: number; tags: string[][]; [k: string]: unknown };
 type AnyFilter = Record<string, unknown>;
 
+/**
+ * One relay's answer, as `NostrClient.publish` reports it on a total failure
+ * (`PublishFailedError.outcomes`). Structural, so this module needs no import of
+ * the transport.
+ */
+type RelayOutcome = { url: string; status: "acked" | "rejected" | "timeout" | "transport"; reason: string };
+
 /** The subset of the coordinator transport this adapter drives. */
 export interface ChatNetworkTransport {
-  publish(event: AnyEvent, relays?: string[]): Promise<void>;
+  /**
+   * Resolves once any relay acked (`acked`, when given, names the relays that had
+   * by then). Rejects when none did, ideally with `outcomes` on the error.
+   */
+  publish(
+    event: AnyEvent,
+    relays?: string[],
+    opts?: { timeoutMs?: number },
+  ): Promise<{ acked?: string[] } | void>;
   fetch(filter: AnyFilter, relays?: string[], timeoutMs?: number): Promise<AnyEvent[]>;
   subscribe(filter: AnyFilter, onEvent: (e: AnyEvent) => void, relays?: string[]): () => void;
 }
@@ -40,6 +55,46 @@ export interface ChatNetworkOptions {
    * Defaults to `{}` (wss-only, deduped, capped — the historical behavior).
    */
   relayPolicy?: RelayPolicy;
+}
+
+/** Kind 445: group commits, proposals and application messages. */
+const GROUP_EVENT_KIND = 445;
+
+/**
+ * Per-relay OK timeout for a kind-445 publish (audit K-7), instead of
+ * nostr-tools' 4.4 s. A relay under REQ pressure can take longer than that to
+ * answer a commit it has stored, and an OK that arrives late is still an OK.
+ * The publish resolves on the first ack, so this only lengthens the case where
+ * no relay answers at all.
+ */
+export const GROUP_EVENT_PUBLISH_TIMEOUT_MS = 15_000;
+
+/**
+ * The per-relay map marmot-ts reads after a publish no relay acked (audit K-7).
+ *
+ * The difference that matters is "the relay said no" against "we do not know".
+ * marmot-ts (`group-runtime.js`, `#publishToGroupRelays`) keeps a commit's exact
+ * bytes for a retry, as a `PublicationUncertainError`, only when some response
+ * is `uncertain`. Otherwise it treats the failure as definite and rolls the
+ * commit back. That was every failure here, so a relay that stored the commit
+ * and then timed out its OK left the members on N+1 and the coordinator on N,
+ * and the coordinator's next commit was a competing N+1 that members discard.
+ *
+ * So a timeout, a transport error, and any failure the transport did not
+ * classify are `uncertain`. Only a relay's own OK=false is definite.
+ */
+function failureResponses(targets: string[], e: unknown): Record<string, PublishResponse> {
+  const message = e instanceof Error ? e.message : String(e);
+  const outcomes = (e as { outcomes?: unknown }).outcomes;
+  const byUrl = new Map<string, RelayOutcome>();
+  if (Array.isArray(outcomes)) for (const o of outcomes as RelayOutcome[]) byUrl.set(o.url, o);
+  return Object.fromEntries(
+    targets.map((r) => {
+      const o = byUrl.get(r);
+      if (o?.status === "rejected") return [r, { from: r, ok: false, message: o.reason }];
+      return [r, { from: r, ok: false, message: o?.reason ?? message, uncertain: true }];
+    }),
+  );
 }
 
 function asArray<T>(x: T | T[]): T[] {
@@ -61,12 +116,24 @@ export function makeChatNetwork(opts: ChatNetworkOptions): NostrNetworkInterface
   return {
     async publish(relays, event): Promise<Record<string, PublishResponse>> {
       const targets = relays.length ? relays : defaultRelays;
+      const opts = event.kind === GROUP_EVENT_KIND ? { timeoutMs: GROUP_EVENT_PUBLISH_TIMEOUT_MS } : undefined;
       try {
-        await transport.publish(event as unknown as AnyEvent, targets);
-        return Object.fromEntries(targets.map((r) => [r, { from: r, ok: true }]));
+        const result = await transport.publish(event as unknown as AnyEvent, targets, opts);
+        // Which relays had acked when the transport resolved. A transport that does
+        // not say is taken at its word that the publish succeeded everywhere.
+        // It resolved, so at least one relay acked; if none of the names match a
+        // target (a spelling the transport normalized), do not turn that into a
+        // failure here.
+        let acked = result && Array.isArray(result.acked) ? new Set(result.acked) : undefined;
+        if (acked && !targets.some((r) => acked!.has(r))) acked = undefined;
+        return Object.fromEntries(
+          targets.map((r) => [
+            r,
+            !acked || acked.has(r) ? { from: r, ok: true } : { from: r, ok: false, message: "no answer yet" },
+          ]),
+        );
       } catch (e) {
-        const message = e instanceof Error ? e.message : String(e);
-        return Object.fromEntries(targets.map((r) => [r, { from: r, ok: false, message }]));
+        return failureResponses(targets, e);
       }
     },
 

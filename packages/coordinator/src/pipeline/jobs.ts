@@ -7,6 +7,7 @@
  */
 import { randomUUID } from "node:crypto";
 import type { Store, JobRow, EnqueueOutcome } from "../store/db.js";
+import { logStamp } from "../log-line.js";
 
 export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn; signal: AbortSignal }) => Promise<void>;
 /** Returns what the enqueue did, so a caller can summarize a dispatch (see
@@ -21,6 +22,9 @@ export type EnqueueFn = (
 
 /** How long a pooled worker waits for a sibling to free the lane it needs. */
 const IDLE_POLL_MS = 50;
+
+/** How often an UNCHANGED queue line is repeated (audit O-2). A change prints at once. */
+export const QUEUE_REPORT_REPEAT_MS = 10 * 60_000;
 
 /**
  * Lease-expiry recoveries after which a job is poisoned rather than run again
@@ -51,9 +55,9 @@ function laneOf(type: string): "score" | "serial" {
   return (SCORE_LANE as readonly string[]).includes(type) ? "score" : "serial";
 }
 
-/** `[hh:mm:ss] ` prefix, matching coordinator.ts's `log()`. */
+/** `[MM-DD hh:mm:ss] ` prefix, matching coordinator.ts's `log()` (audit O-4). */
 function stamp(): string {
-  return new Date().toISOString().slice(11, 19);
+  return logStamp();
 }
 
 /**
@@ -218,9 +222,23 @@ export class JobRunner {
    * will re-run it, and the requested work simply never happens. Until this line
    * existed the only symptom was a dispatch log followed by silence forever
    * (production incident 2026-07-24).
+   *
+   * `quietDedupe` is for a caller that EXPECTS the key to be done already and reads
+   * the returned outcome itself (audit O-1). The hourly profile-refresh sweep
+   * re-enqueues every attendee's current profile key; "already done" is the normal
+   * answer there, and it printed ~70 "this work will NOT run" lines an hour that
+   * buried the discards that do matter. It silences only a `done` collision: a
+   * `poison` one is still logged, because nobody expects that work to be dead.
    */
-  enqueue(type: string, dedupeKey: string, payload: unknown, notBefore = 0): EnqueueOutcome {
+  enqueue(
+    type: string,
+    dedupeKey: string,
+    payload: unknown,
+    notBefore = 0,
+    opts: { quietDedupe?: boolean } = {},
+  ): EnqueueOutcome {
     const outcome = this.store.enqueueJob(type, dedupeKey, payload, notBefore);
+    if (outcome === "done" && opts.quietDedupe) return outcome;
     if (outcome === "done" || outcome === "poison") {
       console.warn(
         `[${stamp()}] [job] ${type} enqueue DISCARDED — dedupe key already '${outcome}': ${dedupeKey.slice(0, 120)} — this work will NOT run`,
@@ -373,6 +391,9 @@ export class JobRunner {
    */
   private inFlight = new Map<number, { id: number; type: string; startedAt: number }>();
 
+  /** What the last queue line said, and when (see {@link reportQueueDepth}). */
+  private lastQueueReport?: { signature: string; at: number };
+
   /**
    * One line describing the queue, emitted only when there is something to say.
    * Called on a timer (see {@link startQueueReporter}) rather than from the drain
@@ -390,7 +411,20 @@ export class JobRunner {
     const waiting = counts.waiting ?? 0;
     const running = counts.running ?? 0;
     const poison = counts.poison ?? 0;
-    if (pending === 0 && waiting === 0 && running === 0 && poison === 0 && this.inFlight.size === 0) return;
+    if (pending === 0 && waiting === 0 && running === 0 && poison === 0 && this.inFlight.size === 0) {
+      this.lastQueueReport = undefined;
+      return;
+    }
+    // Only on change, or every QUEUE_REPORT_REPEAT_MS while nothing moves (audit
+    // O-2). An idle daemon holding two poisoned rows printed the same "2 poisoned —
+    // worker: idle" line every minute, ~8,000 times in six days. The signature
+    // leaves out the in-flight ages on purpose, so a stalled job is still reported
+    // (with its growing age) at the repeat interval, not once.
+    const signature = `${pending}/${running}/${waiting}/${poison}|${[...this.inFlight.keys()].join(",")}`;
+    const now = this.now();
+    const last = this.lastQueueReport;
+    if (last && last.signature === signature && now - last.at < QUEUE_REPORT_REPEAT_MS) return;
+    this.lastQueueReport = { signature, at: now };
     const active =
       [...this.inFlight.values()]
         .map((j) => `${j.type} #${j.id} for ${Math.round((this.now() - j.startedAt) / 1000)}s`)

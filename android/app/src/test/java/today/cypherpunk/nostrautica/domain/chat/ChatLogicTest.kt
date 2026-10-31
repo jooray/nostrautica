@@ -104,8 +104,13 @@ class GroupBindingTest {
     @Test fun refusesAGroupSealedBySomeoneElseOrWithoutTheCoordinator() {
         assertEquals(GroupBinding.Result.NotJoined, GroupBinding.select(listOf(g(welcomer = "f".repeat(64))), gid, coord))
         assertEquals(GroupBinding.Result.NotJoined, GroupBinding.select(listOf(g(members = listOf(me))), gid, coord))
-        // R-70: an unreadable member list / no coordinator is not evidence FOR it.
-        assertEquals(GroupBinding.Result.NotJoined, GroupBinding.select(listOf(g(members = null)), gid, coord))
+        // R-70: an unreadable member list / no coordinator is not evidence FOR it, and
+        // (K-4) not evidence against it either: the group is held but unconfirmed.
+        assertTrue(GroupBinding.select(listOf(g(members = null)), gid, coord) is GroupBinding.Result.Unconfirmed)
+        assertTrue(GroupBinding.select(listOf(g(members = emptyList())), gid, coord) is GroupBinding.Result.Unconfirmed)
+        assertEquals(GroupBinding.Phase.SETUP, GroupBinding.phase(GroupBinding.select(listOf(g(members = null)), gid, coord)))
+        // A foreign welcomer stays NotJoined even with an unreadable member list.
+        assertEquals(GroupBinding.Result.NotJoined, GroupBinding.select(listOf(g(welcomer = "f".repeat(64), members = null)), gid, coord))
         // An unknown welcomer passes: MDK leaves it null after a projection rebuild.
         assertTrue(GroupBinding.select(listOf(g(welcomer = null)), gid, coord) is GroupBinding.Result.Bound)
         assertEquals(GroupBinding.Result.Unverified, GroupBinding.select(listOf(g()), gid, null))
@@ -115,6 +120,9 @@ class GroupBindingTest {
     @Test fun removedMemberIsEvictedNotReady() {
         val r = GroupBinding.select(listOf(g(self = false, members = listOf(coord))), gid, coord)
         assertEquals(GroupBinding.Phase.EVICTED, GroupBinding.phase(r))
+        // Our own leaf says removed even when the member list is unreadable.
+        assertEquals(GroupBinding.Phase.EVICTED, GroupBinding.phase(GroupBinding.select(listOf(g(self = false, members = null)), gid, coord)))
+        assertEquals(GroupBinding.Phase.SETUP, GroupBinding.phase(GroupBinding.select(listOf(g(self = false, pending = true, members = null)), gid, coord)))
     }
 
     @Test fun prefersTheLiveStateAfterARejoin() {

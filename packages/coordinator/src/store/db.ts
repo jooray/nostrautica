@@ -3568,6 +3568,32 @@ export class Store {
   }
 
   /**
+   * Put poisoned jobs of `type` back to `pending` with a FRESH retry budget (audit
+   * R-3), optionally only one event's. Returns the rows re-queued, as they were,
+   * so the caller can log each. Same `json_extract` match as resumeWaitingJobs.
+   */
+  requeuePoisonedJobs(type: string, scope: { coordinate?: string; pubkey?: string } = {}): JobRow[] {
+    let where = "state = 'poison' AND type = ?";
+    const args: string[] = [type];
+    if (scope.coordinate !== undefined) {
+      where += " AND json_extract(payload, '$.coordinate') = ?";
+      args.push(scope.coordinate);
+    }
+    if (scope.pubkey !== undefined) {
+      where += " AND json_extract(payload, '$.pubkey') = ?";
+      args.push(scope.pubkey);
+    }
+    const rows = this.db.prepare(`SELECT * FROM jobs WHERE ${where}`).all(...args) as unknown as JobRow[];
+    if (rows.length === 0) return [];
+    this.db
+      .prepare(
+        `UPDATE jobs SET state = 'pending', attempts = 0, reclaims = 0, next_run_at = 0, worker_token = NULL, lease_until = NULL WHERE ${where}`,
+      )
+      .run(...args);
+    return rows;
+  }
+
+  /**
    * Park a claimed job in the distinct `waiting` state (spec §9 billing/budget
    * gates, H-2). Unlike a failure this does NOT consume a retry, set a backoff, or
    * ever poison — `claimNextJob` never claims a `waiting` row, so blocked paid work
@@ -4025,6 +4051,17 @@ export class Store {
    * pipeline later SUCCEEDS so the organizer-visible poison state recovers
    * instead of staying red forever.
    */
+  /** Clear ONE stage's poison status for an attendee (audit R-3: a chat sync that
+   *  later succeeds must not clear an unrelated pipeline poison). */
+  clearPoisonStatus(coordinate: string, stage: string, pubkey: string): number {
+    const info = this.db
+      .prepare(
+        "UPDATE job_status SET state = 'cleared', updated_at = ? WHERE coordinate = ? AND stage = ? AND pubkey = ? AND state = 'poison'",
+      )
+      .run(Date.now(), coordinate, stage, pubkey);
+    return Number(info.changes);
+  }
+
   clearPoisonStatuses(coordinate: string, pubkey: string): number {
     const info = this.db
       .prepare("UPDATE job_status SET state = 'cleared', updated_at = ? WHERE coordinate = ? AND pubkey = ? AND state = 'poison'")

@@ -66,6 +66,8 @@ const shared = vi.hoisted(() => ({
    * cannot tell apart from "our current key package is published".
    */
   relayKeyPackages: null as { id: string }[] | null,
+  /** Group idStrs whose load throws, from the very first open (audit K-3). */
+  failLoad: new Set<string>(),
 }));
 
 interface FakeRumor {
@@ -126,9 +128,20 @@ class FakeGroups {
     if (i >= 0) this.groups.splice(i, 1);
   });
   async listIds() {
+    this.listIdsCalls++;
     return this.groups.map((g) => g.id);
   }
+  /** idStr of groups whose state fails to load (a damaged store, audit K-3). */
+  failLoad = shared.failLoad;
+  listIdsCalls = 0;
   async get(groupId: Uint8Array | string) {
+    const hit =
+      typeof groupId === "string"
+        ? this.groups.find((g) => g.idStr === groupId)
+        : this.groups.find((g) => g.id.length === groupId.length && g.id.every((b, i) => b === groupId[i]));
+    if (hit && this.failLoad.has(hit.idStr)) {
+      throw new Error("state disagrees with checkpoint", { cause: new Error("IndexedDB read aborted") });
+    }
     const found =
       typeof groupId === "string"
         ? this.groups.find((g) => g.idStr === groupId)
@@ -139,6 +152,26 @@ class FakeGroups {
   connectAll() {
     this.connectAllCalls++;
     return { unsubscribe() {} };
+  }
+  /** Per-group 445 connect (audit S-3): which groups got a live subscription. */
+  connected: Uint8Array[] = [];
+  unsubscribed = 0;
+  connect = vi.fn(async (groupId: Uint8Array) => {
+    this.connected.push(groupId);
+    return { unsubscribe: () => void this.unsubscribed++ };
+  });
+  // The GroupsManager is an EventEmitter; the client listens for `ingestResult`.
+  private emitter = new TinyEmitter();
+  on(ev: string, fn: (...a: unknown[]) => void) {
+    this.emitter.on(ev, fn);
+    return this;
+  }
+  off(ev: string, fn: (...a: unknown[]) => void) {
+    this.emitter.off(ev, fn);
+    return this;
+  }
+  emit(ev: string, ...args: unknown[]) {
+    return this.emitter.emit(ev, ...args);
   }
   async loadAll() {
     return this.groups;
@@ -318,6 +351,12 @@ const ctx = {
 } as never;
 const accountSigner = { getPublicKey: async () => "c".repeat(64) } as never;
 
+/** A freshly readable roster for `ctx` naming a group this device was never added to:
+ *  the positive "not a member" every first-time bootstrap needs (audit K-2). */
+function rosterNamingUnjoinedGroup(coordinate = (ctx as unknown as { coordinate: string }).coordinate): void {
+  shared.rosters.set(coordinate, { v: 2, eck_current: 1, nostr_group_id: "gid-not-joined", attendees: [] });
+}
+
 // Reset the shared cross-instance fixtures before every test so a two-event test's
 // shared backend/pool/rosters never leak into a single-event one.
 beforeEach(() => {
@@ -331,6 +370,7 @@ beforeEach(() => {
   shared.legacyClientId = undefined;
   shared.attestedLabels.length = 0;
   shared.relayKeyPackages = null;
+  shared.failLoad.clear();
 });
 
 describe("MarmotChat.start() — late welcome (G-3)", () => {
@@ -365,17 +405,138 @@ describe("MarmotChat.start() — late welcome (G-3)", () => {
     expect(stateChanges).toBeGreaterThan(0);
   });
 
-  it("keeps a live connectAll so a late-joined group's 445 traffic is auto-subscribed", async () => {
+  it("subscribes a late-joined room's 445 traffic as soon as it binds", async () => {
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-welcome-2",
+      attendees: [],
+    });
     const chat = await MarmotChat.create({ accountSigner, ctx });
     await chat.start();
-    // connectAll runs during start (before the late join) and is not torn down,
-    // so marmot's `joined`-event tracking wires the new group's subscription.
-    expect(lastClient.groups.connectAllCalls).toBe(1);
+    expect(lastClient.groups.connected).toEqual([]); // nothing bound yet
 
     lastClient.invites.deliver({ id: "welcome-2" });
     await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["welcome-2"]));
-    // Still the single long-lived connection — not re-created per join.
-    expect(lastClient.groups.connectAllCalls).toBe(1);
+    await vi.waitFor(() => expect(lastClient.groups.connected).toHaveLength(1));
+    // Per bound room, and never through the subscribe-everything connectAll (S-3).
+    expect(lastClient.groups.connectAllCalls).toBe(0);
+    chat.dispose();
+    expect(lastClient.groups.unsubscribed).toBe(1);
+  });
+
+  // Audit S-3: connectAll() opened a 445 REQ for every group the identity holds —
+  // other events' rooms and dead pre-removal copies included.
+  it("subscribes only this event's live room, not other events' rooms or a dead copy", async () => {
+    const ME = "c".repeat(64);
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-mine",
+      attendees: [],
+    });
+    shared.groups = [
+      { idStr: "aa", id: new Uint8Array([0xaa]), state: { members: [COORD], nostrGroupId: "gid-mine" }, on: () => {} }, // dead copy
+      { idStr: "bb", id: new Uint8Array([0xbb]), state: { members: [COORD, ME], nostrGroupId: "gid-mine" }, on: () => {} }, // live
+      { idStr: "cc", id: new Uint8Array([0xcc]), state: { members: [COORD, ME], nostrGroupId: "gid-other-event" }, on: () => {} },
+    ];
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    await vi.waitFor(() => expect(lastClient.groups.connected).toHaveLength(1));
+    expect(lastClient.groups.connected[0]).toEqual(new Uint8Array([0xbb]));
+    chat.dispose();
+  });
+
+  // The vendored connectAll() retried a failed connect (upstream PR #121: a device
+  // that started offline otherwise never subscribed live). The per-room connect
+  // keeps that behaviour.
+  it("retries a room connect that failed, with backoff", async () => {
+    vi.useFakeTimers();
+    try {
+      const ME = "c".repeat(64);
+      shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+        v: 2,
+        eck_current: 1,
+        nostr_group_id: "gid-retry",
+        attendees: [],
+      });
+      shared.groups = [
+        { idStr: "dd", id: new Uint8Array([0xdd]), state: { members: [COORD, ME], nostrGroupId: "gid-retry" }, on: () => {} },
+      ];
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const chat = await MarmotChat.create({ accountSigner, ctx });
+      lastClient.groups.connect.mockRejectedValueOnce(new Error("every relay rejected the backfill"));
+      await chat.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(lastClient.groups.connect).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(lastClient.groups.connect).toHaveBeenCalledTimes(2);
+      chat.dispose();
+      warn.mockRestore();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Audit S-5: start() awaited the full history replay before the room counted
+  // as bound, so a long backlog held up "ready".
+  it("binds and returns from start() without waiting for the history replay", async () => {
+    const ME = "c".repeat(64);
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-history",
+      attendees: [],
+    });
+    let releaseHistory!: () => void;
+    const slowHistory = {
+      queryRumors: () => new Promise<unknown[]>((r) => (releaseHistory = () => r([]))),
+    };
+    shared.groups = [
+      {
+        idStr: "ee",
+        id: new Uint8Array([0xee]),
+        state: { members: [COORD, ME], nostrGroupId: "gid-history" },
+        on: () => {},
+        history: slowHistory,
+      } as unknown as FakeGroup,
+    ];
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start(); // would hang here if the replay were awaited
+    expect(await chat.nostrGroupId()).toBe("gid-history");
+    releaseHistory();
+    chat.dispose();
+  });
+
+  // Audit R-9: an undecryptable or unappliable event used to vanish silently: a
+  // forked member saw a frozen room and only Rejoin, which kicks them.
+  it("counts this room's unreadable events until a later outcome resolves them", async () => {
+    const ME = "c".repeat(64);
+    shared.rosters.set((ctx as unknown as { coordinate: string }).coordinate, {
+      v: 2,
+      eck_current: 1,
+      nostr_group_id: "gid-sync",
+      attendees: [],
+    });
+    shared.groups = [
+      { idStr: "f1", id: new Uint8Array([0xf1]), state: { members: [COORD, ME], nostrGroupId: "gid-sync" }, on: () => {} },
+      { idStr: "f2", id: new Uint8Array([0xf2]), state: { members: [COORD, ME], nostrGroupId: "gid-elsewhere" }, on: () => {} },
+    ];
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    let changes = 0;
+    chat.onStateChange = () => changes++;
+    await chat.start();
+    const before = changes;
+    lastClient.groups.emit("ingestResult", new Uint8Array([0xf1]), { kind: "unreadable", event: { id: "e1" } });
+    lastClient.groups.emit("ingestResult", new Uint8Array([0xf1]), { kind: "rejected", event: { id: "e2" } });
+    // Another event's room is not this room's problem.
+    lastClient.groups.emit("ingestResult", new Uint8Array([0xf2]), { kind: "unreadable", event: { id: "e3" } });
+    expect(chat.syncIssueCount()).toBe(2);
+    expect(changes).toBeGreaterThan(before);
+    // marmot retried e1 once the missing epoch arrived.
+    lastClient.groups.emit("ingestResult", new Uint8Array([0xf1]), { kind: "processed", event: { id: "e1" } });
+    expect(chat.syncIssueCount()).toBe(1);
+    chat.dispose();
   });
 
   it("stops joining after dispose() removes the decrypted listener", async () => {
@@ -553,6 +714,7 @@ describe("MarmotChat per-event group scoping (audit APPK-3)", () => {
   });
 
   it("a foreign group does not suppress this event's bootstrap (ensurePublished)", async () => {
+    rosterNamingUnjoinedGroup();
     const chat = await MarmotChat.create({ accountSigner, ctx });
     // Before start(): only a foreign (other-event) group exists locally.
     lastClient.groups.groups.push(foreignGroup("gid-event-b", ["b".repeat(64)]));
@@ -843,6 +1005,8 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
     const chat = await MarmotChat.create({ accountSigner, ctx });
     await chat.start();
     expect(await chat.nostrGroupId()).toBeUndefined();
+    // The key package a join already consumed — the only kind rotate may retire (K-8).
+    lastClient.storedKeyPackages = [{ keyPackageRef: new Uint8Array([7]), identifier: "web-test", used: true } as never];
     shared.calls.length = 0;
 
     await chat.rejoin();
@@ -916,7 +1080,7 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
 
     await chat.rejoin();
 
-    expect(shared.calls).toEqual(["attest:revoke", "kp:rotate", "kp:ensurePublished", "attest:add"]);
+    expect(shared.calls).toEqual(["attest:revoke", "kp:create", "kp:ensurePublished", "attest:add"]);
   });
 
   it("re-advertises on open for a removed member, so a reload heals without the button", async () => {
@@ -941,8 +1105,51 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
     // the Add that created the leaf we just lost, so the coordinator has recorded
     // its event id as consumed and would skip it (prod 2026-07-30).
     lastClient.groups.groups[0]!.state.members = [COORD];
+    // The join marked the consumed key package used (marmot's consumption receipt).
+    lastClient.storedKeyPackages = [{ keyPackageRef: new Uint8Array([7]), identifier: "web-test", used: true } as never];
     await chat.ensurePublished();
     expect(shared.calls).toEqual(["kp:rotate", "kp:ensurePublished", "attest:add"]);
+  });
+
+  // Audit K-8: the old pick was `find(slot) ?? stored[0]`, which rotated an UNUSED
+  // key package — possibly the very one another event's in-flight Welcome is
+  // encrypted to — and the stored[0] fallback could even reach another slot's.
+  it("never rotates an unused key package; publishes a fresh one beside it instead", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-evict-unused", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "w-u", nostrGroupId: "gid-evict-unused", members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-u"]));
+    lastClient.groups.groups[0]!.state.members = [COORD]; // evicted
+    lastClient.storedKeyPackages = [
+      { keyPackageRef: new Uint8Array([1]), identifier: "other-slot", used: true } as never,
+      { keyPackageRef: new Uint8Array([2]), identifier: "web-test" }, // unused: keep its private key
+    ];
+    shared.calls.length = 0;
+
+    await chat.ensurePublished();
+
+    expect(lastClient.keyPackages.rotate).not.toHaveBeenCalled();
+    expect(shared.calls).toEqual(["kp:create", "kp:ensurePublished", "attest:add"]);
+  });
+
+  it("rotates the spent key package of this device's slot, not another slot's", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-evict-spent", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.start();
+    lastClient.invites.deliver({ id: "w-s", nostrGroupId: "gid-evict-spent", members: [COORD, "c".repeat(64)] });
+    await vi.waitFor(() => expect(lastClient.joinedFrom).toEqual(["w-s"]));
+    lastClient.groups.groups[0]!.state.members = [COORD];
+    lastClient.storedKeyPackages = [
+      { keyPackageRef: new Uint8Array([1]), identifier: "other-slot", used: true } as never,
+      { keyPackageRef: new Uint8Array([2]), identifier: "web-test" },
+      { keyPackageRef: new Uint8Array([3]), identifier: "web-test", used: true } as never,
+    ];
+
+    await chat.ensurePublished();
+
+    expect(lastClient.keyPackages.rotate).toHaveBeenCalledTimes(1);
+    expect((lastClient.keyPackages.rotate.mock.calls[0] as unknown as [Uint8Array])[0]).toEqual(new Uint8Array([3]));
   });
 
   it("does NOT rotate for a client that was never added — its welcome may be in flight", async () => {
@@ -1181,7 +1388,7 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
 
     await chat.rejoin({ force: true });
 
-    expect(shared.calls).toEqual(["attest:revoke", "kp:rotate", "kp:ensurePublished", "attest:add"]);
+    expect(shared.calls).toEqual(["attest:revoke", "kp:create", "kp:ensurePublished", "attest:add"]);
   });
 
   it("never discards a group we still hold a leaf in", async () => {
@@ -1222,6 +1429,7 @@ describe("MarmotChat.rejoin() — re-enrolling a device that fell out of the gro
  */
 describe("MarmotChat relay set (chat_relay)", () => {
   it("publishes chat identity + key package to the event relays UNION the chat relays", async () => {
+    rosterNamingUnjoinedGroup();
     const chatCtx = {
       config: {
         relays: ["wss://r"],
@@ -1239,6 +1447,7 @@ describe("MarmotChat relay set (chat_relay)", () => {
   });
 
   it("falls back to the event relays for a context cached before chat relays existed", async () => {
+    rosterNamingUnjoinedGroup();
     const chat = await MarmotChat.create({ accountSigner, ctx });
     await chat.ensurePublished();
     const [arg] = lastClient.keyPackages.ensurePublished.mock.calls[0] as unknown as [
@@ -1314,7 +1523,8 @@ describe("MarmotChat.ensureKeyPackageOnRelays — the check that skipped the dev
         keyPackageRef: new Uint8Array([7]),
         identifier: "web-test",
         published: [{ id: "kp-current", created_at: 200 }],
-      },
+        used: true,
+      } as never,
     ];
     shared.calls.length = 0;
     shared.relayKeyPackages = [{ id: "kp-superseded" }]; // a relay that is behind
@@ -1331,7 +1541,8 @@ describe("MarmotChat.ensureKeyPackageOnRelays — the check that skipped the dev
         keyPackageRef: new Uint8Array([7]),
         identifier: "web-test",
         published: [{ id: "kp-current", created_at: 200 }],
-      },
+        used: true,
+      } as never,
     ];
     shared.calls.length = 0;
     shared.relayKeyPackages = [{ id: "kp-current" }];
@@ -1352,6 +1563,7 @@ describe("MarmotChat device label", () => {
   beforeEach(() => vi.clearAllMocks());
 
   it("re-attests with the user's chosen label, not the browser guess", async () => {
+    rosterNamingUnjoinedGroup();
     shared.savedLabel = "Work laptop";
     const chat = await MarmotChat.create({ accountSigner, ctx });
     await chat.ensurePublished();
@@ -1359,6 +1571,7 @@ describe("MarmotChat device label", () => {
   });
 
   it("falls back to the browser guess when the device was never renamed", async () => {
+    rosterNamingUnjoinedGroup();
     const chat = await MarmotChat.create({ accountSigner, ctx });
     await chat.ensurePublished();
     expect(shared.attestedLabels).toEqual(["Test device"]);
@@ -1513,6 +1726,7 @@ describe("MarmotChat — retiring the pre-0.7.0 KeyPackage slot", () => {
   // slot. A new `d` is a new address: the old 30443 stays discoverable unless it
   // is deleted, and an inviter could still pick it.
   it("deletes the old address after publishing, drops spent packages, keeps unused ones", async () => {
+    rosterNamingUnjoinedGroup();
     shared.legacyClientId = "web-0123456789abcdef";
     const chat = await MarmotChat.create({ accountSigner, ctx });
     lastClient.storedKeyPackages = [
@@ -1538,6 +1752,7 @@ describe("MarmotChat — retiring the pre-0.7.0 KeyPackage slot", () => {
   });
 
   it("keeps the legacy slot for a retry when the deletion reaches no relay", async () => {
+    rosterNamingUnjoinedGroup();
     shared.legacyClientId = "web-0123456789abcdef";
     const chat = await MarmotChat.create({ accountSigner, ctx });
     const { publishSigned } = await import("$lib/nostr/ndk.js");
@@ -1556,6 +1771,7 @@ describe("MarmotChat — retiring the pre-0.7.0 KeyPackage slot", () => {
   });
 
   it("does nothing for an install that never had a legacy slot", async () => {
+    rosterNamingUnjoinedGroup();
     const chat = await MarmotChat.create({ accountSigner, ctx });
     const { publishSigned } = await import("$lib/nostr/ndk.js");
 
@@ -1584,6 +1800,7 @@ describe("MarmotChat device kind-0 relays (NIP §10.3, audit R-38)", () => {
     } as never;
     const chat = await MarmotChat.create({ accountSigner, ctx: chatCtx });
     await chat.ensurePublished();
+    await chat.__profileTaskForTests;
     const sent = await kind0Relays();
     expect(sent.length).toBeGreaterThan(0);
     for (const relays of sent) expect(relays).toEqual(["wss://chat"]);
@@ -1594,8 +1811,309 @@ describe("MarmotChat device kind-0 relays (NIP §10.3, audit R-38)", () => {
     vi.mocked(publishSigned).mockClear();
     const chat = await MarmotChat.create({ accountSigner, ctx });
     await chat.ensurePublished();
+    await chat.__profileTaskForTests;
     const sent = await kind0Relays();
     expect(sent.length).toBeGreaterThan(0);
     for (const relays of sent) expect(relays).toEqual(["wss://r"]);
+  });
+});
+
+/**
+ * Audit S-1: the device kind-0 (an account-profile fetch plus a publish) ran in
+ * front of every chat start, for members too, and republished on every open.
+ */
+describe("MarmotChat device kind-0 is off the start path (audit S-1)", () => {
+  const kind0Count = async (): Promise<number> => {
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+    return vi.mocked(publishSigned).mock.calls.filter(([ev]) => (ev as unknown as { kind: number }).kind === 0).length;
+  };
+
+  it("does not hold up ensurePublished while the account profile fetch hangs", async () => {
+    const { fetchProfiles } = await import("$lib/events/social.js");
+    let release!: () => void;
+    vi.mocked(fetchProfiles).mockImplementationOnce(
+      () => new Promise((r) => (release = () => r(new Map()))),
+    );
+    rosterNamingUnjoinedGroup();
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+    await chat.ensurePublished(); // resolves although the profile fetch has not
+    expect(shared.calls).toContain("attest:add");
+    release();
+    await chat.__profileTaskForTests;
+  });
+
+  it("publishes an unchanged profile once, not on every open", async () => {
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+    vi.mocked(publishSigned).mockClear();
+    const { InMemoryKvBackend } = await import("./stores.js");
+    shared.backend = new (InMemoryKvBackend as new () => unknown)(); // survives the reopen
+    const first = await MarmotChat.create({ accountSigner, ctx });
+    await first.ensurePublished();
+    await first.__profileTaskForTests;
+    const reopened = await MarmotChat.create({ accountSigner, ctx });
+    await reopened.ensurePublished();
+    await reopened.__profileTaskForTests;
+    expect(await kind0Count()).toBe(1);
+  });
+
+  it("publishes nothing when the account profile cannot be fetched (no generic overwrite)", async () => {
+    const { publishSigned } = await import("$lib/nostr/ndk.js");
+    vi.mocked(publishSigned).mockClear();
+    const { fetchProfiles } = await import("$lib/events/social.js");
+    vi.mocked(fetchProfiles).mockRejectedValueOnce(new Error("offline"));
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    await chat.ensurePublished();
+    await chat.__profileTaskForTests;
+    expect(await kind0Count()).toBe(0);
+  });
+});
+
+/**
+ * Audit K-2: "could not confirm membership" is not "not a member". Every op:"add"
+ * this client sends is, to the coordinator, a re-enrolment warrant: a device it
+ * still holds a leaf for is removed and re-added. So the bootstrap may publish,
+ * rotate and attest only on a POSITIVE not-member.
+ */
+describe("MarmotChat membership is three-valued (audit K-2)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coord = (ctx as unknown as { coordinate: string }).coordinate;
+  const ME = "c".repeat(64);
+
+  async function seedBinding(gid: string): Promise<void> {
+    const { InMemoryKvBackend, namespacedStore, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => unknown;
+      namespacedStore: (b: unknown, id: string, ns: string) => { setItem(k: string, v: unknown): Promise<unknown> };
+      MARMOT_NAMESPACES: { eventGroups: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    await namespacedStore(backend, ME, MARMOT_NAMESPACES.eventGroups).setItem(coord, gid);
+  }
+
+  function group(hex: string, nostrGroupId: string, members: unknown): FakeGroup {
+    return {
+      idStr: hex,
+      id: Uint8Array.from(hex.match(/../g)!.map((b) => parseInt(b, 16))),
+      state: { members: members as string[], nostrGroupId },
+      on: () => {},
+    };
+  }
+
+  it("attests nothing when the roster cannot be read and our recorded room still has our leaf", async () => {
+    // The prod shape: a joined member whose roster read came back empty-handed
+    // (slow relay, ECK not restored yet). Routing is fail-closed, and the old
+    // bootstrap read that as "not a member" and re-enrolled the device.
+    await seedBinding("gid-mine");
+    shared.groups = [group("a1", "gid-mine", [COORD, ME])];
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+
+    await chat.ensurePublished();
+
+    expect(shared.calls).toEqual([]);
+    expect(chat.lastVerdict).toEqual({ kind: "unknown", reason: "roster-unavailable" });
+  });
+
+  it("attests nothing for a device with no state at all while the roster is unreadable", async () => {
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+    await chat.ensurePublished();
+    expect(shared.calls).toEqual([]);
+  });
+
+  it("attests a first-time device once a fresh roster names a room it does not hold", async () => {
+    rosterNamingUnjoinedGroup();
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+    await chat.ensurePublished();
+    expect(shared.calls).toContain("attest:add");
+    expect(chat.lastVerdict).toEqual({ kind: "not-member", evicted: false });
+  });
+
+  it("does not attest when the recorded room has our leaf and the roster names a room we lack", async () => {
+    // A replaced room: the coordinator re-adds attested devices to the new one on
+    // its own. An add from here would only make it evict our live leaf.
+    await seedBinding("gid-old-room");
+    shared.groups = [group("a2", "gid-old-room", [COORD, ME])];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-new-room", attendees: [] });
+    shared.staleCache.add(coord);
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+    await chat.ensurePublished();
+    expect(shared.calls).toEqual([]);
+    expect(chat.lastVerdict).toEqual({ kind: "unknown", reason: "held-leaf" });
+  });
+
+  it("another event's room on the same coordinator does not block this event's enrolment", async () => {
+    shared.groups = [group("a3", "gid-other-event", [COORD, ME])];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-this-event", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+    await chat.ensurePublished();
+    expect(shared.calls).toContain("attest:add");
+  });
+
+  it("a roster with no group id plus a coordinator room holding our leaf is 'do nothing'", async () => {
+    shared.groups = [group("a4", "gid-unbound", [COORD, ME])];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+    await chat.ensurePublished();
+    expect(shared.calls).toEqual([]);
+  });
+
+  it("a roster with no group id and no coordinator state at all enrols (first device)", async () => {
+    shared.rosters.set(coord, { v: 2, eck_current: 1, attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+    await chat.ensurePublished();
+    expect(shared.calls).toContain("attest:add");
+  });
+
+  // groupHasMember used to return false on any throw, and the evicted check then
+  // rotated and attested.
+  it("never rotates or attests when our leaf cannot be read from the room's state", async () => {
+    shared.groups = [group("a5", "gid-unwalkable", 5 /* not a member list: the walk throws */)];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-unwalkable", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+    await chat.ensurePublished();
+    expect(shared.calls).toEqual([]);
+    expect(chat.lastVerdict).toEqual({ kind: "unknown", reason: "leaf-unreadable" });
+  });
+
+  // Audit R-6: three resolveEventGroups per start, each a full group load.
+  it("decides once per start: one group load and at most one live roster read", async () => {
+    rosterNamingUnjoinedGroup();
+    shared.groups = [group("a6", "gid-elsewhere", [COORD])];
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    const before = lastClient.groups.listIdsCalls;
+    shared.liveFetchCount.clear();
+    await chat.ensurePublished();
+    expect(lastClient.groups.listIdsCalls - before).toBe(1);
+    expect(shared.liveFetchCount.get(coord)).toBe(1);
+  });
+
+  it("a member found through the cached roster costs no live roster read", async () => {
+    shared.groups = [group("a7", "gid-cached", [COORD, ME])];
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-cached", attendees: [] });
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.liveFetchCount.clear();
+    await chat.ensurePublished();
+    expect(shared.liveFetchCount.get(coord)).toBeUndefined();
+    expect(chat.lastVerdict).toEqual({ kind: "member" });
+  });
+
+  it("does not memoize a failed live roster read for the client's lifetime", async () => {
+    await seedBinding("gid-later");
+    shared.groups = [group("a8", "gid-later", [COORD, ME])];
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    expect(await chat.nostrGroupId()).toBeUndefined(); // roster unreadable: fail-closed
+    expect(shared.liveFetchCount.get(coord)).toBe(1);
+    // Within the retry window the miss is reused (a send must not hammer relays)…
+    expect(await chat.nostrGroupId()).toBeUndefined();
+    expect(shared.liveFetchCount.get(coord)).toBe(1);
+    // …and after it the read is tried again, so the session can recover.
+    shared.rosters.set(coord, { v: 2, eck_current: 1, nostr_group_id: "gid-later", attendees: [] });
+    shared.staleCache.add(coord);
+    const realNow = Date.now;
+    const spy = vi.spyOn(Date, "now").mockImplementation(() => realNow() + 31_000);
+    try {
+      expect(await chat.nostrGroupId()).toBe("gid-later");
+    } finally {
+      spy.mockRestore();
+    }
+    expect(shared.liveFetchCount.get(coord)).toBe(2);
+  });
+});
+
+/**
+ * Audit K-3: a group that failed to load once was purged — state, history and
+ * binding — and the next start re-enrolled the device (a kick/rejoin with the
+ * local history gone). The coordinator fixed this for its own groups in 81de76c.
+ */
+describe("MarmotChat keeps a group that fails to load (audit K-3)", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  const coord = (ctx as unknown as { coordinate: string }).coordinate;
+  const ME = "c".repeat(64);
+
+  it("does not destroy or purge it, keeps the binding, and reports it damaged", async () => {
+    const { InMemoryKvBackend, namespacedStore, MARMOT_NAMESPACES } = (await import("./stores.js")) as unknown as {
+      InMemoryKvBackend: new () => { keysWithPrefix(p: string): Promise<string[]> };
+      namespacedStore: (b: unknown, id: string, ns: string) => {
+        setItem(k: string, v: unknown): Promise<unknown>;
+        getItem(k: string): Promise<unknown>;
+      };
+      MARMOT_NAMESPACES: { history: string; eventGroups: string };
+    };
+    const backend = new InMemoryKvBackend();
+    shared.backend = backend;
+    shared.groups = [
+      { idStr: "beef", id: new Uint8Array([0xbe, 0xef]), state: { members: [COORD, ME], nostrGroupId: "gid-damaged" }, on: () => {} },
+    ];
+    await namespacedStore(backend, ME, `${MARMOT_NAMESPACES.history}:beef`).setItem("m1", { id: "m1" });
+    await namespacedStore(backend, ME, MARMOT_NAMESPACES.eventGroups).setItem(coord, "gid-damaged");
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.failLoad.add("beef");
+
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+
+    expect(lastClient.groups.destroy).not.toHaveBeenCalled();
+    expect(lastClient.groups.groups.map((g) => g.idStr)).toEqual(["beef"]);
+    expect(await backend.keysWithPrefix(`${ME}\x1f${MARMOT_NAMESPACES.history}:beef`)).not.toEqual([]);
+    expect(await namespacedStore(backend, ME, MARMOT_NAMESPACES.eventGroups).getItem(coord)).toBe("gid-damaged");
+    expect(chat.damagedGroupIds()).toEqual(["beef"]);
+    // The cause chain is logged, not swallowed.
+    expect(errors.mock.calls.some(([m]) => String(m).includes("IndexedDB read aborted"))).toBe(true);
+    errors.mockRestore();
+  });
+
+  it("never attests while a listed group fails to load, and recovers once it loads", async () => {
+    rosterNamingUnjoinedGroup();
+    shared.groups = [
+      { idStr: "cafe", id: new Uint8Array([0xca, 0xfe]), state: { members: [COORD, ME], nostrGroupId: "gid-not-joined" }, on: () => {} },
+    ];
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    shared.failLoad.add("cafe");
+    const chat = await MarmotChat.create({ accountSigner, ctx });
+    shared.calls.length = 0;
+
+    await chat.ensurePublished();
+    expect(shared.calls).toEqual([]);
+    expect(chat.lastVerdict).toEqual({ kind: "unknown", reason: "groups-unreadable" });
+
+    // The store heals (a transient IndexedDB error).
+    shared.failLoad.clear();
+    expect(await chat.recheckDamaged()).toEqual([]);
+    expect(chat.damagedGroupIds()).toEqual([]);
+    await chat.ensurePublished();
+    expect(chat.lastVerdict).toEqual({ kind: "member" });
+    expect(shared.calls).toEqual([]);
+    errors.mockRestore();
+  });
+
+  it("still discards a group the library positively reports as unsupported, and only that", async () => {
+    shared.groups = [
+      {
+        idStr: "dead",
+        id: new Uint8Array([0xde, 0xad]),
+        state: { members: [COORD, ME], nostrGroupId: "gid-legacy2" },
+        on: () => {},
+        profileSupport: { kind: "unsupported" },
+      } as unknown as FakeGroup,
+      {
+        idStr: "f00d",
+        id: new Uint8Array([0xf0, 0x0d]),
+        state: { members: [COORD, ME], nostrGroupId: "gid-unknown-kind" },
+        on: () => {},
+        profileSupport: { kind: "something-newer" },
+      } as unknown as FakeGroup,
+    ];
+    await MarmotChat.create({ accountSigner, ctx });
+    expect(lastClient.groups.destroy).toHaveBeenCalledWith("dead");
+    expect(lastClient.groups.groups.map((g) => g.idStr)).toEqual(["f00d"]);
   });
 });

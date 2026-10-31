@@ -706,6 +706,70 @@ describe("JobRunner — a job that does not run says so", () => {
     await running;
     out.mockRestore();
   });
+
+  // Audit O-1: the hourly profile-refresh sweep re-enqueues keys it expects to be
+  // done, and printed ~70 "this work will NOT run" lines an hour for it.
+  it("quietDedupe silences an expected 'done' collision, but never a 'poison' one", async () => {
+    const store = new Store();
+    const runner = new JobRunner(store, { now: fixedClock().now, maxAttempts: 1 });
+    runner.register("work", async () => {});
+    runner.register("bad", async () => {
+      throw new Error("boom");
+    });
+    runner.enqueue("work", "k", {});
+    runner.enqueue("bad", "p", {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    await runner.drain();
+    warn.mockClear();
+
+    expect(runner.enqueue("work", "k", {}, 0, { quietDedupe: true })).toBe("done");
+    expect(warn).not.toHaveBeenCalled();
+    // A poisoned key is not "expected done": it is dead work, and stays loud.
+    expect(runner.enqueue("bad", "p", {}, 0, { quietDedupe: true })).toBe("poison");
+    expect(warn.mock.calls.map((c) => c.join(" ")).join("\n")).toMatch(/bad enqueue DISCARDED — dedupe key already 'poison'/);
+    // And without the option a 'done' collision is still reported.
+    warn.mockClear();
+    runner.enqueue("work", "k", {});
+    expect(warn.mock.calls.map((c) => c.join(" ")).join("\n")).toMatch(/work enqueue DISCARDED/);
+    warn.mockRestore();
+  });
+
+  // Audit O-2: "queue: 0 pending … 2 poisoned — worker: idle" ran ~8,000 times in
+  // six days because it printed every minute whether or not anything moved.
+  it("prints the queue line on change, and repeats an unchanged one only every 10 minutes", async () => {
+    const store = new Store();
+    const clock = fixedClock();
+    const runner = new JobRunner(store, { now: clock.now, maxAttempts: 1 });
+    runner.register("bad", async () => {
+      throw new Error("boom");
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    runner.enqueue("bad", "p1", {});
+    await runner.drain();
+    const out = vi.spyOn(console, "log").mockImplementation(() => {});
+    const lines = () => out.mock.calls.map((c) => c.join(" ")).filter((l) => l.includes("[jobs] queue:"));
+
+    runner.reportQueueDepth();
+    expect(lines()).toHaveLength(1);
+    // An idle minute later: same state, nothing printed.
+    for (let i = 0; i < 9; i++) {
+      clock.advance(60_000);
+      runner.reportQueueDepth();
+    }
+    expect(lines()).toHaveLength(1);
+    // Ten minutes after the last line: repeated once, so a stalled queue stays visible.
+    clock.advance(60_000);
+    runner.reportQueueDepth();
+    expect(lines()).toHaveLength(2);
+    // A change prints at once, whatever the interval.
+    runner.enqueue("bad", "p2", {});
+    clock.advance(1_000);
+    runner.reportQueueDepth();
+    expect(lines()).toHaveLength(3);
+    expect(lines()[2]).toMatch(/1 pending/);
+    out.mockRestore();
+    warn.mockRestore();
+  });
 });
 
 /**

@@ -20,6 +20,7 @@ import {
   fetchProfiles,
   profileDisplayName,
   profileNeedsFetch,
+  rememberOwnProfile,
   type ProfileMeta,
 } from "./social.js";
 import {
@@ -196,6 +197,17 @@ describe("fetchProfiles cache behaviour", () => {
     const second = await fetchProfiles([PK]);
     expect(second.get(PK)?.name).toBe("Ada");
     expect(streamEvents).toHaveBeenCalledTimes(1); // no second relay read
+  });
+
+  it("a kind-0 we just published is what the next read returns, not the pre-publish miss", async () => {
+    // Login asks for the user's existing kind-0 (to merge into) BEFORE its first
+    // publish, and that miss is stamped. The join form opened right after used to
+    // answer from the miss: "You don't have a public Nostr profile yet".
+    streamEvents.mockReturnValue({ ready: Promise.resolve([]) });
+    expect((await fetchProfiles([PK])).get(PK)).toBeUndefined();
+    rememberOwnProfile(PK, JSON.stringify({ name: "Attendee One" }), Math.floor(Date.now() / 1000));
+    expect((await fetchProfiles([PK])).get(PK)?.name).toBe("Attendee One");
+    expect(streamEvents).toHaveBeenCalledTimes(1); // served from what we published
   });
 
   it("resolves a fetched profile's name by display_name first", async () => {

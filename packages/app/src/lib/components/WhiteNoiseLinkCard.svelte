@@ -91,7 +91,7 @@
   async function poll(): Promise<void> {
     if (!session.signer || !account || !target) return;
     await receiveGrants(session.signer).catch(() => {});
-    const roster = await fetchRoster(ctx).catch(() => cachedRoster(ctx.coordinate));
+    const roster = (await fetchRoster(ctx).catch(() => undefined)) ?? cachedRoster(ctx.coordinate);
     if (!target || phase === "idle" || !isLinkedInRoster(roster, account, target)) return;
     clearPendingLink(account, ctx.coordinate);
     phase = "linked";

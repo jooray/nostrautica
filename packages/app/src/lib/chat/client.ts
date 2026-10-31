@@ -56,8 +56,29 @@ import { sendChatKeyAttestation } from "./attest.js";
 /** Addressable MLS key-package event (Marmot / NIP-104). */
 const KIND_KEY_PACKAGE = 30443;
 
+/** How long a live roster read that found no group id is reused before retrying. */
+const LIVE_ROSTER_RETRY_MS = 30_000;
+
+/** Where the last successfully published device kind-0 fingerprint is kept (per event). */
+const PROFILE_PUBLISH_NAMESPACE = "profile-published";
+/** An unchanged device kind-0 is still republished this often, in case a relay dropped it. */
+const PROFILE_REPUBLISH_MS = 7 * 24 * 3600_000;
+
 /** A live chat message listener. */
 export type ChatMessageHandler = (message: ChatMessage) => void;
+
+/**
+ * Whether this device is in the event's room (audit K-2). Three-valued on
+ * purpose: only a positive `not-member` may publish, rotate or attest.
+ */
+export type ChatMembership =
+  | { kind: "member" }
+  /** `evicted`: we hold the room's state but our leaf is gone (vs. never added). */
+  | { kind: "not-member"; evicted: boolean }
+  | {
+      kind: "unknown";
+      reason: "groups-unreadable" | "roster-unavailable" | "leaf-unreadable" | "held-leaf" | "no-group-id";
+    };
 
 export interface MarmotChatOptions {
   accountSigner: AppSigner;
@@ -74,7 +95,13 @@ export class MarmotChat {
   private readonly client: MarmotClient<GroupRumorHistory, undefined>;
   private readonly ctx: EventContext;
   private readonly accountSigner: AppSigner;
-  private connection?: { unsubscribe(): void };
+  /** Live 445 subscriptions of this event's bound room(s), by group idStr (audit S-3). */
+  private readonly connections = new Map<string, GroupConnection>();
+  /** Bound group idStr → ids of its events not (yet) readable (audit R-9). */
+  private readonly syncIssues = new Map<string, Set<string>>();
+  private onIngestResult?: (groupId: Uint8Array, result: { kind: string; event?: { id?: string } }) => void;
+  private started = false;
+  private disposed = false;
   private inviteSub?: { unsubscribe(): void };
   private onInviteDecrypted?: () => void;
   /** Serializes the startup join and every welcome-driven join so two runs don't race the same welcome. */
@@ -92,6 +119,12 @@ export class MarmotChat {
    *  after the first must keep using what the live fetch actually found instead
    *  of falling back to trusting the (possibly proven-wrong) recorded value. */
   private liveRosterFetch?: Promise<string | undefined>;
+  /** When the memoized live read came back without an id (it is then retried). */
+  private liveRosterFetchFailedAt?: number;
+  /** The detached device kind-0 publish (audit S-1), so two starts share one. */
+  private profileTask?: Promise<void>;
+  /** Group id (hex) → cause chain of its last failed load (audit K-3). */
+  private readonly loadFailures = new Map<string, string>();
   onMessage?: ChatMessageHandler;
   onStateChange?: () => void;
 
@@ -140,9 +173,10 @@ export class MarmotChat {
    * day: MARMOT-GROUP-CHAT.md, "Library: vendored marmot-ts and the 0x8009 flag
    * day"), so this device re-enrols through the ordinary path.
    *
-   * - **Groups** outside the current account-identity-proof profile (built under
-   *   the legacy 0xF2F1 proof by marmot-ts 0.6.0), or whose state no longer loads
-   *   at all. The library still loads a legacy group but refuses every inbound
+   * - **Groups** the library positively reports outside the current
+   *   account-identity-proof profile (built under the legacy 0xF2F1 proof by
+   *   marmot-ts 0.6.0). A group that merely fails to LOAD is never discarded
+   *   here: see {@link damagedGroupIds}. The library still loads a legacy group but refuses every inbound
    *   event for it, so it is a room nothing can be said in; the coordinator
    *   retires its side too and creates a fresh one. Its history goes with it —
    *   the owner's call: old chats are not migrated.
@@ -161,19 +195,32 @@ export class MarmotChat {
     const discardedNostrIds = new Set<string>();
     for (const idBytes of await this.client.groups.listIds()) {
       const id = toHex(idBytes);
-      let group: MarmotGroupLike | undefined;
+      let group: MarmotGroupLike;
       try {
         group = (await this.client.groups.get(idBytes)) as unknown as MarmotGroupLike;
-      } catch {
-        group = undefined;
+        this.loadFailures.delete(id);
+      } catch (err) {
+        // A group that fails to load is KEPT (audit K-3). This used to purge it as
+        // "unreadable", permanently: its state, its history and the event binding.
+        // A transient IndexedDB error, a checkpoint mismatch, or a tab killed
+        // between the per-key writes of one save is enough to fail a load once,
+        // and the next start then had no group, re-attested, and the coordinator
+        // removed and re-added the device: a kick/rejoin with the local history
+        // gone. The coordinator stopped doing this to its own groups in 81de76c
+        // ("unreadable is kept, not replaced"); the app never had the fix.
+        this.noteLoadFailure(id, err);
+        continue;
       }
-      if (group && (group.profileSupport?.kind ?? "supported") === "supported") continue;
-      const nostrId = group ? safeGroupIdHex(group) : undefined;
+      // Only a POSITIVE verdict from the library discards anything: a group
+      // marmot reports as built under an unsupported (pre-0x8009) proof profile.
+      // A missing or unrecognised verdict is not one.
+      if (group.profileSupport?.kind !== "unsupported") continue;
+      const nostrId = safeGroupIdHex(group);
       if (nostrId) discardedNostrIds.add(nostrId);
       console.warn(
-        `marmot: discarding ${group ? "pre-0x8009" : "unreadable"} chat group ${id.slice(0, 12)}… — this device re-joins the event's new room`,
+        `marmot: discarding pre-0x8009 chat group ${id.slice(0, 12)}… — this device re-joins the event's new room`,
       );
-      if (group) await this.client.groups.destroy(id).catch(() => undefined);
+      await this.client.groups.destroy(id).catch(() => undefined);
       await purgeGroupLocalState(this.kvBackend, this.identity.pubkey, id);
     }
     for (const coordinate of await this.eventGroups.keys().catch(() => [] as string[])) {
@@ -214,7 +261,32 @@ export class MarmotChat {
     // unconditional. Unlike everything below, it is NOT gated on "already joined":
     // a kind-0 is a plain profile note, not MLS state, so republishing it here
     // every open also self-heals identities that joined before this existed.
-    await this.ensureChatKeyProfile();
+    //
+    // Fire-and-forget (audit S-1): it is an account-profile fetch plus a publish,
+    // and nothing below depends on it, yet it used to sit in front of every chat
+    // start, members' included. It now also publishes only when the profile
+    // actually changed (see ensureChatKeyProfile).
+    this.profileTask ??= this.ensureChatKeyProfile()
+      .catch((err) => console.warn("marmot: device profile publish failed", err))
+      .finally(() => (this.profileTask = undefined));
+
+    // Publish, rotate and attest ONLY on a positive "not a member" (audit K-2).
+    // Every op:"add" this sends is, to the coordinator, a re-enrolment warrant: if
+    // it still holds a leaf for this device it removes it and adds it again. So
+    // "we could not confirm membership" (roster unreadable, a group that failed to
+    // load, a state we could not walk) must do NOTHING, not attest. The verdict is
+    // computed once per call (audit R-6): one group load, one live roster read.
+    let evicted = false;
+    if (!opts?.force) {
+      const verdict = await this.membershipVerdict();
+      this.lastVerdict = verdict;
+      if (verdict.kind === "unknown") {
+        console.warn(`marmot: chat membership unknown (${verdict.reason}) — not re-enrolling this device`);
+        return;
+      }
+      if (verdict.kind === "member") return;
+      evicted = verdict.evicted;
+    }
 
     // Already a joined member OF THIS EVENT's group (APPK-3)? Publish NOTHING
     // else. Re-advertising a fresh kind-30443 key package, or (for device-key
@@ -232,8 +304,8 @@ export class MarmotChat {
     // it can still read what it already has and cannot send or read anything new.
     // Checking only for the group's presence made that state permanent, because
     // this bootstrap — the one thing that would ask to be added back — skipped
-    // itself on every open (prod 2026-07-30).
-    if (!opts?.force && (await this.isEventGroupMember())) return;
+    // itself on every open (prod 2026-07-30). The verdict above draws exactly
+    // that line: "evicted" is a held group of this event without our leaf.
     await this.ensureRelayLists();
     // Rotate when we are EVICTED — holding this event's group with our own leaf
     // gone — rather than merely not-yet-added. The key package we still advertise
@@ -243,8 +315,9 @@ export class MarmotChat {
     // re-attestation landed, the coordinator matched it against the same consumed
     // key package, and nothing happened). A not-yet-added client must NOT rotate:
     // its key package may be the one an in-flight Welcome was encrypted to, and
-    // rotating discards the private material needed to join with it.
-    if (opts?.rotate || (await this.isEvictedFromEventGroup())) await this.rotateKeyPackage();
+    // rotating discards the private material needed to join with it — which is
+    // also why rotateKeyPackage only ever retires a SPENT key package (K-8).
+    if (opts?.rotate || evicted) await this.rotateKeyPackage();
     // Publish (or confirm) the kind-30443 key package on the event relays under
     // this device's stable slot. This is what the coordinator's watcher adds.
     await this.client.keyPackages.ensurePublished({
@@ -272,6 +345,12 @@ export class MarmotChat {
     // wins, and this runs on every chat open. A device renamed to "Work laptop"
     // went back to "Chrome on macOS" the next time chat started, with nothing on
     // either side to explain it.
+    //
+    // This is also the ONLY path that carries a rename to the coordinator (audit
+    // K-5): the device card saves the label locally and does not attest on its
+    // own, because an op:"add" from a device still in the room makes the
+    // coordinator remove and re-add it. With K-2 this runs only when the device
+    // is positively out of the room, i.e. "the next time this device joins".
     const queued = !(await sendChatKeyAttestation(this.accountSigner, this.ctx, {
       op: "add",
       chatPubkey: this.identity.pubkey,
@@ -292,9 +371,14 @@ export class MarmotChat {
   /** Publish the device chat key's own kind-0 (name/picture borrowed from the
    *  real account's profile, marked "(chat)") — see {@link buildChatKeyProfile}. */
   private async ensureChatKeyProfile(): Promise<void> {
-    const account = await fetchProfiles([this.identity.account]).catch(
-      () => new Map<string, ProfileMeta>(),
-    );
+    let account: Map<string, ProfileMeta>;
+    try {
+      account = await fetchProfiles([this.identity.account]);
+    } catch {
+      // Offline: publishing now would replace the real name with the generic
+      // fallback. Leave whatever is published alone.
+      return;
+    }
     const meta = account.get(this.identity.account);
     const ev = buildChatKeyProfile(this.identity, meta?.name, meta?.picture);
     // The chat relay set ONLY (NIP §10.3: "MUST NOT publish device kind 0
@@ -304,7 +388,27 @@ export class MarmotChat {
     // routes chat over its general set, so that set is its chat relay set.
     const chatRelays = chatRelaysOf(this.ctx.config);
     const targets = chatRelays.length > 0 ? chatRelays : this.relays;
-    await publishSigned(ev as unknown as Parameters<typeof publishSigned>[0], targets).catch(() => {});
+    // Publish only when what we would publish differs from what we last got onto
+    // a relay (audit S-1), or that was long enough ago that a relay may have
+    // dropped it. The fingerprint is the content, tags and target relays — not
+    // the signature or created_at, which change every time.
+    const fingerprint = JSON.stringify([ev.content, ev.tags, [...targets].sort()]);
+    const store = namespacedStore<{ fingerprint: string; at: number }>(
+      this.kvBackend,
+      this.identity.pubkey,
+      PROFILE_PUBLISH_NAMESPACE,
+    );
+    const last = await store.getItem(this.ctx.coordinate).catch(() => null);
+    if (last && last.fingerprint === fingerprint && Date.now() - last.at < PROFILE_REPUBLISH_MS) return;
+    const delivered = await publishSigned(ev as unknown as Parameters<typeof publishSigned>[0], targets)
+      .then(() => true)
+      .catch(() => false);
+    if (delivered) await store.setItem(this.ctx.coordinate, { fingerprint, at: Date.now() }).catch(() => {});
+  }
+
+  /** Test seam: the in-flight device-profile publish, if any. */
+  get __profileTaskForTests(): Promise<void> | undefined {
+    return this.profileTask;
   }
 
   /** Publish the chat identity's 10050 (inbox) + 10002 (discovery) relay lists. */
@@ -365,9 +469,8 @@ export class MarmotChat {
    *    The evicted device is precisely the one whose freshly-rotated key package
    *    has to be on the relays, because that rotation is the whole re-enrolment
    *    (`ensurePublished` rotates on eviction two calls above this one). So the
-   *    check skipped exactly the case it exists for. Gate on MEMBERSHIP instead —
-   *    `isEventGroupMember()`, the same distinction `ensurePublished` itself
-   *    already draws.
+   *    check skipped exactly the case it exists for. It is gated on MEMBERSHIP
+   *    instead: its caller only gets here on a positive "not a member".
    * 2. It only asked "does SOME 30443 from this author, under this `d`, exist?".
    *    A superseded copy still sitting on one lagging relay answers yes, so a
    *    rotation that never reached any relay looked fine — the coordinator would
@@ -379,10 +482,9 @@ export class MarmotChat {
    */
   private async ensureKeyPackageOnRelays(): Promise<void> {
     try {
-      // A client whose own leaf is in this event's group is a member and needs no
-      // key-package re-advertisement (and re-advertising could prompt a redundant
-      // re-add). Anything else — never added, or added and then removed — does.
-      if (await this.isEventGroupMember()) return;
+      // Only reached after ensurePublished found a positive "not a member" (or a
+      // forced rejoin), so it does not re-ask: a second membership resolve here was
+      // one of the three full group loads per start (audit R-6).
       const found = (await fetchEventsRelayOnly(
         {
           kinds: [KIND_KEY_PACKAGE],
@@ -460,11 +562,16 @@ export class MarmotChat {
    * state listeners. Safe to call after {@link ensurePublished}.
    */
   async start(): Promise<void> {
-    // Keep a live 445 auto-connection for every joined group — including groups we
-    // join LATER from a welcome that arrives after startup. `connectAll` tracks the
-    // manager's `joined` event, so a late join auto-subscribes to its 445 traffic.
-    // Installed first so no group (present or future) is missed.
-    this.connection = this.client.groups.connectAll();
+    this.started = true;
+    // 445 traffic is subscribed per group, for THIS event's bound room only
+    // (audit S-3), from bindAllGroups — which runs at the end of this method and
+    // after every later join, so a group joined from a late welcome is connected
+    // the moment it binds. `connectAll()` subscribed every group this identity
+    // holds: other events' rooms and dead pre-removal copies, one REQ each.
+    //
+    // Ingest outcomes for the room feed the "re-syncing" indicator (audit R-9).
+    this.onIngestResult = (groupId, result) => this.noteIngestResult(toHex(groupId), result);
+    this.client.groups.on("ingestResult", this.onIngestResult);
     // A welcome that arrives after this point is ingested + decrypted by `listen()`
     // into the invite store's "unread" slot, but marmot never *joins* on its own —
     // the app must drive `joinGroupFromWelcome`. The coordinator adds us seconds
@@ -541,7 +648,9 @@ export class MarmotChat {
         // coordinator's leaf — a welcome that passed the seal check but yielded
         // a coordinator-less group is purged locally (no self-remove publish:
         // we owe a hostile group no traffic) and never recorded.
-        if (!groupHasMember(joined, coordinator)) {
+        // Only a POSITIVE "no coordinator leaf": a tree we could not walk is not
+        // evidence of a hostile group, and destroying it would be K-3 again.
+        if (groupLeaf(joined, coordinator) === false) {
           console.warn(
             "marmot: joined group lacks the event coordinator — purging it",
             invite.id,
@@ -639,7 +748,8 @@ export class MarmotChat {
       // No leaf of ours in it ⇒ we were removed and this is the corpse. If we DO
       // hold a leaf, the welcome is for a group we are already in and dropping it
       // would destroy a working room — leave it alone and rethrow.
-      if (!existing || groupHasMember(existing, this.identity.pubkey)) throw err;
+      // An unwalkable tree is not proof of a corpse either (audit K-2).
+      if (!existing || groupLeaf(existing, this.identity.pubkey) !== false) throw err;
 
       const history = namespacedStore<unknown>(
         this.kvBackend,
@@ -657,6 +767,8 @@ export class MarmotChat {
       // The re-joined group is a NEW object under the same id. Forget the old
       // binding, or bindAllGroups skips it and its messages never reach the UI.
       this.boundGroups.delete(mlsIdHex);
+      this.disconnectGroup(mlsIdHex);
+      this.syncIssues.delete(mlsIdHex);
       const joined = await this.client.joinGroupFromWelcome({ welcomeRumor: invite });
 
       for (const [key, value] of saved) await history.setItem(key, value).catch(() => undefined);
@@ -665,18 +777,82 @@ export class MarmotChat {
   }
 
   /**
-   * True when we hold this event's group AND our own chat key still holds a leaf
-   * in it — i.e. we are actually a member, not just a client with leftover state.
+   * Is this device in THIS event's room: `member`, a POSITIVE `not-member`, or
+   * `unknown` (audit K-2)?
    *
-   * The distinction is the whole bug: an MLS Remove strips our leaf but leaves our
-   * local group state (and its decrypted history) exactly where it was, so "do we
-   * have the group?" answers yes for a member who has been removed. Every check
-   * that means "are we in the room?" has to ask this instead.
+   * "Member" means our own leaf is in the group, not merely that we hold state
+   * for it: an MLS Remove strips our leaf but leaves the local group state and
+   * its decrypted history exactly where they were. Only `not-member` may lead to a key-package publish
+   * and an op:"add" attestation, because the coordinator treats every add from a
+   * device it still holds a leaf for as "re-enrol me" and removes + re-adds it.
+   *
+   * Positive not-member means one of:
+   * - a FRESHLY fetched and decrypted roster names group G, and either we hold G
+   *   with no leaf of ours (`evicted: true`), or we hold no state for G at all;
+   * - the fresh roster names no group, and we hold no group from this
+   *   coordinator (nor the recorded binding's) at all.
+   *
+   * Everything else is `unknown`: a group that failed to load, a roster that
+   * did not arrive or would not decrypt (an ECK rotated after a revocation, keys
+   * not restored yet), a state whose leaves we could not walk, or a group that
+   * may be this event's room and still holds our leaf. Unknown does nothing.
+   *
+   * The cached roster is trusted only for the cheap POSITIVE case (it names a
+   * group we hold a leaf in). A negative is never concluded from the cache.
    */
-  private async isEventGroupMember(): Promise<boolean> {
-    const groups = await this.currentEventGroups();
-    return groups.some((g) => groupHasMember(g, this.identity.pubkey));
+  async membershipVerdict(): Promise<ChatMembership> {
+    const me = this.identity.pubkey;
+    const report = await this.loadAllGroupsReport();
+    if (report.listFailed || report.failed.length > 0) return { kind: "unknown", reason: "groups-unreadable" };
+    const all = report.groups;
+    const held = (gid: string) => all.filter((g) => safeGroupIdHex(g) === gid);
+    const leafIn = (gs: MarmotGroupLike[]): boolean | undefined => {
+      const leaves = gs.map((g) => groupLeaf(g, me));
+      if (leaves.includes(true)) return true;
+      return leaves.includes(undefined) ? undefined : false;
+    };
+
+    const cached = cachedRoster(this.ctx.coordinate)?.nostr_group_id;
+    if (cached && leafIn(held(cached)) === true) return { kind: "member" };
+
+    const recorded = await this.recordedEventGroupId();
+    const roster = await fetchRoster(this.ctx).catch(() => undefined);
+    if (!roster) return { kind: "unknown", reason: "roster-unavailable" };
+    const gid = roster.nostr_group_id;
+
+    if (gid) {
+      const mine = held(gid);
+      const leaf = leafIn(mine);
+      if (leaf === true) return { kind: "member" };
+      if (leaf === undefined) return { kind: "unknown", reason: "leaf-unreadable" };
+      if (mine.length > 0) return { kind: "not-member", evicted: true };
+      // We hold no state for the room the roster names. If the room this event
+      // was bound to still has our leaf, the coordinator replaced the room (it
+      // re-adds attested devices to a replacement itself); attesting would only
+      // make it evict us from wherever it still holds a leaf.
+      if (recorded && recorded !== gid && leafIn(held(recorded)) !== false) {
+        return { kind: "unknown", reason: "held-leaf" };
+      }
+      return { kind: "not-member", evicted: false };
+    }
+
+    // The fresh roster names no group (an old coordinator, or no room yet), so a
+    // held group cannot be told apart from another event's. Any group that may
+    // be this event's room — the recorded binding's, or one this coordinator
+    // welcomed us into — with our leaf still in it means "do nothing".
+    const coordinator = this.ctx.config.coordinator;
+    const candidates = all.filter(
+      (g) =>
+        (recorded !== undefined && safeGroupIdHex(g) === recorded) ||
+        (coordinator !== undefined && groupLeaf(g, coordinator) !== false),
+    );
+    if (candidates.some((g) => groupLeaf(g, me) !== false)) return { kind: "unknown", reason: "held-leaf" };
+    if (candidates.length === 0) return { kind: "not-member", evicted: false };
+    return { kind: "unknown", reason: "no-group-id" };
   }
+
+  /** The last {@link membershipVerdict} {@link ensurePublished} acted on, if any. */
+  lastVerdict?: ChatMembership;
 
   /**
    * Every device pubkey that actually holds a leaf in THIS event's MLS group, or
@@ -706,16 +882,6 @@ export class MarmotChat {
       console.warn("marmot: could not read the group's member list", err);
       return undefined;
     }
-  }
-
-  /**
-   * True when we hold this event's group but are no longer in it — removed, as
-   * opposed to never added. The two need different treatment: a removed client's
-   * advertised key package has already been spent, a not-yet-added one's has not.
-   */
-  private async isEvictedFromEventGroup(): Promise<boolean> {
-    const groups = await this.currentEventGroups();
-    return groups.length > 0 && !groups.some((g) => groupHasMember(g, this.identity.pubkey));
   }
 
   /** The nostr_group_id recorded for THIS event's verified join, if any. */
@@ -752,6 +918,34 @@ export class MarmotChat {
     ];
   }
 
+  /**
+   * The roster's group id from one live read, memoized — but only a read that
+   * actually produced an id is kept for the client's life (audit K-2). A failed
+   * or id-less read is remembered for {@link LIVE_ROSTER_RETRY_MS} only, so one
+   * bad fetch (a slow relay, an ECK not restored yet) no longer pins the whole
+   * session to "refusing to route", while a hot send path still cannot hammer the
+   * relays with a read per message.
+   */
+  private async liveRosterGroupId(): Promise<string | undefined> {
+    if (this.liveRosterFetch && this.liveRosterFetchFailedAt !== undefined) {
+      if (Date.now() - this.liveRosterFetchFailedAt >= LIVE_ROSTER_RETRY_MS) {
+        this.liveRosterFetch = undefined;
+        this.liveRosterFetchFailedAt = undefined;
+      }
+    }
+    if (!this.liveRosterFetch) {
+      const run = fetchRoster(this.ctx)
+        .then((r) => r?.nostr_group_id)
+        .catch(() => undefined)
+        .then((id) => {
+          if (!id && this.liveRosterFetch === run) this.liveRosterFetchFailedAt = Date.now();
+          return id;
+        });
+      this.liveRosterFetch = run;
+    }
+    return this.liveRosterFetch;
+  }
+
   /** {@link currentEventGroups} without the own-leaf ordering (roster resolution only). */
   private async resolveEventGroups(): Promise<MarmotGroupLike[]> {
     const all = await this.loadAllGroups();
@@ -777,12 +971,7 @@ export class MarmotChat {
       // `recorded` again (which would UN-DO the refusal below on the very next
       // call, since the cache still can't prove it wrong the second time).
       let liveAdvertised = advertised;
-      if (!liveAdvertised) {
-        this.liveRosterFetch ??= fetchRoster(this.ctx)
-          .then((r) => r?.nostr_group_id)
-          .catch(() => undefined);
-        liveAdvertised = await this.liveRosterFetch;
-      }
+      if (!liveAdvertised) liveAdvertised = await this.liveRosterGroupId();
       // FAIL-CLOSED (NIP §10.4): with NO roster id available at all — cold/stale
       // cache AND a failed or id-less live fetch — we cannot confirm the recorded
       // binding still names this event's group. Refuse to route rather than trust an
@@ -849,12 +1038,77 @@ export class MarmotChat {
    * every other group (and with it this event's room).
    */
   private async loadAllGroups(): Promise<MarmotGroupLike[]> {
+    return (await this.loadAllGroupsReport()).groups;
+  }
+
+  /**
+   * {@link loadAllGroups} that also says what it could NOT load (audit K-3).
+   * `listFailed` means the group list itself was unreadable, so `groups` being
+   * empty proves nothing. A group that fails is recorded in `loadFailures`, logged
+   * with its cause chain, and left on disk; it is never silently dropped, because
+   * "absent" is what made the bootstrap re-enrol a device that was still in the
+   * room.
+   */
+  private async loadAllGroupsReport(): Promise<{
+    groups: MarmotGroupLike[];
+    failed: string[];
+    listFailed: boolean;
+  }> {
     const out: MarmotGroupLike[] = [];
-    for (const id of await this.client.groups.listIds().catch(() => [] as Uint8Array[])) {
-      const group = await this.client.groups.get(id).catch(() => undefined);
-      if (group) out.push(group as unknown as MarmotGroupLike);
+    const failed: string[] = [];
+    let ids: Uint8Array[];
+    try {
+      ids = await this.client.groups.listIds();
+    } catch (err) {
+      console.error(`marmot: could not list chat groups: ${causeChain(err)}`);
+      return { groups: [], failed: [], listFailed: true };
     }
-    return out;
+    for (const id of ids) {
+      const hex = toHex(id);
+      try {
+        out.push((await this.client.groups.get(id)) as unknown as MarmotGroupLike);
+        this.loadFailures.delete(hex);
+      } catch (err) {
+        this.noteLoadFailure(hex, err);
+        failed.push(hex);
+      }
+    }
+    return { groups: out, failed, listFailed: false };
+  }
+
+  /** Record (and log, once per distinct cause) a group that failed to load. */
+  private noteLoadFailure(id: string, err: unknown): void {
+    const chain = causeChain(err);
+    if (this.loadFailures.get(id) !== chain) {
+      console.error(`marmot: chat group ${id.slice(0, 12)}… failed to load — kept on disk, will retry: ${chain}`);
+    }
+    this.loadFailures.set(id, chain);
+  }
+
+  /**
+   * Group ids this client holds on disk but could not load, as of the last
+   * attempt. Non-empty means "chat state damaged": membership cannot be judged,
+   * so nothing re-enrols, and the session retries the load
+   * ({@link recheckDamaged}) instead of discarding anything.
+   */
+  damagedGroupIds(): string[] {
+    return [...this.loadFailures.keys()];
+  }
+
+  /**
+   * Try loading every group again. Returns the ids that still fail. When a group
+   * recovers, its listeners are bound and a state change is announced, so the
+   * room can leave the "damaged" state without a reload.
+   */
+  async recheckDamaged(): Promise<string[]> {
+    if (this.loadFailures.size === 0) return [];
+    const { failed, listFailed } = await this.loadAllGroupsReport();
+    if (listFailed) return this.damagedGroupIds();
+    if (failed.length === 0) {
+      await this.joinPendingAndBind().catch(() => 0);
+      this.onStateChange?.();
+    }
+    return failed;
   }
 
   /** Attach message/state listeners to THIS EVENT's group(s) (idempotent). */
@@ -885,12 +1139,91 @@ export class MarmotChat {
           );
         }
       });
-      // Paint the durable history for this group immediately, so a re-open shows
-      // the whole conversation (not just what arrives live after this mount). The
-      // live `connectAll` backfill then adds anything sent while we were away; both
-      // flow through onMessage, which de-dupes by rumor id (§5).
-      await this.replayHistory(group);
+      // Live 445 subscription for this room (audit S-3), unless our leaf is
+      // positively gone: a dead pre-removal copy can decrypt nothing new, and a
+      // re-add arrives as its own (connected) state.
+      if (groupLeaf(group, this.identity.pubkey) !== false) this.connectGroup(group);
+      // Paint the durable history for this group, so a re-open shows the whole
+      // conversation (not just what arrives live after this mount). In the
+      // BACKGROUND (audit S-5): the room is bound and usable the moment the group
+      // is confirmed, and a long history no longer holds up start(), and with it
+      // the session's "ready". The live backfill adds anything sent while we were
+      // away; both flow through onMessage, which de-dupes by rumor id (§5).
+      void this.replayHistory(group);
     }
+  }
+
+  /**
+   * Subscribe one bound group's 445 traffic, and keep it subscribed (audit S-3).
+   *
+   * Carries over the reconnect behaviour of the vendored `connectAll()` (upstream
+   * PR #121): a connect that fails — every relay rejected the backfill, i.e. a
+   * device that started offline — is retried with doubling backoff for as long as
+   * this client is alive, instead of leaving the room with no live subscription.
+   */
+  private connectGroup(group: MarmotGroupLike, attempt = 0): void {
+    const id = group.idStr;
+    if (this.disposed || this.connections.has(id)) return;
+    const record: GroupConnection = {};
+    this.connections.set(id, record);
+    void this.client.groups
+      .connect(group.id)
+      .then((sub) => {
+        if (this.connections.get(id) !== record) sub.unsubscribe();
+        else record.sub = sub;
+      })
+      .catch((err) => {
+        if (this.connections.get(id) !== record) return;
+        this.connections.delete(id);
+        if (this.disposed) return;
+        const delay = RECONNECT_DELAY_MS * Math.min(2 ** attempt, MAX_RECONNECT_BACKOFF);
+        console.warn(`marmot: connecting chat group ${id.slice(0, 12)}… failed, retrying in ${delay} ms`, err);
+        const placeholder: GroupConnection = {};
+        placeholder.retry = setTimeout(() => {
+          if (this.connections.get(id) !== placeholder) return;
+          this.connections.delete(id);
+          this.connectGroup(group, attempt + 1);
+        }, delay);
+        this.connections.set(id, placeholder);
+      });
+  }
+
+  /** Drop one group's live subscription (its state is about to be replaced). */
+  private disconnectGroup(id: string): void {
+    const record = this.connections.get(id);
+    if (!record) return;
+    this.connections.delete(id);
+    clearTimeout(record.retry);
+    record.sub?.unsubscribe();
+  }
+
+  /**
+   * Track ingest outcomes for THIS event's room (audit R-9). An event that could
+   * not be decrypted or applied is remembered until a later outcome for the same
+   * event id says it went through (marmot pools undecryptable events and retries
+   * them as the epoch history grows). While any are outstanding the room reads
+   * "re-syncing; some messages may be missing": a fork or stall the member can
+   * do nothing about, and must never be offered Rejoin for.
+   */
+  private noteIngestResult(groupHex: string, result: { kind: string; event?: { id?: string } }): void {
+    if (!this.boundGroups.has(groupHex)) return;
+    const eventId = result.event?.id;
+    if (!eventId) return;
+    const set = this.syncIssues.get(groupHex) ?? new Set<string>();
+    const before = this.syncIssueCount();
+    if (result.kind === "unreadable" || result.kind === "rejected") set.add(eventId);
+    else if (result.kind === "processed" || result.kind === "skipped") set.delete(eventId);
+    else return;
+    if (set.size > 0) this.syncIssues.set(groupHex, set);
+    else this.syncIssues.delete(groupHex);
+    if (this.syncIssueCount() !== before) this.onStateChange?.();
+  }
+
+  /** Group events of this room that could not be read or applied (yet). See {@link noteIngestResult}. */
+  syncIssueCount(): number {
+    let n = 0;
+    for (const s of this.syncIssues.values()) n += s.size;
+    return n;
   }
 
   /**
@@ -923,6 +1256,11 @@ export class MarmotChat {
   async nostrGroupId(): Promise<string | undefined> {
     const groups = await this.currentEventGroups();
     const group = groups[0];
+    // A candidate that became this event's room by a roster repair (rather than
+    // a join) has no listener and no subscription yet: bind it now.
+    if (this.started && groups.some((g) => !this.boundGroups.has(g.idStr))) {
+      void this.joinPendingAndBind().catch(() => 0);
+    }
     return group ? getNostrGroupIdHex(group.state) : undefined;
   }
 
@@ -995,18 +1333,22 @@ export class MarmotChat {
    * History from before the new Add stays unreadable: MLS is forward-secret, and
    * no recovery path can change that.
    */
-  async rejoin(opts?: { force?: boolean }): Promise<void> {
+  async rejoin(opts?: { force?: boolean }): Promise<"requested" | "skipped"> {
     // Don't tear down a working membership on a misclick — but "working" means our
     // leaf is still in the group, NOT merely that we hold group state. Guarding on
     // the latter made this a silent no-op for the one state it exists to fix: a
     // removed member, who keeps the group and its history and can no longer send
     // (prod 2026-07-30 — pressing Rejoin reported success and published nothing).
     //
-    // `force` is for the UI's button, which is only reachable after a send has
-    // actually failed or setup has stalled. There, the user's evidence beats ours:
-    // a client that never processed its own removal commit still believes it holds
+    // `force` is for the UI's explicitly confirmed second step ("remove this
+    // device and add it back"), offered only after an unforced Rejoin found no
+    // positive eviction (audit K-6). There the user's evidence beats ours: a
+    // client that never processed its own removal commit still believes it holds
     // a leaf, and refusing would strand exactly the person asking for help.
-    if (!opts?.force && (await this.isEventGroupMember())) return;
+    //
+    // Unforced, only a POSITIVE not-member re-enrols (audit K-2): "we could not
+    // tell" must never revoke a device that may still be in the room.
+    if (!opts?.force && (await this.membershipVerdict()).kind !== "not-member") return "skipped";
     // A re-add may already be waiting: the coordinator added a fresh leaf, but
     // its Welcome reached us before our own removal did and was left unread.
     // Join that instead of revoking: revoking would remove the very leaf the
@@ -1019,11 +1361,12 @@ export class MarmotChat {
     // was sent for this event.
     const joinedHereBefore = this.joinedForThisEvent;
     await this.joinPendingAndBind().catch(() => 0);
-    if (this.joinedForThisEvent > joinedHereBefore) return;
+    if (this.joinedForThisEvent > joinedHereBefore) return "requested";
     // A previous fail-closed refusal may have memoized "the roster advertises no
     // group id" for the life of this client (see currentEventGroups). Drop it, or
     // the rejoin below succeeds and routing still refuses afterwards.
     this.liveRosterFetch = undefined;
+    this.liveRosterFetchFailedAt = undefined;
     // 1. Revoke: the coordinator removes every leaf of this chat key (§3.3). Sent
     //    FIRST so the re-add below can never be processed as "already a member".
     await sendChatKeyAttestation(this.accountSigner, this.ctx, {
@@ -1045,6 +1388,7 @@ export class MarmotChat {
     // 4. Pick up a welcome that is already waiting; later ones arrive through the
     //    `decrypted` listener start() installed.
     await this.joinPendingAndBind();
+    return "requested";
   }
 
   /**
@@ -1057,16 +1401,26 @@ export class MarmotChat {
   private async rotateKeyPackage(): Promise<void> {
     const opts = { relays: this.relays, client: "nostrautica-web" };
     const stored = await this.client.keyPackages.list().catch(() => []);
-    // Prefer this device's own slot; `list()` can also hold packages tracked from
-    // relays (no private material), which cannot be rotated.
-    const mine = stored.find((k) => k.identifier === this.identity.clientId) ?? stored[0];
-    if (mine) {
-      await this.client.keyPackages.rotate(mine.keyPackageRef, {
+    // Retire only a SPENT key package of this device's own slot (audit K-8). The
+    // old pick, `find(slot) ?? stored[0]`, could rotate an UNUSED one, whose
+    // private key is exactly what another event's in-flight Welcome may be
+    // encrypted to: that event then stalled in setup, and the stall offered
+    // Rejoin. A used one is the one a join already consumed, this event's
+    // included, so discarding its private material costs nothing.
+    const spent = stored
+      .filter((k) => k.identifier === this.identity.clientId && (k as { used?: boolean }).used)
+      .sort((a, b) => newestPublish(b) - newestPublish(a))[0];
+    if (spent) {
+      await this.client.keyPackages.rotate(spent.keyPackageRef, {
         ...opts,
         d: this.identity.clientId,
       });
       return;
     }
+    // Nothing spent to retire: still publish a NEW key package under the same
+    // slot (a new event id the coordinator has not consumed; the relay replaces
+    // in place), but keep every unused private bundle. `create` is marmot's own
+    // "replace the slot, keep old private material for a delayed Welcome".
     await this.client.keyPackages.create({ ...opts, identifier: this.identity.clientId });
   }
 
@@ -1089,11 +1443,13 @@ export class MarmotChat {
 
   /** Release live resources (subscriptions/timers). Call on unmount. */
   dispose(): void {
+    this.disposed = true;
     if (this.onInviteDecrypted) this.client.invites.off("decrypted", this.onInviteDecrypted);
     this.onInviteDecrypted = undefined;
-    this.connection?.unsubscribe();
+    if (this.onIngestResult) this.client.groups.off("ingestResult", this.onIngestResult);
+    this.onIngestResult = undefined;
+    for (const id of [...this.connections.keys()]) this.disconnectGroup(id);
     this.inviteSub?.unsubscribe();
-    this.connection = undefined;
     this.inviteSub = undefined;
   }
 }
@@ -1120,6 +1476,16 @@ export async function resolveRemoveUserProposals(
 type MarmotClientCtorSigner = ConstructorParameters<typeof MarmotClient>[0]["signer"];
 type MarmotClientCtorNetwork = ConstructorParameters<typeof MarmotClient>[0]["network"];
 
+/** One bound group's live subscription, or the pending retry of a failed connect. */
+interface GroupConnection {
+  sub?: { unsubscribe(): void };
+  retry?: ReturnType<typeof setTimeout>;
+}
+
+/** First retry delay of a failed group connect, doubling up to the cap (as connectAll). */
+const RECONNECT_DELAY_MS = 2000;
+const MAX_RECONNECT_BACKOFF = 32;
+
 /** The slice of a marmot `MarmotGroup` this wrapper uses (structural — tests fake it). */
 interface MarmotGroupLike {
   id: Uint8Array;
@@ -1135,6 +1501,17 @@ function toHex(bytes: Uint8Array): string {
   let out = "";
   for (const b of bytes) out += b.toString(16).padStart(2, "0");
   return out;
+}
+
+/** "Name: message ← caused by Name: message …", for errors worth a console.error. */
+export function causeChain(err: unknown): string {
+  const parts: string[] = [];
+  let cur: unknown = err;
+  for (let depth = 0; cur !== undefined && cur !== null && depth < 8; depth++) {
+    parts.push(cur instanceof Error ? `${cur.name}: ${cur.message}` : String(cur));
+    cur = cur instanceof Error ? (cur as { cause?: unknown }).cause : undefined;
+  }
+  return parts.join(" ← caused by ");
 }
 
 /** nostr_group_id hex for a group, or undefined when the state can't yield one. */
@@ -1153,11 +1530,27 @@ function safeGroupIdHex(group: MarmotGroupLike): string | undefined {
  * pre-event-scoping migration (audit APPK-3).
  */
 function groupHasMember(group: MarmotGroupLike, pubkey: string): boolean {
+  return groupLeaf(group, pubkey) === true;
+}
+
+/**
+ * Three-valued {@link groupHasMember} (audit K-2): `undefined` when the state
+ * cannot be walked. Anything that rotates, attests or destroys must branch on
+ * this, never on the boolean: "could not read the tree" used to read as "no leaf
+ * here", which re-enrolled (and on the corpse path, destroyed) a working member.
+ */
+function groupLeaf(group: MarmotGroupLike, pubkey: string): boolean | undefined {
   try {
     return getPubkeyLeafNodes(group.state, pubkey).length > 0;
   } catch {
-    return false;
+    return undefined;
   }
+}
+
+/** created_at of a stored key package's newest publication (0 when never published). */
+function newestPublish(k: { published?: unknown }): number {
+  const pubs = (Array.isArray(k.published) ? k.published : []) as { created_at?: number }[];
+  return pubs.reduce((m, p) => Math.max(m, p.created_at ?? 0), 0);
 }
 
 /** Resolve once the wall clock's whole second is past `sec` (at most ~1 s). */

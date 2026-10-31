@@ -291,16 +291,18 @@
     untrack(() => void chatSession.ensure(naddr, context, signer, owner).catch(() => {}));
   });
 
-  const phase = $derived.by<"loading" | "setup" | "evicted" | "ready" | "unavailable">(() => {
+  const phase = $derived.by<"loading" | "setup" | "unreachable" | "evicted" | "ready" | "unavailable">(() => {
     if (error || chatSession.error) return "unavailable";
     if (gate === "loading") return "loading";
     if (gate === "unavailable") return "unavailable";
-    // "evicted" is NOT a kind of "setup": setup is a room that hasn't happened
-    // yet, whose remedy is waiting (and, once slow, Rejoin). Eviction is a room
-    // that stopped, whose remedy is Rejoin and only Rejoin — and whose history is
-    // still on screen, so the setup empty-state that carries the escalation would
-    // never render for it.
+    // Four room states, deliberately kept apart (audit U-1):
+    // - setup: Connecting. Waiting is the remedy; no actions.
+    // - unreachable: we could not tell whether this device is in the room. A
+    //   Retry that re-reads, and never attests while membership is unknown.
+    // - evicted: this device is positively out. Rejoin, and only here (K-6).
+    // - ready, with a "re-syncing" note when some events could not be read (R-9).
     if (chatSession.phase === "evicted") return "evicted";
+    if (chatSession.phase === "unreachable") return "unreachable";
     return chatSession.phase === "ready" ? "ready" : "setup";
   });
 
@@ -315,7 +317,7 @@
   //                     the coordinator's Add + welcome, which is the honest
   //                     enrolment cost and worth seeing separately.
   $effect(() => {
-    if (phase === "setup" || phase === "evicted" || phase === "ready") {
+    if (phase === "setup" || phase === "unreachable" || phase === "evicted" || phase === "ready") {
       perfMark("EventChat", "cache-paint");
     }
     if (phase === "ready") perfMark("EventChat", "network-settled");
@@ -332,30 +334,47 @@
     return () => clearTimeout(id);
   });
 
-  // Re-run the handshake without reloading the page: tear down the half-open
-  // session and start fresh. Republishes the key package so the coordinator gets
-  // another chance to add us, and reopens the subscription sockets.
+  // Re-read what could not be read: damaged groups, the roster, the membership
+  // verdict (audit U-1). Never an attestation while membership is unknown —
+  // that is what used to turn "Try again" into a kick (audit K-2/K-6).
+  let rechecking = $state(false);
   async function retryChat() {
+    if (rechecking) return;
     setupSlow = false;
-    await chatSession.retry();
+    rechecking = true;
+    try {
+      await chatSession.recheck();
+    } finally {
+      rechecking = false;
+    }
   }
 
-  // Re-enrol this device (chat/client.ts rejoin). Offered next to a failed send:
-  // that failure means this session holds no routable group, and no amount of
-  // retrying the send fixes it — the coordinator has to add this device again.
-  async function rejoin() {
+  // Re-enrol this device (chat/client.ts rejoin), offered ONLY when it is
+  // positively out of the room (audit K-6): never after the setup timer, never
+  // after a failed send. Two steps, because every Rejoin is a visible kick:
+  //   1. confirm → an unforced rejoin, which sends nothing unless the eviction
+  //      is positive;
+  //   2. if it was not, "force" behind a second, explicit confirmation.
+  let rejoinStep = $state<"idle" | "confirm" | "notOut" | "forceConfirm">("idle");
+  async function rejoin(force: boolean) {
     sendError = null;
     sendUnroutable = false;
     rejoinError = null;
     rejoined = false;
     try {
-      // Forced: this button is only reachable after a send has actually failed or
-      // setup has stalled, so the user's evidence outranks our own membership
-      // bookkeeping — which can be stale in exactly the case they're stuck in.
-      await chatSession.rejoin({ force: true });
-      rejoined = true;
+      const outcome = await chatSession.rejoin({ force });
+      if (outcome === "requested") {
+        rejoined = true;
+        rejoinStep = "idle";
+      } else if (outcome === "rate-limited") {
+        rejoinError = t("chat.rejoinRateLimited");
+        rejoinStep = "idle";
+      } else {
+        rejoinStep = "notOut";
+      }
     } catch {
       rejoinError = t("chat.rejoinFailed");
+      rejoinStep = "idle";
     }
   }
 
@@ -865,6 +884,16 @@
   // attendee over the same 21606 channel a failed talk/submission already uses
   // (`stage: "chat_attestation"`), and the grant scan records it here.
   const CHAT_STAGE = "chat_attestation";
+  // A durable chat_sync_member job the coordinator gave up on (audit R-3/U-3):
+  // the coordinator may seal that poison to the affected attendee too. It is not
+  // a refusal of the device, and nothing the attendee can press fixes it.
+  const CHAT_SYNC_STAGE = "chat_sync_member";
+  // Shown in every room state, and dropped as soon as the coordinator sends
+  // `cleared` for the stage (ownStatusStore keeps the latest per stage). Never
+  // paired with Rejoin: the coordinator owns the retry.
+  const chatSyncStuck = $derived(
+    !!ctx && ownStatusStore.poison(ctx.coordinate).some((s) => s.stage === CHAT_SYNC_STAGE),
+  );
   const refusal = $derived.by(() => {
     if (!ctx) return undefined;
     const notice = ownStatusStore
@@ -884,6 +913,37 @@
     return t(known[notice.error_category ?? ""] ?? "chat.refused.other");
   });
 </script>
+
+<!-- Rejoin, as two explicit steps (audit K-6). Rendered only on a positive
+     eviction. -->
+{#snippet rejoinControls()}
+  {#if rejoinStep === "confirm"}
+    <p class="muted" style="margin:0 0 0.5rem">{t("chat.rejoinConfirm")}</p>
+    <button class="btn primary" disabled={chatSession.rejoining} onclick={() => void rejoin(false)}>
+      {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoinConfirmYes")}
+    </button>
+    <button class="btn inline ghost" onclick={() => (rejoinStep = "idle")}>{t("chat.cancel")}</button>
+  {:else if rejoinStep === "notOut"}
+    <p class="muted" style="margin:0 0 0.5rem">{t("chat.rejoinNotOut")}</p>
+    <button class="btn inline" onclick={() => (rejoinStep = "forceConfirm")}>{t("chat.rejoinForce")}</button>
+    <button class="btn inline ghost" onclick={() => (rejoinStep = "idle")}>{t("chat.cancel")}</button>
+  {:else if rejoinStep === "forceConfirm"}
+    <p class="send-error" style="margin:0 0 0.5rem">{t("chat.rejoinForceConfirm")}</p>
+    <button class="btn danger" disabled={chatSession.rejoining} onclick={() => void rejoin(true)}>
+      {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoinForceYes")}
+    </button>
+    <button class="btn inline ghost" onclick={() => (rejoinStep = "idle")}>{t("chat.cancel")}</button>
+  {:else}
+    <button class="btn primary" disabled={chatSession.rejoining} onclick={() => (rejoinStep = "confirm")}>
+      {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
+    </button>
+  {/if}
+  {#if rejoinError}
+    <p class="send-error" role="alert" style="margin:0.5rem 0 0">{rejoinError}</p>
+  {:else if rejoined}
+    <p class="muted rejoin-note" role="status" style="margin:0.5rem 0 0">{t("chat.rejoinRequested")}</p>
+  {/if}
+{/snippet}
 
 <!-- Message text with mentions as inline chips. A <span>, not a button: the
      bubble around it is already the "open sender" click target, and nested
@@ -1012,15 +1072,29 @@
     <div class="card warn" role="alert">
       <strong>{t("chat.evicted.title")}</strong>
       <p class="muted" style="margin:0.3rem 0 0.6rem">{t("chat.evicted.body")}</p>
-      <button class="btn primary" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
-        {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
-      </button>
-      {#if rejoinError}
-        <p class="send-error" role="alert" style="margin:0.5rem 0 0">{rejoinError}</p>
-      {:else if rejoined}
-        <p class="muted rejoin-note" role="status" style="margin:0.5rem 0 0">{t("chat.rejoinRequested")}</p>
-      {/if}
+      {@render rejoinControls()}
     </div>
+  {:else if phase === "unreachable"}
+    <!-- "We can't tell", not "you're out" (audit U-1): retried on its own, and
+         the Retry here re-reads without ever attesting. No Rejoin. -->
+    <div class="card" role="status">
+      <strong>{t("chat.unreachable.title")}</strong>
+      <p class="muted" style="margin:0.3rem 0 0.6rem">{t("chat.unreachable.body")}</p>
+      <button class="btn inline" disabled={rechecking} onclick={retryChat}>
+        {rechecking ? t("chat.rechecking") : t("chat.recheck")}
+      </button>
+    </div>
+  {/if}
+  {#if chatSyncStuck}
+    <p class="muted chat-note" role="status">{t("chat.refused.syncStuck")}</p>
+  {/if}
+  {#if chatSession.damaged}
+    <p class="muted chat-note" role="status">{t("chat.damaged")}</p>
+  {/if}
+  {#if phase === "ready" && chatSession.resyncing > 0}
+    <!-- A fork or stall (audit R-9): something could not be read yet. Never a
+         reason to offer Rejoin, which would kick a member who is still in. -->
+    <p class="muted chat-note" role="status">{t("chat.resyncing")}</p>
   {/if}
   <div class="display-toggle" role="group" aria-label={t("chat.display.label")}>
     <button
@@ -1078,32 +1152,22 @@
   >
     {#if messages.length === 0}
       <div class="empty">
-        {#if phase === "setup"}
-          <p class="muted">{t("chat.setup")}</p>
+        {#if phase === "setup" || phase === "unreachable"}
+          <p class="muted">{phase === "setup" ? t("chat.setup") : t("chat.connecting")}</p>
           {#if refusal}
             <!-- We know exactly why, so say it instead of the generic hint. -->
             <p class="muted" style="margin-top:0.5rem" role="status">{refusal}</p>
           {/if}
-          {#if setupSlow}
+          {#if setupSlow && phase === "setup"}
             {#if !refusal}
               <p class="muted" style="margin-top:0.5rem">{t("chat.setupSlow")}</p>
             {/if}
-            <button class="btn inline" style="margin-top:0.25rem" onclick={retryChat}>
-              {t("chat.retry")}
-            </button>
-            <!-- Setup that never finishes is the OTHER face of the failed send:
-                 this device is attested (it's in the device list below) but the
-                 coordinator's Add never reached it, and re-running the handshake
-                 can't fix that — re-advertising the same key package is a no-op on
-                 both sides. Offer the re-enrolment as the escalation. -->
-            <p class="muted" style="margin-top:0.6rem">{t("chat.rejoinHint")}</p>
-            <button
-              class="btn inline"
-              style="margin-top:0.25rem"
-              disabled={chatSession.rejoining}
-              onclick={() => void rejoin()}
-            >
-              {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
+            <!-- A slow setup is still a setup (audit K-6): this used to escalate
+                 to Rejoin after 25 s, and a slow-but-healthy start (or a roster
+                 that had not arrived) then kicked a member who was on their way
+                 in. Retry re-reads; it never attests on an unknown membership. -->
+            <button class="btn inline" style="margin-top:0.25rem" disabled={rechecking} onclick={retryChat}>
+              {rechecking ? t("chat.rechecking") : t("chat.retry")}
             </button>
           {/if}
         {:else}
@@ -1305,7 +1369,7 @@
         rows="1"
         use:autoGrow={draft}
         placeholder={t("chat.compose.placeholder")}
-        disabled={phase === "setup" || phase === "evicted"}
+        disabled={phase === "setup" || phase === "unreachable" || phase === "evicted"}
         oninput={syncCaret}
         onkeyup={syncCaret}
         onclick={syncCaret}
@@ -1327,7 +1391,7 @@
       <button
         class="send"
         type="submit"
-        disabled={!draft.trim() || sending || dmBusy || !!dmCommand || phase === "setup" || phase === "evicted"}
+        disabled={!draft.trim() || sending || dmBusy || !!dmCommand || phase === "setup" || phase === "unreachable" || phase === "evicted"}
         aria-label={dmCommand ? t("chat.cmd.pickPerson") : editing ? t("chat.saveEdit") : t("chat.send")}
       >
         <Icon name={editing ? "check" : "send"} size={20} />
@@ -1348,9 +1412,9 @@
   {#if sendError}
     <p class="send-error" role="alert">{sendError}</p>
     {#if sendUnroutable}
-      <button class="btn inline" disabled={chatSession.rejoining} onclick={() => void rejoin()}>
-        {chatSession.rejoining ? t("chat.rejoining") : t("chat.rejoin")}
-      </button>
+      <!-- Positively out, as reconciled after the failure (audit K-6). Rejoin
+           lives in the "not in the room" card above, once, with its confirmation;
+           a never-added device needs none, since its enrolment is already running. -->
     {:else}
       <!-- A transport failure. The text is still in the composer, so the remedy is
            the button that is already there — say so rather than offering an epoch
@@ -1965,5 +2029,12 @@
   .rejoin-note {
     margin: 0.4rem 0 0.5rem;
     font-size: 0.82rem;
+  }
+  .chat-note {
+    margin: 0.4rem 0;
+    font-size: 0.85rem;
+  }
+  .btn.inline.ghost {
+    background: transparent;
   }
 </style>

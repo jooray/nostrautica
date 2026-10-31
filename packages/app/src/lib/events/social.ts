@@ -75,6 +75,24 @@ function markFetched(pubkeys: string[], nowSec: number): void {
 }
 
 /**
+ * Record a kind-0 THIS device just published for its own user, as if it had been
+ * fetched. Without it, the reads the login flow makes before its first profile
+ * publish (to merge into an existing kind-0) leave a fresh "no kind-0" stamp, and
+ * every fetchProfiles call inside PROFILE_MISS_TTL_SEC then answers from that miss
+ * without asking: a brand-new identity that opens an invite straight after
+ * creating itself was told "You don't have a public Nostr profile yet".
+ */
+export function rememberOwnProfile(pubkey: string, content: string, createdAt: number): void {
+  try {
+    const p = JSON.parse(content);
+    cacheSet(profileKey(pubkey), { name: profileDisplayName(p), picture: p.picture, about: p.about }, createdAt, ANON);
+    markFetched([pubkey], Math.floor(Date.now() / 1000));
+  } catch {
+    /* our own content is JSON; nothing to remember if it somehow is not */
+  }
+}
+
+/**
  * Does this pubkey need a relay read? Pure so the freshness rule — the thing that
  * was wrong — is unit-testable without a cache or a relay.
  */

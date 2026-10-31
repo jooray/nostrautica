@@ -19,12 +19,18 @@ object GroupBinding {
         val nostrGroupIdHex: String,
         /** Account that sealed the Welcome, when known. */
         val welcomer: String?,
-        /** Device keys holding a leaf, when the member list could be read. */
+        /**
+         * Device keys holding a leaf, when the member list could be read. Null (and an
+         * empty list, which MDK returns when it has nothing to report) is UNKNOWN, never
+         * "the coordinator is not a member" (audit K-4 A-2).
+         */
         val members: List<String>?,
         /** Our own leaf is in the group (MDK `selfMembership == MEMBER`). */
         val selfMember: Boolean,
         /** MDK still shows it as an unconfirmed invitation. */
         val pendingInvite: Boolean,
+        /** MDK froze this local copy pending verified repair (`unrecoverable`). */
+        val unrecoverable: Boolean = false,
     )
 
     sealed interface Result {
@@ -32,6 +38,13 @@ object GroupBinding {
         data object Unverified : Result
         /** The roster names a group we do not hold (not added yet). */
         data object NotJoined : Result
+        /**
+         * The roster names a group we hold, sealed by (or not known to be sealed by
+         * someone other than) the coordinator, but its member list is unreadable, so the
+         * coordinator's leaf can't be confirmed. Not routable (R-70), and not "not joined"
+         * either: we may well be in the room.
+         */
+        data class Unconfirmed(val group: GroupInfo) : Result
         data class Bound(val group: GroupInfo) : Result
     }
 
@@ -52,20 +65,24 @@ object GroupBinding {
     fun select(groups: List<GroupInfo>, rosterGroupId: String?, coordinator: String?): Result {
         val want = rosterGroupId?.lowercase()?.takeIf { it.isNotEmpty() } ?: return Result.Unverified
         val coord = coordinator?.lowercase()?.takeIf { it.isNotEmpty() } ?: return Result.Unverified
-        val candidates = groups.filter { g ->
-            g.nostrGroupIdHex.lowercase() == want &&
-                (g.welcomer == null || g.welcomer.lowercase() == coord) &&
-                g.members?.any { it.lowercase() == coord } == true
+        val named = groups.filter { g ->
+            g.nostrGroupIdHex.lowercase() == want && (g.welcomer == null || g.welcomer.lowercase() == coord)
         }
+        val candidates = named.filter { g -> g.members?.any { it.lowercase() == coord } == true }
         // Removed and re-added leaves two states under one id; route to the live one.
-        val pick = candidates.firstOrNull { it.selfMember } ?: candidates.firstOrNull() ?: return Result.NotJoined
-        return Result.Bound(pick)
+        val pick = candidates.firstOrNull { it.selfMember } ?: candidates.firstOrNull()
+        if (pick != null) return Result.Bound(pick)
+        val unknown = named.filter { it.members.isNullOrEmpty() }
+        val maybe = unknown.firstOrNull { it.selfMember } ?: unknown.firstOrNull() ?: return Result.NotJoined
+        return Result.Unconfirmed(maybe)
     }
 
     enum class Phase { SETUP, READY, EVICTED }
 
     fun phase(r: Result): Phase = when (r) {
         is Result.Bound -> if (r.group.selfMember) Phase.READY else Phase.EVICTED
+        // MDK's own leaf says we were removed: that is positive, whatever the member list.
+        is Result.Unconfirmed -> if (!r.group.selfMember && !r.group.pendingInvite) Phase.EVICTED else Phase.SETUP
         else -> Phase.SETUP
     }
 

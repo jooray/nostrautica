@@ -150,6 +150,28 @@ export async function loadChatDeviceKey(account: string): Promise<Uint8Array | u
 const unlockInFlight = new Map<string, Promise<void>>();
 
 /**
+ * Per account: how many unlocks have started (audit K-8). A lock compares the
+ * value it saw when it was asked for against the current one before it deletes
+ * anything, so a lock that finishes after a re-login is a no-op.
+ */
+const unlockEpoch = new Map<string, number>();
+
+/** Per account: the tail of the lock/unlock chain, so the two never interleave. */
+const custodyTail = new Map<string, Promise<void>>();
+
+/** Run `fn` after every earlier lock/unlock step for `account` has settled. */
+function custodyExclusive(account: string, fn: () => Promise<void>): Promise<void> {
+  const prev = custodyTail.get(account) ?? Promise.resolve();
+  const run = prev.then(fn, fn);
+  const tail = run.catch(() => undefined);
+  custodyTail.set(account, tail);
+  void tail.then(() => {
+    if (custodyTail.get(account) === tail) custodyTail.delete(account);
+  });
+  return run;
+}
+
+/**
  * `ensureChatDeviceKey` in flight, per account. Two chats (two events, same
  * account) can init concurrently — each `MarmotChat.create` → `resolveChatIdentity`
  * → here. Without dedup, both could see "no key yet" and BOTH mint, forking THIS
@@ -378,6 +400,12 @@ export async function lockChatIdentityForLogout(
   encrypt: (plaintext: string) => Promise<string>,
 ): Promise<void> {
   const backend = marmotKvBackend();
+  // Which unlock this lock was asked under (audit K-8). Logout bounds this call
+  // with a deadline and moves on, so the encrypt below (a NIP-46 round trip) can
+  // finish long after the user has logged straight back in. A lock that lands
+  // after a NEWER unlock would delete the live plaintext MLS state the new
+  // session is using, and the next start would re-enrol the device.
+  const epoch = unlockEpoch.get(account) ?? 0;
   const keys = await chatKeysFor(account);
   if (keys.length === 0) return;
   try {
@@ -389,8 +417,16 @@ export async function lockChatIdentityForLogout(
       pieces.length === 1
         ? await encrypt(plaintext)
         : LOCK_CHUNK_PREFIX + (await Promise.all(pieces.map((p) => encrypt(p)))).join(".");
-    await backend.set(lockedKey(account), stored);
-    for (const key of keys) await backend.del(key);
+    // The destructive half runs exclusively with unlocks of this account, and
+    // not at all once an unlock has started since this lock was asked for.
+    await custodyExclusive(account, async () => {
+      if ((unlockEpoch.get(account) ?? 0) !== epoch) {
+        console.warn("[chat] a late logout lock was skipped: this account has logged in again since");
+        return;
+      }
+      await backend.set(lockedKey(account), stored);
+      for (const key of keys) await backend.del(key);
+    });
   } catch (err) {
     // Left in plaintext (e.g. signer unreachable) — retried next logout. Say so:
     // this used to be entirely silent, so an account whose snapshot never locked
@@ -419,7 +455,12 @@ export async function unlockChatIdentityForLogin(
   // Registered SYNCHRONOUSLY (before any await) so a concurrent
   // `resolveChatIdentity` call — however early it races in — can always see
   // this in-flight restore and wait for it (see `unlockInFlight`'s doc comment).
-  const run = (async () => {
+  //
+  // The epoch bump, also synchronous, retires every lock asked for before this
+  // unlock; running exclusively waits out one whose destructive half has already
+  // begun, so its snapshot is restored here rather than lost (audit K-8).
+  unlockEpoch.set(account, (unlockEpoch.get(account) ?? 0) + 1);
+  const run = custodyExclusive(account, async () => {
     const backend = marmotKvBackend();
     const ciphertext = await backend.get(lockedKey(account));
     if (typeof ciphertext !== "string") return;
@@ -437,7 +478,7 @@ export async function unlockChatIdentityForLogin(
     } catch {
       /* undecryptable (or the signer isn't ready yet) — retried next login */
     }
-  })();
+  });
   unlockInFlight.set(account, run);
   try {
     await run;
