@@ -99,11 +99,24 @@ export function createMarmotNetwork(): MarmotNetwork {
         for (const url of relays) result[url] = { from: url, ok: false, message, uncertain: true };
         return result;
       }
-      for (const o of outcomes) result[o.url] = classifyRelayOutcome(o);
-      // A requested relay with no outcome of its own (NDK normalized the URL, or
-      // dropped it from the set) never told us anything: uncertain.
+      // Key each outcome by the relay string marmot ASKED for, not NDK's
+      // normalized spelling (`wss://host` comes back as `wss://host/`). marmot-ts
+      // reads acks as `responses[requestedRelay]`: since the 8040bfa vendor a
+      // KeyPackage publish or deletion rejects when no requested relay acks, and a
+      // commit's ack only counts for a relay in the group's list. Keyed by the
+      // normalized URL, a relay that DID store the event read as no answer.
+      const matched = new Set<RelayPublishOutcome>();
       for (const url of relays) {
-        if (url in result || outcomes.some((o) => sameRelay(o.url, url))) continue;
+        const o = outcomes.find((x) => !matched.has(x) && sameRelay(x.url, url));
+        if (!o) continue;
+        matched.add(o);
+        result[url] = { ...classifyRelayOutcome(o), from: url };
+      }
+      for (const o of outcomes) if (!matched.has(o)) result[o.url] = classifyRelayOutcome(o);
+      // A requested relay with no outcome of its own (NDK dropped it from the
+      // set) never told us anything: uncertain.
+      for (const url of relays) {
+        if (url in result) continue;
         result[url] = { from: url, ok: false, message: "no answer", uncertain: true };
       }
       return result;

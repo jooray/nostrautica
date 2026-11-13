@@ -185,8 +185,12 @@ max_events = 50                   # reject installs beyond this many simultaneou
 # per_event_bytes = 53687091200            # 50 GiB
 # per_attendee_duration_sec = 14400        # 4 h of decoded media
 # per_event_duration_sec = 720000          # 200 h
-# per_attendee_calls = 500                 # paid provider calls
-# per_event_calls = 20000
+# per_attendee_calls = 500                 # paid job RUNS, not provider requests:
+# per_event_calls = 20000                  # one run can bill several (STT per media
+#                                          # item, summary, profile, translation)
+# The log shows the real multiplier: every [job] line ends with
+# "— 1 counted run, 5 provider requests (stt 2, chat 3)", and a
+# "[budget] last 24h: …" line sets the window's runs beside its requests.
 #
 # Rolling and daemon-wide, across EVERY installed event. These are the ones that
 # bound your provider bill, because the limits above do not: installation is

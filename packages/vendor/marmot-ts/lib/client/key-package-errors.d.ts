@@ -1,4 +1,17 @@
 /** @module @category Client - Key Package Manager */
+import type { NostrEvent } from "applesauce-core/helpers/event";
+import type { PublishResponse } from "./nostr-interface.js";
+/**
+ * No requested relay acknowledged a KeyPackage publication or deletion.
+ * Responses retain rejection/uncertainty details; the signed event is provided
+ * for inspection. This error does not imply that no relay observed the event.
+ */
+export declare class KeyPackagePublishError extends Error {
+    readonly event: NostrEvent;
+    readonly relays: string[];
+    readonly responses: Record<string, PublishResponse>;
+    constructor(event: NostrEvent, relays: string[], responses: Record<string, PublishResponse>);
+}
 /**
  * Thrown by {@link KeyPackageManager.create} when no relay URLs are provided.
  * Callers can catch this specifically to prompt the user for relay configuration.

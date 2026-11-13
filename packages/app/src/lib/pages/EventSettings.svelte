@@ -17,10 +17,10 @@
     addCoOrganizer,
     updateEventConfig,
     fetchCoordinatorLastSeen,
+    probeCoordinator,
     checkForOrganizerGrant,
     pollForOrganizerGrant,
   } from "$lib/events/organizer.js";
-  import { fetchCoordinatorStatuses } from "$lib/events/coordinator-status.js";
   import { updateEventMetadata, type EventMetadataInput } from "$lib/events/event-metadata.js";
   import { recoverEventKeys } from "$lib/events/recover.js";
   import { deriveBlindingKey } from "$lib/events/blinding.js";
@@ -41,10 +41,13 @@
   } from "$lib/events/posts.js";
   import {
     fetchEventPage,
+    cachedEventPage,
     publishEventPage,
     postNaddr,
   } from "$lib/events/event-page.js";
-  import { fetchEventTheme, publishEventTheme } from "$lib/events/theme.js";
+  import { fetchEventTheme, cachedEventTheme, publishEventTheme } from "$lib/events/theme.js";
+  import { readForEditing } from "$lib/events/editor-load.js";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import { previewEventTheme, resyncEventTheme } from "$lib/events/theme-injector.js";
   import {
     utf8ByteLength,
@@ -384,7 +387,7 @@
   let detaching = $state(false);
   let confirmingDetach = $state(false);
   let testing = $state(false);
-  let testResult = $state<"ok" | "unreachable" | null>(null);
+  let testResult = $state<"ok" | "unreachable" | "unanswered" | null>(null);
 
   async function loadCoordinatorLifecycle() {
     if (!ctx?.config.coordinator) return;
@@ -416,15 +419,15 @@
     testResult = null;
     error = null;
     try {
-      const list = await fetchCoordinators().catch(() => []);
+      // The verdict comes from a fresh, relay-only read (audit KIMIK31 W-11);
+      // cached announcements and last-seen are display data, not evidence.
+      const probe = await probeCoordinator(ctx);
+      testResult = probe === "found" ? "ok" : probe === "unanswered" ? "unanswered" : "unreachable";
+      // Refresh what the card shows, as before (best-effort, not the verdict).
+      const list = await fetchCoordinators({ force: true }).catch(() => []);
       coordAnnounce = list.find((c) => c.pubkey === ctx!.config.coordinator) ?? coordAnnounce;
       const seen = await fetchCoordinatorLastSeen(ctx).catch(() => undefined);
       if (seen !== undefined) coordLastSeen = seen;
-      // Also try a status read when we hold E_id (a stronger liveness signal).
-      if (keys?.eidNsecHex) {
-        await fetchCoordinatorStatuses(ctx, keys.eidNsecHex).catch(() => []);
-      }
-      testResult = coordAnnounce || seen !== undefined ? "ok" : "unreachable";
     } finally {
       testing = false;
     }
@@ -439,10 +442,14 @@
     error = null;
     try {
       const blindingKey = await deriveBlindingKey(session.signer).catch(() => undefined);
-      await attachCoordinator(session.signer, ctx, ctx.config.coordinator, blindingKey);
+      const outcome = await attachCoordinator(session.signer, ctx, ctx.config.coordinator, blindingKey);
       ctx = ownSave(ctx);
-      resent = true;
-      setTimeout(() => (resent = false), 2000);
+      if (outcome === "queued") {
+        opStatus.queued(t("op.coordinatorAttachQueued")); // not "sent ✓" (W-8)
+      } else {
+        resent = true;
+        setTimeout(() => (resent = false), 2000);
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -463,8 +470,12 @@
     error = null;
     try {
       const blindingKey = await deriveBlindingKey(session.signer).catch(() => undefined);
-      await detachCoordinator(session.signer, ctx, blindingKey);
-      // Reflect the detach locally so the UI returns to the attach flow.
+      const outcome = await detachCoordinator(session.signer, ctx, blindingKey);
+      // Reflect the detach locally so the UI returns to the attach flow. Kept even
+      // when it only queued: the keys were already rotated, and offering Detach
+      // again would rotate them a second time. But say so (audit KIMIK31 W-8):
+      // until the outbox drains, attendees and the coordinator still see it attached.
+      if (outcome === "queued") opStatus.queued(t("op.coordinatorDetachQueued"));
       ctx = ownSave({ ...ctx, config: { ...ctx.config, coordinator: undefined } });
       coordAnnounce = undefined;
       coordLastSeen = undefined;
@@ -662,8 +673,11 @@
       // Blinding key lets attach persist the install generation into the durable
       // 30078 backup too (NIP §3.5), not only the local keystore record.
       const blindingKey = await deriveBlindingKey(session.signer).catch(() => undefined);
-      await attachCoordinator(session.signer, ctx, pubkey, blindingKey);
-      attached = true;
+      const outcome = await attachCoordinator(session.signer, ctx, pubkey, blindingKey);
+      // "Attached" only once the config and grant reached a relay (audit KIMIK31
+      // W-8); a queued attach is reported as queued, not as done.
+      if (outcome === "queued") opStatus.queued(t("op.coordinatorAttachQueued"));
+      else attached = true;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
     } finally {
@@ -725,7 +739,11 @@
   // Menu & layout (spec §7.4 kind 31608): merged model, split on publish.
   let pageMenu = $state<MergedMenuItem[]>([]);
   let pageSections = $state<MergedSection[]>([]);
+  // True only once a relay ANSWERED (audit KIMIK31 W-1). Publish sends the whole
+  // model, so it stays disabled while the editor shows a cached stand-in.
   let pageLoaded = $state(false);
+  let pageReadError = $state<unknown>(null);
+  let pageRetrying = $state(false);
   let pageBusy = $state(false);
   let pageSaved = $state(false);
   let menuLabel = $state("");
@@ -743,11 +761,28 @@
 
   async function loadEventPage() {
     if (!ctx) return;
-    const page = await fetchEventPage(ctx).catch(() => undefined);
-    pageMenu = page?.menu ?? [];
-    pageSections = page?.sections ?? [];
-    pageSources = page?.sources ?? [];
-    pageLoaded = true;
+    const c = ctx;
+    // A failed read used to become an EMPTY model with Publish enabled, and one
+    // press deleted the event's real menu, sections and feeds (audit KIMIK31 W-1).
+    // Show the cached copy instead and hold Publish until a relay has answered.
+    const read = await readForEditing(
+      () => fetchEventPage(c),
+      () => cachedEventPage(c.coordinate),
+    );
+    pageMenu = read.value?.menu ?? [];
+    pageSections = read.value?.sections ?? [];
+    pageSources = read.value?.sources ?? [];
+    pageLoaded = read.definitive;
+    pageReadError = read.definitive ? null : read.error;
+  }
+
+  async function retryPageRead() {
+    pageRetrying = true;
+    try {
+      await loadEventPage();
+    } finally {
+      pageRetrying = false;
+    }
   }
 
   /** Split a comma/whitespace separated field into trimmed, non-empty items. */
@@ -870,7 +905,7 @@
   }
 
   async function savePage() {
-    if (!ctx) return;
+    if (!ctx || !pageLoaded) return; // never publish a stand-in (W-1)
     pageBusy = true;
     pageSaved = false;
     error = null;
@@ -910,6 +945,11 @@
   let themeDraftRestored = $state(false);
   let themeLoaded = $state(false);
   let publishedTheme = $state("");
+  // Whether `publishedTheme` is a relay's answer or only the cached copy (audit
+  // KIMIK31 W-1); Publish stays off until it is the former.
+  let themeDefinitive = $state(false);
+  let themeReadError = $state<unknown>(null);
+  let themeRetrying = $state(false);
 
   // Draft-safe auto-refresh (App-2): hold the pending reload while the organizer
   // has unsaved metadata edits (title/summary differ from the loaded event) or a
@@ -936,7 +976,14 @@
 
   async function loadTheme() {
     if (!ctx) return;
-    themeCss = (await fetchEventTheme(ctx).catch(() => undefined)) ?? "";
+    const c = ctx;
+    const read = await readForEditing(
+      () => fetchEventTheme(c),
+      () => cachedEventTheme(c.coordinate),
+    );
+    themeCss = read.value ?? "";
+    themeDefinitive = read.definitive;
+    themeReadError = read.definitive ? null : read.error;
     // U9: restore an unsent draft that differs from the published theme.
     themeDraftId = `theme:${ctx.coordinate}`;
     publishedTheme = themeCss;
@@ -946,6 +993,15 @@
       themeDraftRestored = true;
     }
     themeLoaded = true;
+  }
+
+  async function retryThemeRead() {
+    themeRetrying = true;
+    try {
+      await loadTheme();
+    } finally {
+      themeRetrying = false;
+    }
   }
 
   function previewTheme() {
@@ -959,7 +1015,7 @@
   }
 
   async function publishTheme() {
-    if (!ctx || themeOver) return;
+    if (!ctx || themeOver || !themeDefinitive) return; // never publish a stand-in (W-1)
     themeBusy = true;
     error = null;
     try {
@@ -999,7 +1055,7 @@
 
 <AdminTabs {naddr} />
 
-{#if error}<div class="card warn">{error}</div>{/if}
+{#if error}<div class="card warn" role="alert">{error}</div>{/if}
 
 {#if notOrganizer}
   <div class="card">
@@ -1385,6 +1441,14 @@
       {t("admin.page.feeds.add")}
     </button>
 
+    {#if pageReadError}
+      <ErrorState
+        error={pageReadError}
+        body="admin.page.readFailed"
+        onRetry={retryPageRead}
+        retrying={pageRetrying}
+      />
+    {/if}
     <div class="row" style="margin-top:0.75rem">
       <button class="btn inline primary" onclick={savePage} disabled={pageBusy || !pageLoaded}>
         {pageBusy ? t("admin.page.saving") : t("admin.page.save")}
@@ -1406,6 +1470,14 @@
   <div class="card">
     <div class="field-label">{t("admin.theme.title")}</div>
     <p class="muted">{t("admin.theme.body")}</p>
+    {#if themeReadError}
+      <ErrorState
+        error={themeReadError}
+        body="admin.theme.readFailed"
+        onRetry={retryThemeRead}
+        retrying={themeRetrying}
+      />
+    {/if}
     {#if themeDraftRestored}
       <!-- Visible restore of unsent theme CSS (U9). -->
       <div class="row" style="justify-content:space-between;align-items:center;gap:0.5rem;flex-wrap:wrap">
@@ -1438,7 +1510,11 @@
       {#if themePreviewing}
         <button class="btn inline" onclick={stopPreview}>{t("admin.theme.stopPreview")}</button>
       {/if}
-      <button class="btn inline primary" onclick={publishTheme} disabled={themeBusy || themeOver}>
+      <button
+        class="btn inline primary"
+        onclick={publishTheme}
+        disabled={themeBusy || themeOver || !themeDefinitive}
+      >
         {themeBusy ? t("admin.theme.publishing") : t("admin.theme.publish")}
       </button>
       {#if themePublished}<span class="muted">{t("admin.theme.published")}</span>{/if}
@@ -1548,6 +1624,7 @@
       </div>
       {#if testResult === "ok"}<p class="muted" role="status" style="margin:0.35rem 0 0">{t("admin.coordinator.testOk")}</p>{/if}
       {#if testResult === "unreachable"}<p class="muted" style="color:var(--danger);margin:0.35rem 0 0">{t("admin.coordinator.testFail")}</p>{/if}
+      {#if testResult === "unanswered"}<p class="muted" role="status" style="color:var(--danger);margin:0.35rem 0 0">{t("admin.coordinator.testUnanswered")}</p>{/if}
       {#if resent}<p class="muted" role="status" style="margin:0.35rem 0 0">{t("admin.coordinator.resent")}</p>{/if}
 
       {#if showReplace}

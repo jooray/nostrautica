@@ -156,13 +156,37 @@ const unlockInFlight = new Map<string, Promise<void>>();
  */
 const unlockEpoch = new Map<string, number>();
 
+/**
+ * Per account, SHARED by every tab: how many unlocks have started on this device
+ * (audit KIMIK31 W-3). `unlockEpoch` above is per realm, so it cannot see an
+ * unlock in another tab: tab A's logout lock outlives its deadline, tab B hears
+ * the logout, the user signs back in there (B finds no snapshot yet and keeps
+ * using the plaintext), then A's encrypt finishes, its own epoch is unchanged,
+ * and it deletes the MLS state B is running on. Kept in the same shared store,
+ * under a key outside every prefix `chatKeysFor` collects, so a lock never
+ * snapshots or deletes it.
+ */
+function custodyGenKey(account: string): string {
+  return `__chat_custody_gen__\x1f${account}`;
+}
+
+async function readCustodyGen(account: string): Promise<number> {
+  const v = await marmotKvBackend().get(custodyGenKey(account));
+  return typeof v === "number" ? v : 0;
+}
+
 /** Per account: the tail of the lock/unlock chain, so the two never interleave. */
 const custodyTail = new Map<string, Promise<void>>();
 
-/** Run `fn` after every earlier lock/unlock step for `account` has settled. */
+/**
+ * Run `fn` after every earlier lock/unlock step for `account` has settled, in
+ * this tab (the promise chain) and across tabs (a Web Lock, W-3), so another
+ * tab's unlock can never land between a lock's re-check and its deletes.
+ */
 function custodyExclusive(account: string, fn: () => Promise<void>): Promise<void> {
   const prev = custodyTail.get(account) ?? Promise.resolve();
-  const run = prev.then(fn, fn);
+  const locked = () => withExclusiveLock(`chat-custody:${account}`, fn);
+  const run = prev.then(locked, locked);
   const tail = run.catch(() => undefined);
   custodyTail.set(account, tail);
   void tail.then(() => {
@@ -406,6 +430,10 @@ export async function lockChatIdentityForLogout(
   // after a NEWER unlock would delete the live plaintext MLS state the new
   // session is using, and the next start would re-enrol the device.
   const epoch = unlockEpoch.get(account) ?? 0;
+  // The shared generation, for an unlock in ANOTHER tab (W-3). A read error
+  // leaves it undefined, and the destructive half then refuses to run: keeping
+  // plaintext for the next logout is recoverable, deleting a live session is not.
+  const gen = await readCustodyGen(account).catch(() => undefined);
   const keys = await chatKeysFor(account);
   if (keys.length === 0) return;
   try {
@@ -422,6 +450,13 @@ export async function lockChatIdentityForLogout(
     await custodyExclusive(account, async () => {
       if ((unlockEpoch.get(account) ?? 0) !== epoch) {
         console.warn("[chat] a late logout lock was skipped: this account has logged in again since");
+        return;
+      }
+      const nowGen = await readCustodyGen(account).catch(() => undefined);
+      if (gen === undefined || nowGen !== gen) {
+        console.warn(
+          "[chat] a late logout lock was skipped: this account has logged in again in another tab",
+        );
         return;
       }
       await backend.set(lockedKey(account), stored);
@@ -462,6 +497,11 @@ export async function unlockChatIdentityForLogin(
   unlockEpoch.set(account, (unlockEpoch.get(account) ?? 0) + 1);
   const run = custodyExclusive(account, async () => {
     const backend = marmotKvBackend();
+    // Retire every lock asked for in ANY tab before this unlock (W-3). Inside the
+    // cross-tab section, so a lock's re-check and deletes see it or finish first.
+    await backend
+      .set(custodyGenKey(account), (await readCustodyGen(account).catch(() => 0)) + 1)
+      .catch(() => {});
     const ciphertext = await backend.get(lockedKey(account));
     if (typeof ciphertext !== "string") return;
     try {

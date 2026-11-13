@@ -933,7 +933,17 @@ data class CoordinatorPricing(
 }
 
 @Serializable
-data class CoordinatorFeatures(val matching: Boolean = true, val talks: Boolean = false, val chat: List<String> = emptyList())
+data class CoordinatorFeatures(val matching: Boolean = true, val talks: Boolean = false, val chat: List<String> = emptyList()) {
+    /** The coordinator understands the 21607 add `intent` (NIP §6.2, 0.18). */
+    val attestIntent: Boolean get() = ATTEST_INTENT in chat
+
+    companion object {
+        /** `features.chat` token: "runs Marmot group chat". */
+        const val MARMOT = "marmot"
+        /** `features.chat` token: "understands the 21607 add `intent`" (protocol CHAT_FEATURE_ATTEST_INTENT). */
+        const val ATTEST_INTENT = "attest-intent"
+    }
+}
 
 @Serializable
 data class CoordinatorAnnounce(
@@ -975,9 +985,13 @@ data class ChatKeyAttestationContent(
     @SerialName("client_id") val clientId: String? = null,
     val proof: String? = null,
     val code: String? = null,
+    /** `enrol` | `rejoin` (NIP §10.2, 0.18), op:"add" only; absent = legacy inference. */
+    val intent: String? = null,
 ) : Validated {
     override fun validate() {
         checkVersion(v); check(op in setOf("add", "revoke", "link", "link_confirm")) { "op" }
+        check(intent == null || intent in INTENTS) { "intent" }
+        check(intent == null || op == "add") { "intent is only valid on op:'add'" }
         checkHex32(chatPubkey, "chat_pubkey"); checkLen(label, Limits.MAX_CHAT_KEY_LABEL, "label")
         checkLen(clientId, Limits.MAX_CHAT_KEY_CLIENT_ID, "client_id")
         check(proof == null || proof.isHex64()) { "proof" }
@@ -991,6 +1005,9 @@ data class ChatKeyAttestationContent(
     }
 
     companion object {
+        /** The values of `intent` (protocol CHAT_ATTESTATION_INTENTS). */
+        val INTENTS = setOf("enrol", "rejoin")
+
         fun normalizeLinkCode(input: String) = input.uppercase().replace(Regex("[\\s.-]"), "")
     }
 }

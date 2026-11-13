@@ -17,6 +17,7 @@
  */
 
 import { logStamp } from "../log-line.js";
+import { billedKindOf, recordProviderRequest } from "./request-meter.js";
 
 /** A provider request exceeded its total deadline (connect + headers + body). */
 export class ProviderTimeoutError extends Error {
@@ -435,6 +436,11 @@ export async function withProviderTimeout<T>(
 ): Promise<T> {
   // Fail fast if the caller was already cancelled before we opened a socket.
   callerSignal?.throwIfAborted();
+  // The one place every provider request passes, so this is where billed ones are
+  // counted (audit KIMIK31 R-6; see request-meter.ts). Counted on the way OUT: a
+  // request that then fails, times out or is refused with a 402 was still sent.
+  const billed = billedKindOf(label);
+  if (billed) recordProviderRequest(billed);
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), timeoutMs);
   const signal = callerSignal ? AbortSignal.any([callerSignal, ac.signal]) : ac.signal;

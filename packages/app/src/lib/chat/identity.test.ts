@@ -203,6 +203,40 @@ describe("lockChatIdentityForLogout / unlockChatIdentityForLogin (audit UX-6)", 
     expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 3 });
   });
 
+  // Audit KIMIK31 W-3: the K-8 guard above is a per-realm counter, so it cannot
+  // see a re-login in ANOTHER tab. Tab A's lock outlives its deadline, tab B hears
+  // the logout and the user signs in there (no snapshot yet, so B keeps using the
+  // plaintext), then A's encrypt finishes and deleted the state B is running on.
+  it("a late lock in one tab does not delete state a re-login in another tab is using", async () => {
+    const account = "7".repeat(64);
+    const shared = new InMemoryKvBackend(); // the one IndexedDB both tabs see
+    __setMarmotKvBackendForTests(shared);
+    const stores = makeMarmotStores(shared, account);
+    await stores.groupStateStore.setItem("g1", { epoch: 11 } as never);
+
+    let releaseEncrypt!: () => void;
+    const gate = new Promise<void>((r) => (releaseEncrypt = r));
+    const lockInA = lockChatIdentityForLogout(account, async (pt) => {
+      await gate;
+      return selfEncrypt(pt);
+    });
+    await new Promise((r) => setTimeout(r, 5)); // A has read what it will lock
+
+    // Tab B: a separate realm (fresh module state) over the same storage.
+    vi.resetModules();
+    const tabBStores = await import("./stores.js");
+    tabBStores.__setMarmotKvBackendForTests(shared);
+    const tabB = await import("./identity.js");
+    await tabB.unlockChatIdentityForLogin(account, selfDecrypt);
+
+    releaseEncrypt();
+    await lockInA;
+
+    expect(await stores.groupStateStore.getItem("g1")).toEqual({ epoch: 11 });
+    expect(await shared.get("__chat_locked__\x1f" + account)).toBeUndefined();
+    tabBStores.__setMarmotKvBackendForTests(null);
+  });
+
   it("is a no-op when chat was never used on this device", async () => {
     const account = "a".repeat(64);
     await expect(lockChatIdentityForLogout(account, selfEncrypt)).resolves.toBeUndefined();

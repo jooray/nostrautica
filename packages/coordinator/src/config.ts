@@ -12,6 +12,8 @@ import { decode } from "nostr-tools/nip19";
 import { decrypt as nip49Decrypt } from "nostr-tools/nip49";
 import {
   hexToBytes,
+  CHAT_FEATURE_ATTEST_INTENT,
+  CHAT_FEATURE_MARMOT,
   type CoordinatorAnnounce,
   type CoordinatorBilling,
 } from "@nostrautica/protocol";
@@ -198,7 +200,19 @@ export const configSchema = z.object({
       /** Decoded media seconds (probed). Default 4 h / attendee, 200 h / event. */
       per_attendee_duration_sec: z.number().int().nonnegative().default(4 * 3600),
       per_event_duration_sec: z.number().int().nonnegative().default(200 * 3600),
-      /** Provider spend attempts (paid job executions). Default 500 / attendee, 20k / event. */
+      /**
+       * Paid job RUNS, not provider requests (audit KIMIK31 R-6). One counted run
+       * can make several billed requests: an uncached attendee is up to one STT
+       * call per media item, a Nostr-context summary, the profile and a
+       * translation; a match batch is one prose call plus, with `match_score`, a
+       * decision call. Cache hits make none. Budget for a few provider requests
+       * per counted run. The same holds for `daemon_calls_per_window`.
+       * The real requests are counted and logged, never enforced: each job's
+       * `[job] … done` line ends `— 1 counted run, 5 provider requests (stt 2,
+       * chat 3)`, and a `[budget] last 24h: …` line every 10 minutes (when it
+       * moved) sets the window's counted runs beside the requests sent.
+       * Default 500 / attendee, 20k / event.
+       */
       per_attendee_calls: z.number().int().nonnegative().default(500),
       per_event_calls: z.number().int().nonnegative().default(20_000),
       /**
@@ -553,7 +567,8 @@ export function spendExposure(config: CoordinatorConfig): string | undefined {
   return (
     "publicly announced + open to any installer + budgets.daemon_calls_per_window = 0: " +
     `anyone can install up to security.max_events (${config.security.max_events}) events and spend ` +
-    `budgets.per_event_calls (${config.budgets.per_event_calls}) provider calls each against your API key. ` +
+    `budgets.per_event_calls (${config.budgets.per_event_calls}) paid job runs each against your API key, ` +
+    "and one run can make several provider requests. " +
     "The media ceilings (daemon_bytes/duration) do not bound text-only calls. " +
     "Set budgets.daemon_calls_per_window, or security.allowed_eid_pubkeys, or coordinator.announce = false " +
     "— or security.allow_unbounded_spend = true if your spend cap lives at the provider."
@@ -595,7 +610,9 @@ export function buildAnnounceContent(
     ...(config.coordinator.picture ? { picture: config.coordinator.picture } : {}),
     ...(config.coordinator.operator ? { operator: config.coordinator.operator } : {}),
     relays: config.relays.default,
-    features: { matching: true, talks: true, chat: ["marmot"] },
+    // "attest-intent": this coordinator understands the 21607 add `intent` (NIP
+    // §10.2), so 0.18+ clients may send it. Without the token they send a bare add.
+    features: { matching: true, talks: true, chat: [CHAT_FEATURE_MARMOT, CHAT_FEATURE_ATTEST_INTENT] },
     privacy,
     ...(config.coordinator.terms_url ? { terms_url: config.coordinator.terms_url } : {}),
     pricing,

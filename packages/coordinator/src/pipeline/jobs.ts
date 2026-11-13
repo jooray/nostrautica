@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { Store, JobRow, EnqueueOutcome } from "../store/db.js";
 import { logStamp } from "../log-line.js";
+import { emptyTally, formatJobSpend, runWithRequestTally } from "../providers/request-meter.js";
 
 export type JobHandler = (payload: any, ctx: { enqueue: EnqueueFn; signal: AbortSignal }) => Promise<void>;
 /** Returns what the enqueue did, so a caller can summarize a dispatch (see
@@ -501,22 +502,32 @@ export class JobRunner {
       }
     }, heartbeatMs);
     (heartbeat as { unref?: () => void }).unref?.();
+    // What this run sent to paid providers (audit KIMIK31 R-6): one counted run can
+    // be several billed requests, and this suffix on every outcome line is where an
+    // operator sees the multiplier. Logged only; the budgets still count runs.
+    const tally = emptyTally();
+    const spent = () => {
+      const s = formatJobSpend(tally);
+      return s ? ` — ${s}` : "";
+    };
     try {
-      await handler(JSON.parse(job.payload), {
-        enqueue: (t, k, p) => this.enqueue(t, k, p),
-        signal: this.abortController.signal,
-      });
+      await runWithRequestTally(tally, () =>
+        handler(JSON.parse(job.payload), {
+          enqueue: (t, k, p) => this.enqueue(t, k, p),
+          signal: this.abortController.signal,
+        }),
+      );
       // If our lease expired and another worker took over, completeJob affects 0
       // rows — we discard our result rather than clobber the new owner's state.
       const owned = this.store.completeJob(job.id, token);
       const ms = this.now() - startedAt;
       if (owned) {
-        console.log(`[${stamp()}] [job] ${job.type} #${job.id} done in ${ms}ms`);
+        console.log(`[${stamp()}] [job] ${job.type} #${job.id} done in ${ms}ms${spent()}`);
       } else {
         // Silently dropping a finished result is exactly the kind of thing that
         // looks like "the pipeline just stopped" from the outside.
         console.warn(
-          `[${stamp()}] [job] ${job.type} #${job.id} finished in ${ms}ms but its lease was LOST — result discarded (another worker owns it)`,
+          `[${stamp()}] [job] ${job.type} #${job.id} finished in ${ms}ms${spent()} but its lease was LOST — result discarded (another worker owns it)`,
         );
       }
     } catch (err) {
@@ -536,7 +547,7 @@ export class JobRunner {
       if (this.abortController.signal.aborted) {
         const released = this.store.releaseJob(job.id, token);
         console.log(
-          `[${stamp()}] [job] ${job.type} #${job.id} aborted for shutdown after ${ms}ms — ` +
+          `[${stamp()}] [job] ${job.type} #${job.id} aborted for shutdown after ${ms}ms${spent()} — ` +
             (released
               ? "released back to the queue, runnable immediately on restart (no retry consumed)"
               : "lease already lost — another worker owns the row"),
@@ -550,7 +561,7 @@ export class JobRunner {
         // Logged even when the park did NOT stick (lease lost): "we decided to park
         // and someone else owns the row" is still an outcome the log must carry.
         console.log(
-          `[${stamp()}] [job] ${job.type} #${job.id} PARKED (waiting) after ${ms}ms${parked ? "" : " [lease lost — not applied]"}: ${err.message.slice(0, 160)}`,
+          `[${stamp()}] [job] ${job.type} #${job.id} PARKED (waiting) after ${ms}ms${spent()}${parked ? "" : " [lease lost — not applied]"}: ${err.message.slice(0, 160)}`,
         );
         return;
       }
@@ -572,7 +583,7 @@ export class JobRunner {
         if (parkReason) {
           const parked = this.store.parkJob(job.id, `${parkReason}: ${msg}`, token, { resetAttempts: true });
           console.warn(
-            `[${stamp()}] [job] ${job.type} #${job.id} PARKED instead of poisoned after ${attempts} attempt(s)${parked ? "" : " [lease lost — not applied]"}: ${parkReason} — ${msg.slice(0, 200)}`,
+            `[${stamp()}] [job] ${job.type} #${job.id} PARKED instead of poisoned after ${attempts} attempt(s)${spent()}${parked ? "" : " [lease lost — not applied]"}: ${parkReason} — ${msg.slice(0, 200)}`,
           );
           // Tell somebody. This park is reached only after the retry tail ran out
           // — three days — so it means "this outage outlasted every retry", and
@@ -596,7 +607,7 @@ export class JobRunner {
         }
       }
       console.warn(
-        `[${stamp()}] [job] ${job.type} #${job.id} ${poison ? `POISONED after ${attempts}/${budget}` : `failed (retry ${attempts}/${budget}, next in ${backoff}ms)`} after ${ms}ms: ${msg.slice(0, 300)}`,
+        `[${stamp()}] [job] ${job.type} #${job.id} ${poison ? `POISONED after ${attempts}/${budget}` : `failed (retry ${attempts}/${budget}, next in ${backoff}ms)`} after ${ms}ms${spent()}: ${msg.slice(0, 300)}`,
       );
       const owned = this.store.failJob(job.id, attempts, this.now() + backoff, msg, poison, token);
       // Only surface the poison if we still owned the lease (a stale worker whose

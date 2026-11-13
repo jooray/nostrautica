@@ -180,6 +180,18 @@ describe("standing decisions on the People surface", () => {
     expect(decls).toMatch(/contain-intrinsic-size:\s*auto\s+\d/);
   });
 
+  // Audit KIMIK31 W-20: Admin's People list mounts every approved person too,
+  // with richer cards, and had none of this.
+  it("Admin People uses the same mitigation, with the same focus and size guards", () => {
+    const src = read("src/lib/components/AdminPeople.svelte");
+    const rule = /\.person-card:not\(:focus-within\)\s*\{([^}]*)\}/.exec(src);
+    expect(rule, "Admin People cards lost their :not(:focus-within) rule").not.toBeNull();
+    const decls = rule?.[1] ?? "";
+    expect(decls).toMatch(/content-visibility:\s*auto/);
+    expect(decls).toMatch(/contain-intrinsic-size:\s*auto\s+\d/);
+    expect(src).toMatch(/class="card person-card"/);
+  });
+
   it("never clamps a match reasoning, at any width", () => {
     const src = read("src/lib/components/MatchEntry.svelte");
     const rule = /\.why\s*\{([^}]*)\}/.exec(src);

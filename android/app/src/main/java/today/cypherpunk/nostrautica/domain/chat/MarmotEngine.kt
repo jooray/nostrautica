@@ -4,6 +4,7 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import dev.ipf.marmotkit.AccountSetupReadinessFfi
+import dev.ipf.marmotkit.AppGroupHydrationQuarantineReasonFfi
 import dev.ipf.marmotkit.GroupEventKindFfi
 import dev.ipf.marmotkit.Marmot
 import dev.ipf.marmotkit.MarmotAndroid
@@ -138,7 +139,23 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             // discovery indexers, media and image servers, KeyPackage ranking) a
             // host choice. The White Noise preset keeps exactly what this app ran on,
             // and our rooms are White Noise rooms. Its keychain service is unused:
-            // secrets go through KvSecretStore.
+            // secrets go through KvSecretStore. Since 0.16 it also caps events at
+            // 2 MiB on White Noise's two relays (EventTooLarge, see sized()).
+            //
+            // MDK 0.15+ advertises marmot.group.account-devices.v1 (0x800d). That is
+            // harmless in the coordinator's rooms, which never require it, but a room
+            // that REQUIRED it would be refused by marmot-ts (the coordinator and the
+            // web app: "unsupported required component"). So this app never calls
+            // enableAccountDevices, createGroup or startDirectConversation: an MDK-made
+            // group requires 0x800d whenever every founding device advertises it.
+            //
+            // 0.15's automatic rejoin of an Unrecoverable copy cannot be turned off
+            // from here (no deployment or option switch). It asks an admin device over
+            // its kind-10050 inbox (an MDK-private kind 1059 around an inner kind 1159).
+            // The coordinator opens only the rumor kinds it allowlists and the web app
+            // only Welcomes, so both ignore it. An organizer's Android device (MDK,
+            // co-admin) may answer with one Remove+Add of that same device, which leaves
+            // it holding a leaf: the coordinator neither records a removal nor re-adds.
             deployment = marmotDeploymentWhiteNoise(),
         )
         val deadline = System.currentTimeMillis() + BUSY_WAIT_MS
@@ -223,8 +240,11 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             is MarmotEventFfi.GroupJoined -> e.accountLabel to ChatEngine.Change(e.groupIdHex, state)
             is MarmotEventFfi.GroupStateUpdated -> e.accountLabel to ChatEngine.Change(e.groupIdHex, state)
             is MarmotEventFfi.GroupEvent -> e.accountLabel to ChatEngine.Change(e.groupIdHex, when (e.event) {
+                // QueuedIntentRefused: MDK retired a durable send it will never publish
+                // (for example `event_too_large`), so the timeline's pending row goes.
                 is GroupEventKindFfi.MessageReceived, is GroupEventKindFfi.AppMessageInvalidated,
-                is GroupEventKindFfi.TransportObjectResourceRefused -> message
+                is GroupEventKindFfi.TransportObjectResourceRefused, is GroupEventKindFfi.QueuedIntentRefused -> message
+                is GroupEventKindFfi.GroupHydrationQuarantined -> health
                 is GroupEventKindFfi.GroupUnrecoverable -> health
                 else -> state
             })
@@ -233,6 +253,14 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             is MarmotEventFfi.EpochStallEscalated -> e.accountLabel to ChatEngine.Change(e.groupIdHex, health)
             is MarmotEventFfi.GroupChangeSuperseded -> e.accountLabel to ChatEngine.Change(e.groupIdHex, health)
             is MarmotEventFfi.HistoryNoticesChanged -> e.accountLabel to ChatEngine.Change(null, health)
+            // 0.15: catch-up status, which feeds "history may be incomplete".
+            is MarmotEventFfi.RecoveryStatusChanged -> e.accountLabel to ChatEngine.Change(null, health)
+            // 0.15: experimental device groups only. MDK never sends these to an
+            // ordinary runtime like this one.
+            is MarmotEventFfi.LinkedDevicesChanged, is MarmotEventFfi.KeyPackageRefreshOverdueChanged,
+            is MarmotEventFfi.UnrecognizedSignInsChanged, is MarmotEventFfi.CompromiseWarningChanged,
+            is MarmotEventFfi.DeviceLinkChanged, is MarmotEventFfi.ChatHistoryImportsChanged,
+            is MarmotEventFfi.DeviceUnlinked -> null
             else -> null
         }
     }
@@ -243,8 +271,17 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             is MarmotEventFfi.EpochStallEscalated -> trouble.mark(e.groupIdHex, GroupTrouble.STALLED)
             is MarmotEventFfi.GroupChangeSuperseded ->
                 if (GroupTrouble.supersededNeedsAttention(e.outcome)) trouble.mark(e.groupIdHex, GroupTrouble.SUPERSEDED)
-            is MarmotEventFfi.GroupEvent -> when (e.event) {
+            is MarmotEventFfi.GroupEvent -> when (val k = e.event) {
                 is GroupEventKindFfi.GroupUnrecoverable -> trouble.mark(e.groupIdHex, GroupTrouble.UNRECOVERABLE)
+                // 0.16: retry and rejoin cannot clear this one, the next account open
+                // can. So reopen the runtime once ([RuntimeFreshness]), never Rejoin.
+                is GroupEventKindFfi.GroupHydrationQuarantined ->
+                    if (k.reason == AppGroupHydrationQuarantineReasonFfi.REWIND_RESTORE_FAILED) {
+                        Log.w(TAG, "group quarantined until reopen (rewind restore failed)")
+                        freshness.quarantined(e.groupIdHex)
+                    }
+                is GroupEventKindFfi.QueuedIntentRefused ->
+                    Log.w(TAG, "queued ${k.intentKind} refused: ${k.reason}${k.artifact?.let { " ($it, ${k.sizeClass})" } ?: ""}")
                 // The group moved on, or MDK says it recovered.
                 is GroupEventKindFfi.EpochChanged, is GroupEventKindFfi.GroupHydrationRecovered,
                 is GroupEventKindFfi.PendingCommitRecovered -> trouble.clear(e.groupIdHex, GroupTrouble.STALLED, GroupTrouble.SUPERSEDED)
@@ -328,6 +365,18 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
      * makes the coordinator evict and re-add a device that was in the room all along.
      */
     override suspend fun groups(account: String): List<GroupBinding.GroupInfo> = io {
+        // A quarantined group is missing from chatList and has no nostr group id to
+        // match against the roster. MDK 0.16: treat a REWIND_RESTORE_FAILED copy as
+        // quarantined, not gone, until the next account open, and never rejoin it.
+        // A list without it reads "listed but holding no copy of the room" and the
+        // session attests, which re-enrols the device. Unreadable instead: it waits.
+        // The event can fire during start(), before the event stream is read, so the
+        // one reopen ([RuntimeFreshness], via refreshIfStale) is asked for here too.
+        val held = quarantinedGroups(account).filter { it.reason == AppGroupHydrationQuarantineReasonFfi.REWIND_RESTORE_FAILED }
+        if (held.isNotEmpty()) {
+            held.forEach { freshness.quarantined(it.groupIdHex) }
+            throw IllegalStateException("a group is quarantined until the chat runtime reopens")
+        }
         chatList(account, true).map { row ->
             val d = groupDetails(account, row.groupIdHex)
             GroupBinding.GroupInfo(
@@ -360,24 +409,36 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
 
     override suspend fun republishKeyPackage(account: String) { io { republishKeyPackage(account) } }
 
-    override suspend fun sendText(account: String, groupIdHex: String, text: String): Boolean = io {
+    override suspend fun sendText(account: String, groupIdHex: String, text: String): Boolean = sized {
         sendText(account, groupIdHex, text).acceptDisposition == SendAcceptDispositionFfi.PUBLISHED
     }
 
     override suspend fun react(account: String, groupIdHex: String, messageId: String, emoji: String) {
-        io { reactToMessage(account, groupIdHex, messageId, emoji) }
+        sized { reactToMessage(account, groupIdHex, messageId, emoji) }
     }
 
     override suspend fun unreact(account: String, groupIdHex: String, messageId: String) {
-        io { unreactFromMessage(account, groupIdHex, messageId) }
+        sized { unreactFromMessage(account, groupIdHex, messageId) }
     }
 
     override suspend fun edit(account: String, groupIdHex: String, messageId: String, content: String) {
-        io { editMessage(account, groupIdHex, messageId, content) }
+        sized { editMessage(account, groupIdHex, messageId, content) }
     }
 
     override suspend fun delete(account: String, groupIdHex: String, messageId: String) {
-        io { deleteMessage(account, groupIdHex, messageId) }
+        sized { deleteMessage(account, groupIdHex, messageId) }
+    }
+
+    /**
+     * [io] for a group send. MDK 0.15+ fails one that fits none of the room's relays
+     * as `EventTooLarge` and publishes nothing. That is the content's fault, not the
+     * connection's, so it surfaces as [ChatEventTooLarge] for the screen to say so.
+     */
+    private suspend fun <T> sized(block: suspend Marmot.() -> T): T = try {
+        io(block)
+    } catch (e: MarmotKitException.EventTooLarge) {
+        Log.w(TAG, "send refused for size: ${e.artifact}, ${e.sizeClass}")
+        throw ChatEventTooLarge("too large for the room's relays (${e.sizeClass})")
     }
 
     override fun changes(account: String): Flow<ChatEngine.Change> = events.filter { it.first == account }.map { it.second }

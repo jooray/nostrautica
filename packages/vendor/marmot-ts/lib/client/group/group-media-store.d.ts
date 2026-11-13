@@ -79,8 +79,11 @@ export declare class GroupMediaStore extends EventEmitter<GroupMediaStoreEvents>
      * immediately on subscription, then again after every `mediaAdded`,
      * `mediaRemoved`, or `cleared` event.
      *
-     * The generator runs until the caller breaks out of the loop or the
-     * consuming iterator is garbage-collected (via the `finally` cleanup).
+     * Changes during reads or paused consumption are coalesced. Abort, return,
+     * throw, or async disposal promptly releases listeners, even while a storage
+     * read is pending. Explicitly close iterators when no longer needed.
      */
-    subscribe(): AsyncGenerator<MediaAttachment[]>;
+    subscribe(options?: {
+        signal?: AbortSignal;
+    }): AsyncGenerator<MediaAttachment[]>;
 }

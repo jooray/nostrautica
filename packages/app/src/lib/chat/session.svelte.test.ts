@@ -206,6 +206,46 @@ describe("chat session — promotion keeps the lock it was promoted into", () =>
     expect(seen).not.toContain("setup");
     expect(chatSession.phase).toBe("ready");
   });
+
+  // Audit KIMIK31 W-6: the promotion was fire-and-forget, so a failed build left
+  // a "ready" room with no client and an unhandled rejection.
+  it.each(["create", "start", "ensurePublished"] as const)(
+    "a promotion whose %s fails shows a retryable state, then recovers on the same lock",
+    async (failing) => {
+      const otherTab = new ChatTabCoordinator({
+        scope: OWNER,
+        locks: locks as never,
+        createChannel: (n: string) => new FakeChannel(n) as never,
+        onRoleChange: () => {},
+      });
+      await otherTab.whenSettled;
+      await chatSession.ensure("naddr1", ctx, signer, OWNER);
+      const coordinatorWhileFollower = chatSession.__coordinatorForTests;
+
+      vi.useFakeTimers();
+      try {
+        if (failing === "create") {
+          chatCreate.mockRejectedValueOnce(new Error("identity locked"));
+        } else {
+          chatCreate.mockImplementationOnce(async () => {
+            const chat = fakeChat();
+            chat[failing] = vi.fn().mockRejectedValue(new Error(`${failing} failed`));
+            return chat;
+          });
+        }
+        otherTab.dispose();
+        await vi.waitFor(() => expect(chatSession.phase).toBe("unreachable"));
+        expect(chatSession.chat).toBeUndefined();
+
+        await vi.advanceTimersByTimeAsync(30_000);
+        await vi.waitFor(() => expect(chatSession.chat).toBeDefined());
+        expect(chatSession.__coordinatorForTests).toBe(coordinatorWhileFollower);
+        expect(chatSession.tabRole).toBe("leader");
+      } finally {
+        vi.useRealTimers();
+      }
+    },
+  );
 });
 
 /**
@@ -288,6 +328,72 @@ describe("chat session — real MLS membership, and its handoff to follower tabs
     await vi.waitFor(() =>
       expect(chatSession.memberDevices).toEqual(["c".repeat(64), "d".repeat(64)]),
     );
+  });
+
+  // Audit KIMIK31 W-4: followers only consumed messages and members, so a removed
+  // device's leader tab showed Rejoin while the follower stayed "ready".
+  it("a follower adopts the leader's eviction, and a later message list does not undo it", async () => {
+    const leaderTab = new ChatTabCoordinator({
+      scope: OWNER,
+      locks: locks as never,
+      createChannel: (n: string) => new FakeChannel(n) as never,
+      onRoleChange: () => {},
+    });
+    await leaderTab.whenSettled;
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    expect(chatSession.tabRole).toBe("follower");
+    expect(chatSession.phase).toBe("ready");
+
+    const coordinate = (ctx as unknown as { coordinate: string }).coordinate;
+    leaderTab.broadcastStatus(coordinate, { phase: "evicted", damaged: false });
+    await vi.waitFor(() => expect(chatSession.phase).toBe("evicted"));
+    leaderTab.broadcastState(coordinate, []);
+    await new Promise((r) => setTimeout(r, 0));
+    expect(chatSession.phase).toBe("evicted");
+  });
+
+  it("a proxied send the leader finds unroutable surfaces as ChatUnroutableError", async () => {
+    const leaderTab = new ChatTabCoordinator({
+      scope: OWNER,
+      locks: locks as never,
+      createChannel: (n: string) => new FakeChannel(n) as never,
+      onRoleChange: () => {},
+      onSendRequest: async () => {
+        throw new ChatUnroutableError();
+      },
+    });
+    await leaderTab.whenSettled;
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    expect(chatSession.tabRole).toBe("follower");
+    leaderTab.broadcastState((ctx as unknown as { coordinate: string }).coordinate, []);
+    await vi.waitFor(() => expect(chatSession.readOnly).toBe(false));
+
+    await expect(chatSession.send("hi")).rejects.toBeInstanceOf(ChatUnroutableError);
+    leaderTab.dispose();
+  });
+
+  it("the leader tab broadcasts its phase when it changes", async () => {
+    await chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(chatSession.phase).toBe("ready"));
+    const statuses: { phase: string }[] = [];
+    const followerTab = new ChatTabCoordinator({
+      scope: OWNER,
+      locks: locks as never,
+      createChannel: (n: string) => new FakeChannel(n) as never,
+      onRoleChange: () => {},
+      onLeaderStatus: (_c, s) => void statuses.push(s),
+    });
+    await followerTab.whenSettled;
+    expect(followerTab.role).toBe("follower");
+
+    const chat = chatSession.chat as unknown as {
+      groupMemberPubkeys: ReturnType<typeof vi.fn>;
+      onStateChange?: () => void;
+    };
+    chat.groupMemberPubkeys.mockResolvedValue(["d".repeat(64)]); // our leaf is gone
+    chat.onStateChange?.();
+    await vi.waitFor(() => expect(statuses.at(-1)?.phase).toBe("evicted"));
+    followerTab.dispose();
   });
 
   it("ignores a membership broadcast for a DIFFERENT event", async () => {
@@ -753,6 +859,87 @@ describe("chat session — unknown is not eviction (audit U-1, K-6)", () => {
     await chatSession.ensure("naddr1", ctx, signer, OWNER);
     await vi.waitFor(() => expect(chatSession.chat?.ensurePublished).toHaveBeenCalled());
     expect(chatSession.phase).toBe("setup");
+  });
+
+  // Audit KIMIK31 W-5: a positive not-member whose key package never reached a
+  // relay sat at "Setting up…" forever; only unreachable/damaged were retried.
+  it("a positive not-member keeps re-publishing its key package, without re-attesting", async () => {
+    vi.useFakeTimers();
+    try {
+      let built: ReturnType<typeof fakeChat> | undefined;
+      chatCreate.mockImplementation(async () => {
+        const chat = fakeChat();
+        chat.nostrGroupId = vi.fn().mockResolvedValue(undefined);
+        chat.ensurePublished = vi.fn(async () => {
+          chat.lastVerdict = { kind: "not-member", evicted: false };
+        });
+        built = chat;
+        return chat;
+      });
+      await chatSession.ensure("naddr1", ctx, signer, OWNER);
+      await vi.waitFor(() => expect(built?.ensurePublished).toHaveBeenCalledTimes(1));
+      expect(chatSession.phase).toBe("setup");
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(built!.ensurePublished).toHaveBeenCalledTimes(2);
+      expect(built!.ensurePublished).toHaveBeenLastCalledWith({ attest: false });
+
+      // The Add lands: the room routes, and the retries stop.
+      built!.nostrGroupId = vi.fn().mockResolvedValue("gid");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(chatSession.phase).toBe("ready");
+      const calls = built!.ensurePublished.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(built!.ensurePublished.mock.calls.length).toBe(calls);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an UNKNOWN verdict in setup is never retried by publishing", async () => {
+    vi.useFakeTimers();
+    try {
+      let built: ReturnType<typeof fakeChat> | undefined;
+      chatCreate.mockImplementation(async () => {
+        const chat = fakeChat();
+        chat.nostrGroupId = vi.fn().mockResolvedValue(undefined);
+        chat.ensurePublished = vi.fn(async () => {
+          chat.lastVerdict = undefined; // nothing decided: stays "setup"
+        });
+        built = chat;
+        return chat;
+      });
+      await chatSession.ensure("naddr1", ctx, signer, OWNER);
+      await vi.waitFor(() => expect(built?.ensurePublished).toHaveBeenCalledTimes(1));
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(built!.ensurePublished).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Audit KIMIK31 W-2: logout disposes the session while start() is still waiting
+  // on the relays. The startup used to resume afterwards and call ensurePublished,
+  // which publishes a key package and attests as the account just signed out of.
+  it("a session disposed during start() never goes on to enrol", async () => {
+    let releaseStart!: () => void;
+    const startGate = new Promise<void>((r) => (releaseStart = r));
+    let built: ReturnType<typeof fakeChat> | undefined;
+    chatCreate.mockImplementation(async () => {
+      built = fakeChat();
+      built.start = vi.fn(() => startGate);
+      return built;
+    });
+    const ensuring = chatSession.ensure("naddr1", ctx, signer, OWNER);
+    await vi.waitFor(() => expect(built?.start).toHaveBeenCalled());
+
+    chatSession.dispose(); // logout
+    releaseStart();
+    await ensuring;
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(built!.ensurePublished).not.toHaveBeenCalled();
+    expect(built!.dispose).toHaveBeenCalled();
   });
 
   // Audit S-5: the room is bound before the enrolment decision, not after it.

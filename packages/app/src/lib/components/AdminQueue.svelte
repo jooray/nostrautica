@@ -14,6 +14,7 @@
 
   let {
     requests,
+    known = true,
     relays,
     filterActive,
     matchedPubkeys,
@@ -35,6 +36,11 @@
   }: {
     /** The full pending queue (the count/header use its length). */
     requests: PendingRequest[];
+    /**
+     * False until a scan answered (or a cached queue exists): an empty queue is
+     * then "not loaded yet", never "no join requests" (audit KIMIK31 W-12).
+     */
+    known?: boolean;
     /** Event relays, used as nprofile hints when copying someone's id. */
     relays: string[];
     filterActive: boolean;
@@ -81,7 +87,7 @@
 <h2 id="join-requests">{t("admin.requests.title")}</h2>
 <div class="stack">
   {#if requests.length === 0}
-    <p class="muted">{t("admin.requests.none")}</p>
+    <p class="muted">{known ? t("admin.requests.none") : t("admin.requests.notLoaded")}</p>
   {:else if requests.length > 1}
     <button class="btn" onclick={onApproveAll} disabled={approvingAll}>
       {approvingAll ? t("admin.requests.approving") : t("admin.requests.approveAll", { n: requests.length })}

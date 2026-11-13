@@ -25,7 +25,14 @@ vi.mock("./keystore.js", () => ({
   currentEck: vi.fn(() => undefined),
 }));
 
-import { dedupePendingTalks, fetchTalks, cachedTalks, type RawTalkSubmission } from "./talks.js";
+import {
+  dedupePendingTalks,
+  fetchTalks,
+  fetchPendingTalks,
+  cachedTalks,
+  type RawTalkSubmission,
+} from "./talks.js";
+import { fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { currentEck } from "./keystore.js";
 import type {
   EventContext,
@@ -183,5 +190,31 @@ describe("fetchTalks cache preservation (Bug 2: disappearing talk)", () => {
     const out = await fetchTalks(ctx);
     expect(out).toHaveLength(0);
     expect(cachedTalks(COORD)).toEqual([]);
+  });
+});
+
+// Audit KIMIK31 W-12: Admin replaced its talk-moderation queue with whatever this
+// returned, and an unanswered read returned [].
+describe("fetchPendingTalks when no relay answered", () => {
+  const ctx = {
+    coordinate: "31600:host:conf",
+    config: { talks: "on", relays: ["wss://r.example"] },
+  } as unknown as EventContext;
+  const keys = { einboxNsecHex: "1".repeat(64) } as never;
+
+  it("throws instead of reporting an empty queue", async () => {
+    vi.mocked(fetchEventsRelayOnly).mockImplementationOnce(async (_f, _r, opts) => {
+      opts?.onSettled?.(false);
+      return [];
+    });
+    await expect(fetchPendingTalks(ctx, keys)).rejects.toThrow(/No relay answered/);
+  });
+
+  it("an answered empty read is still an empty queue", async () => {
+    vi.mocked(fetchEventsRelayOnly).mockImplementationOnce(async (_f, _r, opts) => {
+      opts?.onSettled?.(true);
+      return [];
+    });
+    await expect(fetchPendingTalks(ctx, keys)).resolves.toEqual([]);
   });
 });

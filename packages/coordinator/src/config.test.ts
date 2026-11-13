@@ -248,6 +248,11 @@ describe("SEC-7 spend exposure at startup", () => {
     // hitting this at 3am needs the knob, not a lecture.
     expect(msg).toMatch(/allowed_eid_pubkeys/);
     expect(msg).toMatch(/announce/);
+    // The budget counts job runs, and a run can bill several requests (audit
+    // KIMIK31 R-6): calling it "provider calls" understated the exposure.
+    expect(msg).not.toMatch(/provider calls/);
+    expect(msg).toMatch(/paid job runs/);
+    expect(msg).toMatch(/several provider requests/);
   });
 
   it("clears once ANY of the three conditions no longer holds", () => {

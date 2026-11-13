@@ -15,9 +15,16 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { KIND_EVENT_THEME, makeCoordinate } from "@nostrautica/protocol";
 
-const { fetchEvents } = vi.hoisted(() => ({ fetchEvents: vi.fn() }));
+const { fetchEvents, relayAnswers } = vi.hoisted(() => ({
+  fetchEvents: vi.fn(),
+  relayAnswers: { value: true },
+}));
 vi.mock("$lib/nostr/ndk.js", () => ({
   fetchEvents,
+  fetchEventsAnswered: async (...args: unknown[]) => ({
+    events: await (fetchEvents as (...a: unknown[]) => Promise<unknown[]>)(...args),
+    answered: relayAnswers.value,
+  }),
   fetchEventsRelayOnly: vi.fn(),
   publishSigned: vi.fn(),
   isAcceptedRelayUrl: (value: string) => value.startsWith("wss://"),
@@ -29,7 +36,8 @@ vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
   onlyVerified: <T,>(events: T[]) => events,
 }));
 
-import { fetchEventTheme } from "./theme.js";
+import { fetchEventTheme, cachedEventTheme } from "./theme.js";
+import { readForEditing } from "./editor-load.js";
 import type { EventContext } from "./event-context.js";
 import { __resetPersistForTests } from "$lib/cache/persist.js";
 
@@ -62,6 +70,7 @@ describe("fetchEventTheme author pinning", () => {
   beforeEach(() => {
     __resetPersistForTests();
     fetchEvents.mockReset();
+    relayAnswers.value = true;
   });
 
   it("returns the CSS E_id published", async () => {
@@ -118,5 +127,52 @@ describe("fetchEventTheme author pinning", () => {
     __resetPersistForTests();
     fetchEvents.mockResolvedValue([low, high]);
     expect(await fetchEventTheme(ctx)).toBe("body{color:low}");
+  });
+});
+
+/**
+ * Audit KIMIK31 W-1: the theme editor publishes the whole stylesheet back. A read
+ * nobody answered used to come back as `undefined`, overwrote the cached CSS with
+ * "", and seeded the editor with an empty theme that one press of Publish turned
+ * into a deleted theme for every attendee.
+ */
+describe("fetchEventTheme when no relay answered", () => {
+  beforeEach(() => {
+    __resetPersistForTests();
+    fetchEvents.mockReset();
+    relayAnswers.value = true;
+  });
+
+  it("throws instead of reporting 'no theme', and keeps the cached CSS", async () => {
+    fetchEvents.mockResolvedValue([themeEvent(EID, "body{color:teal}", 1000)]);
+    await fetchEventTheme(ctx);
+    expect(cachedEventTheme(COORD)).toBe("body{color:teal}");
+
+    relayAnswers.value = false;
+    fetchEvents.mockResolvedValue([]);
+    await expect(fetchEventTheme(ctx)).rejects.toThrow(/No relay answered/);
+    expect(cachedEventTheme(COORD)).toBe("body{color:teal}");
+  });
+
+  it("gives the editor the cached CSS and a non-definitive read, never an empty theme", async () => {
+    fetchEvents.mockResolvedValue([themeEvent(EID, "body{color:teal}", 1000)]);
+    await fetchEventTheme(ctx);
+    relayAnswers.value = false;
+    fetchEvents.mockResolvedValue([]);
+    const read = await readForEditing(
+      () => fetchEventTheme(ctx),
+      () => cachedEventTheme(COORD),
+    );
+    expect(read.definitive).toBe(false);
+    expect(read.value).toBe("body{color:teal}");
+  });
+
+  it("still treats an ANSWERED empty read as a definitive 'no theme'", async () => {
+    fetchEvents.mockResolvedValue([]);
+    const read = await readForEditing(
+      () => fetchEventTheme(ctx),
+      () => cachedEventTheme(COORD),
+    );
+    expect(read).toEqual({ definitive: true, value: undefined });
   });
 });

@@ -111,6 +111,27 @@ class ChatPolicyTest {
         assertEquals(true, (decide(emptyList(), RosterSays.LISTED) as Decision.Attest).rotate)
     }
 
+    /** NIP §10.2 intent (0.18): only a removal whose re-add never came is a rejoin. */
+    @Test fun onlyAnEvictionPastTheGraceSendsRejoin() {
+        val enrol = ChatAttest.Intent.ENROL
+        val rejoin = ChatAttest.Intent.REJOIN
+        fun intent(d: Decision) = (d as Decision.Attest).intent
+        // Removed, the roster still lists us, and no re-add arrived: our leaf is gone.
+        assertEquals(rejoin, intent(decide(listOf(g(self = false)), RosterSays.LISTED, evictedFor = ChatPolicy.EVICTED_GRACE_MS)))
+        // First enrolment: the roster does not list this device yet.
+        assertEquals(enrol, intent(decide(emptyList(), RosterSays.NOT_LISTED)))
+        // Removed AND dropped from the roster (a revoke): the coordinator holds no leaf to replace.
+        assertEquals(enrol, intent(decide(listOf(g(self = false)), RosterSays.NOT_LISTED, evictedFor = 1_000L)))
+        // Listed, holding nothing of the room (a lost Welcome, never added from our side).
+        assertEquals(enrol, intent(decide(emptyList(), RosterSays.LISTED)))
+        // A group someone else sealed.
+        assertEquals(enrol, intent(decide(listOf(g(nostrId = "b2".repeat(32), welcomer = "f".repeat(64))), RosterSays.LISTED)))
+        // A fixable refusal's one retry.
+        assertEquals(enrol, intent(decide(listOf(g(members = null)), RosterSays.UNKNOWN, refusal = true)))
+        // An enrolment is the default, so no other path can turn into a rejoin by omission.
+        assertEquals(enrol, Decision.Attest(rotate = true, "x").intent)
+    }
+
     @Test fun aFixableRefusalAttestsOnceMore() {
         assertTrue(decide(listOf(g(members = null)), RosterSays.UNKNOWN, refusal = true) is Decision.Attest)
     }

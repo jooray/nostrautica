@@ -1868,3 +1868,38 @@ describe("R-01 — member revocation tombstones", () => {
     }
   });
 });
+
+describe("marmotKvKeysWithPrefix reads one group's rows only (audit KIMIK31 R-7)", () => {
+  it("returns exactly the prefixed keys, newest first, without materializing the rest", () => {
+    const store = new Store(":memory:", generateSecretKey());
+    const ns = "ingest-state";
+    const prefix = "ab12/ingest/wrapper/v1/";
+    for (let g = 0; g < 20; g++) {
+      for (let i = 0; i < 20; i++) store.marmotKvSet(ns, `${g.toString(16).padStart(4, "f")}/ingest/wrapper/v1/${i}`, "x");
+    }
+    store.marmotKvSet(ns, `${prefix}old`, "x");
+    // Neighbours just outside the range on either side, and another namespace.
+    store.marmotKvSet(ns, "ab12/ingest/wrapper/v1", "x");
+    store.marmotKvSet(ns, "ab12/ingest/wrapper/v10", "x");
+    store.marmotKvSet(ns, "ab12/ingest/wrapper/v1.", "x");
+    store.marmotKvSet("other", `${prefix}elsewhere`, "x");
+    store.marmotKvSet(ns, `${prefix}new`, "x");
+
+    const db = (store as any).db;
+    const prepare = db.prepare.bind(db);
+    let materialized = 0;
+    db.prepare = (sql: string) => {
+      const st = prepare(sql);
+      const all = st.all.bind(st);
+      st.all = (...args: unknown[]) => {
+        const rows = all(...args);
+        materialized += rows.length;
+        return rows;
+      };
+      return st;
+    };
+
+    expect(store.marmotKvKeysWithPrefix(ns, prefix).map((r) => r.k)).toEqual([`${prefix}new`, `${prefix}old`]);
+    expect(materialized).toBe(2); // not the 400-odd rows of every other group
+  });
+});

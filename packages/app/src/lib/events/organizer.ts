@@ -62,6 +62,7 @@ import {
   KIND_INVITE_LIST,
   KIND_APP_DATA,
   KIND_COORDINATOR_GRANT,
+  KIND_COORDINATOR_ANNOUNCE,
   KIND_ADMIN_COMMAND,
   KIND_ORGANIZER_GRANT,
   EVENT_INBOX_RUMOR_KINDS,
@@ -97,6 +98,7 @@ import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { loadEventKeys, currentEck, saveEventKeys, activeKeystoreOwner, adoptConfigInbox } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishOrQueue, toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
@@ -255,13 +257,21 @@ async function readInboxWraps(
   cursor: number | undefined,
 ): Promise<{ wraps: GiftWrap[]; complete: boolean }> {
   const now = Math.floor(Date.now() / 1000);
+  // Nothing back from a relay that never answered is not "no requests" (audit
+  // KIMIK31 W-12): Admin rendered it as an empty queue on a cold open, and the
+  // scan advanced its cursor past requests it never saw. Throw instead; the
+  // cursor and the cached queue stay as they were.
+  let answered = true;
+  const onSettled = (a: boolean) => (answered = a);
   if (cursor !== undefined) {
     const since = Math.min(giftwrapSince(now), cursor - GIFTWRAP_MAX_BACKDATE_SEC - 24 * 60 * 60);
     // Relay-only: join requests must not be lost to the cache/EOSE race (see ndk.ts).
     const wraps = (await fetchEventsRelayOnly(
       { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, since },
       ctx.config.relays,
+      { onSettled },
     )) as unknown as GiftWrap[];
+    if (wraps.length === 0 && !answered) throw new RelaysUnansweredError();
     return { wraps, complete: true };
   }
   const seen = new Set<string>();
@@ -270,7 +280,8 @@ async function readInboxWraps(
   for (let page = 0; page < PENDING_MAX_PAGES; page++) {
     const filter: Record<string, unknown> = { kinds: [KIND_GIFT_WRAP], "#p": inboxPubkeys, limit: PENDING_PAGE_SIZE };
     if (until !== undefined) filter.until = until;
-    const batch = (await fetchEventsRelayOnly(filter, ctx.config.relays)) as unknown as GiftWrap[];
+    const batch = (await fetchEventsRelayOnly(filter, ctx.config.relays, { onSettled })) as unknown as GiftWrap[];
+    if (page === 0 && batch.length === 0 && !answered) throw new RelaysUnansweredError();
     let added = 0;
     let oldest: number | undefined;
     for (const w of batch) {
@@ -1268,6 +1279,44 @@ export async function fetchCoordinatorLastSeen(
   return seen;
 }
 
+/** What an explicit "Test connection" found (audit KIMIK31 W-11). */
+export type CoordinatorProbe = "found" | "not-found" | "unanswered";
+
+/**
+ * Ask the relays, now, whether the attached coordinator has published anything
+ * (its announcement, or any record for this event). Relay-only: the old test
+ * read the hour-cached coordinator list and the cache-inclusive last-seen, kept
+ * the previous announcement on a failed fetch, and so reported "reachable"
+ * with every relay down, sending an organizer debugging a live event the wrong
+ * way. "unanswered" is its own result: no relay answered, so nothing was tested.
+ */
+export async function probeCoordinator(ctx: EventContext): Promise<CoordinatorProbe> {
+  const coordinator = ctx.config.coordinator;
+  if (!coordinator) return "not-found";
+  let answered = false;
+  const onSettled = (a: boolean) => {
+    if (a) answered = true;
+  };
+  const [records, announce] = await Promise.all([
+    fetchEventsRelayOnly(
+      {
+        kinds: [KIND_DIRECTORY_ENTRY, KIND_ROSTER, KIND_MATCH_LIST, KIND_MATCH_MATRIX],
+        authors: [coordinator],
+        "#a": [ctx.coordinate],
+        limit: 1,
+      },
+      ctx.config.relays,
+      { onSettled },
+    ).catch(() => []),
+    // Announcements live on the discovery relays, as in fetchCoordinators.
+    fetchEventsRelayOnly({ kinds: [KIND_COORDINATOR_ANNOUNCE], authors: [coordinator], limit: 1 }, undefined, {
+      onSettled,
+    }).catch(() => []),
+  ]);
+  if ([...records, ...announce].some((e) => e.pubkey === coordinator)) return "found";
+  return answered ? "not-found" : "unanswered";
+}
+
 export interface GeneratedInvite {
   label: string;
   nsec: string; // the invite code (an nsec, spec §6.5)
@@ -2194,7 +2243,7 @@ export async function attachCoordinator(
   ctx: EventContext,
   coordinatorPubkey: string,
   blindingKey?: Uint8Array,
-): Promise<void> {
+): Promise<PublishOutcome> {
   // Captured once (audit DS41-001): the write-backs below happen after several
   // relay round trips, and must land under the identity that read these keys.
   const owner = activeKeystoreOwner() ?? undefined;
@@ -2288,7 +2337,7 @@ export async function attachCoordinator(
   // Monotonic config republish (audit P3): an attach in the same second as the
   // prior config must win the §3.1 tie-break, or the grant can be published while
   // the coordinator-bearing config never becomes current.
-  await Promise.all([
+  const [config, grantPublished] = await Promise.all([
     publishMonotonic({
       kind: built.kind,
       author: ctx.config.eidPubkey,
@@ -2314,6 +2363,10 @@ export async function attachCoordinator(
       console.warn("[organizer] attach recorded gen", gen, "but its backup did not publish:", e);
     });
   }
+  // Whether the coordinator is actually attached yet (audit KIMIK31 W-8): both
+  // the config and the grant must have reached a relay. Either one only queued
+  // in the outbox means attendees and the coordinator have not heard of it.
+  return toOutcome(config.published && grantPublished);
 }
 
 /** The grant's `revoked` set: the recorded revocations minus the current roster (R-04). */
@@ -2467,8 +2520,8 @@ export async function detachCoordinator(
   organizer: AppSigner,
   ctx: EventContext,
   blindingKey?: Uint8Array,
-): Promise<void> {
-  if (!ctx.config.coordinator) return;
+): Promise<PublishOutcome> {
+  if (!ctx.config.coordinator) return "published"; // nothing to detach
   const owner = activeKeystoreOwner() ?? undefined; // see attachCoordinator (DS41-001)
   const keys = await loadEventKeys(ctx.coordinate, owner);
   if (!keys || keys.role !== "organizer" || !keys.eidNsecHex) {
@@ -2481,7 +2534,7 @@ export async function detachCoordinator(
   // one, that is the one actually holding custody.
   const current = await freshConfig(ctx);
   const previous = current.coordinator;
-  if (!previous) return;
+  if (!previous) return "published"; // another device already detached it
   assertCurrentCustody(current, keys);
   ctx = { ...ctx, config: current };
 
@@ -2492,7 +2545,7 @@ export async function detachCoordinator(
     kind: KIND_ADMIN_COMMAND,
     content: { v: 2, a: ctx.coordinate, cmd: "detach", args: {}, expires },
   });
-  await publishAccountGiftWrap(detachWrap as any, previous, ctx.config.relays);
+  const commandPublished = await publishAccountGiftWrap(detachWrap as any, previous, ctx.config.relays);
 
   // 2. Rotate the ECK + E_inbox (NIP §3.7): a departed coordinator may retain the
   //    keys it held, so both are rotated (re-encrypt directory/roster, re-grant to
@@ -2513,7 +2566,7 @@ export async function detachCoordinator(
   // Monotonic republish (audit P3): a detach in the same second as the previous
   // config must win the §3.1 tie-break, or the coordinator-bearing config can
   // stay authoritative and the detach silently doesn't take.
-  await publishMonotonic({
+  const config = await publishMonotonic({
     kind: built.kind,
     author: ctx.config.eidPubkey,
     identifier: ctx.config.d,
@@ -2524,4 +2577,7 @@ export async function detachCoordinator(
         eidSk,
       ),
   });
+  // Detached only once the coordinator-less config is on a relay (W-8); a queued
+  // detach command means the coordinator has not been told to stop either.
+  return toOutcome(config.published && commandPublished);
 }

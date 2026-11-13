@@ -63,6 +63,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import today.cypherpunk.nostrautica.domain.ProfileMeta
+import today.cypherpunk.nostrautica.domain.chat.ChatEventTooLarge
 import today.cypherpunk.nostrautica.domain.chat.ChatMembers
 import today.cypherpunk.nostrautica.domain.chat.ChatMessage
 import today.cypherpunk.nostrautica.domain.chat.ChatSession
@@ -277,6 +278,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
             try { fn() }
             catch (e: CancellationException) { throw e }
             catch (e: ChatSession.Unroutable) { actionError = s.t("chat.android.sendUnroutable") }
+            catch (e: ChatEventTooLarge) { actionError = s.t("chat.android.tooLarge") }
             catch (e: Exception) { actionError = s.t("chat.actionFailed") }
         }
     }
@@ -307,6 +309,8 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                 throw x
             } catch (x: ChatSession.Unroutable) {
                 actionError = s.t("chat.android.sendUnroutable")
+            } catch (x: ChatEventTooLarge) {
+                actionError = s.t("chat.android.tooLarge")
             } catch (x: Exception) {
                 actionError = s.t("chat.actionFailed")
             } finally { sending = false }
@@ -344,6 +348,8 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                 rejoinNote = null
             } catch (e: ChatSession.Unroutable) {
                 sendUnroutable = true; sendError = s.t("chat.android.sendUnroutable")
+            } catch (e: ChatEventTooLarge) {
+                sendError = s.t("chat.android.tooLarge")
             } catch (e: Exception) {
                 sendError = s.t("chat.sendFailedTransport")
             } finally { sending = false }

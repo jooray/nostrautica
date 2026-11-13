@@ -71,6 +71,17 @@ describe("reloadToLatestBuild (R-84)", () => {
     expect(reload).toHaveBeenCalledTimes(1);
   });
 
+  // Audit KIMIK31 W-15: connectivity was captured when the reload was requested.
+  it("a reload held for unsaved work does not purge if the network dropped meanwhile", () => {
+    let deferred: (() => void) | undefined;
+    h.requestRefresh.mockImplementationOnce((apply: () => void) => void (deferred = apply));
+    reloadToLatestBuild(); // online now
+    vi.stubGlobal("navigator", { onLine: false }); // …offline by the time work is saved
+    deferred!();
+    expect(h.purge).not.toHaveBeenCalled();
+    expect(reload).toHaveBeenCalledTimes(1);
+  });
+
   it("the protocol 'please update' button does the same, not the inert updateSW(true)", () => {
     const updateSW = vi.fn();
     vi.stubGlobal("window", { location: { reload }, __nostrauticaUpdateSW: updateSW });

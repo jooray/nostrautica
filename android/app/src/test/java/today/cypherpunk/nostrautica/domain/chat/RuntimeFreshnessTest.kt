@@ -36,6 +36,22 @@ class RuntimeFreshnessTest {
         assertTrue(f.shouldRestart(1))
     }
 
+    @Test fun aQuarantineUntilReopenAsksForOneRestartPerGroup() {
+        val f = RuntimeFreshness()
+        f.quarantined("AB".repeat(32))
+        assertTrue(f.shouldRestart(1))
+        assertEquals("a group is quarantined until reopen", f.reason())
+        f.restarted()
+        assertFalse(f.shouldRestart(1))
+        // Quarantined again by the reopen (and reported on every groups read): a
+        // second restart would not help, and a loop would tear down the screen.
+        f.quarantined("ab".repeat(32))
+        assertFalse(f.shouldRestart(1))
+        // Another group still gets its one reopen.
+        f.quarantined("cd".repeat(32))
+        assertTrue(f.shouldRestart(1))
+    }
+
     @Test fun aRejoinAfterARestartAsksAgain() {
         val f = RuntimeFreshness()
         f.rejoined("ab".repeat(32))

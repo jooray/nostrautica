@@ -241,7 +241,14 @@ async function runDaemon(): Promise<void> {
     // discovered for Marmot chat, same as key-package NIP-65 discovery (audit R20).
     relayPolicy,
   });
-  const { mls: chatMls } = createMarmotClientMls({ store, coordSk, network: chatNetwork });
+  const { mls: chatMls } = createMarmotClientMls({
+    store,
+    coordSk,
+    network: chatNetwork,
+    // Before a group blocked by an unrestorable retained commit is unblocked, its
+    // relays must answer that they do not have that commit (audit KIMIK31 C-2).
+    lookupEvent: (id, relays) => client.lookupEvent(id, relays),
+  });
   // Before anything loads a group: drop rooms this library generation cannot run
   // (pre-0x8009 groups after the marmot-ts upgrade). Their events get a fresh
   // group from the normal ensureChat path. A no-op once every group is current.

@@ -19,11 +19,13 @@ import { verifyEvent } from "nostr-tools/pure";
 import type { Store, MarmotChatLinkRow } from "../store/db.js";
 import { keyPackageProfile, causeChain, type ChatMls, type IngestReport } from "./mls.js";
 import { normalizeAvatarUrl } from "./avatar.js";
+import { MARMOT_NAMESPACES } from "./stores.js";
 import {
   verifyChatDeviceProof,
   rumorEffectiveCreatedAt,
   MAX_CHAT_KEYS_PER_ACCOUNT,
   type ChatKeyAttestationContent,
+  type ChatAttestationIntent,
   type CoordinatorStatusContent,
 } from "@nostrautica/protocol";
 import {
@@ -48,7 +50,14 @@ export interface MarmotAdminDeps {
    * constructible in tests without a queue; when absent, a failed attestation-path
    * sync is only logged, which is the behaviour this exists to replace.
    */
-  enqueueSync?(coordinate: string, accountPubkey: string, reenrolling?: string, reenrollAt?: number): void;
+  enqueueSync?(
+    coordinate: string,
+    accountPubkey: string,
+    reenrolling?: string,
+    reenrollAt?: number,
+    /** "rejoin" when the attestation said so (NIP §10.2); absent = legacy inference. */
+    reenrolIntent?: "rejoin",
+  ): void;
   /**
    * Run `fn` under the coordinator's per-member subject lock — the same
    * `member:<pubkey>` mutex the live approve / revoke / attestation paths already
@@ -67,6 +76,13 @@ export interface MarmotAdminDeps {
    * absent, `fn` simply runs, which is the previous behaviour.
    */
   withMemberLock?(coordinate: string, accountPubkey: string, fn: () => Promise<void>): Promise<void>;
+  /**
+   * Run one chat commit under the coordinator's daemon-wide chat commit queue
+   * (`withChatCommitLock`, audit K-7 point 4), so Adds from different events do
+   * not publish at once (audit KIMIK31 C-6). Not re-entrant: nothing that already
+   * holds it may call into the add path. Optional; without it `fn` simply runs.
+   */
+  withCommitLock?<T>(fn: () => Promise<T>): Promise<T>;
   /**
    * The event's published roster (31604) is now stale — republish it.
    *
@@ -244,12 +260,14 @@ export class MarmotAdmin {
     accountPubkey: string,
     reenrolling?: string,
     reenrollAt?: number,
+    reenrolIntent?: "rejoin",
   ) => void;
   private readonly withMemberLock?: (
     coordinate: string,
     accountPubkey: string,
     fn: () => Promise<void>,
   ) => Promise<void>;
+  private readonly withCommitLock?: <T>(fn: () => Promise<T>) => Promise<T>;
   private readonly onRosterChanged?: (coordinate: string) => void;
   private readonly notifyAttendee?: (
     coordinate: string,
@@ -266,6 +284,7 @@ export class MarmotAdmin {
     this.fetchKeyPackages = deps.fetchKeyPackages;
     this.enqueueSync = deps.enqueueSync;
     this.withMemberLock = deps.withMemberLock;
+    this.withCommitLock = deps.withCommitLock?.bind(deps);
     this.onRosterChanged = deps.onRosterChanged;
     this.notifyAttendee = deps.notifyAttendee;
     this.log = deps.log ?? (() => {});
@@ -680,6 +699,12 @@ export class MarmotAdmin {
        *  there is no re-enrolment warrant (see {@link REENROL_WARRANT_MS}). */
       reenrollAt?: number;
       /**
+       * The attestation behind `reenrolling` said `intent:"rejoin"` (NIP §10.2):
+       * replace the held leaf without the activity guard. Absent = a pre-0.18
+       * client, whose add is still inferred. Meaningless without a live warrant.
+       */
+      reenrolIntent?: "rejoin";
+      /**
        * Key packages already fetched for a KNOWN set of authors ({@link prefetched}),
        * so a walk over many members costs one relay read instead of one per member.
        * Used only when this member's authorized identities are a subset of the set
@@ -768,7 +793,13 @@ export class MarmotAdmin {
       // See tryAddKeyPackage.
       const ok = await this.tryAddKeyPackage(coordinate, group.mls_group_id, kp, {
         reconcile: true,
-        ...(kp === warrantKp ? { reenrolling, reenrollAt: opts?.reenrollAt } : {}),
+        ...(kp === warrantKp
+          ? {
+              reenrolling,
+              reenrollAt: opts?.reenrollAt,
+              ...(opts?.reenrolIntent ? { reenrolIntent: opts.reenrolIntent } : {}),
+            }
+          : {}),
       });
       // Release the hold only on "nothing further to do for this member" — a
       // transient Add/Welcome failure keeps the copy so the durable retry a moment
@@ -857,7 +888,7 @@ export class MarmotAdmin {
     coordinate: string,
     mlsGroupId: string,
     kp: AnyEvent,
-    opts?: { reconcile?: boolean; reenrolling?: string; reenrollAt?: number },
+    opts?: { reconcile?: boolean; reenrolling?: string; reenrollAt?: number; reenrolIntent?: "rejoin" },
   ): Promise<boolean> {
     if (this.isFreshlySpentConfirmKp(coordinate, kp)) {
       // NOT "nothing to do": the linked key IS authorized, we are just waiting for
@@ -871,6 +902,20 @@ export class MarmotAdmin {
     const consumed = this.store.isKpConsumed(coordinate, kp.id);
     if (consumed && !opts?.reconcile) return true;
     const member = await this.mls.isMember(mlsGroupId, kp.pubkey);
+    // Removed on purpose at the MLS layer (a co-admin's Remove, or its own
+    // self_remove): the roster still says approved and active, so every sync path
+    // — the restart backfill, a durable retry, the watcher — would invite it
+    // straight back. Only a fresh attestation from the device lifts this (see
+    // {@link liftDeliberateRemoval}). A device that holds a leaf again was re-added
+    // by someone else; the record is then moot.
+    const removal = this.deliberateRemovalOf(mlsGroupId, kp.pubkey);
+    if (removal) {
+      if (!member) {
+        this.noteRemovalSkip(coordinate, mlsGroupId, kp.pubkey, removal);
+        return true; // a deliberate keep-out, not a failure: nothing to retry
+      }
+      this.forgetDeliberateRemoval(mlsGroupId, kp.pubkey);
+    }
     // Passive watcher, and they're already in: nothing to do — and crucially, do
     // NOT record this key package as consumed. A client re-enrolling publishes its
     // rotated key package a beat BEFORE the attestation that explains it, so the
@@ -919,7 +964,7 @@ export class MarmotAdmin {
     // attestation for THIS event speaks to this device's membership here.
     if (member && opts?.reenrolling !== kp.pubkey) {
       this.log(
-        `[chat] keeping ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} but no re-enrolment attestation for this event (likely rotated for another event)`,
+        `[chat] keeping ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} but no re-enrolment attestation for this event (likely rotated for another event, or an enrol)`,
       );
       return true; // a deliberate keep, not a failure
     }
@@ -990,13 +1035,30 @@ export class MarmotAdmin {
       );
       return false;
     }
-    if (member) {
+    // An explicit `intent:"rejoin"` (NIP §10.2) skips the activity guard: the
+    // device has said its group state is gone, and a device that posted and then
+    // lost its state would otherwise be held off by its own activity. The guard
+    // exists for clients that cannot say which they mean (no intent).
+    if (member && opts?.reenrolIntent !== "rejoin") {
       // Evidence before eviction (audit K-1): the coordinator decrypts every 445,
       // so it knows whether this leaf is still in use. If it is, the device is
       // fine and this attestation is a refresh, whatever the client believed.
-      const seen = this.mls.lastActivity
-        ? await this.mls.lastActivity(mlsGroupId, kp.pubkey).catch(() => undefined)
-        : undefined;
+      //
+      // An activity read that FAILS is not "no activity" (audit C-1). It used to be
+      // caught to undefined, which skipped this guard and went straight on to
+      // Remove + Add, evicting a device that may well be healthy on the strength of
+      // evidence nobody could read. Defer instead: false hands the attestation to
+      // the durable retry with its warrant, which either reads the evidence next
+      // time or expires (REENROL_WARRANT_MS) and leaves the leaf in place.
+      let seen: Awaited<ReturnType<NonNullable<ChatMls["lastActivity"]>>>;
+      try {
+        seen = this.mls.lastActivity ? await this.mls.lastActivity(mlsGroupId, kp.pubkey) : undefined;
+      } catch (e) {
+        this.log(
+          `[chat] keeping ${kp.pubkey.slice(0, 8)} in ${coordinate} for now: could not read its leaf activity (${causeChain(e)}) — not evicting on unknown evidence, retrying later`,
+        );
+        return false;
+      }
       if (seen && seen.ageMs <= REENROL_ACTIVITY_WINDOW_MS) {
         this.log(
           `[chat] keeping ${kp.pubkey.slice(0, 8)} in ${coordinate}: its leaf is active (last seen ${Math.round(seen.ageMs / 1000)}s ago, in epoch ${seen.epoch} of ${seen.currentEpoch}) — attestation treated as a refresh`,
@@ -1025,59 +1087,78 @@ export class MarmotAdmin {
       this.log(
         `[chat] re-enrolling ${kp.pubkey.slice(0, 8)} in ${coordinate}: fresh 30443 ${kp.id.slice(0, 8)} from a device we still hold a leaf for — ${this.mls.reenrol ? "replacing its leaf in one commit" : "removing it first"}`,
       );
-      if (!this.mls.reenrol) await this.mls.removePubkeys(mlsGroupId, [kp.pubkey]);
     }
-    // Re-check authorization at the last synchronous point before the Add (audit
-    // DS41-048). Everything above awaited — the relay fetch in syncMember, the
-    // membership and eligibility reads — and a revoke or withdrawal may have landed
-    // in between: it sets the binding/attendee status FIRST and only then queues its
-    // MLS Remove. Checking here means either we see that status and stop, or the
-    // revoke's Remove is queued after our Add on the group's commit chain
-    // (MarmotClientMls.serialize is FIFO) and removes what we just added. Without it
-    // the revoked device was invited back and nothing was left to remove it. The
-    // passive watcher needs this too: it takes no member lock at all.
-    if (!this.isAuthorizedNow(coordinate, kp.pubkey)) {
-      this.log(
-        `[chat] not adding ${kp.pubkey.slice(0, 8)} to ${coordinate}: no longer an approved attendee's active device`,
-      );
-      return true; // nothing to retry — the member or device is gone
-    }
-    try {
-      if (member && this.mls.reenrol) {
-        await this.mls.reenrol(mlsGroupId, kp); // Remove + Add in one commit, + Welcome
-      } else {
-        await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
-      }
-      this.store.markKpConsumed(coordinate, kp.id);
-      this.noteInvited(coordinate, kp.pubkey);
-      this.log(`[chat] added ${kp.pubkey.slice(0, 8)} to ${coordinate} from 30443 ${kp.id.slice(0, 8)}`);
-      // An organizer device can only be promoted once it holds a leaf.
-      if (this.desiredAdminPubkeys(coordinate).includes(kp.pubkey)) {
-        await this.syncAdmins(coordinate).catch((e) =>
-          this.log(`[chat] promoting ${kp.pubkey.slice(0, 8)} in ${coordinate} failed: ${String(e)}`),
+    // Every commit below goes through the daemon-wide chat commit queue (audit
+    // KIMIK31 C-6), like the setup commits. The startup roster backfill runs here
+    // for up to RESTORE_CONCURRENCY events at once, and their Adds went out
+    // together into relays that were already refusing REQs, the uncertain-publish
+    // burst K-7 point 4 queued the setup commits to avoid. Only the commits wait:
+    // the key-package reads above stay off the queue.
+    return this.underCommitLock(async () => {
+      if (member && !this.mls.reenrol) await this.mls.removePubkeys(mlsGroupId, [kp.pubkey]);
+      // Re-check authorization at the last synchronous point before the Add (audit
+      // DS41-048). Everything above awaited — the relay fetch in syncMember, the
+      // membership and eligibility reads — and a revoke or withdrawal may have landed
+      // in between: it sets the binding/attendee status FIRST and only then queues its
+      // MLS Remove. Checking here means either we see that status and stop, or the
+      // revoke's Remove is queued after our Add on the group's commit chain
+      // (MarmotClientMls.serialize is FIFO) and removes what we just added. Without it
+      // the revoked device was invited back and nothing was left to remove it. The
+      // passive watcher needs this too: it takes no member lock at all.
+      if (!this.isAuthorizedNow(coordinate, kp.pubkey)) {
+        this.log(
+          `[chat] not adding ${kp.pubkey.slice(0, 8)} to ${coordinate}: no longer an approved attendee's active device`,
         );
+        return true; // nothing to retry — the member or device is gone
       }
-      return true;
-    } catch (e) {
-      // A single malformed/incompatible key package (e.g. a proof version our
-      // vendored marmot-ts can't decode yet, from a newer peer client) must
-      // never take down the whole coordinator process — every OTHER event's
-      // chat and every OTHER attendee's add depends on this loop finishing
-      // (prod incident 2026-07-20: an uncaught throw here during startup
-      // backfill crashed the process). Left unconsumed, not ineligible, so
-      // it's retried (and can succeed) once the library gains support.
-      //
-      // But "don't crash" is not "don't retry" (audit B-5). Returning normally
-      // here told every caller the member was synced: the attestation path only
-      // queued its durable `chat_sync_member` on a THROW, and the approval path's
-      // job completed successfully, so one transient relay or marmot failure left
-      // the member staring at "Setting up…" with the rumor marked seen and nothing
-      // anywhere re-driving it. The boolean carries the failure out instead.
-      this.log(
-        `[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} invite FAILED: ${e instanceof Error ? e.message : e}`,
-      );
-      return false;
-    }
+      // Same for a removal ingested while this awaited (the commit lock included).
+      const removedSince = this.deliberateRemovalOf(mlsGroupId, kp.pubkey);
+      if (removedSince) {
+        this.noteRemovalSkip(coordinate, mlsGroupId, kp.pubkey, removedSince);
+        return true;
+      }
+      try {
+        if (member && this.mls.reenrol) {
+          await this.mls.reenrol(mlsGroupId, kp); // Remove + Add in one commit, + Welcome
+        } else {
+          await this.mls.invite(mlsGroupId, kp); // Add commit + Welcome (marmot delivers)
+        }
+        this.store.markKpConsumed(coordinate, kp.id);
+        this.noteInvited(mlsGroupId, kp.pubkey);
+        this.log(`[chat] added ${kp.pubkey.slice(0, 8)} to ${coordinate} from 30443 ${kp.id.slice(0, 8)}`);
+        // An organizer device can only be promoted once it holds a leaf.
+        if (this.desiredAdminPubkeys(coordinate).includes(kp.pubkey)) {
+          await this.syncAdmins(coordinate).catch((e) =>
+            this.log(`[chat] promoting ${kp.pubkey.slice(0, 8)} in ${coordinate} failed: ${String(e)}`),
+          );
+        }
+        return true;
+      } catch (e) {
+        // A single malformed/incompatible key package (e.g. a proof version our
+        // vendored marmot-ts can't decode yet, from a newer peer client) must
+        // never take down the whole coordinator process — every OTHER event's
+        // chat and every OTHER attendee's add depends on this loop finishing
+        // (prod incident 2026-07-20: an uncaught throw here during startup
+        // backfill crashed the process). Left unconsumed, not ineligible, so
+        // it's retried (and can succeed) once the library gains support.
+        //
+        // But "don't crash" is not "don't retry" (audit B-5). Returning normally
+        // here told every caller the member was synced: the attestation path only
+        // queued its durable `chat_sync_member` on a THROW, and the approval path's
+        // job completed successfully, so one transient relay or marmot failure left
+        // the member staring at "Setting up…" with the rumor marked seen and nothing
+        // anywhere re-driving it. The boolean carries the failure out instead.
+        this.log(
+          `[chat] 30443 ${kp.id.slice(0, 8)} from ${kp.pubkey.slice(0, 8)} invite FAILED: ${e instanceof Error ? e.message : e}`,
+        );
+        return false;
+      }
+    });
+  }
+
+  /** `fn` under {@link MarmotAdminDeps.withCommitLock}, or plainly without one. */
+  private underCommitLock<T>(fn: () => Promise<T>): Promise<T> {
+    return this.withCommitLock ? this.withCommitLock(fn) : fn();
   }
 
   /** Backfill every approved attendee into the group (config toggled on, §4.2).
@@ -1203,8 +1284,8 @@ export class MarmotAdmin {
       return false;
     }
     // External-client link (NIP §10.5): its own possession mechanism, its own path.
-    if (content.op === "link") return this.handleLinkRequest(coordinate, accountPubkey, content);
-    if (content.op === "link_confirm") return this.handleLinkConfirm(coordinate, accountPubkey, content);
+    if (content.op === "link") return this.handleLinkRequest(coordinate, accountPubkey, content, createdAt);
+    if (content.op === "link_confirm") return this.handleLinkConfirm(coordinate, accountPubkey, content, createdAt);
     if (content.op === "add") {
       // Proof of possession (NIP §10.2): the chat DEVICE key must sign the challenge
       // that binds this (coordinate, account, chat pubkey, created_at). The schema
@@ -1258,7 +1339,32 @@ export class MarmotAdmin {
         return false;
       }
       this.recordAttestation(coordinate, "add", content.chat_pubkey, orderAt);
-      this.log(`[chat] bound chat key ${content.chat_pubkey.slice(0, 8)} → ${accountPubkey.slice(0, 8)}`);
+      // The device asked to be in the room, after (or despite) an MLS-only removal.
+      this.liftDeliberateRemoval(coordinate, content.chat_pubkey, orderAt, "a fresh 21607 add");
+      // The explicit intent (NIP §10.2), or "legacy" for a pre-0.18 client whose
+      // add is still inferred (warrant + key-package lead + leaf-activity guard).
+      const intent: ChatAttestationIntent | undefined = content.intent;
+      this.log(
+        `[chat] bound chat key ${content.chat_pubkey.slice(0, 8)} → ${accountPubkey.slice(0, 8)} (intent: ${intent ?? "legacy"})`,
+      );
+      // `enrol` carries no re-enrolment warrant at all, inline or in the durable
+      // retry, so neither can ever drop a leaf we hold for this device. `rejoin`
+      // and a legacy add carry it; only `rejoin` skips the activity guard. The
+      // warrant still expires (REENROL_WARRANT_MS), and with it the intent.
+      const warrant =
+        intent === "enrol"
+          ? undefined
+          : {
+              reenrolling: content.chat_pubkey,
+              reenrollAt: createdAt,
+              ...(intent === "rejoin" ? { reenrolIntent: "rejoin" as const } : {}),
+            };
+      const enqueueRetry = (enqueue: NonNullable<MarmotAdminDeps["enqueueSync"]>) =>
+        warrant
+          ? warrant.reenrolIntent
+            ? enqueue(coordinate, accountPubkey, warrant.reenrolling, warrant.reenrollAt, warrant.reenrolIntent)
+            : enqueue(coordinate, accountPubkey, warrant.reenrolling, warrant.reenrollAt)
+          : enqueue(coordinate, accountPubkey);
       // Republish: this add is what puts the device (and its label) in the roster's
       // `chat_keys`, which is the only thing the device-management UI can read.
       this.rosterChanged(coordinate);
@@ -1273,10 +1379,7 @@ export class MarmotAdmin {
         // until a restart or another manual Rejoin — while the rumor was marked
         // seen, so nothing re-drove it.
         try {
-          const synced = await this.syncMember(coordinate, accountPubkey, {
-            reenrolling: content.chat_pubkey,
-            reenrollAt: createdAt,
-          });
+          const synced = await this.syncMember(coordinate, accountPubkey, warrant);
           // A FALSE return is the same situation as a throw (audit B-5): the device
           // is not in the group and the reason can clear on its own. It used to be
           // invisible here, because `tryAddKeyPackage` catches its own invite
@@ -1286,7 +1389,7 @@ export class MarmotAdmin {
             this.log(
               `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} did not complete — queued for durable retry`,
             );
-            this.enqueueSync(coordinate, accountPubkey, content.chat_pubkey, createdAt);
+            enqueueRetry(this.enqueueSync);
           }
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -1300,8 +1403,8 @@ export class MarmotAdmin {
             // another event") — which is the exact case this attestation exists to
             // repair. The user pressed Rejoin, saw "requested", and was not back in;
             // the inline attempt's transient failure had quietly turned the durable
-            // retry into a no-op.
-            this.enqueueSync(coordinate, accountPubkey, content.chat_pubkey, createdAt);
+            // retry into a no-op. (An `enrol` has no warrant to carry, by design.)
+            enqueueRetry(this.enqueueSync);
           } else {
             this.log(
               `[chat] attestation sync for ${accountPubkey.slice(0, 8)} in ${coordinate} failed with no retry queue: ${msg.slice(0, 160)}`,
@@ -1370,6 +1473,8 @@ export class MarmotAdmin {
     coordinate: string,
     accountPubkey: string,
     content: ChatKeyAttestationContent,
+    /** The rumor's `created_at` (s); absent means "now". */
+    createdAt?: number,
   ): Promise<boolean> {
     const w = content.chat_pubkey;
     const who = `${accountPubkey.slice(0, 8)} → ${w.slice(0, 8)}`;
@@ -1400,6 +1505,7 @@ export class MarmotAdmin {
       // sure it is in the room.
       this.log(`[chat] 21607 link ${who}: already an active chat key of this account — re-syncing`);
       this.notifyLinkProgress(coordinate, accountPubkey);
+      this.liftDeliberateRemoval(coordinate, w, this.linkOrderAt(createdAt), "a fresh 21607 link");
       await this.syncLinkedKey(coordinate, accountPubkey);
       return true;
     }
@@ -1414,7 +1520,7 @@ export class MarmotAdmin {
       // Self-link: the 21607 is sealed BY this key, which is the proof. The account
       // key becomes a chat member only through this explicit, roster-visible,
       // cap-counted, revocable binding — never implicitly (§10.2).
-      return this.bindLinkedKey(coordinate, accountPubkey, w, label);
+      return this.bindLinkedKey(coordinate, accountPubkey, w, label, createdAt);
     }
 
     // ── a different key: confirmation by one-time code ──
@@ -1503,6 +1609,8 @@ export class MarmotAdmin {
     coordinate: string,
     accountPubkey: string,
     content: ChatKeyAttestationContent,
+    /** The rumor's `created_at` (s); absent means "now". */
+    createdAt?: number,
   ): Promise<boolean> {
     const w = content.chat_pubkey;
     const who = `${accountPubkey.slice(0, 8)} → ${w.slice(0, 8)}`;
@@ -1551,7 +1659,13 @@ export class MarmotAdmin {
     }
     // 'linked' keeps confirm_kp_id for the reuse grace (isFreshlySpentConfirmKp).
     this.store.setChatLinkStatus(coordinate, accountPubkey, "linked", this.now());
-    const ok = await this.bindLinkedKey(coordinate, accountPubkey, w, link.label?.trim() || EXTERNAL_CHAT_KEY_LABEL);
+    const ok = await this.bindLinkedKey(
+      coordinate,
+      accountPubkey,
+      w,
+      link.label?.trim() || EXTERNAL_CHAT_KEY_LABEL,
+      createdAt,
+    );
     // Best effort, and AFTER the bind: the user is done with the code either way.
     await this.teardownConfirmGroup(link);
     return ok;
@@ -1563,6 +1677,7 @@ export class MarmotAdmin {
     accountPubkey: string,
     w: string,
     label: string,
+    createdAt?: number,
   ): Promise<boolean> {
     const recorded = this.store.upsertChatKey({
       coordinate,
@@ -1578,6 +1693,7 @@ export class MarmotAdmin {
       return false;
     }
     this.log(`[chat] linked external chat key ${w.slice(0, 8)} → ${accountPubkey.slice(0, 8)} (${label})`);
+    this.liftDeliberateRemoval(coordinate, w, this.linkOrderAt(createdAt), "a confirmed 21607 link");
     this.rosterChanged(coordinate);
     this.notifyLinkProgress(coordinate, accountPubkey);
     await this.syncLinkedKey(coordinate, accountPubkey);
@@ -1748,18 +1864,56 @@ export class MarmotAdmin {
     }
     if (!report) return;
     this.logIngest(coordinate, report);
+    await this.recordDeliberateRemovals(coordinate, group.mls_group_id, report);
     if (report.epochAfter !== report.epochBefore || report.forks.some((f) => f.adopted)) {
       await this.recheckRecentInvites(coordinate, group.mls_group_id, report);
     }
   }
 
-  /** Per coordinate: chat pubkeys this coordinator added recently, and when. */
-  private readonly recentInvites = new Map<string, Map<string, number>>();
+  /**
+   * Chat pubkeys this coordinator added to a group recently, and when (ms).
+   *
+   * Durable, in marmot_kv under the MLS group id (audit KIMIK31 C-4). This was an
+   * in-memory map, so an Add acknowledged just before a restart was forgotten:
+   * when the competing commit that undid it was ingested by the next process,
+   * nothing re-queued the member, and the device sat on "Setting up…" with a
+   * Welcome for a dead branch. Small (one JSON object per group, entries older
+   * than {@link RECENT_INVITE_RECHECK_MS} pruned on every write), and
+   * `purgeGroupState` drops it with the group. A row that will not read is
+   * treated as empty: the repair then does not fire, which is the behaviour it
+   * replaces, never an eviction.
+   */
+  private readRecentInvites(mlsGroupId: string): Map<string, number> {
+    const map = new Map<string, number>();
+    try {
+      const raw = this.store.marmotKvGet(MARMOT_NAMESPACES.recentInvites, mlsGroupId.toLowerCase());
+      if (!raw) return map;
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) if (typeof v === "number") map.set(k, v);
+      }
+    } catch (e) {
+      this.log(`[chat] could not read the recent invites of group ${mlsGroupId.slice(0, 12)}…: ${causeChain(e)}`);
+    }
+    return map;
+  }
 
-  private noteInvited(coordinate: string, chatPubkey: string): void {
-    let map = this.recentInvites.get(coordinate);
-    if (!map) this.recentInvites.set(coordinate, (map = new Map()));
-    map.set(chatPubkey, this.now());
+  private writeRecentInvites(mlsGroupId: string, map: Map<string, number>): void {
+    const key = mlsGroupId.toLowerCase();
+    try {
+      if (map.size === 0) this.store.marmotKvDelete(MARMOT_NAMESPACES.recentInvites, key);
+      else this.store.marmotKvSet(MARMOT_NAMESPACES.recentInvites, key, JSON.stringify(Object.fromEntries(map)));
+    } catch (e) {
+      this.log(`[chat] could not persist the recent invites of group ${mlsGroupId.slice(0, 12)}…: ${causeChain(e)}`);
+    }
+  }
+
+  private noteInvited(mlsGroupId: string, chatPubkey: string): void {
+    const now = this.now();
+    const map = this.readRecentInvites(mlsGroupId);
+    for (const [k, at] of map) if (now - at > RECENT_INVITE_RECHECK_MS) map.delete(k);
+    map.set(chatPubkey, now);
+    this.writeRecentInvites(mlsGroupId, map);
   }
 
   /**
@@ -1771,26 +1925,253 @@ export class MarmotAdmin {
    * invite had returned success, the key package was marked consumed, and
    * nothing would ever try again, so the device sat on "Setting up…" with a
    * Welcome for a dead branch. Re-queueing the member's sync re-adds it.
+   *
+   * A leaf this same ingest REMOVED is not such a loss (audit KIMIK31 C-3): a
+   * co-admin's Remove, or a device's own self_remove that we auto-committed, is a
+   * decision, and re-adding the device reversed it. Those are forgotten, not
+   * repaired. A fork-adopting commit's `removed` is excluded from that, because it
+   * is measured against the branch we left and so names exactly the Adds that
+   * branch lost.
    */
   private async recheckRecentInvites(coordinate: string, mlsGroupId: string, report: IngestReport): Promise<void> {
-    const map = this.recentInvites.get(coordinate);
-    if (!map) return;
+    const map = this.readRecentInvites(mlsGroupId);
+    if (map.size === 0) return;
+    /** Entries to forget; applied to a fresh read at the end, so an Add noted
+     *  while this awaited is not overwritten. */
+    const forget = new Set<string>();
+    const removedOnPurpose = new Set<string>();
+    for (const c of report.commits) if (!c.fork) for (const p of c.removed) removedOnPurpose.add(p);
+    for (const a of report.autoCommits) if (a.published) for (const p of a.removed) removedOnPurpose.add(p);
     const now = this.now();
     for (const [chatPubkey, at] of [...map]) {
       if (now - at > RECENT_INVITE_RECHECK_MS) {
-        map.delete(chatPubkey);
+        forget.add(chatPubkey);
         continue;
       }
       const member = await this.mls.isMember(mlsGroupId, chatPubkey).catch(() => true);
       if (member) continue;
-      map.delete(chatPubkey);
+      forget.add(chatPubkey);
+      if (removedOnPurpose.has(chatPubkey)) {
+        this.log(
+          `[chat] ${coordinate}: ${chatPubkey.slice(0, 8)} was added ${Math.round((now - at) / 1000)}s ago and then removed by a commit in epoch ${report.epochBefore}→${report.epochAfter} — a removal, not a lost Add; not re-adding it`,
+        );
+        continue;
+      }
       const account = this.store.getChatKey(coordinate, chatPubkey)?.account_pubkey;
       this.log(
         `[chat] ${coordinate}: ${chatPubkey.slice(0, 8)} was added ${Math.round((now - at) / 1000)}s ago but holds no leaf after epoch ${report.epochBefore}→${report.epochAfter} (a competing commit won) — ${account && this.enqueueSync ? "re-queueing its sync" : "no retry queue to re-add it"}`,
       );
       if (account && this.enqueueSync) this.enqueueSync(coordinate, account);
     }
-    if (map.size === 0) this.recentInvites.delete(coordinate);
+    if (forget.size === 0) return;
+    const fresh = this.readRecentInvites(mlsGroupId);
+    for (const k of forget) if (fresh.get(k) === map.get(k)) fresh.delete(k);
+    this.writeRecentInvites(mlsGroupId, fresh);
+  }
+
+  // ── deliberate MLS-only removals ───────────────────────────────────────────
+  /**
+   * Devices removed on purpose at the MLS layer only, per group, durable in
+   * marmot_kv ({@link MARMOT_NAMESPACES.deliberateRemovals}).
+   *
+   * The roster (approved account + active chat key) is the authority for who is
+   * in the room, and a co-admin's Remove or a device's own self_remove does not
+   * touch it. So the next restart's backfill, or any durable `chat_sync_member`,
+   * found an approved attendee with an active key and no leaf, and invited the
+   * device straight back: a moderation action or a voluntary leave undone by a
+   * deploy. The in-process lost-Add repair already respected these removals
+   * (audit KIMIK31 C-3); this makes every sync path respect them.
+   *
+   * Recorded: removals by a non-fork inbound commit and by a published
+   * self_remove auto-commit. NOT recorded: the coordinator's own commits (a
+   * revoke, a re-enrolment's Remove+Add) — they are not in the ingest report,
+   * whose `commits` exclude our own self-echo — and a fork-adopting commit's
+   * `removed`, which names the Adds our abandoned branch lost (C-3: a loss to
+   * repair, not a decision).
+   *
+   * Lifted by a fresh 21607 add/link from the device sent no earlier than the
+   * removal ({@link liftDeliberateRemoval}), by an organizer approve of the
+   * account ({@link clearDeliberateRemovals}), or by the device holding a leaf
+   * again. A row that will not read is treated as empty, which is the previous
+   * behaviour (the device is re-added), never a lock-out.
+   */
+  private readDeliberateRemovals(mlsGroupId: string): Map<string, DeliberateRemoval> {
+    const map = new Map<string, DeliberateRemoval>();
+    try {
+      const raw = this.store.marmotKvGet(MARMOT_NAMESPACES.deliberateRemovals, mlsGroupId.toLowerCase());
+      if (!raw) return map;
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+          const r = v as Partial<DeliberateRemoval> | null;
+          if (r && typeof r.epoch === "number" && typeof r.at === "number" && (r.how === "commit" || r.how === "self_remove")) {
+            map.set(k, {
+              epoch: r.epoch,
+              at: r.at,
+              how: r.how,
+              ...(typeof r.by === "string" ? { by: r.by } : {}),
+              ...(r.skipLogged ? { skipLogged: true as const } : {}),
+            });
+          }
+        }
+      }
+    } catch (e) {
+      this.log(`[chat] could not read the deliberate removals of group ${mlsGroupId.slice(0, 12)}…: ${causeChain(e)}`);
+    }
+    return map;
+  }
+
+  private writeDeliberateRemovals(mlsGroupId: string, map: Map<string, DeliberateRemoval>): void {
+    const key = mlsGroupId.toLowerCase();
+    try {
+      if (map.size === 0) this.store.marmotKvDelete(MARMOT_NAMESPACES.deliberateRemovals, key);
+      else this.store.marmotKvSet(MARMOT_NAMESPACES.deliberateRemovals, key, JSON.stringify(Object.fromEntries(map)));
+    } catch (e) {
+      this.log(`[chat] could not persist the deliberate removals of group ${mlsGroupId.slice(0, 12)}…: ${causeChain(e)}`);
+    }
+  }
+
+  private deliberateRemovalOf(mlsGroupId: string, chatPubkey: string): DeliberateRemoval | undefined {
+    return this.readDeliberateRemovals(mlsGroupId).get(chatPubkey);
+  }
+
+  private forgetDeliberateRemoval(mlsGroupId: string, chatPubkey: string): void {
+    const map = this.readDeliberateRemovals(mlsGroupId);
+    if (map.delete(chatPubkey)) this.writeDeliberateRemovals(mlsGroupId, map);
+  }
+
+  /** What a removal was, for log lines. */
+  private describeRemoval(r: DeliberateRemoval): string {
+    return r.how === "self_remove"
+      ? `left with its own self_remove (epoch ${r.epoch})`
+      : `removed by ${r.by ? `co-admin ${short(r.by)}` : "an inbound commit"} (epoch ${r.epoch})`;
+  }
+
+  /**
+   * Record this ingest's deliberate removals (see {@link readDeliberateRemovals}).
+   * Only devices that are still out of the group when the batch is done: a later
+   * commit in the same batch may have added one back, and an inbound Add of a
+   * recorded device lifts its record.
+   */
+  private async recordDeliberateRemovals(coordinate: string, mlsGroupId: string, report: IngestReport): Promise<void> {
+    const now = this.now();
+    const candidates = new Map<string, DeliberateRemoval>();
+    const readded = new Set<string>();
+    for (const c of report.commits) {
+      for (const p of c.added) {
+        readded.add(p);
+        candidates.delete(p);
+      }
+      if (c.fork) continue;
+      for (const p of c.removed) {
+        readded.delete(p);
+        candidates.set(p, {
+          epoch: c.toEpoch,
+          at: Math.min(c.at ?? now, now),
+          how: "commit",
+          ...(c.committer ? { by: c.committer } : {}),
+        });
+      }
+    }
+    for (const a of report.autoCommits) {
+      if (!a.published) continue;
+      for (const p of a.removed) {
+        readded.delete(p);
+        candidates.set(p, { epoch: a.epoch ?? report.epochAfter, at: Math.min(a.at ?? now, now), how: "self_remove" });
+      }
+    }
+    candidates.delete(this.coordinatorPubkey); // removedSelf is its own alarm
+    if (candidates.size === 0 && readded.size === 0) return;
+    const map = this.readDeliberateRemovals(mlsGroupId);
+    let changed = false;
+    for (const p of readded) changed = map.delete(p) || changed;
+    for (const [p, r] of candidates) {
+      // A device that holds a leaf after the batch was not removed in the end. An
+      // unreadable membership counts as out: recording a member is harmless, since
+      // the record is dropped the moment a sync sees the leaf.
+      if (await this.mls.isMember(mlsGroupId, p).catch(() => false)) continue;
+      map.set(p, r);
+      changed = true;
+      this.log(
+        `[chat] ${coordinate}: ${short(p)} was ${this.describeRemoval(r)} — kept out of the roster backfill and durable syncs until the device attests again`,
+      );
+    }
+    if (changed) this.writeDeliberateRemovals(mlsGroupId, map);
+  }
+
+  /**
+   * A sync found a device it would add, but the device was removed on purpose.
+   * Logged once per removal (persisted, so not again after a restart either),
+   * not on every backfill, retry and watcher hit.
+   */
+  private noteRemovalSkip(coordinate: string, mlsGroupId: string, chatPubkey: string, r: DeliberateRemoval): void {
+    if (r.skipLogged) return;
+    this.log(
+      `[chat] not re-adding ${short(chatPubkey)} to ${coordinate}: it was ${this.describeRemoval(r)}, and the roster alone does not undo that — a fresh attestation from the device does`,
+    );
+    const map = this.readDeliberateRemovals(mlsGroupId);
+    const cur = map.get(chatPubkey);
+    if (!cur) return;
+    map.set(chatPubkey, { ...cur, skipLogged: true });
+    this.writeDeliberateRemovals(mlsGroupId, map);
+  }
+
+  /** A link rumor's ordering time (s): clamped like an attestation's, or now. */
+  private linkOrderAt(createdAt: number | undefined): number {
+    return createdAt === undefined ? Math.floor(this.now() / 1000) : this.attestationOrderKey(createdAt);
+  }
+
+  /**
+   * Lift a device's deliberate-removal record for an explicit request from the
+   * device to be in the room: a 21607 add or link, sent at `atSec` (clamped
+   * rumor `created_at`). Only a request at least as new as the removal counts
+   * (ties pass: seconds are coarse). An older one — a relay replaying the
+   * attestation that first enrolled the device, or anything sent before the
+   * removal it would undo — leaves the record in place. A durable retry never
+   * comes here: it carries the warrant of an attestation already processed, so a
+   * stale retry cannot lift a later removal.
+   */
+  private liftDeliberateRemoval(coordinate: string, chatPubkey: string, atSec: number, why: string): void {
+    const group = this.store.getMarmotGroup(coordinate);
+    if (!group) return;
+    const map = this.readDeliberateRemovals(group.mls_group_id);
+    const r = map.get(chatPubkey);
+    if (!r) return;
+    const removedAtSec = Math.floor(r.at / 1000);
+    if (atSec < removedAtSec) {
+      this.log(
+        `[chat] ${short(chatPubkey)} in ${coordinate}: ${why} from ${atSec} predates its removal (${removedAtSec}) — still kept out`,
+      );
+      return;
+    }
+    map.delete(chatPubkey);
+    this.writeDeliberateRemovals(group.mls_group_id, map);
+    this.log(`[chat] ${short(chatPubkey)} in ${coordinate}: ${why} lifts its earlier removal — it may be added again`);
+  }
+
+  /**
+   * Lift every deliberate-removal record of an account's chat keys made at or
+   * before `asOfSec`: an organizer approve of the account (a 21604 command at
+   * that `created_at`) says "this person belongs in the event", which outranks
+   * an MLS-layer removal it postdates. Returns how many were lifted.
+   */
+  clearDeliberateRemovals(coordinate: string, accountPubkey: string, asOfSec: number): number {
+    const group = this.store.getMarmotGroup(coordinate);
+    if (!group) return 0;
+    const map = this.readDeliberateRemovals(group.mls_group_id);
+    if (map.size === 0) return 0;
+    let lifted = 0;
+    for (const k of this.store.chatKeysForAccount(coordinate, accountPubkey)) {
+      const r = map.get(k.chat_pubkey);
+      if (r && Math.floor(r.at / 1000) <= asOfSec && map.delete(k.chat_pubkey)) lifted++;
+    }
+    if (lifted > 0) {
+      this.writeDeliberateRemovals(group.mls_group_id, map);
+      this.log(
+        `[chat] organizer approve of ${short(accountPubkey)} in ${coordinate} lifts ${lifted} earlier chat removal(s)`,
+      );
+    }
+    return lifted;
   }
 
   /** One line per applied inbound commit, auto-commit and fork; failures rate-limited. */
@@ -1844,6 +2225,19 @@ export class MarmotAdmin {
 
 function short(pubkey: string): string {
   return pubkey.slice(0, 8);
+}
+
+/** One device removed on purpose at the MLS layer (see MarmotAdmin.readDeliberateRemovals). */
+interface DeliberateRemoval {
+  /** The epoch the removing commit produced. */
+  epoch: number;
+  /** When the removal was sent (ms), as the removing 445 claims, clamped to when we saw it. */
+  at: number;
+  how: "commit" | "self_remove";
+  /** The committing leaf, for a co-admin's commit, when known. */
+  by?: string;
+  /** The "not re-adding" line has been written for this removal. */
+  skipLogged?: true;
 }
 
 /** How long after an Add the coordinator re-checks, on epoch changes, that it held (audit K-8). */

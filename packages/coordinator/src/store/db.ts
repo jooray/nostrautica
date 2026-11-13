@@ -4227,11 +4227,25 @@ export class Store {
   /** Keys under `prefix` in a namespace with their first-write time, newest first
    *  (audit R-44: aging out ingest evidence that never settles). */
   marmotKvKeysWithPrefix(namespace: string, prefix: string): { k: string; created_at: number }[] {
-    return (
-      this.db
-        .prepare("SELECT k, created_at FROM marmot_kv WHERE namespace = ? ORDER BY created_at DESC, rowid DESC")
-        .all(namespace) as { k: string; created_at: number }[]
-    ).filter((r) => r.k.startsWith(prefix));
+    // A range on the (namespace, k) primary key, so one group's sweep reads that
+    // group's rows only instead of every group's ingest history (audit KIMIK31
+    // R-7). `upper` is the prefix with its last character bumped, which bounds the
+    // range exactly under SQLite's byte order when that character is ASCII (every
+    // caller's prefix ends in "/"); any other prefix takes the full scan.
+    const last = prefix.charCodeAt(prefix.length - 1);
+    if (prefix === "" || last >= 0x7f) {
+      return (
+        this.db
+          .prepare("SELECT k, created_at FROM marmot_kv WHERE namespace = ? ORDER BY created_at DESC, rowid DESC")
+          .all(namespace) as { k: string; created_at: number }[]
+      ).filter((r) => r.k.startsWith(prefix));
+    }
+    const upper = prefix.slice(0, -1) + String.fromCharCode(last + 1);
+    return this.db
+      .prepare(
+        "SELECT k, created_at FROM marmot_kv WHERE namespace = ? AND k >= ? AND k < ? ORDER BY created_at DESC, rowid DESC",
+      )
+      .all(namespace, prefix, upper) as { k: string; created_at: number }[];
   }
 
   marmotKvDelete(namespace: string, key: string): void {

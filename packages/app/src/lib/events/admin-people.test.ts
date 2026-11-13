@@ -7,6 +7,7 @@ import {
   chatSyncStuckPubkeys,
   summarizeBulk,
   filterPeople,
+  countMissingIntros,
   type BulkItem,
   type FilterablePerson,
 } from "./admin-people.js";
@@ -370,5 +371,34 @@ describe("EV-5 — an approved member's withdrawal is visible on their card", ()
     });
     expect(people[0]!.withdrawn).toBe(true);
     expect(people[0]!.name).toBe("Sam");
+  });
+});
+
+// Audit KIMIK31 W-16: a roster member whose intake aged out (no join request in
+// the scanned window, no directory entry) was counted and filtered as "missing
+// intro", which on a long-running community buried the real ones.
+describe("unknown intake is not a missing intro", () => {
+  const people = buildApprovedPeople({
+    roster: roster([pk("a")]),
+    sessionApproved: new Set(),
+    revoked: new Set(),
+    known: [], // aged out
+    directory: [],
+  });
+
+  it("is not counted as missing", () => {
+    expect(people[0].intakeAvailable).toBe(false);
+    expect(countMissingIntros(people)).toBe(0);
+    expect(
+      countMissingIntros([{ revoked: false, hasIntro: false, intakeAvailable: true }]),
+    ).toBe(1);
+  });
+
+  it("is not matched by the no-intro filter", () => {
+    const filterable: FilterablePerson[] = [
+      { pubkey: pk("a"), name: "Old", approved: true, hasIntro: false, introKnown: false, op: "ok", hasTalk: false },
+      { pubkey: pk("b"), name: "New", approved: true, hasIntro: false, introKnown: true, op: "ok", hasTalk: false },
+    ];
+    expect(filterPeople(filterable, "no-intro", "").map((p) => p.name)).toEqual(["New"]);
   });
 });

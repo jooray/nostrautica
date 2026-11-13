@@ -647,7 +647,7 @@
     </div>
   {/if}
 {:else}
-  {#if error}<div class="card warn">{error}</div>{/if}
+  {#if error}<div class="card warn" role="alert">{error}</div>{/if}
   {#if showErrors}<ErrorSummary errors={fieldErrors} />{/if}
   <div class="card stack">
     {#if !session.loggedIn}

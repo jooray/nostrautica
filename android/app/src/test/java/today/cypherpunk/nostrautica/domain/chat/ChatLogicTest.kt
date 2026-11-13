@@ -66,6 +66,40 @@ class AttestTest {
         assertEquals(c, back)
     }
 
+    @Test fun addCarriesItsIntentOnTheWire() {
+        for ((intent, wire) in listOf(ChatAttest.Intent.ENROL to "enrol", ChatAttest.Intent.REJOIN to "rejoin")) {
+            val c = ChatAttest.content(coordinate, account, ChatAttest.Op.ADD, device, 5, "Phone", deviceSecret = deviceSk, intent = intent)
+            assertEquals(wire, c.intent)
+            val json = ChatAttest.json(c)
+            assertTrue(json.contains("\"intent\":\"$wire\""))
+            val back = (Wire.parseSafe(ChatKeyAttestationContent.serializer(), json) as Wire.Result.Ok).value
+            assertEquals(c, back)
+        }
+        // No intent: the field is left out entirely, as a pre-0.18 client sends it.
+        val legacy = ChatAttest.content(coordinate, account, ChatAttest.Op.ADD, device, 5, "Phone", deviceSecret = deviceSk)
+        assertFalse(ChatAttest.json(legacy).contains("intent"))
+    }
+
+    /** NIP §6.2: `intent` goes only to a coordinator whose 31611 lists "attest-intent". */
+    @Test fun intentIsSentOnlyToAnAdvertisingCoordinator() {
+        for (wanted in ChatAttest.Intent.values()) {
+            assertEquals(wanted, ChatAttest.intentFor(wanted, supported = true))
+            // A pre-0.18 coordinator (the live third-party one lists only "marmot").
+            assertNull(ChatAttest.intentFor(wanted, supported = false))
+            // Announcement not known yet, or unreadable: the bare add every coordinator takes.
+            assertNull(ChatAttest.intentFor(wanted, supported = null))
+        }
+        // And a null intent really is a bare add on the wire.
+        val bare = ChatAttest.content(coordinate, account, ChatAttest.Op.ADD, device, 5, "Phone", deviceSecret = deviceSk,
+            intent = ChatAttest.intentFor(ChatAttest.Intent.REJOIN, supported = false))
+        assertFalse(ChatAttest.json(bare).contains("intent"))
+    }
+
+    @Test fun intentIsRefusedOnAnythingButAnAdd() {
+        assertThrows { ChatAttest.content(coordinate, account, ChatAttest.Op.REVOKE, device, 1, intent = ChatAttest.Intent.REJOIN) }
+        assertThrows { ChatAttest.content(coordinate, account, ChatAttest.Op.LINK, device, 1, label = "WN", intent = ChatAttest.Intent.ENROL) }
+    }
+
     @Test fun overlongLabelIsTrimmedToTheWireLimit() {
         val c = ChatAttest.content(coordinate, account, ChatAttest.Op.ADD, device, 5, "x".repeat(80), deviceSecret = deviceSk)
         assertEquals(60, c.label!!.length)

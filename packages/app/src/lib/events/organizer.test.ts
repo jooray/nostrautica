@@ -87,6 +87,7 @@ import {
   sendAdminCommand,
   type PendingRequest,
   fetchPending,
+  probeCoordinator,
   cachedPending,
   addCoOrganizer,
   checkOrganizerKeys,
@@ -1405,11 +1406,57 @@ describe("fetchPending surfaces withdrawals", () => {
     expect(cachedPending(COORD)).toBeUndefined();
   });
 
+  // Audit KIMIK31 W-12: an unanswered scan returned [], which a cold Admin showed
+  // as "No pending requests" and which advanced the scan cursor past requests it
+  // never saw.
+  it("throws instead of reporting an empty queue when no relay answered", async () => {
+    const keys = (await loadEventKeys(COORD))!;
+    const unanswered = async (_f: unknown, _r: unknown, opts?: { onSettled?: (a: boolean) => void }) => {
+      opts?.onSettled?.(false);
+      return [];
+    };
+    fetchEventsRelayOnly.mockImplementation(unanswered);
+    await expect(fetchPending(inboxCtx, keys)).rejects.toThrow(/No relay answered/);
+
+    // With a cursor from an earlier answered scan, too — and the cursor stays put.
+    fetchEventsRelayOnly.mockResolvedValue([joinWrap(100)]);
+    await fetchPending(inboxCtx, keys);
+    const cached = cachedPending(COORD);
+    fetchEventsRelayOnly.mockImplementation(unanswered);
+    await expect(fetchPending(inboxCtx, keys)).rejects.toThrow(/No relay answered/);
+    expect(cachedPending(COORD)).toEqual(cached);
+  });
+
   it("does not let a stale withdrawal shadow a later re-join", async () => {
     fetchEventsRelayOnly.mockResolvedValue([withdrawWrap(100, true), joinWrap(200)]);
 
     const pending = await fetchPending(inboxCtx, (await loadEventKeys(COORD))!);
     expect(pending.find((p) => p.attendeePubkey === ATTENDEE)?.withdrawn).toBeUndefined();
+  });
+});
+
+// Audit KIMIK31 W-11: "Test connection" answered from cached evidence and said
+// "reachable" with every relay down.
+describe("probeCoordinator", () => {
+  const COORDINATOR = getPublicKey(generateSecretKey());
+  const probeCtx = { ...ctx, config: { ...ctx.config, coordinator: COORDINATOR } } as EventContext;
+  const answering =
+    (answered: boolean, events: unknown[] = []) =>
+    async (_f: unknown, _r: unknown, opts?: { onSettled?: (a: boolean) => void }) => {
+      opts?.onSettled?.(answered);
+      return events;
+    };
+
+  it("is 'unanswered' when no relay answered, whatever the cache holds", async () => {
+    fetchEventsRelayOnly.mockImplementation(answering(false));
+    expect(await probeCoordinator(probeCtx)).toBe("unanswered");
+  });
+
+  it("is 'found' only for a record the coordinator itself published", async () => {
+    fetchEventsRelayOnly.mockImplementation(answering(true, [{ pubkey: COORDINATOR, kind: KIND_ROSTER }]));
+    expect(await probeCoordinator(probeCtx)).toBe("found");
+    fetchEventsRelayOnly.mockImplementation(answering(true, [{ pubkey: "f".repeat(64), kind: KIND_ROSTER }]));
+    expect(await probeCoordinator(probeCtx)).toBe("not-found");
   });
 });
 
@@ -1674,6 +1721,47 @@ describe("updateEventConfig relay editing", () => {
         .map((c) => c[0] as { kind: number; tags: string[][] })
         .find((e) => e.kind === KIND_EVENT_CONFIG)!;
       expect(cfg.tags.find((t) => t[0] === "coordinator")).toEqual(["coordinator", coordinator, "5"]);
+    });
+
+    // Audit KIMIK31 W-8: both outcomes were discarded, so Event Settings said
+    // "attached" while the grant (or the config) sat in the outbox.
+    it("reports 'published' when the config and the grant both reached a relay", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const coordinator = getPublicKey(generateSecretKey());
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK) });
+
+      expect(await attachCoordinator({} as AppSigner, stale, coordinator)).toBe("published");
+    });
+
+    it("reports 'queued' when the grant only reached the outbox", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const coordinator = getPublicKey(generateSecretKey());
+      const stale = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK) });
+      publishSigned.mockImplementation(async (e: { kind: number }) => {
+        if (e.kind === 1059) throw new Error("no relay accepted the grant");
+      });
+      expect(await attachCoordinator({} as AppSigner, stale, coordinator)).toBe("queued");
+    });
+
+    it("detach reports 'queued' when the coordinator-less config reached no relay", async () => {
+      await saveEventKeys(withInbox(), OWNER);
+      fetchEvents.mockResolvedValue([]);
+      const coordinator = getPublicKey(generateSecretKey());
+      const page = ctxWith({ inbox: getPublicKey(INBOX_SK) });
+      serveConfig({ ...fullConfig, inbox: getPublicKey(INBOX_SK), coordinator, coordinatorGen: 1 });
+      const ctx = { ...page, config: { ...page.config, coordinator } } as EventContext;
+      const attachedConfig = await fetchEventsRelayOnly({ kinds: [KIND_EVENT_CONFIG] });
+      fetchEventsRelayOnly.mockImplementation(async (filter: { kinds?: number[] }) =>
+        filter.kinds?.includes(KIND_EVENT_CONFIG) ? attachedConfig : [],
+      );
+      publishSigned.mockImplementation(async (e: { kind: number }) => {
+        if (e.kind === KIND_EVENT_CONFIG) throw new Error("no relay accepted the config");
+      });
+      expect(await detachCoordinator({} as AppSigner, ctx)).toBe("queued");
     });
 
     // Audit R-29: after a detach a relay acked, a relay still serving the

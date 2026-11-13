@@ -23,6 +23,12 @@ export type StoredInviteEntry = {
 } | {
     type: "received";
     giftwrap: ReceivedGiftWrap;
+    /** Written before prompting; automatic listening never retries an attempt. */
+    attempted?: boolean;
+    /** Validated transition journal; survives a failed unread write or cleanup. */
+    rumor?: UnreadInvite;
+    /** Permanently invalid plaintext; only source cleanup remains. */
+    invalid?: boolean;
 } | {
     type: "unread";
     rumor: UnreadInvite;
@@ -37,7 +43,7 @@ export type InviteManagerEvents = {
     decrypted: (invite: UnreadInvite) => void;
     /** Emitted when an invite is marked as read and removed */
     read: (inviteId: string) => void;
-    /** Emitted when a received gift wrap is processed (decrypted or failed) */
+    /** Emitted when a received gift wrap is retired or permanently quarantined */
     processed: (inviteId: string) => void;
     /** Emitted when an event fails to decrypt or parse */
     error: (error: Error, eventId: string) => void;
@@ -85,7 +91,7 @@ export interface InviteManagerOptions {
  *
  * Store layout:
  * - `__seen` key holds a serialized set of all seen event IDs
- * - `received:<eventId>` keys hold undecrypted gift wraps
+ * - `received:<eventId>` keys hold gift wraps and optional retry/transition state
  * - `unread:<rumorId>` keys hold decrypted welcome rumors
  */
 export declare class InviteManager extends EventEmitter<InviteManagerEvents> {
@@ -94,14 +100,18 @@ export declare class InviteManager extends EventEmitter<InviteManagerEvents> {
     private store;
     private network;
     private seenCache;
+    private readonly unreadRecovery;
+    private processing;
     constructor(options: InviteManagerOptions);
     /**
      * Subscribes for gift-wrapped invites (kind 1059) addressed to this account on
      * the given relays — the inbound counterpart the app would otherwise hand-wire.
      * Each new gift wrap is {@link ingestEvent | ingested} (de-duplicated) and then
      * {@link decryptGiftWraps | decrypted}, so `watchUnread` / the `decrypted` event
-     * update on their own. Any already-stored gift wraps are decrypted once on
-     * start. Call `.unsubscribe()` on the result to stop listening.
+     * update on their own. Previously unattempted gift wraps are tried once on
+     * start. Failed/interrupted attempts require an explicit decrypt call, even
+     * after reconnect or restart; journaled transitions resume without prompting.
+     * Call `.unsubscribe()` on the result to stop listening.
      *
      * `relays` should be the account's advertised kind-10050 inbox relays — where
      * inviters deliver Welcomes. Subscribing elsewhere silently misses invites.
@@ -133,22 +143,26 @@ export declare class InviteManager extends EventEmitter<InviteManagerEvents> {
      * Process a single received (undecrypted) gift wrap by event ID.
      *
      * Attempts to decrypt and parse the specified event.
-     * - On success: moves to 'unread' state and emits 'newInvite' event
-     * - On failure: emits 'error' event (event remains in 'seen' to prevent retry)
+     * - On success: journals the validated rumor, persists unread, then retires received.
+     * - Signer/cancellation/storage failures emit 'error' and retain the source.
+     * - Invalid decrypted payloads are retired (or quarantined until cleanup succeeds).
      *
-     * This method prompts the user via signer for decryption.
+     * This is an explicit retry, which may prompt the signer again. A journaled
+     * rumor is resumed without prompting or emitting a duplicate 'decrypted' event.
      *
      * @param eventId - The gift wrap event ID to decrypt, or the gift wrap event itself
-     * @returns The decrypted welcome rumor, or null if failed to decrypt
-     * @throws Error if the event is not found in received store
+     * @returns A newly persisted unread rumor, or null on failure/already delivered
+     * @throws Error if an event ID is not found in received storage
      */
     decryptGiftWrap(eventId: string | ReceivedGiftWrap): Promise<UnreadInvite | null>;
+    private serialize;
+    private processGiftWrap;
     /**
      * Decrypts all received gift wraps.
      *
      * Attempts to decrypt and parse each received gift wrap.
-     * - On success: moves to 'unread' state and emits 'newInvite' event
-     * - On failure: emits 'error' event (event remains in 'seen' to prevent retry)
+     * - On success: moves to 'unread' state and emits 'decrypted'.
+     * - On retryable failure: emits 'error' and retains received for explicit retry.
      *
      * This method prompts the user via signer for each decryption,
      * so it should be called deliberately by the app (not automatically).
@@ -156,6 +170,7 @@ export declare class InviteManager extends EventEmitter<InviteManagerEvents> {
      * @returns Array of successfully decrypted welcome rumors
      */
     decryptGiftWraps(): Promise<UnreadInvite[]>;
+    private decryptStoredGiftWraps;
     /**
      * Get all unread invites.
      *
@@ -180,19 +195,37 @@ export declare class InviteManager extends EventEmitter<InviteManagerEvents> {
      * Watch for unread invites.
      *
      * Yields the current array of unread invites, then yields again
-     * whenever the unread list changes (via 'newInvite' or 'inviteRead' events).
+     * whenever the unread list changes or a recovery confirms persisted unread.
      *
      * This does NOT automatically mark invites as read - the app must
      * call markAsRead() after processing each invite.
+     *
+     * Pass an AbortSignal to stop watching. Abort, return, throw, and async
+     * disposal release listeners and interrupt pending reads without another event.
+     * Abandoned reads may finish internally; their results are ignored.
      */
-    watchUnread(): AsyncGenerator<UnreadInvite[]>;
+    watchUnread(options?: {
+        signal?: AbortSignal;
+    }): AsyncGenerator<UnreadInvite[]>;
+    /**
+     * Calls `changed` whenever the unread list may have changed.
+     * Returns a function that removes the listeners.
+     * @internal
+     */
+    onUnreadChanged(changed: () => void): () => void;
     /**
      * Watch for received (encrypted) invites.
      *
      * Yields the current list of received gift wraps, then yields again
-     * whenever the received list changes (via 'ReceivedGiftWrap' or 'receivedProcessed' events).
+     * whenever the received list changes (via 'received' or 'processed' events).
+     *
+     * Pass an AbortSignal to stop watching. Abort, return, throw, and async
+     * disposal release listeners and interrupt pending reads without another event.
+     * Abandoned reads may finish internally; their results are ignored.
      */
-    watchReceived(): AsyncGenerator<ReceivedGiftWrap[]>;
+    watchReceived(options?: {
+        signal?: AbortSignal;
+    }): AsyncGenerator<ReceivedGiftWrap[]>;
     /**
      * Clear all stored invites (received and unread).
      *

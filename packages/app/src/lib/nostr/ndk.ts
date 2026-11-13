@@ -511,9 +511,23 @@ export async function fetchEventsAnswered(
 export async function fetchEventsRelayOnly(
   filters: Filter | Filter[],
   relays?: string[],
-  opts: { timeoutMs?: number; graceMs?: number } = {},
+  opts: {
+    timeoutMs?: number;
+    graceMs?: number;
+    /**
+     * Told whether any relay answered (see `StreamHandle.answered`), for callers
+     * that must not read "nothing back" as "nothing exists" (audit KIMIK31 W-12).
+     * A callback rather than a new return shape so every existing caller and test
+     * double keeps working; a double that never calls it reads as answered.
+     */
+    onSettled?: (answered: boolean) => void;
+  } = {},
 ): Promise<NDKEvent[]> {
-  return streamEvents(filters, { relays, relayOnly: true, ...opts }).ready;
+  const { onSettled, ...rest } = opts;
+  const handle = streamEvents(filters, { relays, relayOnly: true, ...rest });
+  const events = await handle.ready;
+  onSettled?.(handle.answered());
+  return events;
 }
 
 /** Test-only: swap the NDK singleton (pass null to restore lazy creation). */

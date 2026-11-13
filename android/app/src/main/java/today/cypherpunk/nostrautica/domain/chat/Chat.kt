@@ -5,17 +5,27 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
+import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import today.cypherpunk.nostrautica.AppContainer
+import today.cypherpunk.nostrautica.data.Cache
 import today.cypherpunk.nostrautica.domain.EventContext
+import today.cypherpunk.nostrautica.domain.organizer.DiscoveredCoordinator
+import today.cypherpunk.nostrautica.nostr.Filter
 import today.cypherpunk.nostrautica.nostr.Nostr
 import today.cypherpunk.nostrautica.nostr.RelayPool
 import today.cypherpunk.nostrautica.nostr.Relays
+import today.cypherpunk.nostrautica.protocol.CoordinatorAnnounce
+import today.cypherpunk.nostrautica.protocol.CoordinatorFeatures
 import today.cypherpunk.nostrautica.protocol.CoordinatorStatusContent
 import today.cypherpunk.nostrautica.protocol.Kinds
 import today.cypherpunk.nostrautica.protocol.LocalSigner
 import today.cypherpunk.nostrautica.protocol.Nip19
+import today.cypherpunk.nostrautica.protocol.NostrEvent
+import today.cypherpunk.nostrautica.protocol.Ordering
+import today.cypherpunk.nostrautica.protocol.Wire
 import today.cypherpunk.nostrautica.protocol.RosterContent
 import today.cypherpunk.nostrautica.protocol.UnsignedEvent
 import today.cypherpunk.nostrautica.protocol.nowSec
@@ -59,7 +69,8 @@ class Chat(internal val c: AppContainer) {
         clientId: String? = null,
         deviceSecret: ByteArray? = null,
         code: String? = null,
-    ): Boolean = attestTimed(ctx, op, chatPubkey, label, clientId, deviceSecret, code).published
+        intent: ChatAttest.Intent? = null,
+    ): Boolean = attestTimed(ctx, op, chatPubkey, label, clientId, deviceSecret, code, intent).published
 
     /** One sent attestation: whether it reached a relay, the rumor's `created_at`, the wrap's id. */
     data class Attested(val published: Boolean, val createdAt: Long, val wrapId: String)
@@ -73,13 +84,58 @@ class Chat(internal val c: AppContainer) {
         clientId: String? = null,
         deviceSecret: ByteArray? = null,
         code: String? = null,
+        intent: ChatAttest.Intent? = null,
     ): Attested {
         val coordinator = ctx.cfg.coordinator ?: throw IllegalStateException("chat attestation requires a coordinator")
         val account = c.accounts.pubkey
         val createdAt = nowSec()
-        val content = ChatAttest.content(ctx.coordinate, account, op, chatPubkey, createdAt, label, clientId, deviceSecret, code)
+        val content = ChatAttest.content(ctx.coordinate, account, op, chatPubkey, createdAt, label, clientId, deviceSecret, code, intent)
         val wrap = c.accounts.wrap(coordinator, Kinds.CHAT_KEY_ATTESTATION, ChatAttest.json(content), listOf(listOf("a", ctx.coordinate)), createdAt)
         return Attested(c.accounts.publishWrapToAccount(wrap, coordinator, ctx.relays, "chat") is Nostr.PublishResult.Published, createdAt, wrap.id)
+    }
+
+    // ── Does the event's coordinator understand the add `intent`? (NIP §6.2) ──
+
+    /**
+     * What is known without the network: this coordinator's own cached `features`,
+     * else the coordinator picker's cached list. Null = unknown, which sends no intent.
+     */
+    suspend fun knownIntentSupport(coordinator: String?): Boolean? {
+        val pk = coordinator?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+        c.cache.get(Cache.ANON, featuresKey(pk), CoordinatorFeatures.serializer())?.let { return it.attestIntent }
+        val listed = c.cache.get(Cache.ANON, "coordinators", ListSerializer(DiscoveredCoordinator.serializer()))
+        return listed?.firstOrNull { it.pubkey.equals(pk, true) }?.announce?.features?.attestIntent
+    }
+
+    /**
+     * Read the coordinator's latest 31611 in the background when the cached answer is
+     * missing or older than an hour. Never awaited by enrolment: the next attestation
+     * uses what it finds.
+     */
+    fun prefetchIntentSupport(coordinator: String?) {
+        val pk = coordinator?.lowercase()?.takeIf { it.isNotEmpty() } ?: return
+        scope.launch {
+            runCatching {
+                if (c.cache.isFresh(featuresKey(pk), INTENT_SUPPORT_TTL_MS)) return@launch
+                val r = c.nostr.fetch(Relays.READ, Filter(kinds = listOf(Kinds.COORDINATOR_ANNOUNCE), authors = listOf(pk), limit = 1))
+                var latest: NostrEvent? = null
+                for (e in r.events) {
+                    if (!e.pubkey.equals(pk, true) || e.kind != Kinds.COORDINATOR_ANNOUNCE) continue
+                    if (latest == null || Ordering.supersedes(e, latest)) latest = e
+                }
+                val ev = latest ?: return@launch
+                val a = (Wire.parseSafe(CoordinatorAnnounce.serializer(), ev.content) as? Wire.Result.Ok)?.value ?: return@launch
+                c.cache.put(Cache.ANON, featuresKey(pk), CoordinatorFeatures.serializer(), a.features, ev.createdAt)
+                c.cache.markFetched(featuresKey(pk))
+            }.onFailure { if (it is CancellationException) throw it }
+        }
+    }
+
+    private fun featuresKey(pk: String) = "coordinator-chat-features:$pk"
+
+    private companion object {
+        /** A cached answer about the coordinator's `features` is re-read after this. */
+        const val INTENT_SUPPORT_TTL_MS = 3600_000L
     }
 
     /** Take a queued attestation back out of the outbox, so it is never sent. */
@@ -121,23 +177,14 @@ class Chat(internal val c: AppContainer) {
 
     suspend fun cachedRoster(account: String, coordinate: String): RosterContent? = c.members.cachedRoster(account, coordinate)
 
-    /** The last roster with attendees fetched per (account, event), and when, in this process. */
-    private val rosterMemo = java.util.concurrent.ConcurrentHashMap<String, Pair<Long, RosterContent>>()
+    private val rosterReads = RosterReads()
 
     /**
      * The roster from the relays, or one fetched no longer than [reuseMs] ago (audit
-     * S-2: every chat open fetched it again). Returns it with the time it was fetched,
-     * so the caller can tell how fresh it is. Only a roster with attendees is reused;
-     * an empty one is what the fetch returns when no relay had the roster at all.
+     * S-2: every chat open fetched it again). See [RosterReads] for what counts as fresh.
      */
-    suspend fun fetchRoster(ctx: EventContext, account: String, reuseMs: Long = 0): Pair<RosterContent, Long>? {
-        val key = "$account|${ctx.coordinate}"
-        val now = System.currentTimeMillis()
-        rosterMemo[key]?.let { (at, r) -> if (reuseMs > 0 && now - at < reuseMs) return r to at }
-        val r = runCatching { c.members.fetchRoster(ctx, account) }.getOrNull() ?: return null
-        if (r.attendees.isNotEmpty()) rosterMemo[key] = now to r
-        return r to now
-    }
+    suspend fun fetchRoster(ctx: EventContext, account: String, reuseMs: Long = 0): RosterReads.Fetched? =
+        rosterReads.fetch("$account|${ctx.coordinate}", reuseMs) { runCatching { c.members.readRoster(ctx, account) }.getOrNull() }
 
     /** This attendee's own 21606 notices for the event (latest per stage). */
     suspend fun ownStatuses(account: String, coordinate: String): List<CoordinatorStatusContent> =

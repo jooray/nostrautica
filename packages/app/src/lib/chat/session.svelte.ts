@@ -30,6 +30,7 @@ import type { MarmotChat } from "./client.js";
 import {
   ChatTabCoordinator,
   type ChatAction,
+  type LeaderStatus,
   type TabRole,
   type TabCoordinatorOptions,
 } from "./tab-leader.js";
@@ -75,6 +76,12 @@ export type RejoinOutcome =
 export const REJOIN_COOLDOWN_MS = 60_000;
 /** How often an unreachable or damaged session re-checks on its own. */
 const RECHECK_INTERVAL_MS = 30_000;
+/**
+ * How many times a session positively waiting for its Add re-publishes its key
+ * package on its own (audit KIMIK31 W-5): ~5 minutes at the interval above.
+ * Bounded so a coordinator that never adds this device is not polled forever.
+ */
+const MAX_SETUP_RECHECKS = 10;
 
 /**
  * This device is POSITIVELY not in the event's room (audit K-6): its leaf is gone
@@ -91,10 +98,34 @@ export class ChatUnroutableError extends Error {
   }
 }
 
+/**
+ * A proxied failure keeps its type across tabs (audit KIMIK31 W-4): the leader
+ * acks a ChatUnroutableError with code "unroutable", and the follower rebuilds
+ * it, so the UI offers Rejoin rather than a transport retry.
+ */
+function rethrowTyped(err: unknown): never {
+  if ((err as { code?: string } | null)?.code === "unroutable") throw new ChatUnroutableError();
+  throw err;
+}
+
 class ChatSessionStore {
   /** The event this session belongs to (undefined when idle). */
   naddr = $state<string | undefined>(undefined);
-  phase = $state<ChatSessionPhase>("idle");
+  #phase = $state<ChatSessionPhase>("idle");
+  /**
+   * The room's phase. A setter so that EVERY change on the leader tab reaches
+   * the follower tabs (audit KIMIK31 W-4), whichever of the many paths made it.
+   */
+  get phase(): ChatSessionPhase {
+    return this.#phase;
+  }
+  set phase(next: ChatSessionPhase) {
+    if (next === this.#phase) return;
+    this.#phase = next;
+    this.announceStatus();
+  }
+  /** A follower has received the leader's status, which is then authoritative (W-4). */
+  private leaderStatusSeen = false;
   error = $state<unknown>(null);
   /** Every decoded message, de-duped by rumor id and chronologically sorted. */
   messages = $state<ChatMessage[]>([]);
@@ -137,7 +168,34 @@ class ChatSessionStore {
    * A group this device holds on disk failed to load (audit K-3). It is kept and
    * re-tried, never discarded; meanwhile membership cannot be judged.
    */
-  damaged = $state(false);
+  #damaged = $state(false);
+  get damaged(): boolean {
+    return this.#damaged;
+  }
+  set damaged(next: boolean) {
+    if (next === this.#damaged) return;
+    this.#damaged = next;
+    this.announceStatus();
+  }
+
+  /** Leader: mirror phase + damage to follower tabs (W-4). */
+  private announceStatus(): void {
+    if (this.tabRole !== "leader" || !this.ctx) return;
+    this.coordinator?.broadcastStatus(this.ctx.coordinate, this.leaderStatus());
+  }
+
+  private leaderStatus(): LeaderStatus {
+    return { phase: this.#phase, damaged: this.#damaged };
+  }
+
+  /** Follower: adopt the leader's status for this event (W-4). */
+  private adoptLeaderStatus(status: LeaderStatus): void {
+    const phases: ChatSessionPhase[] = ["setup", "unreachable", "ready", "evicted"];
+    if (!phases.includes(status.phase as ChatSessionPhase)) return;
+    this.leaderStatusSeen = true;
+    this.#phase = status.phase as ChatSessionPhase;
+    this.#damaged = status.damaged;
+  }
   /**
    * Events of this room that could not be decrypted or applied yet (audit R-9):
    * "re-syncing, some messages may be missing". A fork or stall, never a reason
@@ -145,6 +203,8 @@ class ChatSessionStore {
    */
   resyncing = $state(0);
   private recheckTimer?: ReturnType<typeof setTimeout>;
+  /** Setup re-publishes made since this session began (W-5). */
+  private setupRechecks = 0;
   /** The multi-tab coordinator (leader election + follower proxy). */
   private coordinator?: ChatTabCoordinator;
   /**
@@ -197,6 +257,8 @@ class ChatSessionStore {
     this.coordinator = undefined;
     this.tabRole = "pending";
     this.readOnly = false;
+    this.leaderStatusSeen = false;
+    this.setupRechecks = 0;
     const ctx = this.ctx;
     const signer = this.signer;
     if (!ctx || !signer) return;
@@ -238,7 +300,7 @@ class ChatSessionStore {
           // down and re-elects, and the room flickers between "setting up" and
           // "ready" several times a second. Reported from a real two-tab session.
           if (role === "leader" && wasFollower && !this.chat) {
-            void this.becomeLeaderClient(tok, coordinator, ctx, signer);
+            void this.promote(tok, coordinator, ctx, signer);
           }
         },
         onLeaderState: (coordinate, messages) => {
@@ -251,7 +313,16 @@ class ChatSessionStore {
           // Follower render: adopt the leader's de-duped, sorted list wholesale.
           if (coordinate !== ctx.coordinate) return;
           this.messages = messages;
-          if (this.phase !== "ready") this.phase = "ready";
+          // A leader that reports its status is the authority on the phase; a
+          // message list says nothing about whether this device is still in the
+          // room (W-4). Only a leader on the previous build, which sends no
+          // status, still promotes the room from its messages.
+          if (this.phase !== "ready" && !this.leaderStatusSeen) this.phase = "ready";
+        },
+        onLeaderStatus: (coordinate, status) => {
+          if (tok !== this.token) return;
+          if (coordinate !== ctx.coordinate) return;
+          this.adoptLeaderStatus(status);
         },
         onLeaderMembers: (coordinate, members) => {
           if (tok !== this.token) return;
@@ -271,14 +342,16 @@ class ChatSessionStore {
           if (coordinate && coordinate !== this.ctx?.coordinate) {
             throw new Error("the active tab is in a different event's chat");
           }
-          await this.chat.send(text);
+          // Through the leader's own send path (W-4), so a failure is reconciled
+          // the same way and a positive eviction comes back as ChatUnroutableError.
+          await this.send(text);
         },
         onActionRequest: async (action, coordinate) => {
           if (!this.chat) throw new Error("no chat session");
           if (coordinate && coordinate !== this.ctx?.coordinate) {
             throw new Error("the active tab is in a different event's chat");
           }
-          await this.runAction(action);
+          await this.act(action); // reconciled like a local action (W-4)
         },
         onRejoinRequest: async (force, coordinate) => {
           // Leader performs a follower's rejoin: MLS state has a single writer, so
@@ -297,6 +370,8 @@ class ChatSessionStore {
           // until the next MLS state change (which may be minutes away in a quiet
           // room).
           if (this.memberDevices) coordinator.broadcastMembers(ctx.coordinate, this.memberDevices);
+          // …and so is the room's status (W-4): a new follower must not assume "ready".
+          if (this.chat) coordinator.broadcastStatus(ctx.coordinate, this.leaderStatus());
         },
       });
       this.coordinator = coordinator;
@@ -316,7 +391,8 @@ class ChatSessionStore {
         if (tok !== this.token) return;
         this.chatPubkey = id?.pubkey;
         this.recomputeReadOnly();
-        this.phase = "ready";
+        // The leader's status, if it already arrived, outranks this default (W-4).
+        if (!this.leaderStatusSeen) this.phase = "ready";
         return;
       }
 
@@ -404,11 +480,57 @@ class ChatSessionStore {
     // attests only on a positive "not a member" (audit K-2) — and listen for the
     // welcome that follows. A welcome arriving in between is joined by the
     // listener start() installed.
+    //
+    // Liveness is re-checked after every await (audit KIMIK31 W-2): a logout that
+    // lands while start() waits on the relays disposes this session, and
+    // ensurePublished must not then publish and attest as the account just signed
+    // out of.
     await chat.start();
+    if (tok !== this.token) return;
     await this.syncPhase(tok);
     await this.syncMembers(tok, coordinator, ctx.coordinate);
+    if (tok !== this.token) return;
     await chat.ensurePublished();
+    if (tok !== this.token) return;
     await this.syncPhase(tok);
+  }
+
+  /** Retry timer for a failed follower → leader promotion (W-6). */
+  private promoteTimer?: ReturnType<typeof setTimeout>;
+
+  /**
+   * Build the client for a promoted tab, and recover if that fails (audit
+   * KIMIK31 W-6). The promotion used to be fire-and-forget: a rejected dynamic
+   * import, locked identity, `create`, `start` or `ensurePublished` escaped as
+   * an unhandled rejection and left the room "ready" with no client, so no
+   * traffic was ingested anywhere in the profile and `send()` threw "no chat
+   * session" until a reload. Now a failure drops any half-built client, shows
+   * the retryable "can't reach the room" state (never an eviction), and tries
+   * again on the SAME coordinator, so the Web Lock this tab was promoted into is
+   * kept rather than traded away by a re-election.
+   */
+  private async promote(
+    tok: number,
+    coordinator: ChatTabCoordinator,
+    ctx: EventContext,
+    signer: AppSigner,
+  ): Promise<void> {
+    try {
+      await this.becomeLeaderClient(tok, coordinator, ctx, signer);
+    } catch (err) {
+      if (tok !== this.token) return;
+      console.warn("chat: taking over as the active tab failed; retrying", err);
+      this.chat?.dispose();
+      this.chat = undefined;
+      this.error = err;
+      this.phase = "unreachable";
+      clearTimeout(this.promoteTimer);
+      this.promoteTimer = setTimeout(() => {
+        this.promoteTimer = undefined;
+        if (tok !== this.token || this.chat || coordinator.role !== "leader") return;
+        void this.promote(tok, coordinator, ctx, signer);
+      }, RECHECK_INTERVAL_MS);
+    }
   }
 
   /** The coordinator a recheck broadcasts membership on (the leader's). */
@@ -439,9 +561,19 @@ class ChatSessionStore {
     if (coordinator && this.ctx) await this.syncMembers(tok, coordinator, this.ctx.coordinate);
   }
 
-  /** Keep re-checking on our own while the room is unreachable or damaged. */
+  /**
+   * Keep re-checking on our own while the room is unreachable or damaged, and
+   * (bounded) while positively waiting for our Add (W-5). Only a POSITIVE
+   * not-member counts: an unknown verdict never leads to a publish here.
+   */
   private scheduleRecheck(tok: number): void {
-    const needed = this.phase === "unreachable" || this.damaged;
+    const verdict = this.chat?.lastVerdict;
+    const awaitingAdd =
+      this.phase === "setup" &&
+      verdict?.kind === "not-member" &&
+      !verdict.evicted &&
+      this.setupRechecks < MAX_SETUP_RECHECKS;
+    const needed = this.phase === "unreachable" || this.damaged || awaitingAdd;
     if (!needed) {
       clearTimeout(this.recheckTimer);
       this.recheckTimer = undefined;
@@ -451,8 +583,28 @@ class ChatSessionStore {
     this.recheckTimer = setTimeout(() => {
       this.recheckTimer = undefined;
       if (tok !== this.token) return;
-      void this.recheck();
+      if (awaitingAdd && this.phase === "setup") void this.recheckSetup(tok);
+      else void this.recheck();
     }, RECHECK_INTERVAL_MS);
+  }
+
+  /**
+   * Setup has been waiting on the coordinator's Add (W-5). Enrolment publishes
+   * the key package once, ignoring relay outcomes, so an outage could leave it
+   * on no relay while the attestation sat in the outbox; when connectivity came
+   * back the attestation drained but nothing republished the package, and the
+   * room stayed "Setting up…" until a reload. Re-verify it (republishing if it
+   * is missing), without a fresh attestation, then re-read the phase.
+   */
+  private async recheckSetup(tok: number): Promise<void> {
+    const chat = this.chat;
+    if (!chat) return;
+    this.setupRechecks++;
+    await chat
+      .ensurePublished({ attest: false })
+      .catch((err: unknown) => console.warn("chat: setup recheck failed", err));
+    if (tok !== this.token) return;
+    await this.syncPhase(tok);
   }
 
   /**
@@ -585,7 +737,7 @@ class ChatSessionStore {
     // Interactive follower proxies the send to the leader tab (Web Locks path only).
     const c = this.coordinator;
     if (c && c.role === "follower" && !this.readOnly) {
-      await c.proxySend(text, this.ctx?.coordinate);
+      await c.proxySend(text, this.ctx?.coordinate).catch(rethrowTyped);
       return;
     }
     throw new Error("no chat session");
@@ -640,7 +792,7 @@ class ChatSessionStore {
     }
     const c = this.coordinator;
     if (c && c.role === "follower" && !this.readOnly) {
-      await c.proxyAction(action, this.ctx?.coordinate);
+      await c.proxyAction(action, this.ctx?.coordinate).catch(rethrowTyped);
       return;
     }
     throw new Error("no chat session");
@@ -757,6 +909,8 @@ class ChatSessionStore {
     this.starting = undefined;
     clearTimeout(this.recheckTimer);
     this.recheckTimer = undefined;
+    clearTimeout(this.promoteTimer);
+    this.promoteTimer = undefined;
     this.coordinatorForRecheck = undefined;
     this.damaged = false;
     this.resyncing = 0;

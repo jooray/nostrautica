@@ -24,6 +24,11 @@ import today.cypherpunk.nostrautica.protocol.RosterContent
  *
  * Unknown (group list unreadable, roster missing, stale, undecryptable or empty)
  * always waits.
+ *
+ * Since 0.18 the `add` also says why (NIP §10.2 `intent`): only the removal whose
+ * re-add never came sends `rejoin`; every other automatic add sends `enrol`, which a
+ * 0.18 coordinator never answers by removing a leaf it holds. The explicit Rejoin
+ * ([ChatSession.rejoin]) sends `rejoin` too.
  */
 object ChatPolicy {
     /** How long an evicted device waits for the coordinator's re-add Welcome before enrolling. */
@@ -58,11 +63,34 @@ object ChatPolicy {
         return if (listed) RosterSays.LISTED else RosterSays.NOT_LISTED
     }
 
+    /**
+     * When the session's roster was last fresh, after [read]: only a read a relay just
+     * sent (or its memo) moves it; a store-only read leaves it where it was (A-3).
+     */
+    fun rosterFreshAt(prevMs: Long, read: RosterReads.Fetched): Long =
+        if (read.fresh) maxOf(prevMs, read.atMs) else prevMs
+
+    /**
+     * A stored device key the engine cannot import may be replaced only when a roster
+     * a relay just sent does not list it (K-4, A-3). A store-only roster can predate
+     * the key's attestation, and replacing an attested key strands its leaf.
+     */
+    fun mayReplaceUnimportableKey(read: RosterReads.Fetched?, account: String, chatPubkey: String): Boolean =
+        rosterSays(read?.roster, read?.fresh == true, account, chatPubkey) == RosterSays.NOT_LISTED
+
     sealed interface Decision {
         val why: String
         data class Wait(override val why: String) : Decision
-        /** Send a 21607 `add`; [rotate] first publishes a fresh key package (the old one may be spent). */
-        data class Attest(val rotate: Boolean, override val why: String) : Decision
+        /**
+         * Send a 21607 `add`; [rotate] first publishes a fresh key package (the old one may be spent).
+         * [intent] is [ChatAttest.Intent.REJOIN] only for a removal whose re-add never came
+         * (positive evidence our leaf is gone); every other add is an enrolment.
+         */
+        data class Attest(
+            val rotate: Boolean,
+            override val why: String,
+            val intent: ChatAttest.Intent = ChatAttest.Intent.ENROL,
+        ) : Decision
     }
 
     /**
@@ -90,8 +118,9 @@ object ChatPolicy {
             RosterSays.UNKNOWN -> Decision.Wait("roster not freshly known")
             RosterSays.NOT_LISTED -> Decision.Attest(rotate = evicted, "the roster does not list this device")
             RosterSays.LISTED -> when {
-                evicted -> if ((evictedForMs ?: 0) >= EVICTED_GRACE_MS) Decision.Attest(rotate = true, "removed, and no re-add arrived")
-                else Decision.Wait("removed; waiting for the re-add")
+                evicted -> if ((evictedForMs ?: 0) >= EVICTED_GRACE_MS) {
+                    Decision.Attest(rotate = true, "removed, and no re-add arrived", ChatAttest.Intent.REJOIN)
+                } else Decision.Wait("removed; waiting for the re-add")
                 rosterGroupId.isNullOrEmpty() -> Decision.Wait("the roster names no room yet")
                 holdsRosterGroup(groups, rosterGroupId, coord) -> Decision.Wait("holding the roster's room")
                 maybeInRoom(groups, coord) -> Decision.Wait("holding a group the coordinator sealed")

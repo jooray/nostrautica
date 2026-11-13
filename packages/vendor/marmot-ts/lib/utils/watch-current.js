@@ -1,5 +1,8 @@
+const stopped = Symbol("cancelled");
+/** Consecutive overtaken reads to discard before yielding one anyway. */
+const MAX_DISCARDED_READS = 3;
 /**
- * Watch a synchronous current value, coalescing changes while the consumer is
+ * Watch a current value, coalescing changes while the consumer is
  * busy. Cancellation also wakes an outstanding next(), unlike a bare generator.
  * @internal
  */
@@ -7,6 +10,7 @@ export function watchCurrent(options) {
     let cancelled = false;
     let version = 0;
     let wake;
+    let cancelRead;
     let unsubscribe;
     const changed = () => {
         version++;
@@ -14,7 +18,11 @@ export function watchCurrent(options) {
         wake = undefined;
     };
     const cancel = () => {
+        if (cancelled)
+            return;
         cancelled = true;
+        cancelRead?.();
+        cancelRead = undefined;
         unsubscribe?.();
         unsubscribe = undefined;
         options.signal?.removeEventListener("abort", cancel);
@@ -25,11 +33,14 @@ export function watchCurrent(options) {
     const iterator = (async function* () {
         if (cancelled || options.signal?.aborted || options.closed?.aborted)
             return;
-        unsubscribe = options.subscribe(changed);
-        options.signal?.addEventListener("abort", cancel, { once: true });
-        options.closed?.addEventListener("abort", cancel, { once: true });
         try {
+            unsubscribe = options.subscribe(changed);
+            options.signal?.addEventListener("abort", cancel, { once: true });
+            options.closed?.addEventListener("abort", cancel, { once: true });
+            if (options.signal?.aborted || options.closed?.aborted)
+                cancel();
             let yieldedVersion = -1;
+            let discarded = 0;
             while (!cancelled) {
                 if (yieldedVersion === version)
                     await new Promise((resolve) => {
@@ -37,8 +48,29 @@ export function watchCurrent(options) {
                     });
                 if (cancelled)
                     return;
-                yieldedVersion = version;
-                yield options.read();
+                const readVersion = version;
+                const value = options.read();
+                // Only async reads can be pending, so only they race cancellation.
+                const result = isThenable(value)
+                    ? await Promise.race([
+                        value,
+                        new Promise((resolve) => {
+                            cancelRead = () => resolve(stopped);
+                            if (cancelled)
+                                cancelRead();
+                        }),
+                    ])
+                    : value;
+                cancelRead = undefined;
+                if (cancelled || result === stopped)
+                    return;
+                if (options.discardStale &&
+                    readVersion !== version &&
+                    ++discarded < MAX_DISCARDED_READS)
+                    continue;
+                discarded = 0;
+                yieldedVersion = readVersion;
+                yield result;
             }
         }
         finally {
@@ -63,4 +95,7 @@ export function watchCurrent(options) {
             await iterator.return(undefined);
         },
     };
+}
+function isThenable(value) {
+    return typeof value?.then === "function";
 }

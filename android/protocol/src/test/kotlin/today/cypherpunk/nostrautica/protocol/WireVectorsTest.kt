@@ -9,6 +9,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertSame
 import org.junit.Assert.assertThrows
@@ -123,6 +124,31 @@ class WireVectorsTest {
         assertThrows(Wire.InvalidPayload::class.java) { ok.copy(proof = null).validate() }
         assertThrows(Wire.InvalidPayload::class.java) { ok.copy(op = "link").validate() }
         assertEquals("ABCD2345", ChatKeyAttestationContent.normalizeLinkCode("abcd-23 45"))
+    }
+
+    @Test fun announceAdvertisesAttestIntent() {
+        fun features(json: String) = (Wire.parseSafe(CoordinatorAnnounce.serializer(), json) as Wire.Result.Ok).value.features
+        assertTrue(features("""{"v":2,"name":"C","features":{"chat":["marmot","attest-intent"]}}""").attestIntent)
+        // The shape a pre-0.18 coordinator publishes.
+        assertFalse(features("""{"v":2,"name":"C","features":{"matching":true,"talks":true,"chat":["marmot"]}}""").attestIntent)
+        assertFalse(features("""{"v":2,"name":"C"}""").attestIntent)
+        assertEquals("attest-intent", CoordinatorFeatures.ATTEST_INTENT)
+    }
+
+    @Test fun attestationIntentRules() {
+        val add = ChatKeyAttestationContent(a = "x", op = "add", chatPubkey = pk, label = "Pixel", proof = "ab".repeat(64))
+        add.copy(intent = "enrol").validate()
+        add.copy(intent = "rejoin").validate()
+        assertThrows(Wire.InvalidPayload::class.java) { add.copy(intent = "evict").validate() }
+        val revoke = ChatKeyAttestationContent(a = "x", op = "revoke", chatPubkey = pk)
+        revoke.validate()
+        assertThrows(Wire.InvalidPayload::class.java) { revoke.copy(intent = "rejoin").validate() }
+        assertThrows(Wire.InvalidPayload::class.java) { add.copy(op = "link", proof = null, intent = "enrol").validate() }
+        // Absent stays absent on the wire (a pre-0.18 coordinator rejects the field).
+        val legacy = Json.parseToJsonElement(Wire.encode(ChatKeyAttestationContent.serializer(), add)) as JsonObject
+        assertEquals(false, legacy.containsKey("intent"))
+        val withIntent = Json.parseToJsonElement(Wire.encode(ChatKeyAttestationContent.serializer(), add.copy(intent = "rejoin"))) as JsonObject
+        assertEquals("rejoin", withIntent["intent"]!!.jsonPrimitive.content)
     }
 
     @Test fun eventPageMergeSplitRoundTrips() {

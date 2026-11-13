@@ -142,6 +142,21 @@ describe("recoverFromStaleChunk", () => {
     expect(unregister).not.toHaveBeenCalled();
   });
 
+  // Audit KIMIK31 W-15: the escalation used to be decided at request time.
+  it("a deferred escalation does not purge if the network dropped before it ran", async () => {
+    store.set("nostrautica:stale-chunk-reload", String(Date.now() - 60_000));
+    const release = refreshGuard.hold("record");
+    expect(recoverFromStaleChunk(err())).toBe(true); // requested while online
+    vi.stubGlobal("navigator", {
+      onLine: false,
+      serviceWorker: { getRegistrations: async () => [{ unregister }] },
+    });
+    release();
+    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
+    expect(cacheDelete).not.toHaveBeenCalled();
+    expect(unregister).not.toHaveBeenCalled();
+  });
+
   it("purges at most once per session", async () => {
     store.set("nostrautica:stale-chunk-reload", String(Date.now() - 60_000));
     expect(recoverFromStaleChunk(err())).toBe(true);

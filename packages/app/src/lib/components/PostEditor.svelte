@@ -111,11 +111,23 @@
 </script>
 
 <div class="stack">
-  <input placeholder={t("post.editor.titlePlaceholder")} bind:value={title} />
-  <input placeholder={t("post.editor.summaryPlaceholder")} bind:value={summary} />
+  <input
+    placeholder={t("post.editor.titlePlaceholder")}
+    aria-label={t("post.editor.titlePlaceholder")}
+    bind:value={title}
+  />
+  <input
+    placeholder={t("post.editor.summaryPlaceholder")}
+    aria-label={t("post.editor.summaryPlaceholder")}
+    bind:value={summary}
+  />
 
   <div class="image-field">
-    <input placeholder={t("post.editor.imagePlaceholder")} bind:value={image} />
+    <input
+      placeholder={t("post.editor.imagePlaceholder")}
+      aria-label={t("post.editor.imagePlaceholder")}
+      bind:value={image}
+    />
     <FileButton
       class="btn inline upload"
       accept="image/*"
@@ -180,7 +192,11 @@
   </div>
 
   {#if tab === "write"}
-    <textarea rows="8" placeholder={t("post.editor.contentPlaceholder")} bind:value={content}
+    <textarea
+      rows="8"
+      placeholder={t("post.editor.contentPlaceholder")}
+      aria-label={t("post.editor.contentPlaceholder")}
+      bind:value={content}
     ></textarea>
   {:else}
     <div class="card preview longform">

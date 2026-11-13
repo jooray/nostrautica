@@ -18,6 +18,7 @@ vi.mock("$lib/nostr/ndk.js", () => ({ fetchEvents: vi.fn(), fetchEventsRelayOnly
 import {
   avatarInfo,
   fetchProfiles,
+  fetchProfilesAnswered,
   profileDisplayName,
   profileNeedsFetch,
   rememberOwnProfile,
@@ -230,5 +231,21 @@ describe("fetchProfiles cache behaviour", () => {
     await fetchProfiles([PK]);
     await fetchProfiles([PK]);
     expect(streamEvents).toHaveBeenCalledTimes(1);
+  });
+
+  // Audit KIMIK31 W-18: an empty result nobody answered was stamped like a real
+  // absence, so a short outage suppressed the profile for the freshness window.
+  it("does not stamp a miss when no relay answered, and says so", async () => {
+    streamEvents.mockReturnValue({ ready: Promise.resolve([]), answered: () => false });
+    const first = await fetchProfilesAnswered([PK]);
+    expect(first.answered).toBe(false);
+    expect(first.profiles.get(PK)).toBeUndefined();
+    await fetchProfiles([PK]);
+    expect(streamEvents).toHaveBeenCalledTimes(2); // asked again: nothing was stamped
+  });
+
+  it("an answered empty read is conclusive", async () => {
+    streamEvents.mockReturnValue({ ready: Promise.resolve([]), answered: () => true });
+    expect((await fetchProfilesAnswered([PK])).answered).toBe(true);
   });
 });

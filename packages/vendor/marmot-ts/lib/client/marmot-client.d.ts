@@ -196,8 +196,14 @@ export declare class MarmotClient<THistory extends BaseGroupHistory | undefined 
      * Like {@link InviteManager.watchUnread}, but annotates each invite with
      * whether it's {@link canJoinInvite | joinable}. Lets an app default to showing
      * only acceptable invites while still being able to reveal the rest.
+     *
+     * Pass an AbortSignal to stop watching. Abort, return, throw, and async
+     * disposal release listeners and interrupt pending reads without another event.
+     * Abandoned reads may finish internally; their results are ignored.
      */
-    watchInvites(): AsyncGenerator<AnnotatedInvite[]>;
+    watchInvites(options?: {
+        signal?: AbortSignal;
+    }): AsyncGenerator<AnnotatedInvite[]>;
     /**
      * Joins a group from a Welcome message received via NIP-59 gift wrap.
      *

@@ -11,7 +11,7 @@
  */
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
-import { fetchRoster, fetchDirectory, fetchMatches } from "./attendee.js";
+import { fetchRoster, fetchDirectoryAnswered, fetchMatches } from "./attendee.js";
 import { fetchTalks } from "./talks.js";
 import { fetchProfiles } from "./social.js";
 import { fetchEventPage } from "./event-page.js";
@@ -99,7 +99,10 @@ export function cachedOfflinePack(coordinate: string): OfflinePack | undefined {
  * app-code steps can't have durably cached, so the pack is never "complete".
  */
 export function packComplete(pack: OfflinePack): boolean {
-  if (pack.swControlled === false) return false;
+  // `=== true`, not `!== false` (audit KIMIK31 W-14): a pack recorded before R7
+  // has no swControlled and no shell/module steps, so nothing ever verified that
+  // its app code is cached. It must be downloaded again before it says "Ready".
+  if (pack.swControlled !== true) return false;
   return pack.steps.filter((s) => !s.skipped).every((s) => s.ok);
 }
 
@@ -168,7 +171,9 @@ export async function buildOfflinePack(
   await run("roster", false, async () => (await fetchRoster(ctx))?.attendees.length ?? 0);
   let directoryPubkeys: string[] = [];
   await run("directory", false, async () => {
-    const dir = await fetchDirectory(ctx);
+    // Throws when no relay answered (W-14): an unanswered read is not an empty
+    // directory, and must not let the pack claim "Ready to use offline".
+    const dir = await fetchDirectoryAnswered(ctx);
     directoryPubkeys = dir.map((e) => e.pubkey);
     return dir.length;
   });

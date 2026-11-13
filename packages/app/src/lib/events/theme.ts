@@ -14,7 +14,8 @@ import {
   pickLatest,
   hasCurrentVersionTag,
 } from "@nostrautica/protocol";
-import { fetchEvents } from "$lib/nostr/ndk.js";
+import { fetchEventsAnswered } from "$lib/nostr/ndk.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { onlyVerified, onlyByAuthors } from "$lib/nostr/verify.js";
 import { publishMonotonic } from "$lib/nostr/monotonic.js";
 import { toOutcome, type PublishOutcome } from "$lib/nostr/publish-queue.js";
@@ -36,10 +37,15 @@ export function cachedEventTheme(coordinate: string): string | undefined {
 /** The event's published CSS, or undefined (none / empty / over the cap). */
 export async function fetchEventTheme(ctx: EventContext): Promise<string | undefined> {
   const { pubkey, identifier } = parseCoordinate(ctx.coordinate);
-  const events = await fetchEvents(
+  const { events, answered } = await fetchEventsAnswered(
     { kinds: [KIND_EVENT_THEME], authors: [pubkey], "#d": [identifier] },
     ctx.config.relays,
   );
+  // Nothing back and nobody answered is "unknown", not "this event has no theme"
+  // (audit KIMIK31 W-1, as fetchEventPage). Returning undefined here overwrote
+  // the cached CSS with "" below, and handed the theme editor an empty model
+  // that one press of Publish turned into a deleted theme for every attendee.
+  if (events.length === 0 && !answered) throw new RelaysUnansweredError();
   // Authority boundary: `authors` in the filter above is a REQUEST, not a
   // guarantee — nothing stops a relay in the event's set from answering it with a
   // validly-signed 31609 authored by any key it likes. This content is not data

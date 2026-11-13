@@ -37,8 +37,16 @@ describe("buildAnnounceContent", () => {
     // match relaxed to non-private; others required-private.
     expect(a.privacy?.match).toBe("non-private");
     expect(a.privacy?.summary).toBe("private");
-    expect(a.features).toMatchObject({ matching: true, chat: ["marmot"] });
+    expect(a.features).toMatchObject({ matching: true });
+    expect(a.features.chat).toContain("marmot");
     expect(a.pricing?.model).toBe("free");
+  });
+
+  // 0.18: clients send the 21607 add `intent` only to a coordinator that says it
+  // understands it; an older coordinator rejects the whole attestation.
+  it("advertises that it understands the 21607 add intent", () => {
+    const a = buildAnnounceContent(cfg({ coordinator: { name: "Test Coord" } }));
+    expect(a.features.chat).toEqual(["marmot", "attest-intent"]);
   });
 
   it("NEVER leaks the free-organizer allowlist into the public announce", () => {

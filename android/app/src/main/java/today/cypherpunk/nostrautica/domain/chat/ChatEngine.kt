@@ -21,6 +21,13 @@ data class ChatMessage(
 /** The chat runtime did not get through a step in time: an ordinary, retryable failure. */
 class ChatEngineTimeout(message: String) : Exception(message)
 
+/**
+ * Every relay of the room refuses the event for its size, or it is over a relay's
+ * known limit, so nothing was published (MDK `EventTooLarge`). Not a connection
+ * problem: retrying the same content fails the same way.
+ */
+class ChatEventTooLarge(message: String) : Exception(message)
+
 /** A bounded timeline window as MDK materializes it. */
 data class ChatPage(val messages: List<ChatMessage>, val hasMoreBefore: Boolean)
 

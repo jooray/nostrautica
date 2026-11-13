@@ -57,6 +57,19 @@ export type ChatAction =
   | { type: "edit"; target: string; content: string }
   | { type: "retract"; ids: string[] };
 
+/**
+ * The leader's room status, mirrored to followers (audit KIMIK31 W-4). Without
+ * it a follower adopted "ready" from the first message broadcast and kept it,
+ * so when the coordinator removed this device the leader tab showed Rejoin and
+ * the follower, where the user actually was, stayed "ready" and offered a
+ * transport retry for every failed send.
+ */
+export interface LeaderStatus {
+  /** The leader session's phase (a `ChatSessionPhase`). */
+  phase: string;
+  damaged: boolean;
+}
+
 /** Broadcast wire protocol — {send request, ack, message list update, membership update} + election pings. */
 type Wire =
   | { t: "leader-hello"; scope: string }
@@ -64,12 +77,16 @@ type Wire =
   | { t: "sync"; scope: string }
   | { t: "state"; scope: string; coordinate: string; messages: ChatMessage[] }
   | { t: "members"; scope: string; coordinate: string; members: string[] }
+  | { t: "status"; scope: string; coordinate: string; status: LeaderStatus }
   // `coordinate`: the event the FOLLOWER is in (audit R-31). Optional so a tab
   // still running the previous build interoperates until it reloads.
   | { t: "send"; scope: string; reqId: string; text: string; coordinate?: string }
   | { t: "rejoin"; scope: string; reqId: string; force?: boolean; coordinate?: string }
   | { t: "action"; scope: string; reqId: string; action: ChatAction; coordinate?: string }
-  | { t: "ack"; scope: string; reqId: string; ok: boolean; error?: string };
+  // `code`: a machine-readable failure kind (W-4), so a follower can rebuild the
+  // leader's typed error ("unroutable" → ChatUnroutableError) rather than show a
+  // generic transport failure. Absent from a tab on the previous build.
+  | { t: "ack"; scope: string; reqId: string; ok: boolean; error?: string; code?: string };
 
 export interface TabCoordinatorOptions {
   /** Election scope — the account (chat identity) pubkey. One leader per scope. */
@@ -84,6 +101,8 @@ export interface TabCoordinatorOptions {
   onLeaderState?(coordinate: string, messages: ChatMessage[]): void;
   /** Follower: the leader broadcast a fresh membership set for `coordinate`. */
   onLeaderMembers?(coordinate: string, members: string[]): void;
+  /** Follower: the leader broadcast its room status for `coordinate` (W-4). */
+  onLeaderStatus?(coordinate: string, status: LeaderStatus): void;
   /** Leader: a follower proxied a send; resolve to ack ok, throw to ack error. */
   onSendRequest?(text: string, coordinate?: string): Promise<void>;
   /** Leader: a follower proxied a reaction/edit/delete; resolve/throw to ack. */
@@ -327,6 +346,12 @@ export class ChatTabCoordinator {
           this.opts.onLeaderMembers?.(msg.coordinate, msg.members);
         }
         return;
+      case "status":
+        if (this.role === "follower") {
+          this.leaderCoordinate = msg.coordinate;
+          this.opts.onLeaderStatus?.(msg.coordinate, msg.status);
+        }
+        return;
       case "send":
         if (this.role === "leader") void this.handleSendRequest(msg.reqId, msg.text, msg.coordinate);
         return;
@@ -346,7 +371,7 @@ export class ChatTabCoordinator {
         this.pending.delete(msg.reqId);
         clearTimeout(p.timer);
         if (msg.ok) p.resolve();
-        else p.reject(new Error(msg.error ?? "proxied send failed"));
+        else p.reject(Object.assign(new Error(msg.error ?? "proxied send failed"), msg.code ? { code: msg.code } : {}));
         return;
       }
     }
@@ -360,13 +385,16 @@ export class ChatTabCoordinator {
   private async runForFollower(reqId: string, run: () => Promise<void> | undefined): Promise<void> {
     let ok = true;
     let error: string | undefined;
+    let code: string | undefined;
     try {
       await run();
     } catch (e) {
       ok = false;
       error = e instanceof Error ? e.message : String(e);
+      // By name, not instanceof: tab-leader must not import the session (W-4).
+      if (e instanceof Error && e.name === "ChatUnroutableError") code = "unroutable";
     }
-    this.channel?.postMessage({ t: "ack", scope: this.scope, reqId, ok, error } satisfies Wire);
+    this.channel?.postMessage({ t: "ack", scope: this.scope, reqId, ok, error, code } satisfies Wire);
   }
 
   // ── leader → follower broadcasts ───────────────────────────────────────────
@@ -405,6 +433,21 @@ export class ChatTabCoordinator {
       } satisfies Wire);
     } catch (err) {
       console.warn("marmot: tab members broadcast failed", err);
+    }
+  }
+
+  /** Leader: publish the room's phase and damage flag for `coordinate` (W-4). */
+  broadcastStatus(coordinate: string, status: LeaderStatus): void {
+    if (this.role !== "leader" || !this.channel) return;
+    try {
+      this.channel.postMessage({
+        t: "status",
+        scope: this.scope,
+        coordinate,
+        status: { phase: status.phase, damaged: status.damaged },
+      } satisfies Wire);
+    } catch (err) {
+      console.warn("marmot: tab status broadcast failed", err);
     }
   }
 

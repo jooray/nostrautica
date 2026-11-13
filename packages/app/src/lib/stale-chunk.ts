@@ -126,13 +126,16 @@ export function recoverFromStaleChunk(reason?: unknown, opts?: { force?: boolean
   // STILL missing — that combination means the shell we keep re-booting is
   // being served by a worker whose precache no longer matches the server.
   // Requires being online: a purge offline would leave nothing to boot from.
-  const online = typeof navigator === "undefined" || navigator.onLine !== false;
-  const escalate = online && !alreadyPurged() && (!!opts?.force || last !== 0);
+  const escalate = !alreadyPurged() && (!!opts?.force || last !== 0);
   refreshGuard.requestRefresh(() => {
     // Latch only when the reload ACTUALLY runs (possibly after unsaved work
     // clears), so a deferred reload doesn't spend the cooldown before it happens.
     markReloaded();
-    if (escalate) {
+    // Connectivity is read HERE, when the deferred reload runs (audit KIMIK31
+    // W-15). Captured at request time, a reload held by unsaved work until after
+    // the network dropped still purged the caches it would need to boot.
+    const online = typeof navigator === "undefined" || navigator.onLine !== false;
+    if (escalate && online) {
       markPurged();
       void purgeServiceWorkerAndReload();
     } else {

@@ -51,27 +51,56 @@ describe("FileButton accessible name", () => {
  * Event settings must be named: an aria-label, an id (paired with <label for>),
  * a wrapping <label>, or be a checkbox (always wrapped in a label here).
  */
+function unnamedControls(file: string): string[] {
+  const src = read(file);
+  const markup = src.slice(src.indexOf("</script>", src.lastIndexOf("<script")));
+  const offenders: string[] = [];
+  let labelDepth = 0;
+  const re = /<(\/?)(label|input|select|textarea)\b([^>]*?)(\/?)>/g;
+  for (const m of markup.matchAll(re)) {
+    const [whole, close, tag, attrs] = m;
+    if (tag === "label") {
+      labelDepth += close ? -1 : 1;
+      continue;
+    }
+    if (close) continue;
+    const named =
+      labelDepth > 0 ||
+      /\baria-label(ledby)?=/.test(attrs) ||
+      /\bid=/.test(attrs) ||
+      /type="(checkbox|radio|hidden)"/.test(attrs);
+    if (!named) offenders.push(whole.replace(/\s+/g, " ").slice(0, 100));
+  }
+  return offenders;
+}
+
 describe("Event settings form controls are named", () => {
   it("has no unnamed input, select or textarea", () => {
-    const src = read("pages/EventSettings.svelte");
-    const markup = src.slice(src.indexOf("</script>", src.lastIndexOf("<script")));
-    const offenders: string[] = [];
-    let labelDepth = 0;
-    const re = /<(\/?)(label|input|select|textarea)\b([^>]*?)(\/?)>/g;
-    for (const m of markup.matchAll(re)) {
-      const [whole, close, tag, attrs] = m;
-      if (tag === "label") {
-        labelDepth += close ? -1 : 1;
-        continue;
-      }
-      if (close) continue;
-      const named =
-        labelDepth > 0 ||
-        /\baria-label(ledby)?=/.test(attrs) ||
-        /\bid=/.test(attrs) ||
-        /type="(checkbox|radio|hidden)"/.test(attrs);
-      if (!named) offenders.push(whole.replace(/\s+/g, " ").slice(0, 100));
-    }
-    expect(offenders).toEqual([]);
+    expect(unnamedControls("pages/EventSettings.svelte")).toEqual([]);
   });
+});
+
+/**
+ * Audit KIMIK31 W-19: the post editor named its fields by placeholder only, and
+ * Admin's batch-invite count had no name at all ("spin button, 5").
+ */
+describe("post editor and Admin form controls are named", () => {
+  it.each(["components/PostEditor.svelte", "pages/Admin.svelte"])("%s", (file) => {
+    expect(unnamedControls(file)).toEqual([]);
+  });
+});
+
+/**
+ * Audit KIMIK31 W-19: Admin, Event settings and Create showed failures as bare
+ * `{error}` cards, which assistive tech never announces. The card keeps its
+ * (often already specific, localized) text and gains role="alert", the same
+ * announcement ErrorState makes; retryable reads use ErrorState itself.
+ */
+describe("page-level errors are announced", () => {
+  it.each(["pages/Admin.svelte", "pages/EventSettings.svelte", "pages/Create.svelte"])(
+    "%s has no unannounced error card",
+    (file) => {
+      expect(read(file)).not.toMatch(/<div class="card warn">\{error\}<\/div>/);
+    },
+  );
 });

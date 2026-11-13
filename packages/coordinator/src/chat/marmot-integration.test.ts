@@ -50,10 +50,12 @@ class FakeNetwork implements NostrNetworkInterface {
     return true;
   }
 
-  async publish(_relays: string[], event: Ev): Promise<Record<string, PublishResponse>> {
+  async publish(relays: string[], event: Ev): Promise<Record<string, PublishResponse>> {
     this.events.push(event);
     for (const o of this.observers) if (o.filters.some((f) => this.matches(event, f))) o.next(event);
-    return { [RELAYS[0]!]: { from: RELAYS[0]!, ok: true } };
+    // Ack under every relay asked for: marmot reads `responses[requested]`, and it
+    // asks for normalized spellings (`wss://test.relay/`) on key-package publishes.
+    return Object.fromEntries([RELAYS[0]!, ...relays].map((r) => [r, { from: r, ok: true }]));
   }
   async request(_relays: string[], filters: any): Promise<Ev[]> {
     const fs = Array.isArray(filters) ? filters : [filters];

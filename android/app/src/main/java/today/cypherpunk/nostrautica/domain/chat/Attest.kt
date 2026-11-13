@@ -20,6 +20,21 @@ import today.cypherpunk.nostrautica.protocol.Wire
 object ChatAttest {
     enum class Op(val wire: String) { ADD("add"), REVOKE("revoke"), LINK("link"), LINK_CONFIRM("link_confirm") }
 
+    /**
+     * Why an `add` is sent (NIP §10.2, 0.18). [ENROL] never makes the coordinator
+     * remove a leaf it still holds for this device; [REJOIN] says our group state is
+     * gone and lets it replace that leaf (Remove + Add in one commit).
+     */
+    enum class Intent(val wire: String) { ENROL("enrol"), REJOIN("rejoin") }
+
+    /**
+     * The intent actually sent: [wanted] only when the coordinator's latest 31611
+     * lists "attest-intent" ([supported] true). A coordinator from before 0.18 rejects
+     * an add carrying `intent` at its strict parse, so false and unknown (null) both
+     * send the bare 0.17 add, which every coordinator accepts.
+     */
+    fun intentFor(wanted: Intent, supported: Boolean?): Intent? = wanted.takeIf { supported == true }
+
     /** Build and validate the 21607 content. Throws on a payload the coordinator would refuse. */
     fun content(
         coordinate: String,
@@ -31,6 +46,7 @@ object ChatAttest {
         clientId: String? = null,
         deviceSecret: ByteArray? = null,
         code: String? = null,
+        intent: Intent? = null,
     ): ChatKeyAttestationContent {
         val proof = if (op == Op.ADD) {
             val sk = requireNotNull(deviceSecret) { "an add needs the device secret for its proof of possession" }
@@ -44,6 +60,7 @@ object ChatAttest {
             clientId = clientId,
             proof = proof,
             code = code,
+            intent = intent?.wire,
         ).also { it.validate() }
     }
 

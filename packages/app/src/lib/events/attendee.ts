@@ -66,6 +66,7 @@ import {
 } from "./keystore.js";
 import { acceptedRecordAuthors } from "./organizer.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { onlyVerified, onlyByAuthors, onlyAddressed } from "$lib/nostr/verify.js";
 import { streamEvents, type StreamHandle, type StreamOptions } from "$lib/nostr/stream.js";
 import { DEFAULT_RELAYS, unionRelays } from "$lib/nostr/relays.js";
@@ -1011,7 +1012,14 @@ export function cachedRoster(coordinate: string): RosterContent | undefined {
  *    lands, `streamDirectory` doesn't know which blinded d's to ask for.
  */
 const inflightRoster = new Map<string, Promise<RosterContent | undefined>>();
-const inflightDirectory = new Map<string, Promise<DirectoryEntryContent[]>>();
+const inflightDirectory = new Map<string, Promise<DirectoryRead>>();
+
+/** A directory read, and whether the relays answered it (audit KIMIK31 W-14). */
+interface DirectoryRead {
+  entries: DirectoryEntryContent[];
+  /** False when entries were asked for and no relay answered every chunk. */
+  answered: boolean;
+}
 
 /**
  * Who a member-only read runs FOR, captured when it starts (audit DS41-003).
@@ -1277,7 +1285,22 @@ function streamDirectoryEvents(
 }
 
 /** Fetch + decrypt every directory entry listed in the roster. */
-export function fetchDirectory(ctx: EventContext): Promise<DirectoryEntryContent[]> {
+export async function fetchDirectory(ctx: EventContext): Promise<DirectoryEntryContent[]> {
+  return (await readDirectory(ctx)).entries;
+}
+
+/**
+ * {@link fetchDirectory} for a caller that must not take an unanswered read for
+ * an empty directory (the offline pack, audit KIMIK31 W-14): throws
+ * RelaysUnansweredError when entries were asked for and no relay answered.
+ */
+export async function fetchDirectoryAnswered(ctx: EventContext): Promise<DirectoryEntryContent[]> {
+  const read = await readDirectory(ctx);
+  if (!read.answered) throw new RelaysUnansweredError();
+  return read.entries;
+}
+
+function readDirectory(ctx: EventContext): Promise<DirectoryRead> {
   const scope = captureReadScope();
   return share(inflightDirectory, shareKey(scope, ctx.coordinate), () =>
     fetchDirectoryOnce(ctx, scope),
@@ -1287,18 +1310,23 @@ export function fetchDirectory(ctx: EventContext): Promise<DirectoryEntryContent
 async function fetchDirectoryOnce(
   ctx: EventContext,
   scope: ReadScope,
-): Promise<DirectoryEntryContent[]> {
-  if (!scope.keysOwner) return [];
+): Promise<DirectoryRead> {
+  const none: DirectoryRead = { entries: [], answered: true };
+  if (!scope.keysOwner) return none;
   const held = await heldFor(ctx.coordinate, scope.keysOwner);
-  if (!held) return [];
+  if (!held) return none;
   const roster = await fetchRosterFor(ctx, scope);
-  if (!roster || roster.attendees.length === 0) return [];
+  if (!roster || roster.attendees.length === 0) return none;
 
   const authors = acceptedRecordAuthors(ctx);
   const ds = roster.attendees.map((a) => a.d);
   // Chunked #d filters (UX-22): a 200-attendee roster would otherwise exceed
   // relay filter-size limits and silently return fewer people.
-  const rawEvents = await streamDirectoryEvents(authors, ds, ctx.config.relays).ready;
+  const stream = streamDirectoryEvents(authors, ds, ctx.config.relays);
+  const rawEvents = await stream.ready;
+  // Nothing back and not every chunk answered: unknown, not an empty directory.
+  // Leave the cached directory alone (W-14).
+  if (rawEvents.length === 0 && !stream.answered()) return { entries: [], answered: false };
   const events = onlyByAuthors(rawEvents, authors);
   // Keep the latest event per blinded d.
   const latestByD = new Map<string, (typeof events)[number]>();
@@ -1320,7 +1348,7 @@ async function fetchDirectoryOnce(
     }
   }
   cacheDirectory(scope, ctx.coordinate, entries, newestAt);
-  return entries;
+  return { entries, answered: true };
 }
 
 export interface DirectoryStream {
@@ -1424,7 +1452,7 @@ export async function streamDirectory(
   const pendingWarm = inflightDirectory.get(shareKey(scope, coord));
   if (pendingWarm) {
     void pendingWarm
-      .then((warmed) => {
+      .then(({ entries: warmed }) => {
         if (!warmed.length) return;
         let adopted = false;
         for (const entry of warmed) {

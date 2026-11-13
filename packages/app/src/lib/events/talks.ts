@@ -32,6 +32,7 @@ import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "./event-context.js";
 import type { EventKeys } from "./keystore.js";
 import { fetchEvents, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { loadEventKeys, currentEck } from "./keystore.js";
 import { directoryPublisher, acceptedRecordAuthors } from "./organizer.js";
 import { onlyByAuthors } from "$lib/nostr/verify.js";
@@ -227,10 +228,15 @@ export async function fetchPendingTalks(
   if (!keys.einboxNsecHex) throw new Error("missing E_inbox key");
   const einboxSk = hexToBytes(keys.einboxNsecHex);
   // Relay-only: submissions must not be lost to the cache/EOSE race (see ndk.ts).
+  let answered = true;
   const wraps = (await fetchEventsRelayOnly(
     { kinds: [KIND_GIFT_WRAP], "#p": [getPublicKey(einboxSk)], since: giftwrapSince() },
     ctx.config.relays,
+    { onSettled: (a) => (answered = a) },
   )) as unknown as GiftWrap[];
+  // Unanswered is not "no talks waiting" (audit KIMIK31 W-12): Admin replaced its
+  // moderation queue with the empty result. Throw, so the caller keeps it.
+  if (wraps.length === 0 && !answered) throw new RelaysUnansweredError();
 
   const subs: RawTalkSubmission[] = [];
   for (const wrap of wraps) {

@@ -8,7 +8,13 @@
  * with the bundle running it.
  */
 import { describe, it, expect, vi } from "vitest";
-import { UpdateHealth, DRIFT_WARN_AFTER, SILENCE_WARN_MS, servedRevision } from "./update-health.js";
+import {
+  UpdateHealth,
+  DRIFT_WARN_AFTER,
+  SILENCE_WARN_MS,
+  servedRevision,
+  readServedWorker,
+} from "./update-health.js";
 
 describe("servedRevision", () => {
   it("reads the index.html revision out of a served sw.js, minified or not", () => {
@@ -17,6 +23,31 @@ describe("servedRevision", () => {
     );
     expect(servedRevision(`[{"url": "/index.html", "revision": "abc"}]`)).toBe("abc");
     expect(servedRevision("<html>proxy error</html>")).toBe("unknown");
+  });
+});
+
+// Audit KIMIK31 W-9: only a real sw.js is drift evidence.
+describe("readServedWorker", () => {
+  const sw = `e.precacheAndRoute([{url:"/app/index.html",revision:"v0.0.1+aaaaaaaaaaaa"}])`;
+
+  it("accepts a real service worker, stale or not, with the revision it serves", () => {
+    expect(readServedWorker({ ok: true, status: 200 }, sw)).toEqual({
+      ok: true,
+      source: sw,
+      revision: "v0.0.1+aaaaaaaaaaaa",
+    });
+  });
+
+  it("rejects a non-OK status even when the body looks like a worker", () => {
+    expect(readServedWorker({ ok: false, status: 503 }, sw).ok).toBe(false);
+    expect(readServedWorker({ ok: false, status: 404 }, "<html>404</html>").ok).toBe(false);
+  });
+
+  it("rejects a 200 whose body is not a service worker (captive portal, proxy page)", () => {
+    expect(readServedWorker({ ok: true, status: 200 }, "<html><form>Log in to Wi-Fi</form></html>").ok).toBe(
+      false,
+    );
+    expect(readServedWorker({ ok: true, status: 200 }, "").ok).toBe(false);
   });
 });
 

@@ -1172,93 +1172,13 @@ export class GroupsManager extends EventEmitter {
                 signal: options.signal,
             });
         }
-        const manager = this;
-        const signal = options?.signal;
-        let cancelled = false;
-        let listening = false;
-        let version = 0;
-        let wake;
-        let cancelLoad;
-        const changed = () => {
-            version++;
-            wake?.();
-            wake = undefined;
-        };
-        const cleanup = () => {
-            if (!listening)
-                return;
-            listening = false;
-            manager.off("updated", changed);
-            signal?.removeEventListener("abort", cancel);
-        };
-        const cancel = () => {
-            cancelled = true;
-            cleanup();
-            cancelLoad?.();
-            cancelLoad = undefined;
-            wake?.();
-            wake = undefined;
-        };
-        const iterator = (async function* () {
-            if (cancelled || signal?.aborted)
-                return;
-            listening = true;
-            manager.on("updated", changed);
-            signal?.addEventListener("abort", cancel, { once: true });
-            try {
-                // Capture the change version before loading. An update during the load
-                // or between yields remains pending, even when there is no idle waiter.
-                let yieldedVersion = -1;
-                while (!cancelled) {
-                    if (yieldedVersion === version) {
-                        await new Promise((resolve) => {
-                            wake = resolve;
-                        });
-                    }
-                    if (cancelled)
-                        return;
-                    const snapshotVersion = version;
-                    // Cancellation must also wake a load waiting on storage, without
-                    // leaving its eventual rejection unhandled.
-                    const snapshot = await new Promise((resolve, reject) => {
-                        cancelLoad = () => resolve(undefined);
-                        manager.loadAll().then((groups) => {
-                            cancelLoad = undefined;
-                            resolve(groups);
-                        }, (error) => {
-                            cancelLoad = undefined;
-                            reject(error);
-                        });
-                    });
-                    if (cancelled || signal?.aborted || snapshot === undefined)
-                        return;
-                    yieldedVersion = snapshotVersion;
-                    yield [...snapshot];
-                }
-            }
-            finally {
-                cancel();
-            }
-        })();
-        // Native generator return queues behind an outstanding next. Wake that
-        // next first, then let the generator perform normal completion/error flow.
-        return {
-            next: (...args) => iterator.next(...args),
-            return: (value) => {
-                cancel();
-                return iterator.return(value);
+        return watchCurrent({
+            read: async () => [...(await this.loadAll())],
+            subscribe: (changed) => {
+                this.on("updated", changed);
+                return () => this.off("updated", changed);
             },
-            throw: (error) => {
-                cancel();
-                return iterator.throw(error);
-            },
-            [Symbol.asyncIterator]() {
-                return this;
-            },
-            async [Symbol.asyncDispose]() {
-                cancel();
-                await iterator.return(undefined);
-            },
-        };
+            signal: options?.signal,
+        });
     }
 }

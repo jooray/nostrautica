@@ -17,7 +17,7 @@ import type { NostrNetworkInterface, PublishResponse, Subscribable } from "@inte
 import { getEpoch, getNostrGroupIdHex, getPubkeyLeafNodes, deserializeApplicationData } from "@internet-privacy/marmot-ts/core";
 import { Proposals, createChatRumor, createApplicationMessageIntent } from "@internet-privacy/marmot-ts/client";
 import { Store } from "../store/db.js";
-import { makeMarmotStores, sqliteStore, pendingPublicationKvKey } from "./stores.js";
+import { makeMarmotStores, sqliteStore, pendingPublicationKvKey, retainedCommitOf } from "./stores.js";
 import { makeCoordinatorSigner } from "./signer.js";
 import { createMarmotClientMls, type MarmotClientMls } from "./mls.js";
 import { makeChatNetwork, type ChatNetworkTransport } from "./network.js";
@@ -88,9 +88,11 @@ class SilentRelay {
   /** A member's network: a plain, always-acking relay. */
   memberNetwork(): NostrNetworkInterface {
     return {
-      publish: async (_relays, event): Promise<Record<string, PublishResponse>> => {
+      publish: async (relays, event): Promise<Record<string, PublishResponse>> => {
         this.store(event as unknown as Ev);
-        return { [RELAY]: { from: RELAY, ok: true } };
+        // Ack under every relay asked for: marmot reads `responses[requested]`, and
+        // it asks for normalized spellings on key-package publishes.
+        return Object.fromEntries([RELAY, ...relays].map((r) => [r, { from: r, ok: true }]));
       },
       request: async (_relays, filters) => this.query(filters) as never,
       subscription: (_relays, filters): Subscribable<never> => ({
@@ -260,7 +262,7 @@ describe("MarmotClientMls.ingest report (audit R-5)", () => {
       const before = await coordEpoch();
       const report = await mls.ingest(gid, relay.query({ kinds: [445] }) as never);
       expect(report.commits).toEqual([
-        { fromEpoch: before, toEpoch: before + 1, committer: organizer.pub, added: [guestPub], removed: [] },
+        { fromEpoch: before, toEpoch: before + 1, committer: organizer.pub, added: [guestPub], removed: [], at: expect.any(Number) },
       ]);
       expect(report.forks).toEqual([]);
       expect(report.epochAfter).toBe(before + 1);
@@ -290,6 +292,41 @@ describe("MarmotClientMls.ingest report (audit R-5)", () => {
       const report = await mls.ingest(gid, relay.query({ kinds: [445] }) as never);
       expect(report.forks).toMatchObject([{ epoch: n, eventId: competing }]);
 
+    },
+    60_000,
+  );
+
+  // What MarmotAdmin records as a deliberate removal, and what it must not.
+  it(
+    "reports a co-admin's Remove with when it was sent, and never the coordinator's own Remove",
+    async () => {
+      const relay = new SilentRelay();
+      const { mls, ids, coordSk, memberPub } = await roomWithMember(relay);
+      const gid = ids.mlsGroupIdHex;
+      const organizer = await joinMember(relay, mls, gid);
+      const guest = await joinMember(relay, mls, gid);
+      await mls.setAdmins(gid, [getPublicKey(coordSk), organizer.pub]);
+      await organizer.follow();
+
+      // The coordinator removes the first member (a revoke) and ingests its own
+      // commit back from the relay: not an inbound commit, not in the report.
+      await mls.removePubkeys(gid, [memberPub]);
+      const own = await mls.ingest(gid, relay.query({ kinds: [445] }) as never);
+      expect(own.commits).toEqual([]);
+      expect(own.autoCommits).toEqual([]);
+
+      // The organizer device removes the guest itself.
+      await organizer.follow();
+      const ctx = organizer.group.session.proposalContext();
+      const removes = await Proposals.proposeRemoveUser(guest.pub)(ctx);
+      const sentAfter = Date.now() - 1_000;
+      await organizer.client.groups.commit(organizer.group.idStr, { extraProposals: [...removes] });
+      const report = await mls.ingest(gid, relay.query({ kinds: [445] }) as never);
+      expect(report.commits).toHaveLength(1);
+      expect(report.commits[0]).toMatchObject({ committer: organizer.pub, removed: [guest.pub], added: [] });
+      expect(report.commits[0]!.fork).toBeUndefined();
+      expect(report.commits[0]!.at).toBeGreaterThanOrEqual(sentAfter);
+      expect(report.commits[0]!.at).toBeLessThanOrEqual(Date.now());
     },
     60_000,
   );
@@ -341,6 +378,57 @@ describe("MarmotClientMls.lastActivity (audit K-1)", () => {
 
       await restarted.mls.removePubkeys(gid, [memberPub]);
       expect(await restarted.mls.lastActivity(gid, memberPub)).toBeUndefined();
+    },
+    60_000,
+  );
+
+  // Audit C-5: a backfill or a relay replay delivers traffic long after it was sent.
+  it(
+    "dates a message by when it was sent, not when the coordinator ingested it",
+    async () => {
+      const relay = new SilentRelay();
+      const { member, memberPub, group, coordSk, coordStore, network, ids } = await roomWithMember(relay);
+      const gid = ids.mlsGroupIdHex;
+      await member.groups.send(
+        group.idStr,
+        createApplicationMessageIntent(createChatRumor({ pubkey: memberPub, content: "an hour ago" })),
+      );
+      // The coordinator sees that message for the first time an hour later.
+      const HOUR = 60 * 60 * 1000;
+      const later = createMarmotClientMls({ store: coordStore, coordSk, network, now: () => Date.now() + HOUR });
+      await later.mls.ingest(gid, relay.query({ kinds: [445] }) as never);
+      const seen = await later.mls.lastActivity(gid, memberPub);
+      expect(seen!.ageMs).toBeGreaterThan(HOUR - 60_000);
+      expect(seen!.ageMs).toBeLessThan(HOUR + 60_000);
+    },
+    60_000,
+  );
+
+  // Audit C-1: an unreadable record used to read as "nobody was ever active" and
+  // was cached that way for the life of the process.
+  it(
+    "rejects on an unreadable record, caches nothing, and reads the record once it is readable",
+    async () => {
+      const relay = new SilentRelay();
+      const { mls, ids, memberPub, coordEpoch, coordStore } = await roomWithMember(relay);
+      const gid = ids.mlsGroupIdHex;
+      const key = gid.toLowerCase();
+      for (const bad of ["{not json", "[]", JSON.stringify({ [memberPub]: { at: "yesterday" } })]) {
+        coordStore.marmotKvSet("leaf-activity", key, bad);
+        await expect(mls.lastActivity(gid, memberPub)).rejects.toThrow();
+      }
+      // An ingest meanwhile neither fails nor overwrites the record.
+      const warn = console.warn;
+      console.warn = () => {};
+      try {
+        await mls.ingest(gid, []);
+      } finally {
+        console.warn = warn;
+      }
+      expect(coordStore.marmotKvGet("leaf-activity", key)).toBe(JSON.stringify({ [memberPub]: { at: "yesterday" } }));
+      const epoch = await coordEpoch();
+      coordStore.marmotKvSet("leaf-activity", key, JSON.stringify({ [memberPub]: { at: Date.now(), epoch } }));
+      expect(await mls.lastActivity(gid, memberPub)).toMatchObject({ epoch });
     },
     60_000,
   );
@@ -422,44 +510,149 @@ describe("MarmotClientMls.reenrol (audit K-1)", () => {
   );
 });
 
-/** Audit K-8: a group must not stay dead because of its pending-publication record. */
-describe("loading a group whose pending-publication record will not restore (audit K-8)", () => {
+/**
+ * Audit K-8 / KIMIK31 C-2 / D-3: a group whose retained pending-publication record
+ * will not restore. Dropping the record and committing again on the parent epoch
+ * is a fork whenever a relay holds the retained commit (members who fetched it are
+ * already past that epoch), so the record may only go once every relay has
+ * answered that it does not have it. These tests check the member's side, not just
+ * that the coordinator's next call succeeds.
+ */
+describe("loading a group whose pending-publication record will not restore (audit K-8, KIMIK31 C-2)", () => {
+  /**
+   * A room with one member and an unacknowledged commit, whose record is then
+   * damaged so marmot refuses it. `stored`: whether the relay kept the commit.
+   * `nameless`: damage it beyond naming its event id.
+   */
+  async function blockedRoom(opts: { stored: boolean; nameless?: boolean }) {
+    const relay = new SilentRelay();
+    const room = await roomWithMember(relay);
+    const gid = room.ids.mlsGroupIdHex;
+    const key = pendingPublicationKvKey(gid);
+    const start = await room.coordEpoch();
+    const before = relay.query({ kinds: [445] }).length;
+    relay.silent = true;
+    await expect(room.mls.setAvatar(gid, "https://img.example.com/x.png")).rejects.toThrow();
+    relay.silent = false;
+    const retained = retainedCommitOf(room.coordStore, gid)!;
+    expect(retained.relays).toEqual([RELAY]);
+    if (!opts.stored) relay.events = relay.events.filter((e) => e.id !== retained.eventId);
+    // Damage it (a format change, a partial write) so marmot's own read refuses it.
+    const rewind = sqliteStore<Uint8Array>(room.coordStore, "rewind");
+    const record = JSON.parse(new TextDecoder().decode((await rewind.getItem(key))!));
+    const damaged = opts.nameless ? { version: 9 } : { ...record, version: 9 };
+    await rewind.setItem(key, new TextEncoder().encode(JSON.stringify(damaged)));
+    const damagedRow = room.coordStore.marmotKvGet("rewind", key);
+    await room.follow(); // the member reads whatever the relay has
+    const commits = relay.query({ kinds: [445] }).length;
+    expect(commits).toBe(before + (opts.stored ? 1 : 0));
+    return { relay, room, gid, key, start, commits, retained, damagedRow };
+  }
+
+  /** The coordinator restarted, with a relay lookup that answers as scripted. */
+  async function restart(
+    b: Awaited<ReturnType<typeof blockedRoom>>,
+    lookup: (id: string) => { found: boolean; unanswered: string[] },
+  ) {
+    const asked: string[] = [];
+    const warned: string[] = [];
+    const warn = console.warn;
+    console.warn = (m: unknown) => void warned.push(String(m));
+    const restarted = createMarmotClientMls({
+      store: b.room.coordStore,
+      coordSk: b.room.coordSk,
+      network: b.room.network,
+      lookupEvent: async (id) => {
+        asked.push(id);
+        return lookup(id);
+      },
+    });
+    let status;
+    try {
+      status = await restarted.mls.groupProfile(b.gid);
+    } finally {
+      console.warn = warn;
+    }
+    return { ...restarted, status, asked, warned };
+  }
+
+  /** The group stays blocked: record untouched, and nothing new reaches the relay. */
+  async function expectBlocked(b: Awaited<ReturnType<typeof blockedRoom>>, mls: MarmotClientMls) {
+    expect(b.room.coordStore.marmotKvGet("rewind", b.key)).toBe(b.damagedRow);
+    expect(b.room.coordStore.marmotKvKeys("pending-publication-bak")).toEqual([]);
+    await expect(mls.setAvatar(b.gid, "https://img.example.com/y.png")).rejects.toThrow();
+    expect(b.relay.query({ kinds: [445] }).length).toBe(b.commits); // no competing commit
+  }
+
   it(
-    "backs the record up, drops it, and loads the group",
+    "keeps the group blocked while a relay holds the retained commit",
     async () => {
-      const relay = new SilentRelay();
-      const { mls, ids, coordSk, coordStore, network } = await roomWithMember(relay);
-      const gid = ids.mlsGroupIdHex;
-      const key = pendingPublicationKvKey(gid);
+      const b = await blockedRoom({ stored: true });
+      // The member already took the retained commit: it is one epoch ahead.
+      expect(getEpoch(b.room.group.state as never)).toBe(b.start + 1);
+      const r = await restart(b, (id) => ({ found: b.relay.events.some((e) => e.id === id), unanswered: [] }));
+      expect(r.asked).toEqual([b.retained.eventId]);
+      expect(r.status).toBe("unreadable");
+      expect(
+        r.warned.some(
+          (l) =>
+            l.includes("KEPT BLOCKED") &&
+            l.includes(b.retained.eventId) &&
+            l.includes(`from epoch ${b.start}`) &&
+            l.includes("a relay HAS it"),
+        ),
+      ).toBe(true);
+      await expectBlocked(b, r.mls);
+    },
+    60_000,
+  );
 
-      // An unacknowledged commit leaves a retained record...
-      relay.silent = true;
-      await expect(mls.setAvatar(gid, "https://img.example.com/x.png")).rejects.toThrow();
-      expect(coordStore.marmotKvGet("rewind", key)).toBeDefined();
-      // ...which is then damaged (a format change, a partial write).
-      await sqliteStore<Uint8Array>(coordStore, "rewind").setItem(key, new TextEncoder().encode('{"version":9}'));
-      const damaged = coordStore.marmotKvGet("rewind", key);
-      relay.silent = false;
+  it(
+    "keeps the group blocked when a relay did not answer",
+    async () => {
+      const b = await blockedRoom({ stored: false });
+      const r = await restart(b, () => ({ found: false, unanswered: [RELAY] }));
+      expect(r.status).toBe("unreadable");
+      expect(r.warned.some((l) => l.includes("KEPT BLOCKED") && l.includes(`no answer from ${RELAY}`))).toBe(true);
+      await expectBlocked(b, r.mls);
+    },
+    60_000,
+  );
 
-      const warned: string[] = [];
-      const warn = console.warn;
-      console.warn = (m: unknown) => void warned.push(String(m));
-      let status;
-      const restarted = createMarmotClientMls({ store: coordStore, coordSk, network });
-      try {
-        status = await restarted.mls.groupProfile(gid);
-      } finally {
-        console.warn = warn;
-      }
-      expect(status).toBe("current");
-      expect(coordStore.marmotKvGet("rewind", key)).toBeUndefined();
-      const [backup] = coordStore.marmotKvKeys("pending-publication-bak");
-      expect(backup!.startsWith(`${key}.bak.`)).toBe(true);
-      expect(coordStore.marmotKvGet("pending-publication-bak", backup!)).toBe(damaged);
-      expect(warned.some((l) => l.includes("pending-publication record") && l.includes("Invalid pending publication record"))).toBe(true);
+  it(
+    "keeps the group blocked when the record no longer names its commit",
+    async () => {
+      const b = await blockedRoom({ stored: false, nameless: true });
+      // Even a lookup that would say "absent" is not asked: there is nothing to ask for.
+      const r = await restart(b, () => ({ found: false, unanswered: [] }));
+      expect(r.asked).toEqual([]);
+      expect(r.status).toBe("unreadable");
+      await expectBlocked(b, r.mls);
+    },
+    60_000,
+  );
 
-      // And the room works again.
-      expect(await restarted.mls.setAvatar(gid, "https://img.example.com/y.png")).toBe(true);
+  it(
+    "drops the record once every relay answered without it, and the room converges",
+    async () => {
+      const b = await blockedRoom({ stored: false });
+      expect(getEpoch(b.room.group.state as never)).toBe(b.start); // nobody has the lost commit
+      const r = await restart(b, (id) => ({ found: b.relay.events.some((e) => e.id === id), unanswered: [] }));
+      expect(r.status).toBe("current");
+      expect(b.room.coordStore.marmotKvGet("rewind", b.key)).toBeUndefined();
+      const [backup] = b.room.coordStore.marmotKvKeys("pending-publication-bak");
+      expect(backup!.startsWith(`${b.key}.bak.`)).toBe(true);
+      expect(b.room.coordStore.marmotKvGet("pending-publication-bak", backup!)).toBe(b.damagedRow);
+      expect(r.warned.some((l) => l.includes("every relay answered and none has it") && l.includes("dropped it"))).toBe(true);
+
+      // And the room works again, for the member too: one branch, same epoch.
+      expect(await r.mls.setAvatar(b.gid, "https://img.example.com/y.png")).toBe(true);
+      await b.room.follow();
+      expect(b.room.memberResults).not.toContain("stateInvalidated");
+      expect(b.room.group.groupData?.avatarUrl).toBe("https://img.example.com/y.png");
+      const coordEpoch = getEpoch((await r.client.groups.get(b.gid)).state as never);
+      expect(getEpoch(b.room.group.state as never)).toBe(coordEpoch);
+      expect(coordEpoch).toBe(b.start + 1);
     },
     60_000,
   );

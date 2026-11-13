@@ -9,7 +9,8 @@ import {
   REENROL_KP_LEAD_SEC,
   RECENT_INVITE_RECHECK_MS,
 } from "./admin.js";
-import type { ChatMls } from "./mls.js";
+import type { ChatMls, IngestReport } from "./mls.js";
+import { purgeGroupState } from "./stores.js";
 import {
   makeChatDeviceProof,
   MAX_CHAT_KEYS_PER_ACCOUNT,
@@ -161,7 +162,13 @@ function makeAdmin(
   kps: AnyEvent[] = [],
   log?: (m: string) => void,
   extra?: {
-    enqueueSync?: (coordinate: string, pubkey: string, reenrolling?: string, reenrollAt?: number) => void;
+    enqueueSync?: (
+      coordinate: string,
+      pubkey: string,
+      reenrolling?: string,
+      reenrollAt?: number,
+      reenrolIntent?: "rejoin",
+    ) => void;
     withMemberLock?: (coordinate: string, pubkey: string, fn: () => Promise<void>) => Promise<void>;
     fetchKeyPackages?: (coordinate: string, authors: string[]) => Promise<AnyEvent[]>;
     onRosterChanged?: (coordinate: string) => void;
@@ -206,14 +213,19 @@ function freshStore(): Store {
 function attest(
   op: "add" | "revoke",
   chatPubkey = CHATKEY,
-  opts: { deviceSk?: Uint8Array | null; account?: string; label?: string } = {},
+  opts: { deviceSk?: Uint8Array | null; account?: string; label?: string; intent?: "enrol" | "rejoin" } = {},
 ): ChatKeyAttestationContent {
   const base = { v: 2 as const, a: COORD, op, chat_pubkey: chatPubkey };
   if (op !== "add") return base;
   const account = opts.account ?? ACCOUNT;
   const deviceSk = "deviceSk" in opts ? opts.deviceSk : DEVICE_SK;
   const proof = deviceSk ? makeChatDeviceProof(deviceSk, COORD, account, CREATED_AT) : undefined;
-  return { ...base, label: opts.label ?? "Test device", ...(proof ? { proof } : {}) };
+  return {
+    ...base,
+    label: opts.label ?? "Test device",
+    ...(proof ? { proof } : {}),
+    ...(opts.intent ? { intent: opts.intent } : {}),
+  };
 }
 
 /** A kind-445 event signed by a throwaway key, as Marmot's ephemeral senders do. */
@@ -1316,6 +1328,58 @@ describe("the startup backfill takes the same per-member lock the live paths do"
   });
 });
 
+// Audit KIMIK31 C-6: two events restoring at once used to publish their backfill
+// Adds together, outside the daemon-wide commit queue the setup commits use.
+describe("the roster backfill's Adds go through the daemon-wide commit queue", () => {
+  it("two events backfilling at once never have two Adds in flight", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    class SlowMls extends FakeMls {
+      async invite(group: string, kp: AnyEvent): Promise<void> {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 5));
+        inFlight--;
+        await super.invite(group, kp);
+      }
+    }
+    // The coordinator's withChatCommitLock: a FIFO promise chain.
+    let chain: Promise<unknown> = Promise.resolve();
+    let locked = 0;
+    const withCommitLock = <T,>(fn: () => Promise<T>): Promise<T> => {
+      locked++;
+      const run = chain.then(fn, fn);
+      chain = run.then(
+        () => undefined,
+        () => undefined,
+      );
+      return run;
+    };
+    const COORD2 = "31923:" + "e".repeat(64) + ":other";
+    const store = freshStore();
+    const mls = new SlowMls();
+    const admin = new MarmotAdmin({
+      store,
+      mls,
+      now: () => 1000,
+      coordinatorPubkey: COORDINATOR,
+      fetchKeyPackages: async (_c, authors) =>
+        [kpEvent(CHATKEY, "kp1"), kpEvent(CHATKEY2, "kp2")].filter((e) => authors.includes(e.pubkey)),
+      withCommitLock,
+    });
+    for (const coordinate of [COORD, COORD2]) {
+      await admin.ensureGroup({ coordinate, name: "n", description: "d", relays: [] });
+      store.upsertAttendee({ coordinate, pubkey: ACCOUNT, status: "approved", now: 1 });
+      store.upsertChatKey({ coordinate, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+      store.upsertChatKey({ coordinate, accountPubkey: ACCOUNT, chatPubkey: CHATKEY2, now: 1 });
+    }
+    await Promise.all([admin.backfillApproved(COORD), admin.backfillApproved(COORD2)]);
+    expect(mls.invited).toHaveLength(4); // every device in both rooms
+    expect(locked).toBeGreaterThanOrEqual(4);
+    expect(peak).toBe(1);
+  });
+});
+
 describe("a revoke that lands while a sync is in flight is not undone (DS41-048 / SB-97)", () => {
   // The sync reads the device as active, then awaits the relay fetch. A 21607
   // revoke landing in that window marks the key revoked and drops the leaf (there
@@ -2336,6 +2400,27 @@ describe("re-enrolment needs a dead leaf (audit K-1)", () => {
       expect(mls.removed).toEqual([[CHATKEY]]);
     });
 
+    // Audit C-1: "could not read the evidence" used to become "no evidence", and
+    // the guard was skipped straight into Remove + Add.
+    it("keeps the leaf and defers when the activity read fails", async () => {
+      const { mls, store } = await enrolled([]);
+      mls.lastActivity = async () => {
+        throw new Error("SQLITE_BUSY: database is locked");
+      };
+      const retries: [string, string, string | undefined, number | undefined][] = [];
+      const logs: string[] = [];
+      const admin3 = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp-rotated")], (m) => logs.push(m), {
+        enqueueSync: (c, p, r, at) => void retries.push([c, p, r, at]),
+      });
+      expect(await admin3.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+      expect(mls.removed).toEqual([]); // no eviction
+      expect(mls.invited).toEqual([CHATKEY]); // no re-add either
+      expect(store.isKpConsumed(COORD, "kp-rotated")).toBe(false); // the key package is not spent
+      // Deferred to the durable retry, warrant intact, rather than dropped.
+      expect(retries).toEqual([[COORD, ACCOUNT, CHATKEY, CREATED_AT]]);
+      expect(logs.some((l) => /could not read its leaf activity \(SQLITE_BUSY/.test(l))).toBe(true);
+    });
+
   // Audit K-1 point 3: one commit, so members see one change and the device is
   // never out of the room without an Add already on its way.
   it("a real re-enrolment is ONE Remove + Add commit when the MLS layer offers it", async () => {
@@ -2425,6 +2510,320 @@ describe("an Add undone by a competing commit is re-queued (audit K-8)", () => {
     const { synced } = await addedThenIngest({ lostLeaf: true, afterMs: RECENT_INVITE_RECHECK_MS + 1 });
     expect(synced).toEqual([]);
   });
+
+  // Audit KIMIK31 C-4: the watch lived in memory, so a restart between the Add and
+  // the ingest of the commit that undid it lost the repair.
+  it("still re-queues the sync when the coordinator restarted after the Add", async () => {
+    const store = freshStore();
+    const mls = new EpochMovingMls();
+    const clock = { now: CREATED_AT };
+    const before = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, { now: () => clock.now });
+    await before.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await before.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+
+    // A new process over the same database; the winning competing commit arrives.
+    const synced: string[] = [];
+    const after = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")], undefined, {
+      now: () => clock.now,
+      enqueueSync: (_c, p) => void synced.push(p),
+    });
+    mls.members.get("mls-1")!.delete(CHATKEY);
+    clock.now += 30_000;
+    await after.ingest(COORD, [groupEvent([["h", "ng-1"]])]);
+    expect(synced).toEqual([ACCOUNT]);
+    // ...once: the watch is consumed, and the row goes with it.
+    await after.ingest(COORD, [groupEvent([["h", "ng-1"]])]);
+    expect(synced).toEqual([ACCOUNT]);
+    expect(store.marmotKvKeys("recent-invites")).toEqual([]);
+  });
+});
+
+// Audit KIMIK31 C-3: the repair above re-added a device that a co-admin had
+// removed, or that had left the room itself, within ten minutes of its Add.
+describe("a recent Add that is then removed on purpose is not re-added (audit KIMIK31 C-3)", () => {
+  type Report = Omit<IngestReport, "epochBefore" | "epochAfter" | "failures" | "removedSelf">;
+  class ScriptedMls extends FakeMls {
+    reports: Report[] = [];
+    async ingest(_group: string, events: AnyEvent[]): Promise<IngestReport> {
+      this.ingested.push(events);
+      const r = this.reports.shift() ?? { commits: [], autoCommits: [], forks: [] };
+      return { epochBefore: 5, epochAfter: 6, failures: [], removedSelf: false, ...r };
+    }
+  }
+  const ACCOUNT2 = "b".repeat(64);
+
+  /** CHATKEY (and, with `two`, CHATKEY2 of ACCOUNT2) added, then their leaves gone. */
+  async function setup(two = false) {
+    const store = freshStore();
+    const mls = new ScriptedMls();
+    const synced: string[] = [];
+    const logs: string[] = [];
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1"), kpEvent(CHATKEY2, "kp2")], (m) => logs.push(m), {
+      enqueueSync: (_c, p) => void synced.push(p),
+    });
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    if (two) {
+      store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT2, status: "approved", now: 1 });
+      store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT2, chatPubkey: CHATKEY2, now: 1 });
+      await admin.syncMember(COORD, ACCOUNT2);
+    }
+    mls.members.get("mls-1")!.delete(CHATKEY);
+    if (two) mls.members.get("mls-1")!.delete(CHATKEY2);
+    const ingest = (r?: Report) => {
+      if (r) mls.reports.push(r);
+      return admin.ingest(COORD, [groupEvent([["h", "ng-1"]])]);
+    };
+    return { synced, logs, ingest };
+  }
+  const removal = (removed: string[], extra: Partial<IngestReport["commits"][number]> = {}) => ({
+    commits: [{ fromEpoch: 5, toEpoch: 6, added: [], removed, ...extra }],
+    autoCommits: [],
+    forks: [],
+  });
+
+  it("a co-admin's Remove of the device is respected, and stays respected", async () => {
+    const { synced, logs, ingest } = await setup();
+    await ingest(removal([CHATKEY]));
+    expect(synced).toEqual([]);
+    expect(logs.some((l) => /a removal, not a lost Add; not re-adding it/.test(l))).toBe(true);
+    await ingest(); // a later epoch change without the removal: the watch is gone
+    expect(synced).toEqual([]);
+  });
+
+  it("the device's own self_remove, auto-committed and published, is respected", async () => {
+    const { synced, ingest } = await setup();
+    await ingest({ commits: [], autoCommits: [{ removed: [CHATKEY], published: true }], forks: [] });
+    expect(synced).toEqual([]);
+  });
+
+  it("an auto-commit that was NOT published does not count as the removal", async () => {
+    const { synced, ingest } = await setup();
+    await ingest({ commits: [], autoCommits: [{ removed: [CHATKEY], published: false }], forks: [] });
+    expect(synced).toEqual([ACCOUNT]);
+  });
+
+  it("a fork-adopting commit's 'removed' is the lost Add itself, and is still repaired", async () => {
+    const { synced, ingest } = await setup();
+    await ingest({
+      ...removal([CHATKEY], { fromEpoch: 4, fork: true }),
+      forks: [{ epoch: 4, eventId: "f".repeat(64), adopted: true }],
+    });
+    expect(synced).toEqual([ACCOUNT]);
+  });
+
+  it("of two missing recent invitees, only the one not removed on purpose is repaired", async () => {
+    const { synced, ingest } = await setup(true);
+    await ingest(removal([CHATKEY2]));
+    expect(synced).toEqual([ACCOUNT]);
+  });
+});
+
+// The C-3 fix above stopped the in-process lost-Add repair from undoing a
+// removal; the roster backfill on the next restart (and any durable sync) still
+// invited the device straight back, because the roster says approved and active.
+describe("a device removed on purpose at the MLS layer stays out of every sync path", () => {
+  type Report = Omit<IngestReport, "epochBefore" | "epochAfter" | "failures" | "removedSelf">;
+  class ScriptedMls extends FakeMls {
+    reports: Report[] = [];
+    async ingest(_group: string, events: AnyEvent[]): Promise<IngestReport> {
+      this.ingested.push(events);
+      const r = this.reports.shift() ?? { commits: [], autoCommits: [], forks: [] };
+      return { epochBefore: 5, epochAfter: 6, failures: [], removedSelf: false, ...r };
+    }
+  }
+  const ORGANIZER_DEVICE = "d".repeat(64);
+  /** The attestations below are signed at CREATED_AT (s); the clock sits 200 s later. */
+  const NOW_MS = (CREATED_AT + 200) * 1000;
+  const BEFORE_ATTEST_MS = (CREATED_AT - 100) * 1000;
+  const AFTER_ATTEST_MS = (CREATED_AT + 100) * 1000;
+
+  /** CHATKEY of ACCOUNT added; `restart()` builds a fresh admin over the same state. */
+  async function setup() {
+    const store = freshStore();
+    const mls = new ScriptedMls();
+    const synced: { pubkey: string; reenrolling?: string; reenrollAt?: number }[] = [];
+    const logs: string[] = [];
+    const kps = [kpEvent(CHATKEY, "kp1")];
+    const build = () =>
+      makeAdmin(store, mls, kps, (m) => logs.push(m), {
+        now: () => NOW_MS,
+        enqueueSync: (_c, pubkey, reenrolling, reenrollAt) => void synced.push({ pubkey, reenrolling, reenrollAt }),
+      });
+    let admin = build();
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+    /** Ingest a report in which CHATKEY's leaf is gone. */
+    const ingest = (r: Report) => {
+      mls.members.get("mls-1")!.delete(CHATKEY);
+      mls.reports.push(r);
+      return admin.ingest(COORD, [groupEvent([["h", "ng-1"]])]);
+    };
+    const restart = () => (admin = build());
+    return { store, mls, synced, logs, kps, ingest, restart, admin: () => admin };
+  }
+  const coAdminRemove = (at = BEFORE_ATTEST_MS, extra: Partial<IngestReport["commits"][number]> = {}): Report => ({
+    commits: [{ fromEpoch: 5, toEpoch: 6, committer: ORGANIZER_DEVICE, added: [], removed: [CHATKEY], at, ...extra }],
+    autoCommits: [],
+    forks: [],
+  });
+  const selfRemove = (at = BEFORE_ATTEST_MS): Report => ({
+    commits: [],
+    autoCommits: [{ removed: [CHATKEY], published: true, epoch: 6, at }],
+    forks: [],
+  });
+  const records = (store: Store) => store.marmotKvKeys("deliberate-removals");
+
+  it("a co-admin's Remove survives a restart: the backfill does not re-add the device", async () => {
+    const { mls, logs, ingest, restart, admin, store } = await setup();
+    await ingest(coAdminRemove());
+    expect(records(store)).toEqual(["mls-1"]);
+    restart();
+    await admin().backfillApproved(COORD);
+    await admin().backfillApproved(COORD);
+    expect(mls.invited).toEqual([CHATKEY]); // the original Add only
+    // One line for the removal, one for the skip — not one per backfill.
+    const skips = logs.filter((l) => l.includes(`not re-adding ${CHATKEY.slice(0, 8)}`));
+    expect(skips).toHaveLength(1);
+    expect(skips[0]).toContain(COORD);
+    expect(skips[0]).toContain("epoch 6");
+    expect(skips[0]).toContain(`co-admin ${ORGANIZER_DEVICE.slice(0, 8)}`);
+  });
+
+  it("the device's own self_remove survives a restart, and its fresh key package is not added either", async () => {
+    const { mls, ingest, restart, admin, kps } = await setup();
+    await ingest(selfRemove());
+    restart();
+    await admin().backfillApproved(COORD);
+    kps.push(kpEvent(CHATKEY, "kp-rotated")); // e.g. rotated for another event
+    await admin().handleKeyPackageEvent(COORD, kpEvent(CHATKEY, "kp-rotated"));
+    await admin().syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+  });
+
+  it("a stale durable retry, carrying a warrant from before the removal, does not re-add it", async () => {
+    const { mls, synced, ingest, restart, admin } = await setup();
+    await ingest(coAdminRemove());
+    restart();
+    // The shape of a chat_sync_member row an earlier attestation left behind.
+    const done = await admin().syncMember(COORD, ACCOUNT, { reenrolling: CHATKEY, reenrollAt: CREATED_AT - 500 });
+    expect(done).toBe(true); // nothing to retry: no poison, no retry loop
+    expect(mls.invited).toEqual([CHATKEY]);
+    expect(synced).toEqual([]);
+  });
+
+  it("a fresh attestation from the device after the removal re-adds it", async () => {
+    const { mls, ingest, restart, admin, store } = await setup();
+    await ingest(coAdminRemove(BEFORE_ATTEST_MS));
+    restart();
+    await admin().backfillApproved(COORD);
+    expect(mls.invited).toEqual([CHATKEY]);
+    expect(await admin().handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+    expect(records(store)).toEqual([]);
+  });
+
+  // 0.18: the explicit intent does not change what lifts a deliberate removal.
+  for (const intent of ["enrol", "rejoin"] as const) {
+    it(`a fresh intent:"${intent}" attestation after the removal lifts it and re-adds the device`, async () => {
+      const { mls, ingest, restart, admin, store } = await setup();
+      await ingest(coAdminRemove(BEFORE_ATTEST_MS));
+      restart();
+      await admin().backfillApproved(COORD);
+      expect(mls.invited).toEqual([CHATKEY]);
+      expect(await admin().handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { intent }), CREATED_AT)).toBe(true);
+      expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+      expect(records(store)).toEqual([]);
+    });
+  }
+
+  it("an attestation that predates the removal does not lift it", async () => {
+    const { mls, logs, ingest, admin, store } = await setup();
+    await ingest(selfRemove(AFTER_ATTEST_MS));
+    // e.g. a relay replaying the attestation that first enrolled the device
+    await admin().handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    expect(mls.invited).toEqual([CHATKEY]);
+    expect(records(store)).toEqual(["mls-1"]);
+    expect(logs.some((l) => /predates its removal/.test(l))).toBe(true);
+  });
+
+  it("a fork-adopting commit's 'removed' is a lost Add: not recorded, and still repaired", async () => {
+    const { mls, synced, ingest, restart, admin, store } = await setup();
+    await ingest({
+      ...coAdminRemove(BEFORE_ATTEST_MS, { fromEpoch: 4, fork: true }),
+      forks: [{ epoch: 4, eventId: "f".repeat(64), adopted: true }],
+    });
+    expect(records(store)).toEqual([]);
+    expect(synced.map((s) => s.pubkey)).toEqual([ACCOUNT]); // the C-3/K-8 repair
+    restart();
+    await admin().backfillApproved(COORD);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+  });
+
+  it("a device removed and re-added within one batch is not recorded", async () => {
+    const { ingest, store, mls } = await setup();
+    await ingest({
+      commits: [
+        { fromEpoch: 5, toEpoch: 6, added: [], removed: [CHATKEY], at: BEFORE_ATTEST_MS },
+        { fromEpoch: 6, toEpoch: 7, added: [CHATKEY], removed: [], at: BEFORE_ATTEST_MS },
+      ],
+      autoCommits: [],
+      forks: [],
+    });
+    mls.members.get("mls-1")!.add(CHATKEY); // the second commit's Add
+    expect(records(store)).toEqual([]);
+  });
+
+  it("the coordinator's own revoke and re-enrolment are not recorded", async () => {
+    const { mls, ingest, admin, store, kps } = await setup();
+    // A re-enrolment: the device rotates its key package and attests while we
+    // still hold its leaf; the coordinator replaces it (Remove, then Add, here).
+    mls.members.get("mls-1")!.add(CHATKEY);
+    kps.splice(0, kps.length, kpEvent(CHATKEY, "kp-rotated"));
+    await admin().handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT);
+    expect(mls.removed).toEqual([[CHATKEY]]);
+    // A revoke of the whole account.
+    await admin().handleRevoke(COORD, ACCOUNT);
+    // Our own commits come back from the relay as self-echo, which the ingest
+    // report does not list (see mls-convergence.test.ts).
+    await ingest({ commits: [], autoCommits: [], forks: [] });
+    expect(records(store)).toEqual([]);
+  });
+
+  it("an organizer approve lifts a removal it postdates, and not one it predates", async () => {
+    const { mls, ingest, admin, store } = await setup();
+    await ingest(coAdminRemove(AFTER_ATTEST_MS));
+    expect(admin().clearDeliberateRemovals(COORD, ACCOUNT, CREATED_AT)).toBe(0);
+    await admin().backfillApproved(COORD);
+    expect(mls.invited).toEqual([CHATKEY]);
+    expect(admin().clearDeliberateRemovals(COORD, ACCOUNT, CREATED_AT + 100)).toBe(1);
+    expect(records(store)).toEqual([]);
+    await admin().backfillApproved(COORD);
+    expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+  });
+
+  it("a device that holds a leaf again has its record dropped", async () => {
+    const { mls, ingest, admin, store } = await setup();
+    await ingest(coAdminRemove());
+    mls.members.get("mls-1")!.add(CHATKEY); // a co-admin added it back, unseen
+    await admin().backfillApproved(COORD);
+    expect(records(store)).toEqual([]);
+  });
+
+  it("purgeGroupState drops the records with the group", async () => {
+    const { ingest, store } = await setup();
+    await ingest(coAdminRemove());
+    purgeGroupState(store, "mls-1");
+    expect(records(store)).toEqual([]);
+  });
 });
 
 // Audit O-3: 154,870 "holding 30443 from <stranger>" lines in six days.
@@ -2452,5 +2851,149 @@ describe("the held-key-package log line (audit O-3)", () => {
     clock.now += HELD_KEY_PACKAGE_TTL_MS;
     await admin.handleKeyPackageEvent(COORD, kpEvent(stranger, "kp-later"));
     expect(holds()).toBe(2);
+  });
+});
+
+// 0.18 (NIP §10.2): the attestation says whether it is an enrolment or a rejoin, so
+// the coordinator no longer has to infer it from the key package and leaf activity.
+describe("the 21607 add intent decides whether a held leaf may be replaced", () => {
+  class SingleCommitMls extends FakeMls {
+    reenrolled: string[] = [];
+    async reenrol(group: string, kp: AnyEvent): Promise<void> {
+      this.reenrolled.push(kp.pubkey);
+      (this.members.get(group) ?? this.members.set(group, new Set()).get(group)!).add(kp.pubkey);
+    }
+  }
+  type Retry = [string, string, string?, number?, "rejoin"?];
+  /** CHATKEY enrolled from kp1; the second admin sees a freshly rotated key package. */
+  async function enrolled(
+    opts: { failFetch?: () => boolean; kp?: AnyEvent; now?: () => number; mls?: FakeMls } = {},
+  ) {
+    const store = freshStore();
+    const mls = opts.mls ?? new FakeMls();
+    const logs: string[] = [];
+    const retries: Retry[] = [];
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    store.upsertChatKey({ coordinate: COORD, accountPubkey: ACCOUNT, chatPubkey: CHATKEY, now: 1 });
+    await admin.syncMember(COORD, ACCOUNT);
+    expect(mls.invited).toEqual([CHATKEY]);
+    const kp = opts.kp ?? kpEvent(CHATKEY, "kp-rotated");
+    const admin2 = makeAdmin(store, mls, [kp], (m) => logs.push(m), {
+      enqueueSync: (...args) => void retries.push(args as Retry),
+      ...(opts.now ? { now: opts.now } : {}),
+      fetchKeyPackages: async () => {
+        if (opts.failFetch?.()) throw new Error("simulated relay outage");
+        return [kp];
+      },
+    });
+    return { store, mls, logs, retries, admin2 };
+  }
+
+  it("enrol never removes a held leaf, even one with no activity on record", async () => {
+    const { mls, store, logs, admin2 } = await enrolled();
+    // No activity at all: a legacy add here is a re-enrolment (see the K-1 block).
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { intent: "enrol" }), CREATED_AT)).toBe(true);
+    expect(mls.removed).toEqual([]);
+    expect(mls.invited).toEqual([CHATKEY]);
+    // Not spent: a later rejoin from this device needs exactly this key package.
+    expect(store.isKpConsumed(COORD, "kp-rotated")).toBe(false);
+    expect(logs.some((l) => l.includes("(intent: enrol)"))).toBe(true);
+  });
+
+  it("enrol still updates the label of a device that holds a leaf", async () => {
+    const { mls, store, admin2 } = await enrolled();
+    const content = attest("add", CHATKEY, { intent: "enrol", label: "Renamed phone" });
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, content, CREATED_AT)).toBe(true);
+    expect(store.getChatKey(COORD, CHATKEY)?.label).toBe("Renamed phone");
+    expect(mls.removed).toEqual([]);
+  });
+
+  it("enrol adds a device that holds no leaf", async () => {
+    const store = freshStore();
+    const mls = new FakeMls();
+    const admin = makeAdmin(store, mls, [kpEvent(CHATKEY, "kp1")]);
+    await admin.ensureGroup({ coordinate: COORD, name: "n", description: "d", relays: [] });
+    store.upsertAttendee({ coordinate: COORD, pubkey: ACCOUNT, status: "approved", now: 1 });
+    expect(await admin.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { intent: "enrol" }), CREATED_AT)).toBe(true);
+    expect(mls.invited).toEqual([CHATKEY]);
+    expect(store.isKpConsumed(COORD, "kp1")).toBe(true);
+  });
+
+  it("rejoin replaces a held leaf in one commit even though it posted a minute ago", async () => {
+    const mls = new SingleCommitMls();
+    const { store, logs, admin2 } = await enrolled({ mls });
+    mls.activity.set(CHATKEY, { ageMs: 60_000, epoch: 5, currentEpoch: 5 });
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { intent: "rejoin" }), CREATED_AT)).toBe(true);
+    expect(mls.reenrolled).toEqual([CHATKEY]);
+    expect(store.isKpConsumed(COORD, "kp-rotated")).toBe(true);
+    expect(logs.some((l) => l.includes("(intent: rejoin)"))).toBe(true);
+    expect(logs.some((l) => /its leaf is active/.test(l))).toBe(false);
+  });
+
+  it("a legacy add (no intent) with the same recent activity is still held off", async () => {
+    const { mls, logs, admin2 } = await enrolled();
+    mls.activity.set(CHATKEY, { ageMs: 60_000, epoch: 5, currentEpoch: 5 });
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+    expect(mls.removed).toEqual([]);
+    expect(logs.some((l) => l.includes("(intent: legacy)"))).toBe(true);
+    expect(logs.some((l) => /its leaf is active/.test(l))).toBe(true);
+  });
+
+  it("rejoin still needs a key package fresh for this request", async () => {
+    const old = { ...kpEvent(CHATKEY, "kp-5min"), created_at: CREATED_AT - 5 * 60 };
+    const { mls, admin2 } = await enrolled({ kp: old });
+    expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { intent: "rejoin" }), CREATED_AT)).toBe(true);
+    expect(mls.removed).toEqual([]);
+    expect(mls.invited).toEqual([CHATKEY]);
+  });
+
+  it("an expired rejoin warrant does not evict, whatever its intent", async () => {
+    const { mls, logs, admin2 } = await enrolled({ now: () => (CREATED_AT + 2 * 60 * 60) * 1000 });
+    expect(
+      await admin2.syncMember(COORD, ACCOUNT, { reenrolling: CHATKEY, reenrollAt: CREATED_AT, reenrolIntent: "rejoin" }),
+    ).toBe(true);
+    expect(mls.removed).toEqual([]);
+    expect(logs.some((l) => /re-enrolment request .* is stale/.test(l))).toBe(true);
+  });
+
+  it("rejoin still re-checks authorization: a revoked device is not re-added", async () => {
+    const { mls, store, admin2 } = await enrolled();
+    store.setChatKeyStatus(COORD, CHATKEY, "revoked", 2);
+    await admin2.syncMember(COORD, ACCOUNT, { reenrolling: CHATKEY, reenrollAt: CREATED_AT, reenrolIntent: "rejoin" });
+    expect(mls.invited).toEqual([CHATKEY]);
+  });
+
+  describe("the durable retry carries the intent, and only a rejoin's", () => {
+    it("enrol queues a plain sync with no warrant, so the retry cannot evict", async () => {
+      let fail = true;
+      const { mls, retries, admin2 } = await enrolled({ failFetch: () => fail });
+      expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { intent: "enrol" }), CREATED_AT)).toBe(true);
+      expect(retries).toEqual([[COORD, ACCOUNT]]);
+      fail = false;
+      const [c, p, reenrolling, reenrollAt] = retries[0]!;
+      await admin2.syncMember(c, p, { reenrolling, reenrollAt });
+      expect(mls.removed).toEqual([]);
+    });
+
+    it("rejoin queues its warrant and intent, and the retry replaces the active leaf", async () => {
+      let fail = true;
+      const { mls, retries, admin2 } = await enrolled({ failFetch: () => fail });
+      mls.activity.set(CHATKEY, { ageMs: 60_000, epoch: 5, currentEpoch: 5 });
+      expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add", CHATKEY, { intent: "rejoin" }), CREATED_AT)).toBe(true);
+      expect(retries).toEqual([[COORD, ACCOUNT, CHATKEY, CREATED_AT, "rejoin"]]);
+      fail = false;
+      const [c, p, reenrolling, reenrollAt, reenrolIntent] = retries[0]!;
+      expect(await admin2.syncMember(c, p, { reenrolling, reenrollAt, reenrolIntent })).toBe(true);
+      expect(mls.removed).toEqual([[CHATKEY]]);
+      expect(mls.invited).toEqual([CHATKEY, CHATKEY]);
+    });
+
+    it("a legacy add queues its warrant without an intent, as before", async () => {
+      const { retries, admin2 } = await enrolled({ failFetch: () => true });
+      expect(await admin2.handleAttestation(COORD, ACCOUNT, attest("add"), CREATED_AT)).toBe(true);
+      expect(retries).toEqual([[COORD, ACCOUNT, CHATKEY, CREATED_AT]]);
+    });
   });
 });

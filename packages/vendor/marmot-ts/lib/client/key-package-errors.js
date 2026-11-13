@@ -1,4 +1,20 @@
-/** @module @category Client - Key Package Manager */
+/**
+ * No requested relay acknowledged a KeyPackage publication or deletion.
+ * Responses retain rejection/uncertainty details; the signed event is provided
+ * for inspection. This error does not imply that no relay observed the event.
+ */
+export class KeyPackagePublishError extends Error {
+    event;
+    relays;
+    responses;
+    constructor(event, relays, responses) {
+        super("No requested relay acknowledged the key package event");
+        this.event = event;
+        this.relays = relays;
+        this.responses = responses;
+        this.name = "KeyPackagePublishError";
+    }
+}
 /**
  * Thrown by {@link KeyPackageManager.create} when no relay URLs are provided.
  * Callers can catch this specifically to prompt the user for relay configuration.

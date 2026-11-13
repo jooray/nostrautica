@@ -325,8 +325,25 @@ export interface FilterablePerson {
   name?: string;
   approved: boolean;
   hasIntro: boolean;
+  /**
+   * Whether `hasIntro` is known (audit KIMIK31 W-16). False for a roster member
+   * whose intake aged out of the inbox window with no directory entry: nothing
+   * says they lack an intro, only that it cannot be read here. Omitted = known.
+   */
+  introKnown?: boolean;
   op: PersonOpState;
   hasTalk: boolean;
+}
+
+/**
+ * Approved, non-revoked people who KNOWABLY have no intro (W-16). Unavailable
+ * intake used to count as missing, so on a long-running community everyone whose
+ * join request had aged out showed up as a missing intro, burying the real ones.
+ */
+export function countMissingIntros(
+  people: { revoked: boolean; hasIntro: boolean; intakeAvailable: boolean }[],
+): number {
+  return people.filter((p) => !p.revoked && p.intakeAvailable && !p.hasIntro).length;
 }
 
 /**
@@ -349,7 +366,7 @@ export function filterPeople<T extends FilterablePerson>(
       case "approved":
         return p.approved;
       case "no-intro":
-        return p.approved && !p.hasIntro;
+        return p.approved && !p.hasIntro && p.introKnown !== false;
       case "processing":
         return p.op === "processing";
       case "failed":

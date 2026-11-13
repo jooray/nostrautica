@@ -43,6 +43,40 @@ export function servedRevision(source: string): string {
   return /index\.html"\s*,\s*"?revision"?\s*:\s*"([^"]+)"/.exec(source)?.[1] ?? "unknown";
 }
 
+/**
+ * What an update check fetched for `sw.js`: a real service worker (with the
+ * revision it serves), or something else that must not be read as drift.
+ */
+export type ServedWorker =
+  | { ok: true; source: string; revision: string }
+  | { ok: false; reason: string };
+
+/**
+ * Accept a fetched `sw.js` only when it IS one (audit KIMIK31 W-9). The check
+ * used to feed any body to the drift watchdog: a 404 or 503 page, or a venue
+ * captive portal answering HTTP 200 with its login page, never mentions our
+ * release, so three of them in a row read as "stuck on an old build" and drove
+ * the automatic purge-and-reload, wiping the offline shell at exactly the place
+ * with no network to rebuild it from. A real `sw.js` from any of our builds
+ * stamps a revision on its precached index.html; a body without one is a failed
+ * check, not a stale deploy. A real stale deploy (an old sw.js, with its old
+ * revision) still passes here and still recovers, once per revision (R-84).
+ */
+export function readServedWorker(
+  res: { ok: boolean; status: number },
+  source: string,
+): ServedWorker {
+  if (!res.ok) return { ok: false, reason: `sw.js answered HTTP ${res.status}` };
+  const revision = servedRevision(source);
+  if (revision === "unknown") {
+    return {
+      ok: false,
+      reason: "sw.js answered with something that is not a service worker (an error or captive-portal page?)",
+    };
+  }
+  return { ok: true, source, revision };
+}
+
 type Log = (...args: unknown[]) => void;
 
 /**

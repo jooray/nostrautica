@@ -1262,6 +1262,41 @@ describe("Coordinator pipeline (spec §9, P4 acceptance)", () => {
     expect(typeof pair.score).toBe("number");
   });
 
+  it("a matrix past the NIP-44 ceiling publishes its best pairs instead of throwing (audit KIMIK31 R-1)", async () => {
+    const h = await setup(0, { matchVisibility: "event" });
+    await join(h, generateSecretKey(), "crypto");
+    await h.coordinator.jobs.drain();
+    // 40 approved people, every pair scored: 780 pairs, ~117 KB of plaintext.
+    const pks = Array.from({ length: 40 }, () => getPublicKey(generateSecretKey()));
+    for (const pk of pks) h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "approved", now: 1 });
+    let n = 0;
+    const scores = new Map<string, number>();
+    for (let i = 0; i < pks.length; i++) {
+      for (let j = i + 1; j < pks.length; j++) {
+        const score = ++n / 1000;
+        const [a, b] = pks[i]! < pks[j]! ? [pks[i]!, pks[j]!] : [pks[j]!, pks[i]!];
+        scores.set(`${a}|${b}`, score);
+        h.store.putPair({
+          coordinate: h.coordinate, a, b, inputsHash: "h", score, similarity: 0, complementarity: 0,
+          reasoningForA: "r", reasoningForB: "r", now: 1,
+        });
+      }
+    }
+    const state = (h.coordinator as any).events.get(h.coordinate);
+    const before = h.transport.published.length;
+    await (h.coordinator as any).publishMatrix(state);
+
+    const matrices = h.transport.published.slice(before).filter((e) => e.kind === KIND_MATCH_MATRIX);
+    expect(matrices).toHaveLength(1);
+    const matrix = matchMatrixContentSchema.parse(JSON.parse(eckDecrypt(h.eck, matrices[0]!.content)));
+    expect(matrix.pairs.length).toBeGreaterThan(300);
+    expect(matrix.pairs.length).toBeLessThan(scores.size);
+    // The kept pairs are exactly the highest-scoring ones.
+    const kept = matrix.pairs.map((p) => scores.get(`${p.a}|${p.b}`)!).sort((x, y) => y - x);
+    const best = [...scores.values()].sort((x, y) => y - x).slice(0, matrix.pairs.length);
+    expect(kept).toEqual(best);
+  });
+
   // ── H3: rotation republishes match lists + matrix under the new ECK ──────────
   it("revocation republishes remaining attendees' match lists + matrix under the new d, excluding the revoked (H3)", async () => {
     const h = await setup(0, { matchVisibility: "event" });
@@ -4521,6 +4556,55 @@ describe("H-2 §8 — usage budgets gate paid processing", () => {
   });
 
   /**
+   * KIMIK31 R-6 (owner decision): the call budgets keep counting job RUNS, and the
+   * billed requests a run actually sends are counted beside them and logged. The
+   * mocks are routed through the real `withProviderTimeout` hook under the real
+   * adapters' labels, so this is the production counting path end to end: hook →
+   * job tally → the job's outcome line, with assertSpendAllowed's one run.
+   */
+  it("one process_attendee run is one budget call but logs every provider request it sent, by kind", async () => {
+    const { withProviderTimeout } = await import("./providers/http.js");
+    const h = await setup(0, { budgets: { ...generous } });
+    const stt = h.stt.transcribe.bind(h.stt);
+    h.stt.transcribe = (a, o) => withProviderTimeout("Venice STT", 60_000, () => stt(a, o));
+    const complete = h.llm.completeStructured.bind(h.llm);
+    h.llm.completeStructured = ((r: any) =>
+      withProviderTimeout("Venice chat/completions", 60_000, () => complete(r))) as typeof h.llm.completeStructured;
+    const lines: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((s: string) => void lines.push(String(s)));
+    try {
+      const pk = await join(h, generateSecretKey(), "crypto");
+      await h.coordinator.jobs.drain();
+      const chat = h.llm.completeCalls;
+      // An uncached attendee: the STT request plus more than one chat stage.
+      expect(chat).toBeGreaterThan(1);
+      const done = lines.filter((l) => /\[job\] process_attendee #\d+ done/.test(l));
+      expect(done).toHaveLength(1);
+      expect(done[0]).toContain(`— 1 counted run, ${1 + chat} provider requests (stt 1, chat ${chat})`);
+
+      // The budget is unchanged: it holds one unit per counted run (process_attendee
+      // and the free match_recompute after it), never one per request.
+      const runs = lines
+        .filter((l) => /\[job\] \S+ #\d+ done/.test(l))
+        .reduce((n, l) => n + Number(/— (\d+) counted run/.exec(l)?.[1] ?? 0), 0);
+      expect(h.store.getUsage(h.coordinate, pk).calls).toBe(runs);
+      expect(runs).toBeLessThan(1 + chat);
+
+      // The periodic [budget] line sets the window's runs beside the requests.
+      (h.coordinator as any).reportProviderRequests();
+      expect(
+        lines.some((l) =>
+          new RegExp(
+            `\\[budget\\] last 24h: ${runs} counted runs \\(daemon_calls_per_window unlimited\\), \\d+ provider requests \\(stt \\d+, chat \\d+`,
+          ).test(l),
+        ),
+      ).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  /**
    * SEC-7. The budgets above are lifetime AND per-installation, so they bound what
    * one event can spend and say nothing about what many can. Install is
    * protocol-level and `allowedEidPubkeys` is empty by default, so anyone can
@@ -5501,6 +5585,58 @@ describe("NIP §6.3 — attendee-scoped 21606 status", () => {
       .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
     expect(toAttendee.length).toBeGreaterThan(0);
     expect(toAttendee[toAttendee.length - 1]!.pubkey).toBe(pk);
+  });
+
+  /** Statuses sealed to `sk` that reached the relay. */
+  const statusesFor = (h: Harness, sk: Uint8Array) =>
+    h.transport.published
+      .filter((e) => e.kind === 1059)
+      .map((e) => { try { return unwrapRumor(e as any, sk); } catch { return null; } })
+      .filter((r): r is NonNullable<typeof r> => !!r && r.kind === KIND_COORDINATOR_STATUS)
+      .map((r) => coordinatorStatusContentSchema.parse(JSON.parse(r.content)));
+
+  /** The relay refuses the first publish sealed to `refusedPubkey`, accepts the rest. */
+  function refuseFirstTo(h: Harness, refusedPubkey: string) {
+    let refused = 0;
+    h.transport.onPublish = (e) => {
+      if (e.kind === 1059 && e.tags.some((t) => t[0] === "p" && t[1] === refusedPubkey) && refused === 0) {
+        refused++;
+        throw new Error("relay said no");
+      }
+    };
+    return () => refused;
+  }
+  const settle = () => new Promise((r) => setTimeout(r, 0));
+
+  it("a refused organizer copy of a poison notice does not stop the attendee's, and is retried (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const refused = refuseFirstTo(h, getPublicKey(h.eidSk));
+    await (h.coordinator as any).surfacePoison({
+      type: "process_attendee",
+      payload: { coordinate: h.coordinate, pubkey: pk },
+      attempts: 27,
+      error: "boom",
+    });
+    await settle();
+    expect(refused()).toBe(1);
+    expect(statusesFor(h, attendeeSk).some((s) => s.state === "poison")).toBe(true);
+    expect(statusesFor(h, h.eidSk).some((s) => s.state === "poison")).toBe(true); // the retry
+  });
+
+  it("a refused organizer copy of a cleared notice does not stop the attendee's (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    refuseFirstTo(h, getPublicKey(h.eidSk));
+    const state = (h.coordinator as any).events.get(h.coordinate);
+    await expect((h.coordinator as any).announceCleared(state, pk)).resolves.toBeUndefined();
+    await settle();
+    expect(statusesFor(h, attendeeSk).some((s) => s.state === "cleared")).toBe(true);
+    expect(statusesFor(h, h.eidSk).some((s) => s.state === "cleared")).toBe(true);
   });
 });
 
@@ -7663,6 +7799,15 @@ describe("audit K-7/S-4 — boot-time chat commits and subscriptions do not burs
     await c.setUpChat(c.events.get(h.coordinate));
     // ensure-group (syncAdmins), ensure-relays, ensure-avatar.
     expect(lock.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+
+  // Audit KIMIK31 C-6: the roster backfill's member Adds commit too.
+  it("hands the same queue to the chat admin for member Adds", async () => {
+    const h = await setup(0, { chat: true, chatMls: new StubMls() });
+    const c = h.coordinator as any;
+    const lock = vi.spyOn(c, "withChatCommitLock");
+    await expect(c.marmot.withCommitLock(async () => "added")).resolves.toBe("added");
+    expect(lock).toHaveBeenCalledTimes(1);
   });
 
   it("staggers boot-time chat subscriptions, one slot per event", async () => {

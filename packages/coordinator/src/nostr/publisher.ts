@@ -33,6 +33,8 @@ import {
   type CoordinatorAnnounce,
   type TalkContent,
   eckFingerprint,
+  utf8ByteLength,
+  NIP44_MAX_PLAINTEXT_BYTES,
 } from "@nostrautica/protocol";
 
 export interface PublishKeys {
@@ -152,6 +154,38 @@ export function buildMatchListEvent(
     },
     keys.coordSk,
   );
+}
+
+/**
+ * Trim a match matrix to what one 31606 payload can carry (audit KIMIK31 R-1).
+ *
+ * The matrix is one ECK-sealed event, and NIP-44 caps its plaintext at 65,535
+ * bytes. A pair costs ~150 bytes, so about 420 scored pairs (a fully scored
+ * event of ~30 people) is the ceiling, and past it `eckEncrypt` threw: the match
+ * job failed after its list publish, retried (republishing the list each time)
+ * and poisoned, and a revocation's ECK rotation aborted before republishing
+ * talks. The wire stays as it is (one event, PROTOCOL-NIP.md is frozen), so
+ * the highest-scoring pairs are kept and the rest dropped, which is what a
+ * "best matches" board shows anyway. Ties break on the pair's keys, so the same
+ * scores always keep the same pairs. `dropped` is how many did not fit.
+ */
+export function fitMatchMatrix(
+  content: MatchMatrixContent,
+  maxBytes = NIP44_MAX_PLAINTEXT_BYTES,
+): { content: MatchMatrixContent; dropped: number } {
+  if (utf8ByteLength(JSON.stringify(content)) <= maxBytes) return { content, dropped: 0 };
+  const ranked = [...content.pairs].sort(
+    (x, y) => y.score - x.score || (x.a < y.a ? -1 : x.a > y.a ? 1 : x.b < y.b ? -1 : x.b > y.b ? 1 : 0),
+  );
+  let bytes = utf8ByteLength(JSON.stringify({ ...content, pairs: [] }));
+  const kept: MatchMatrixContent["pairs"] = [];
+  for (const pair of ranked) {
+    const cost = utf8ByteLength(JSON.stringify(pair)) + (kept.length > 0 ? 1 : 0); // the comma
+    if (bytes + cost > maxBytes) break;
+    bytes += cost;
+    kept.push(pair);
+  }
+  return { content: { ...content, pairs: kept }, dropped: content.pairs.length - kept.length };
 }
 
 /**

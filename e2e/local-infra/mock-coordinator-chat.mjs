@@ -170,16 +170,22 @@ await coordinator.start();
 // Publish the kind-31611 discovery announcement (docs/COORDINATOR-DISCOVERY-PLAN.md).
 // See mock-coordinator.mjs for the full story: only the real CLI (main.ts) ever did
 // this, so CoordinatorPicker.svelte's discovery subscription found nothing against
-// either double and every wait for `.coord-card` timed out. `chat: ["marmot"]`
-// reflects the chatMls wiring above, matching what a real coordinator with Marmot
-// enabled would disclose.
+// either double and every wait for `.coord-card` timed out. `chat` reflects the
+// chatMls wiring above and matches what a real 0.18+ coordinator with Marmot
+// enabled discloses: "attest-intent" too, so the chat tier exercises the
+// enrol/rejoin intent path that production clients take, not only the legacy
+// bare add (MOCK_LEGACY_ATTEST=1 drops it to test against a pre-0.18 coordinator).
 try {
   const announce = buildCoordinatorAnnounce(coordSk, {
     v: 2,
     name: "Mock Coordinator (chat)",
     about: "Local e2e/screenshot double with Marmot group chat — MockStt/MockLlm, no real API calls.",
     relays: [RELAY],
-    features: { matching: true, talks: false, chat: ["marmot"] },
+    features: {
+      matching: true,
+      talks: false,
+      chat: process.env.MOCK_LEGACY_ATTEST === "1" ? ["marmot"] : ["marmot", "attest-intent"],
+    },
     pricing: { model: "free" },
   });
   await client.publish(announce, [RELAY]);

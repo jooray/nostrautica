@@ -194,6 +194,13 @@ test.describe.serial(WN_BIN && COORD_NPUB ? "white noise interop" : "white noise
     await expect(card.getByText(/Invite sent to White Noise/)).toBeVisible({ timeout: 30_000 });
 
     eventGroupA = await acceptInvite(aliceHex, /WN Interop E2E/);
+    // Let the browser apply the coordinator's commit that added White Noise before
+    // it sends. White Noise can accept its Welcome in the same second that commit is
+    // published, and a message the browser encrypts under the previous epoch is, by
+    // MLS design, unreadable to a member who joined in the next one. Since 0.17's
+    // quicker link flow this test sent inside that window every time (bisected to
+    // bde64637, which only shifted timing); messages sent after it arrive.
+    await alice.waitForTimeout(5_000);
     await sendChat(alice, "browser to white noise A");
     await until("wn A sees the browser message", () => messagesText(aliceHex, eventGroupA).includes("browser to white noise A"));
     wn(aliceHex, ["messages", "send", eventGroupA, "white noise A to browser"]);

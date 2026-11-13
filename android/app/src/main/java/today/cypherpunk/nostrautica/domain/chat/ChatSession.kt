@@ -4,7 +4,6 @@ import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.awaitCancellation
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -95,18 +94,15 @@ class ChatSession internal constructor(
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> get() = _state
 
-    private var job: Job? = null
     private val reconcileLock = Mutex()
     private var accountRef: String? = null
     private var device: ChatDeviceKeys.Device? = null
     private var boundGroup: String? = null
     private var timeline: ChatEngine.TimelineHandle? = null
     private var timelineJob: Job? = null
-    /** When this process last sent an automatic `add` (0: never). Survives [retry] on purpose. */
-    private var lastAttestMs = 0L
+    /** The automatic-attestation spacing and refusal-retry latches. Survive [retry] on purpose. */
+    private val enrolment = Enrolment()
     private var lastAttestSec = 0L
-    /** One extra attempt after a fixable refusal of an attestation this process sent. */
-    private var refusalRetried = false
     /** When a roster with attendees was last fetched from the relays (0: not yet). */
     @Volatile private var rosterFreshAtMs = 0L
     /** Since when the device has been seen removed from the room, in a row. */
@@ -116,8 +112,8 @@ class ChatSession internal constructor(
 
     val groupId: String? get() = boundGroup
 
-    /** A run [stop] cancelled that may still be unwinding (its finally unbinds and releases). */
-    private var stopping: Job? = null
+    /** At most one [run] alive at a time, across start, stop and retry. */
+    private val runs = SessionRuns(chat.scope)
 
     /**
      * Start (or resume) the session. The phase goes back to STARTING: whatever the
@@ -125,40 +121,24 @@ class ChatSession internal constructor(
      * and a READY carried over with no bound group made the first send fail as
      * "unroutable" and offer Rejoin (audit K-6).
      */
-    @Synchronized
-    fun start() {
-        if (job?.isActive == true) return
-        val old = stopping
-        stopping = null
-        job = chat.scope.launch {
-            old?.join()
-            _state.update { it.copy(phase = Phase.STARTING, setupSince = System.currentTimeMillis(), offerRejoin = false, error = null) }
-            run()
-        }
-    }
+    fun start() = runs.start({
+        _state.update { it.copy(phase = Phase.STARTING, setupSince = System.currentTimeMillis(), offerRejoin = false, error = null) }
+        // In the background, so the first attestation usually knows whether the
+        // coordinator takes the add `intent` (NIP §6.2). Never waited for.
+        chat.prefetchIntentSupport(coordinator)
+    }) { run() }
 
-    @Synchronized
-    fun stop() {
-        job?.cancel()
-        stopping = job ?: stopping
-        job = null
-    }
+    fun stop() = runs.stop()
 
     /**
-     * "Try again": tear down and start from scratch (the old run fully ends first).
-     * It never attests by itself: the automatic-attestation spacing survives it, so a
-     * press can't turn into a re-enrolment (K-6).
+     * "Try again": tear down and start from scratch (the old run fully ends first,
+     * however many presses came in between: [SessionRuns], A-1). It never attests by
+     * itself: the automatic-attestation spacing survives it, so a press can't turn
+     * into a re-enrolment (K-6).
      */
-    @Synchronized
-    fun retry() {
-        val old = job ?: stopping
-        stopping = null
-        job = chat.scope.launch {
-            old?.cancelAndJoin()
-            _state.update { State(roster = it.roster, chatPubkey = it.chatPubkey, messages = it.messages, hasMoreBefore = it.hasMoreBefore) }
-            run()
-        }
-    }
+    fun retry() = runs.retry({
+        _state.update { State(roster = it.roster, chatPubkey = it.chatPubkey, messages = it.messages, hasMoreBefore = it.hasMoreBefore) }
+    }) { run() }
 
     private suspend fun run() {
         var acquired = false
@@ -176,7 +156,8 @@ class ChatSession internal constructor(
                 // Replacing the key is only safe when a FRESH roster shows it was never
                 // attested (K-4): a cached roster can predate the attestation, and a new
                 // key for a device the coordinator holds a leaf for strands that leaf.
-                if (imported.isFailure && ChatPolicy.rosterSays(fetchRosterNow(), true, account, stored.pubkey) == ChatPolicy.RosterSays.NOT_LISTED) {
+                // "Fresh" is the read's own provenance, never assumed (KIMIK31 A-3).
+                if (imported.isFailure && ChatPolicy.mayReplaceUnimportableKey(fetchRosterNow(), account, stored.pubkey)) {
                     Log.w(TAG, "device key import failed (${imported.exceptionOrNull()?.javaClass?.simpleName}); minting a new one")
                     chat.keys.discard(account)
                     d = null
@@ -199,7 +180,7 @@ class ChatSession internal constructor(
                 launch { runCatching { chat.publishDeviceProfile(d, chatRelays) }.onFailure { Log.w(TAG, "device profile: ${it.javaClass.simpleName}") } }
                 launch {
                     // Coming back to the screen within a minute reuses the last roster (S-2).
-                    fetchRosterNow(ChatPolicy.ROSTER_REUSE_MS)?.let { r -> chat.warmProfiles(r, chatRelays) }
+                    fetchRosterNow(ChatPolicy.ROSTER_REUSE_MS)?.let { r -> chat.warmProfiles(r.roster, chatRelays) }
                     reconcile()
                 }
                 launch {
@@ -257,6 +238,9 @@ class ChatSession internal constructor(
                 // Say so instead of waiting in silence; the next reconcile retries.
                 Log.w(TAG, "groups: ${e.javaClass.simpleName}")
                 _state.update { it.copy(problem = Problem.GROUPS_UNREADABLE) }
+                // MDK 0.16: a group quarantined until the next account open makes the
+                // list unreadable, and only a reopen clears it (once, RuntimeFreshness).
+                if (engine.refreshIfStale()) unbindTimeline()
                 return@withLock
             }
             val rosterGid = _state.value.roster?.nostrGroupId
@@ -317,7 +301,7 @@ class ChatSession internal constructor(
         // The coordinator's word on our attestation (21606, from the local cache).
         val statuses = if (phase == Phase.READY) emptyList() else runCatching { chat.ownStatuses(account, ctx.coordinate) }.getOrDefault(emptyList())
         val refusal = statuses.filter { it.stage == ExternalLink.ATTESTATION_STAGE && it.state == "poison" }.maxByOrNull { it.at }
-        val refusalRetry = !refusalRetried && lastAttestSec > 0 && refusal != null && refusal.at >= lastAttestSec &&
+        val refusalRetry = !enrolment.refusalRetried && lastAttestSec > 0 && refusal != null && refusal.at >= lastAttestSec &&
             refusal.errorCategory in ChatPolicy.RETRYABLE_REFUSALS
         val roster = _state.value.roster
         val says = ChatPolicy.rosterSays(roster, now - rosterFreshAtMs < ChatPolicy.ROSTER_FRESH_MS, account, d.pubkey)
@@ -339,40 +323,56 @@ class ChatSession internal constructor(
             )
         }
         if (bound != null && bound.groupIdHex != boundGroup) bindTimeline(ref, bound.groupIdHex, d.pubkey)
-        if (ChatPolicy.attestAllowed(decision, lastAttestMs, now, refusalRetry)) {
+        if (enrolment.allowed(decision, now, refusalRetry)) {
             Log.i(TAG, "attesting: ${decision.why}")
-            if (refusalRetry) refusalRetried = true
-            enroll(ref, d, (decision as ChatPolicy.Decision.Attest).rotate)
+            val attest = decision as ChatPolicy.Decision.Attest
+            enroll(ref, d, attest.rotate, refusalRetry, attest.intent)
         } else if (phase != Phase.READY) {
             Log.d(TAG, "not attesting: ${decision.why}")
         }
     }
 
-    /** Ask the coordinator to add this device (client.ts ensurePublished). */
-    private suspend fun enroll(ref: String, d: ChatDeviceKeys.Device, rotate: Boolean) {
-        lastAttestMs = System.currentTimeMillis()
-        if (rotate) runCatching { engine.rotateKeyPackage(ref) }.onFailure { Log.w(TAG, "rotate: ${it.javaClass.simpleName}") }
-        _state.update { it.copy(keyPackageReady = it.keyPackageReady || engine.networkReady(ref)) }
-        sendAdd(d)
+    /**
+     * Ask the coordinator to add this device (client.ts ensurePublished). A required
+     * rotation that fails sends nothing and consumes no latch ([Enrolment], A-2).
+     */
+    private suspend fun enroll(ref: String, d: ChatDeviceKeys.Device, rotate: Boolean, refusalRetry: Boolean, intent: ChatAttest.Intent) {
+        val sent = enrolment.enroll(rotate, refusalRetry, rotateKeyPackage = {
+            try {
+                engine.rotateKeyPackage(ref)
+            } catch (e: Exception) {
+                if (e !is CancellationException) Log.w(TAG, "rotate: ${e.javaClass.simpleName}; not attesting on the old key package")
+                throw e
+            }
+        }) {
+            _state.update { it.copy(keyPackageReady = it.keyPackageReady || engine.networkReady(ref)) }
+            sendAdd(d, intent)
+        }
+        if (!sent) _state.update { it.copy(attest = Attest.FAILED) }
     }
 
     /**
      * Fetch the roster from the relays, or reuse one fetched under [reuseMs] ago. Only
-     * a roster with attendees is applied and counts as fresh: an empty one is what the
-     * fetch returns when no relay had it.
+     * a roster with attendees is applied: an empty one is what the fetch returns when
+     * no relay had it. Only one a relay just sent counts as fresh ([RosterReads]); a
+     * read the phone answered from its own store is shown but decides nothing (A-3).
      */
-    private suspend fun fetchRosterNow(reuseMs: Long = 0): RosterContent? {
-        val (r, at) = chat.fetchRoster(ctx, account, reuseMs) ?: return null
-        if (r.attendees.isEmpty()) return null
-        rosterFreshAtMs = maxOf(rosterFreshAtMs, at)
-        _state.update { it.copy(roster = r) }
-        return r
+    private suspend fun fetchRosterNow(reuseMs: Long = 0): RosterReads.Fetched? {
+        val f = chat.fetchRoster(ctx, account, reuseMs) ?: return null
+        if (f.roster.attendees.isEmpty()) return null
+        rosterFreshAtMs = ChatPolicy.rosterFreshAt(rosterFreshAtMs, f)
+        _state.update { it.copy(roster = f.roster) }
+        return f
     }
 
-    private suspend fun sendAdd(d: ChatDeviceKeys.Device) {
+    private suspend fun sendAdd(d: ChatDeviceKeys.Device, intent: ChatAttest.Intent) {
         val label = chat.keys.label(d.pubkey) ?: MarmotEngine.defaultDeviceLabel()
         lastAttestSec = nowSec()
-        val r = runCatching { chat.attestTimed(ctx, ChatAttest.Op.ADD, d.pubkey, label, d.clientId, d.secret) }
+        // `intent` only to a coordinator that advertises "attest-intent" (NIP §6.2);
+        // otherwise, or while its announcement is unknown, the bare 0.17 add.
+        val sent = ChatAttest.intentFor(intent, chat.knownIntentSupport(coordinator))
+        chat.prefetchIntentSupport(coordinator)
+        val r = runCatching { chat.attestTimed(ctx, ChatAttest.Op.ADD, d.pubkey, label, d.clientId, d.secret, intent = sent) }
         r.onFailure { Log.w(TAG, "attest: ${it.javaClass.simpleName}") }
         r.getOrNull()?.let { lastAttestSec = it.createdAt }
         _state.update { it.copy(attest = r.fold({ a -> if (a.published) Attest.SENT else Attest.QUEUED }, { Attest.FAILED })) }
@@ -494,8 +494,9 @@ class ChatSession internal constructor(
             }
             engine.rotateKeyPackage(ref)
             while (nowSec() <= revoke.createdAt) delay(200)
-            lastAttestMs = System.currentTimeMillis()
-            sendAdd(d)
+            enrolment.attestedNow()
+            // The user asked to be put back (NIP §10.2 `intent:"rejoin"`).
+            sendAdd(d, ChatAttest.Intent.REJOIN)
             reconcile()
         } finally {
             _state.update { it.copy(rejoining = false) }

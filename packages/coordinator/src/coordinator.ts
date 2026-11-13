@@ -151,6 +151,7 @@ import {
   buildRoster,
   buildMatchListEvent,
   buildMatchMatrix,
+  fitMatchMatrix,
   buildKeyGrant,
   buildCoordinatorStatus,
   buildTalkEntry,
@@ -168,6 +169,12 @@ import { profilePicture } from "./chat/avatar.js";
 import { sanitizeRelayUrls, type RelayPolicy } from "./net/relay-urls.js";
 import { describeError, LogThrottle, logStamp, sanitizeLogText } from "./log-line.js";
 import { retryInBackground } from "./background-retry.js";
+import {
+  formatTally,
+  formatWindowSummary,
+  noteCountedRun,
+  providerRequests,
+} from "./providers/request-meter.js";
 import {
   sanitizeLlmText,
   sanitizeAiProfile,
@@ -559,6 +566,8 @@ const PENDING_PUBLICATION_RETRY_METHODS = [
   "retryPendingPublication",
   "sweepPendingPublications",
 ] as const;
+/** Back-off before each re-send of a 21606 status a relay set refused (audit KIMIK31 R-3). */
+const STATUS_RETRY_MS = [5_000, 30_000, 120_000];
 
 /**
  * Whether the roster is also published at its pre-R-53 address, the bare event
@@ -986,6 +995,8 @@ export class Coordinator {
   /** True while the daemon-wide ceiling (audit SEC-7) is parking paid work, so the
    *  operator log says so once rather than once per gated job. */
   private daemonCeilingParked = false;
+  /** Last `[budget]` request summary printed, so an idle daemon repeats nothing (R-6). */
+  private lastRequestSummary?: string;
   /** Bounded inbound work queue (audit C3): pending handler closures + the number of
    *  handlers currently running, enforcing a global concurrency limit and a queue
    *  depth cap so a gift-wrap burst can't spawn unbounded concurrent work. */
@@ -1065,7 +1076,9 @@ export class Coordinator {
         // interleave with one of them for the same member.
         withMemberLock: (coordinate, pubkey, fn) =>
           this.withSubjectLock(coordinate, `member:${pubkey}`, fn),
-        enqueueSync: (coordinate, pubkey, reenrolling, reenrollAt) =>
+        // Member Adds queue with the setup commits (audit KIMIK31 C-6).
+        withCommitLock: (fn) => this.withChatCommitLock(fn),
+        enqueueSync: (coordinate, pubkey, reenrolling, reenrollAt, reenrolIntent) =>
           this.jobs.enqueue("chat_sync_member", `chat-sync:${coordinate}:${pubkey}:${this.now()}`, {
             coordinate,
             pubkey,
@@ -1076,6 +1089,10 @@ export class Coordinator {
             ...(reenrolling ? { reenrolling } : {}),
             // When the attestation was made: the warrant expires (REENROL_WARRANT_MS).
             ...(reenrollAt !== undefined ? { reenrollAt } : {}),
+            // The attestation's explicit `intent:"rejoin"` (NIP §10.2). Absent on an
+            // `enrol` (which enqueues no warrant at all), on a legacy add, and on
+            // rows written before 0.18, all of which keep the guarded inference.
+            ...(reenrolIntent ? { reenrolIntent } : {}),
           }),
         // A device-management action changes `chat_keys`, and the published 31604
         // roster is the only place a client reads the device list from — so without
@@ -1343,6 +1360,7 @@ export class Coordinator {
           this.marmot!.syncMember(p.coordinate, p.pubkey, {
             ...(typeof p.reenrolling === "string" ? { reenrolling: p.reenrolling } : {}),
             ...(typeof p.reenrollAt === "number" ? { reenrollAt: p.reenrollAt } : {}),
+            ...(p.reenrolIntent === "rejoin" ? { reenrolIntent: "rejoin" as const } : {}),
           }),
         );
         // THROW on an incomplete sync (audit B-5), so this job is what its comment
@@ -5161,10 +5179,14 @@ export class Coordinator {
         pairs.push({ a, b, score: row.score });
       }
     }
-    const content: MatchMatrixContent = { v: 2, computed_at: Math.floor(this.now() / 1000), pairs };
+    // One NIP-44 payload holds ~420 pairs; past that keep the best (audit KIMIK31 R-1).
+    const { content, dropped } = fitMatchMatrix({ v: 2, computed_at: Math.floor(this.now() / 1000), pairs });
     const event = buildMatchMatrix(this.publishKeys(state), state.coordinate, content, this.nextCreatedAt);
     await this.publish(event, state.configRelays);
-    log(`[match] published 31606 matrix — ${pairs.length} pair(s)`);
+    log(
+      `[match] published 31606 matrix — ${content.pairs.length} pair(s)` +
+        (dropped > 0 ? `; ${dropped} lower-scoring pair(s) left out to fit one NIP-44 payload` : ""),
+    );
   }
 
   /**
@@ -5335,6 +5357,12 @@ export class Coordinator {
         // refused approval leaves the tombstone in place rather than silently
         // reopening the member to an automatic re-join later.
         this.deps.store.clearRevocation(coordinate, pubkey);
+        // Likewise for a chat removal made only at the MLS layer (a co-admin's
+        // Remove, the member's own self_remove): the organizer saying "approve" is
+        // the event authority wanting this person in, so the sync the grant below
+        // queues may add their devices again. Only removals no newer than this
+        // command, so a replayed old approve cannot undo a later removal.
+        this.marmot?.clearDeliberateRemovals(coordinate, pubkey, order?.createdAt ?? Math.floor(this.now() / 1000));
         if (attendee.status !== "approved") {
           this.deps.store.upsertAttendee({ coordinate, pubkey, status: "approved", now: this.now() });
           log(`[approve] organizer approved ${short(pubkey)}`);
@@ -6879,6 +6907,11 @@ export class Coordinator {
       } catch {
         /* next tick */
       }
+      try {
+        this.reportProviderRequests();
+      } catch {
+        /* diagnostics only; next tick */
+      }
     }, 600_000);
     if (typeof (daemonBudgetTimer as any).unref === "function") (daemonBudgetTimer as any).unref();
     this.closers.add(() => clearInterval(daemonBudgetTimer));
@@ -7873,7 +7906,13 @@ export class Coordinator {
     if (daemonOver) {
       if (!this.daemonCeilingParked) {
         this.daemonCeilingParked = true;
-        log(`[budget] DAEMON-WIDE ceiling reached — parking paid work for every event: ${daemonOver}`);
+        // Beside the counted runs, what they actually sent (audit KIMIK31 R-6): the
+        // ceiling counts runs, and the provider bill is the requests.
+        const sent = formatTally(providerRequests.window(this.deps.budgets?.daemonWindowHours ?? 24));
+        log(
+          `[budget] DAEMON-WIDE ceiling reached — parking paid work for every event: ${daemonOver} ` +
+            `(${sent} sent in that window by this process)`,
+        );
       }
       if (!this.budgetNotified.has(coordinate)) {
         this.budgetNotified.add(coordinate);
@@ -7899,6 +7938,7 @@ export class Coordinator {
     }
     // 4. Account one provider spend attempt (per-attendee + per-event `calls`).
     if (this.deps.budgets) {
+      noteCountedRun();
       const now = this.now();
       if (pubkey) this.deps.store.addUsage(coordinate, pubkey, { calls: 1 }, now);
       else this.deps.store.addUsage(coordinate, "", { calls: 1 }, now);
@@ -7973,6 +8013,33 @@ export class Coordinator {
     }
   }
 
+  /**
+   * Log the daemon window's counted runs beside the billed provider requests
+   * they sent (audit KIMIK31 R-6), on the daemon-ceiling sweep's 10-minute tick
+   * and only when a number moved. The budgets count runs and stay that way; this
+   * line is how an operator sees what a run costs in requests.
+   */
+  reportProviderRequests(): void {
+    const meter = providerRequests;
+    const b = this.deps.budgets;
+    const windowHours = b?.daemonWindowHours ?? 24;
+    const requests = meter.window(windowHours);
+    const runs = b ? this.deps.store.getDaemonUsage(this.now(), windowHours).calls : undefined;
+    const signature = `${runs ?? "-"}|${requests.total}`;
+    if (signature === this.lastRequestSummary) return;
+    this.lastRequestSummary = signature;
+    if (requests.total === 0 && !runs) return;
+    log(
+      formatWindowSummary({
+        windowHours,
+        runs,
+        runLimit: b?.daemonCalls,
+        requests,
+        uptimeMs: this.now() - meter.startedAt,
+      }),
+    );
+  }
+
   /** Gift-wrap a 21606 budget_exceeded status to the event identity (H-2). */
   private async emitBudgetStatus(state: EventState, reason: string): Promise<void> {
     const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, {
@@ -8037,10 +8104,12 @@ export class Coordinator {
    * neither has any other way to learn it stopped being true.
    *
    * Best-effort by design: the recovery already happened and is recorded durably,
-   * so a relay failure here must not fail the pipeline run. The next successful
-   * run re-announces (the DB row is already `cleared`, so it won't — see the
-   * caller's `> 0` guard; a stuck banner past a relay outage is the residual cost,
-   * and it clears on the attendee's next real failure/success cycle).
+   * so a relay failure here must not fail the pipeline run. Each recipient is
+   * tried on its own and retried in the background ({@link deliverStatus}); the
+   * DB row is already `cleared`, so nothing re-announces after that (see the
+   * caller's `> 0` guard). A stuck banner past a relay outage longer than the
+   * retries, or across a restart, is the residual cost, and it clears on the
+   * attendee's next real failure/success cycle.
    */
   private async announceCleared(state: EventState, pubkey: string, stage = "process_attendee"): Promise<void> {
     const content: import("@nostrautica/protocol").CoordinatorStatusContent = {
@@ -8052,10 +8121,58 @@ export class Coordinator {
       retryable: false,
       at: Math.floor(this.now() / 1000),
     };
+    const sent = await this.deliverStatus(state, [state.eidPubkey, pubkey], content, `cleared ${stage}`);
+    log(`[status] announced cleared ${stage} for ${short(pubkey)} to organizer + attendee (${sent}/2 on the first try)`);
+  }
+
+  /**
+   * Seal one 21606 to each recipient, independently (audit KIMIK31 R-3). These
+   * used to go out one after another, so a relay refusing the organizer's copy
+   * threw before the attendee's was even tried, and the poison callback
+   * swallowed it: the member never learned their work had stopped, or a
+   * "poisoned" banner outlived the recovery. Every recipient gets a first attempt
+   * now; one that fails is retried in the background ({@link STATUS_RETRY_MS})
+   * with the same wrap, so the caller is not held up by a relay outage, and a
+   * final failure is logged. In memory only: a restart forgets pending retries.
+   * Resolves to how many recipients took the first attempt.
+   */
+  private async deliverStatus(
+    state: EventState,
+    recipients: string[],
+    content: import("@nostrautica/protocol").CoordinatorStatusContent,
+    what: string,
+  ): Promise<number> {
     const relays = this.accountRelays(state);
-    await this.publish(buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, content), relays);
-    await this.publish(buildCoordinatorStatus(this.deps.coordSk, pubkey, content), relays);
-    log(`[status] announced cleared ${stage} for ${short(pubkey)} to organizer + attendee`);
+    const ok = await Promise.all(
+      recipients.map(async (to) => {
+        const wrap = buildCoordinatorStatus(this.deps.coordSk, to, content);
+        try {
+          await this.deps.transport.publish(wrap, relays);
+          return true;
+        } catch (e) {
+          void this.retryStatus(state.coordinate, wrap, to, what, e);
+          return false;
+        }
+      }),
+    );
+    return ok.filter(Boolean).length;
+  }
+
+  private async retryStatus(coordinate: string, wrap: NostrEvent, to: string, what: string, firstError: unknown): Promise<void> {
+    let err = firstError;
+    for (const delay of STATUS_RETRY_MS) {
+      await this.sleep(delay);
+      const state = this.events.get(coordinate);
+      if (!state) return; // detached meanwhile: nobody to tell
+      try {
+        await this.deps.transport.publish(wrap, this.accountRelays(state));
+        log(`[status] ${what} reached ${short(to)} on a retry`);
+        return;
+      } catch (e) {
+        err = e;
+      }
+    }
+    log(`[status] could not deliver ${what} to ${short(to)} after ${STATUS_RETRY_MS.length + 1} attempts: ${describeError(err)}`);
   }
 
   /**
@@ -8129,19 +8246,16 @@ export class Coordinator {
       retryable: true,
       at: Math.floor(this.now() / 1000),
     };
-    const status = buildCoordinatorStatus(this.deps.coordSk, state.eidPubkey, content);
-    await this.deps.transport.publish(status, this.accountRelays(state));
     // Attendee-scoped delivery (NIP §6.3 21606): a poison report tied to a single
     // attendee's own submission/talk pipeline is ALSO sealed to that attendee, so
     // they see "your talk failed processing — try re-recording" without waiting on
     // the organizer. Billing/budget blocks stay organizer-only (emitted elsewhere,
     // never via surfacePoison), so every poison surfaced here is safe to mirror.
-    if (pubkey) {
-      const attendeeStatus = buildCoordinatorStatus(this.deps.coordSk, pubkey, content);
-      await this.deps.transport.publish(attendeeStatus, this.accountRelays(state));
-    }
+    const recipients = pubkey ? [state.eidPubkey, pubkey] : [state.eidPubkey];
+    const sent = await this.deliverStatus(state, recipients, content, `${info.type} poison notice`);
     log(
-      `[status] surfaced ${info.parked ? `PARKED (${info.parked.reason})` : "poisoned"} ${info.type} for ${pubkey ? short(pubkey) : coordinate}${pubkey ? " to organizer + attendee" : " to organizer"}`,
+      `[status] surfaced ${info.parked ? `PARKED (${info.parked.reason})` : "poisoned"} ${info.type} for ${pubkey ? short(pubkey) : coordinate}${pubkey ? " to organizer + attendee" : " to organizer"}` +
+        ` (${sent}/${recipients.length} on the first try)`,
     );
   }
 

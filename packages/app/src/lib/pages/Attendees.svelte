@@ -149,6 +149,9 @@
   import { streamDirectory, fetchMatches, cachedDirectory, cachedMatches, type DirectoryStream } from "$lib/events/attendee.js";
   import { fetchFollowSet, fetchProfiles, cachedProfiles, cachedFollowSet, type ProfileMeta } from "$lib/events/social.js";
   import { loadPerEventSettings, toggleSetting, cachedPerEventSettings } from "$lib/events/settings.js";
+  import { runRowAction } from "$lib/events/row-action.js";
+  import { categorizeError } from "$lib/nostr/errors.js";
+  import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { perfMark } from "$lib/perf.js";
   import { cacheHydration } from "$lib/cache/hydration.svelte.js";
   import { cacheGet, cacheSet, whenCacheReady } from "$lib/cache/persist.js";
@@ -363,11 +366,31 @@
     if (suggestion) dmPrefill.set(pubkey, suggestion);
     router.go({ name: "dmPeer", npub: npubEncode(pubkey) });
   }
-  async function toggleWantToMeet(pubkey: string) {
-    if (!session.signer || !ctx || !blindingKey) return;
-    settings = await toggleSetting(session.signer, ctx, blindingKey, "want_to_meet", pubkey).catch(
-      () => settings,
-    );
+  // Rows with a "want to meet" save in flight: the button is disabled until it
+  // settles, so a second tap cannot race the first (audit KIMIK31 W-17).
+  let wantBusy = $state(new Set<string>());
+  async function toggleWantToMeet(pubkey: string, name: string) {
+    if (!session.signer || !ctx || !blindingKey || wantBusy.has(pubkey)) return;
+    const signer = session.signer;
+    const c = ctx;
+    const bk = blindingKey;
+    wantBusy = new Set([...wantBusy, pubkey]);
+    try {
+      // A failure keeps the row as it was and SAYS so (W-17): it used to be
+      // swallowed, so a blocked save looked like an ignored tap.
+      settings = await runRowAction(
+        () => toggleSetting(signer, c, bk, "want_to_meet", pubkey),
+        settings,
+        (err) =>
+          opStatus.fail(
+            `${t("attendees.wantToMeetFailed", { name })} ${t(`error.cat.${categorizeError(err)}` as MessageKey)}`,
+          ),
+      );
+    } finally {
+      const next = new Set(wantBusy);
+      next.delete(pubkey);
+      wantBusy = next;
+    }
   }
   const wantToMeet = (pubkey: string) => !!settings?.want_to_meet?.includes(pubkey);
 
@@ -771,7 +794,8 @@
       class:primary={wantToMeet(pubkey)}
       title={t("attendees.wantToMeetName", { name })}
       aria-label={t("attendees.wantToMeetName", { name })}
-      onclick={() => toggleWantToMeet(pubkey)}
+      disabled={wantBusy.has(pubkey)}
+      onclick={() => toggleWantToMeet(pubkey, name)}
     >
       <Icon name="bookmark" size={16} />
     </button>

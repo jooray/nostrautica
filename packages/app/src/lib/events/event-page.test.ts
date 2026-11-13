@@ -32,6 +32,7 @@ vi.mock("$lib/nostr/verify.js", async (importOriginal) => ({
 }));
 
 import { fetchEventPage, cachedEventPage } from "./event-page.js";
+import { readForEditing } from "./editor-load.js";
 import type { EventContext } from "./event-context.js";
 import { __resetPersistForTests, setActiveCacheOwner } from "$lib/cache/persist.js";
 
@@ -112,5 +113,49 @@ describe("fetchEventPage author pinning", () => {
       pageEvent(IMPOSTOR, { label: "Tickets", target: "https://phish.example", createdAt: 9_000 }),
     ]);
     expect(await fetchEventPage(ctx)).toBeUndefined();
+  });
+});
+
+/**
+ * Audit KIMIK31 W-1: Event Settings publishes the WHOLE page model back. It used
+ * to turn a failed read into `{menu: [], sections: [], sources: []}` with Publish
+ * enabled, so a relay outage plus one press deleted the real menu, sections and
+ * feeds for every attendee. The editor's read now says whether it is definitive
+ * and falls back to the cached page, not to an empty one.
+ */
+describe("readForEditing(fetchEventPage)", () => {
+  beforeEach(() => {
+    __resetPersistForTests();
+    setActiveCacheOwner(null);
+    fetchEvents.mockReset();
+    relayAnswers.value = true;
+  });
+
+  const read = () => readForEditing(() => fetchEventPage(ctx), () => cachedEventPage(COORD));
+
+  it("keeps the cached page and is not definitive when no relay answered", async () => {
+    fetchEvents.mockResolvedValue([
+      pageEvent(EID, { label: "Tickets", target: "https://real.example", createdAt: 1000 }),
+    ]);
+    await fetchEventPage(ctx); // warms the cache, as any earlier visit does
+
+    relayAnswers.value = false;
+    fetchEvents.mockResolvedValue([]);
+    const result = await read();
+    expect(result.definitive).toBe(false);
+    expect(result.value?.menu.map((m) => m.target)).toEqual(["https://real.example"]);
+  });
+
+  it("is not definitive on a cold cache either, rather than claiming an empty page", async () => {
+    relayAnswers.value = false;
+    fetchEvents.mockResolvedValue([]);
+    const result = await read();
+    expect(result.definitive).toBe(false);
+    expect(result.value).toBeUndefined();
+  });
+
+  it("is definitive when a relay answered that there is no page", async () => {
+    fetchEvents.mockResolvedValue([]);
+    expect(await read()).toEqual({ definitive: true, value: undefined });
   });
 });

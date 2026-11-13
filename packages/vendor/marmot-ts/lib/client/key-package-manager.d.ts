@@ -7,7 +7,7 @@ import { type KeyPackagePublisherOptions } from "./key-package-publisher.js";
 import { ListedKeyPackage, LocalKeyPackage, StoredKeyPackage, WelcomeKeyPackageCandidate } from "./key-package-store.js";
 import { NostrNetworkInterface } from "./nostr-interface.js";
 import { type RejectReason, type VerifyEventMethod } from "./verify.js";
-export { KeyPackageNotFoundError, KeyPackageRotatePreconditionError, MissingRelayError, MissingSlotIdentifierError, } from "./key-package-errors.js";
+export { KeyPackageNotFoundError, KeyPackagePublishError, KeyPackageRotatePreconditionError, MissingRelayError, MissingSlotIdentifierError, } from "./key-package-errors.js";
 export { KeyPackageStore, type KeyPackageStoreEvents, type ListedKeyPackage, type LocalKeyPackage, type StoredKeyPackage, type TrackedKeyPackage, type WelcomeKeyPackageCandidate, } from "./key-package-store.js";
 export { KeyPackagePublisher, type KeyPackagePublisherOptions, } from "./key-package-publisher.js";
 /** Options for creating a new key package */
@@ -134,7 +134,7 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      */
     create(options: CreateKeyPackageOptions): Promise<ListedKeyPackage>;
     /**
-     * Ensures this client has at least one unused, current KeyPackage published,
+     * Ensures the requested slot has at least one unused, current KeyPackage published,
      * so peers can always invite it. A no-op (returning the existing unused
      * current KeyPackage) when one already exists; otherwise creates and
      * publishes a fresh one to `options.relays` via {@link create}. Idempotent —
@@ -254,6 +254,12 @@ export declare class KeyPackageManager extends EventEmitter<KeyPackageManagerEve
      *
      * Yields the current snapshot on subscription, then re-yields on every
      * subsequent change.
+     *
+     * Pass an AbortSignal to stop watching. Abort, return, throw, and async
+     * disposal release listeners and interrupt pending reads without another event.
+     * Abandoned reads may finish internally; their results are ignored.
      */
-    watchKeyPackages(): AsyncGenerator<ListedKeyPackage[]>;
+    watchKeyPackages(options?: {
+        signal?: AbortSignal;
+    }): AsyncGenerator<ListedKeyPackage[]>;
 }

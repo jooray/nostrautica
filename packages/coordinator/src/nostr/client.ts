@@ -114,7 +114,7 @@ interface Bundle {
   sub?: { close: () => void };
   /** Bumped on every (re-)send and on close; callbacks of an older REQ are ignored. */
   generation: number;
-  /** The current REQ has reached EOSE (real or nostr-tools' synthetic one). */
+  /** The relay answered the current REQ with EOSE (never nostr-tools' synthetic one). */
   eosed: boolean;
   timer?: ReturnType<typeof setTimeout>;
   attempt: number;
@@ -137,9 +137,39 @@ interface RelayPressure {
 /** The parameters {@link NostrClient.openReq} hands to one relay-level REQ. */
 export interface ReqHandlers {
   onevent: (event: NostrEvent) => void;
+  /** The relay sent EOSE for this REQ. Only ever a real EOSE (see {@link realEoseOnly}). */
   oneose: () => void;
   /** The REQ ended without us closing it: refused, connection lost, or never opened. */
   onclose: (reason: string) => void;
+  /** nostr-tools re-sent the REQ on a reconnected socket; the relay has not answered it yet. */
+  onresend?: () => void;
+}
+
+/**
+ * Make a nostr-tools subscription report only the relay's own EOSE (audit
+ * KIMIK31 R-5).
+ *
+ * `Subscription.fire()` arms a `baseEoseTimeout` (4.4 s) timer that calls the
+ * same `receivedEose()` a protocol EOSE does, so `oneose` cannot tell "the relay
+ * answered" from "4.4 s passed". A long-lived bundle uses EOSE as its evidence
+ * that the relay accepted the REQ: a "too many REQs" NOTICE names no
+ * subscription, so the ones re-sent are those not answered yet. A REQ the relay
+ * silently dropped therefore counted as accepted after 4.4 s and was never
+ * re-sent. The timer is set synchronously inside `fire()`, so clearing it right
+ * after each fire disarms exactly the synthetic path; a reconnect re-fires the
+ * subscription, which is reported through `onResend`.
+ */
+export function realEoseOnly(
+  sub: { fire: () => void; eoseTimeoutHandle?: ReturnType<typeof setTimeout> },
+  onResend?: () => void,
+): void {
+  clearTimeout(sub.eoseTimeoutHandle);
+  const fire = sub.fire.bind(sub);
+  sub.fire = () => {
+    fire();
+    clearTimeout(sub.eoseTimeoutHandle);
+    onResend?.();
+  };
 }
 
 /**
@@ -197,6 +227,11 @@ class BoundedSeenIds {
       this.current = new Set();
     }
     return false;
+  }
+  /** Un-record `id`, so another relay's copy is delivered after all. */
+  forget(id: string): void {
+    this.current.delete(id);
+    this.previous.delete(id);
   }
 }
 
@@ -444,6 +479,9 @@ export class NostrClient {
             },
           });
           Object.defineProperty(s, "lastEmitted", { get: () => undefined, set: () => {}, configurable: true });
+          realEoseOnly(s as any, () => {
+            if (!cancelled) handlers.onresend?.();
+          });
           sub = s;
         } catch (err) {
           handlers.onclose(err instanceof Error ? err.message : String(err));
@@ -525,13 +563,31 @@ export class NostrClient {
     b.sub = this.openReq(b.url, filters, {
       onevent: (e) => {
         if (gen !== b.generation) return;
-        for (const m of b.members.values()) if (matchFilter(m.filter as any, e)) m.deliver(e);
+        // Every member gets its own try (audit KIMIK31 R-4). One subscriber's throw
+        // used to end this loop, and nostr-tools swallows it, so every later member
+        // of the shared REQ lost the event for good.
+        for (const m of b.members.values()) {
+          if (!matchFilter(m.filter as any, e)) continue;
+          try {
+            m.deliver(e);
+          } catch (err) {
+            relayLog(
+              `[relay] a subscriber on ${b.url} threw on event ${e.id.slice(0, 8)} (kind ${e.kind}): ` +
+                `${err instanceof Error ? err.message : String(err)} — delivering to the rest`,
+            );
+          }
+        }
       },
       oneose: () => {
         if (gen !== b.generation) return;
         b.eosed = true;
         // EOSE is the relay answering, so the back-off ladder starts over.
         b.attempt = 0;
+      },
+      onresend: () => {
+        // A reconnect put the REQ on the wire again: until the relay answers it,
+        // it is as unconfirmed as a brand-new one.
+        if (gen === b.generation) b.eosed = false;
       },
       onclose: (reason) => {
         if (gen !== b.generation || b.closed) return;
@@ -665,7 +721,13 @@ export class NostrClient {
     const deliver = (e: NostrEvent) => {
       // Per subscriber, across relays: without it every wrap is handled once per relay.
       if (closed || seen.seenBefore(e.id)) return;
-      onEvent(e);
+      try {
+        onEvent(e);
+      } catch (err) {
+        // Not consumed: another relay's copy of this event gets another go.
+        seen.forget(e.id);
+        throw err;
+      }
     };
     const classKey = JSON.stringify([...(filter.kinds ?? [])].sort((a, b) => a - b));
     const joined: Array<{ bundle: Bundle; id: number }> = [];
@@ -869,6 +931,80 @@ export class NostrClient {
                 relayDone();
               },
             });
+            subs.push(sub);
+          }),
+        );
+      }
+    });
+  }
+
+  /**
+   * Ask each relay whether it holds the event `id`, and say which relays actually
+   * ANSWERED (audit KIMIK31 C-2). `fetch()` cannot: it settles on EOSE and on its
+   * timeout alike, and nostr-tools fires a synthetic EOSE after 4.4 s on a relay
+   * that never replied, so "no events" there does not mean "not stored".
+   *
+   * Here the subscription's `maxWait` (nostr-tools' EOSE timeout) is set past our
+   * own deadline, so any EOSE seen before that deadline came from the relay. A
+   * relay that closed the REQ, never got a fetch slot, or did not reach EOSE in
+   * time is `unanswered`. Excluded relays are not dialled, so they are not listed.
+   * Never rejects.
+   */
+  lookupEvent(
+    id: string,
+    relays: string[],
+    timeoutMs = 10_000,
+  ): Promise<{ found: boolean; unanswered: string[] }> {
+    return new Promise((resolve) => {
+      const urls = [...new Set(this.usable(relays).map((u) => normalizeURL(u)))];
+      // Nothing to ask is not "nobody has it".
+      if (urls.length === 0) {
+        resolve({ found: false, unanswered: relays.length ? [...relays] : ["(no relays)"] });
+        return;
+      }
+      const pending = new Set(urls);
+      const subs: Array<{ close: () => void }> = [];
+      const releases: Array<() => void> = [];
+      const cancels: Array<() => void> = [];
+      let finished = false;
+      const done = (found: boolean) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        for (const c of cancels) c();
+        for (const sub of subs) {
+          try {
+            sub.close();
+          } catch {
+            /* already closed */
+          }
+        }
+        for (const r of releases) r();
+        resolve({ found, unanswered: [...pending] });
+      };
+      const timer = setTimeout(() => done(false), timeoutMs);
+      for (const url of urls) {
+        cancels.push(
+          this.withFetchSlot(url, (release) => {
+            if (finished) {
+              release();
+              return;
+            }
+            releases.push(release);
+            const sub = this.pool.subscribe([url], { ids: [id] } as any, {
+              maxWait: timeoutMs * 2,
+              onevent: (e: NostrEvent) => {
+                if (e.id === id) done(true);
+              },
+              oneose: () => {
+                pending.delete(url);
+                if (pending.size === 0) done(false);
+              },
+              onclose: (reasons: { url: string; reason: string }[] | string) => {
+                const why = Array.isArray(reasons) ? reasons.map((r) => r?.reason ?? "").join("; ") : String(reasons ?? "");
+                if (TOO_MANY_REQS.test(why)) this.noteBackpressure(url, why);
+              },
+            } as any);
             subs.push(sub);
           }),
         );

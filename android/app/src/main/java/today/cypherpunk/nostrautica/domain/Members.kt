@@ -36,6 +36,8 @@ class Members(
     private val nostr: Nostr,
     private val cache: Cache,
     private val keys: EventKeysStore,
+    /** The roster's relay fetch (stores what arrives, returns this fetch's events); a seam for tests. */
+    private val fetchRosterEvents: suspend (Collection<String>, Filter) -> List<NostrEvent> = { relays, f -> nostr.fetch(relays, f).events },
 ) {
     private val locks = HashMap<String, Mutex>()
     private fun lockFor(k: String) = synchronized(locks) { locks.getOrPut(k) { Mutex() } }
@@ -98,32 +100,51 @@ class Members(
             else -> null
         }
 
-    suspend fun fetchRoster(ctx: EventContext, owner: String): RosterContent? = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { fetchRosterOffMain(ctx, owner) }
+    suspend fun fetchRoster(ctx: EventContext, owner: String): RosterContent? = readRoster(ctx, owner)?.roster
 
-    private suspend fun fetchRosterOffMain(ctx: EventContext, owner: String): RosterContent? {
+    /**
+     * One roster read and where it came from (audit KIMIK31 A-3). [roster] is the
+     * newest the phone holds; [fromNetwork] is true only when every page of it (page
+     * 0 and each continuation) came back from a relay in THIS read. Offline, or when
+     * no relay answered, the fetch returns nothing and the roster is whatever an
+     * earlier read stored: possibly from before this device's chat key was attested,
+     * so it must never count as a fresh "the roster does not list you".
+     */
+    data class RosterRead(val roster: RosterContent, val fromNetwork: Boolean)
+
+    suspend fun readRoster(ctx: EventContext, owner: String): RosterRead? =
+        kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.Default) { readRosterOffMain(ctx, owner) }
+
+    private suspend fun readRosterOffMain(ctx: EventContext, owner: String): RosterRead? {
         val authors = acceptedAuthors(ctx)
         // Both page-0 addresses (NIP §6.2.2), and only a record naming THIS space: a
         // same-named space on the same coordinator shares the legacy `d` (audit R-53).
         val page0Ds = Roster.page0Ds(ctx.coordinate)
-        nostr.fetch(ctx.relays, Filter(kinds = listOf(Kinds.ROSTER), authors = authors, tags = mapOf("d" to page0Ds)))
+        val seen = fetchRosterEvents(ctx.relays, Filter(kinds = listOf(Kinds.ROSTER), authors = authors, tags = mapOf("d" to page0Ds))).mapTo(HashSet()) { it.id }
         val latest = authors.flatMap { a -> page0Ds.mapNotNull { d -> nostr.store.latest(Kinds.ROSTER, a, d) } }
             .filter { Roster.isPageFor(ctx.coordinate, page0Ds, it.tags) }.let(Ordering::pickLatest)
-            ?: return RosterContent(2, 1, null, null, emptyList()).also { cache.put(owner, rosterKey(ctx.coordinate), RosterContent.serializer(), it, 0) }
+            ?: return RosterRead(RosterContent(2, 1, null, null, emptyList()), false)
+                .also { cache.put(owner, rosterKey(ctx.coordinate), RosterContent.serializer(), it.roster, 0) }
         val eck = eckFor(owner, ctx.coordinate, latest.tag("eck")) ?: return null
         val page0 = decryptRoster(eck, latest) ?: return null
+        // The page the store picked must be one a relay just sent, not merely "some
+        // relay answered": a stored page newer than anything the relays returned is
+        // not evidence of what the coordinator publishes now.
+        var fromNetwork = latest.id in seen
         val pages = Roster.pageCountOf(page0)
         var roster = page0
         if (pages > 1) {
             val ds = Roster.continuationDs(latest.tag("d") ?: page0Ds.first(), pages)
-            nostr.fetch(ctx.relays, Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(latest.pubkey), tags = mapOf("d" to ds)))
+            val seenMore = fetchRosterEvents(ctx.relays, Filter(kinds = listOf(Kinds.ROSTER), authors = listOf(latest.pubkey), tags = mapOf("d" to ds))).mapTo(HashSet()) { it.id }
             val rest = ds.map { d ->
                 val e = nostr.store.latest(Kinds.ROSTER, latest.pubkey, d)?.takeIf { ev -> ev.tag("a") == ctx.coordinate } ?: return null
+                if (e.id !in seenMore) fromNetwork = false
                 decryptRoster(eckFor(owner, ctx.coordinate, e.tag("eck")) ?: return null, e) ?: return null
             }
             roster = Roster.merge(listOf(page0) + rest)
         }
         cache.put(owner, rosterKey(ctx.coordinate), RosterContent.serializer(), roster, latest.createdAt)
-        return roster
+        return RosterRead(roster, fromNetwork)
     }
 
     suspend fun fetchDirectory(ctx: EventContext, owner: String, roster: RosterContent): List<DirectoryEntryContent> =

@@ -18,6 +18,7 @@ import {
   KIND_CHAT_KEY_ATTESTATION,
   chatKeyAttestationContentSchema,
   makeChatDeviceProof,
+  type ChatAttestationIntent,
   type ChatKeyAttestationContent,
 } from "@nostrautica/protocol";
 import type { Rumor } from "@nostrautica/protocol";
@@ -38,6 +39,9 @@ export interface AttestationInput {
   proof?: string;
   /** The one-time code from the external client (op:"link_confirm" only, NIP §10.5). */
   code?: string;
+  /** Why this device attests (op:"add" only, NIP §10.2): "enrol" never evicts a
+   *  leaf the coordinator holds for it, "rejoin" replaces that leaf. */
+  intent?: ChatAttestationIntent;
 }
 
 /** Build and validate a 21607 v2 content object (pure — unit-tested). */
@@ -54,6 +58,7 @@ export function buildChatKeyAttestationContent(
     ...(input.clientId ? { client_id: input.clientId } : {}),
     ...(input.proof ? { proof: input.proof } : {}),
     ...(input.code !== undefined ? { code: input.code } : {}),
+    ...(input.intent !== undefined ? { intent: input.intent } : {}),
   });
 }
 
@@ -68,6 +73,8 @@ export interface SendAttestationInput {
   deviceSecretKey?: Uint8Array;
   /** op:"link_confirm": the code shown inside the external client. */
   code?: string;
+  /** op:"add" only: "enrol" or "rejoin" (NIP §10.2). See {@link AttestationInput}. */
+  intent?: ChatAttestationIntent;
 }
 
 /**
@@ -114,6 +121,7 @@ export async function sendChatKeyAttestation(
     label: input.label,
     proof,
     code: input.code,
+    intent: input.intent,
   });
   const wrap = await signerWrap(accountSigner, coordinator, {
     kind: KIND_CHAT_KEY_ATTESTATION,

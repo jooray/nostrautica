@@ -28,10 +28,9 @@ import { refreshGuard } from "$lib/stores/refresh-guard.svelte.js";
 import { ControllerLatch } from "$lib/pwa-latch.js";
 import { warmRouteModules, CRITICAL_PARTICIPANT_ROUTES } from "$lib/router/route-modules.js";
 import { ensureEntryShellCached } from "$lib/pwa/offline-shell.js";
-import { UpdateHealth } from "$lib/pwa/update-health.js";
+import { UpdateHealth, readServedWorker } from "$lib/pwa/update-health.js";
 import { RELEASE_MANIFEST } from "$lib/release.js";
 import { updateStuck, autoRecoverFromDrift } from "$lib/stores/update-stuck.svelte.js";
-import { servedRevision } from "$lib/pwa/update-health.js";
 const UPDATE_INTERVAL_MS = 60_000; // 60s while the app is open (spec §10.2)
 
 /**
@@ -143,15 +142,19 @@ export function registerPwa(): void {
           // check, means the update path is wedged — a stale proxy/cache answer,
           // or a worker that cannot activate — and that is exactly the state
           // that used to persist for days in total silence.
-          const source = await res.text().catch(() => "");
-          health.observeServiceWorkerSource(source);
+          const served = readServedWorker(res, await res.text().catch(() => ""));
+          // Not a service worker (an HTTP error, a captive portal): a FAILED check,
+          // never drift evidence, so it can neither raise the banner nor purge the
+          // offline shell (audit KIMIK31 W-9). The catch below records it.
+          if (!served.ok) throw new Error(served.reason);
+          health.observeServiceWorkerSource(served.source);
           // Tell the user, not just the console (audit R-84) — and take the
           // banner down again once the served worker matches.
           updateStuck.set(health.driftDetected ? "drift" : null);
           // …but never DEPEND on the user: a confirmed stuck build moves itself
           // once per served revision (the banner stays as the fallback when that
           // attempt is spent and the tab is still stuck).
-          if (health.driftDetected) autoRecoverFromDrift(servedRevision(source));
+          if (health.driftDetected) autoRecoverFromDrift(served.revision);
           await registration.update();
         } catch (e) {
           // Offline is normal and expected (the `online` listener below retries);

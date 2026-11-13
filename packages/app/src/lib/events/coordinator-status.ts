@@ -29,6 +29,7 @@ import type { GiftWrap } from "@nostrautica/protocol";
 import { getPublicKey } from "nostr-tools/pure";
 import type { EventContext } from "./event-context.js";
 import { fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
+import { RelaysUnansweredError } from "$lib/nostr/unanswered.js";
 import { cacheGet, cacheSet } from "$lib/cache/persist.js";
 
 // Cached decrypted coordinator statuses, owner-scoped (CACHING-PLAN §2.11).
@@ -118,10 +119,15 @@ export async function fetchCoordinatorStatuses(
   // Relay-only read (see attendee.receiveGrants): a status must not be lost to the
   // cache/EOSE race. The wrap is addressed to E_id, so unwrapRumor(eidSk) succeeds
   // only for wraps genuinely sealed to us.
+  let answered = true;
   const wraps = (await fetchEventsRelayOnly(
     { kinds: [KIND_GIFT_WRAP], "#p": [eidPubkey], since: giftwrapSince() },
     ctx.config.relays,
+    { onSettled: (a) => (answered = a) },
   )) as unknown as GiftWrap[];
+  // Unanswered is not "the coordinator reports no problems" (audit KIMIK31 W-12):
+  // Admin replaced its cached poison/failure warnings with the empty result.
+  if (wraps.length === 0 && !answered) throw new RelaysUnansweredError();
 
   const statuses: CoordinatorStatusContent[] = [];
   for (const wrap of wraps) {

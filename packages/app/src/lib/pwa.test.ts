@@ -64,7 +64,7 @@ beforeEach(() => {
   h.requestRefresh.mockClear();
   sw = Object.assign(target(), { controller: null as unknown });
   win = Object.assign(target(), { location: { reload: vi.fn() } });
-  fetchMock = vi.fn(async () => ({ text: async () => SW_BODY }));
+  fetchMock = vi.fn(async () => ({ ok: true, status: 200, text: async () => SW_BODY }));
   vi.stubGlobal("window", win);
   vi.stubGlobal("navigator", { serviceWorker: sw, onLine: true });
   vi.stubGlobal("document", Object.assign(target(), { visibilityState: "visible" }));
@@ -179,15 +179,39 @@ describe("registerPwa update wiring (SB-67)", () => {
 
   it("sustained sw.js drift raises the user-facing banner, and a match clears it (R-84)", async () => {
     const { updateStuck } = await import("$lib/stores/update-stuck.svelte.js");
-    fetchMock.mockImplementation(async () => ({ text: async () => "precacheAndRoute([])" }));
+    fetchMock.mockImplementation(async () => ({ ok: true, status: 200, text: async () => `precacheAndRoute([{url:"/app/index.html",revision:"v0.0.1+bbbbbbbbbbbb"}])` }));
     await registered();
     await vi.advanceTimersByTimeAsync(60_000 * 2);
     expect(updateStuck.reason).toBeNull(); // two misses: a deploy in progress
     await vi.advanceTimersByTimeAsync(60_000);
     expect(updateStuck.reason).toBe("drift");
-    fetchMock.mockImplementation(async () => ({ text: async () => SW_BODY }));
+    fetchMock.mockImplementation(async () => ({ ok: true, status: 200, text: async () => SW_BODY }));
     await vi.advanceTimersByTimeAsync(60_000);
     expect(updateStuck.reason).toBeNull();
+  });
+
+  // Audit KIMIK31 W-9: an answer that is not a service worker never mentions our
+  // release, so three of them used to read as a stuck build and purge the offline
+  // shell. Each case is polled well past the drift threshold.
+  it.each([
+    ["HTTP 503 JSON", { ok: false, status: 503, body: `{"error":"upstream"}` }],
+    ["HTTP 404 HTML", { ok: false, status: 404, body: "<html><h1>Not Found</h1></html>" }],
+    ["a 200 captive portal", { ok: true, status: 200, body: "<html><form>Accept the Wi-Fi terms</form></html>" }],
+  ])("%s is a failed check: no drift, no banner, no purge", async (_label, r) => {
+    const store = new Map<string, string>();
+    vi.stubGlobal("sessionStorage", {
+      getItem: (k: string) => store.get(k) ?? null,
+      setItem: (k: string, v: string) => void store.set(k, v),
+    });
+    const noted = vi.spyOn((await healthClass()).prototype, "noteCheckFailed");
+    fetchMock.mockImplementation(async () => ({ ok: r.ok, status: r.status, text: async () => r.body }));
+    const { updateStuck } = await import("$lib/stores/update-stuck.svelte.js");
+    await registered();
+    await vi.advanceTimersByTimeAsync(60_000 * 6);
+    expect(updateStuck.reason).toBeNull();
+    expect(h.requestRefresh).not.toHaveBeenCalled();
+    expect(win.location.reload).not.toHaveBeenCalled();
+    expect(noted).toHaveBeenCalled();
   });
 
   it("a confirmed stuck build reloads itself once per served revision, via the guard", async () => {
@@ -197,7 +221,7 @@ describe("registerPwa update wiring (SB-67)", () => {
       setItem: (k: string, v: string) => void store.set(k, v),
     });
     const stale = `precacheAndRoute([{url:"/app/index.html",revision:"v0.0.1+aaaaaaaaaaaa"}])`;
-    fetchMock.mockImplementation(async () => ({ text: async () => stale }));
+    fetchMock.mockImplementation(async () => ({ ok: true, status: 200, text: async () => stale }));
     await registered();
     await vi.advanceTimersByTimeAsync(60_000 * 2);
     expect(win.location.reload).not.toHaveBeenCalled(); // not confirmed yet

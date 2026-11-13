@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from "vitest";
+import { Subscription } from "nostr-tools/abstract-relay";
 import {
   NostrClient,
   MAX_FETCH_EVENTS,
@@ -474,6 +475,39 @@ describe("NostrClient.subscribe per-relay retry (2026-09-09 audit)", () => {
       vi.useRealTimers();
     }
   });
+
+  it("a subscriber that throws does not starve the others on the shared REQ (audit KIMIK31 R-4)", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const subs = fakeReqs(client);
+      let attempts = 0;
+      const got: string[] = [];
+      client.subscribe(
+        { kinds: [1059] },
+        () => {
+          attempts++;
+          throw new Error("sqlite is busy");
+        },
+        ["wss://a", "wss://b"],
+      );
+      client.subscribe({ kinds: [1059] }, (e) => got.push(e.id), ["wss://a", "wss://b"]);
+      await flush();
+      // Both filters share one REQ per relay.
+      expect(subs).toHaveLength(2);
+      expect(() => subs[0]!.handlers.onevent(ev("w1"))).not.toThrow();
+      expect(got).toEqual(["w1"]);
+      // The thrower did not consume the event: the second relay's copy is retried.
+      subs[1]!.handlers.onevent(ev("w1"));
+      expect(attempts).toBe(2);
+      expect(got).toEqual(["w1"]); // the healthy subscriber still dedupes
+      expect(log.mock.calls.some((c) => String(c[0]).includes("threw on event"))).toBe(true);
+    } finally {
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  });
 });
 
 /**
@@ -683,6 +717,87 @@ describe("NostrClient subscription pressure (audit R-2)", () => {
   });
 });
 
+/**
+ * Audit KIMIK31 R-5. nostr-tools' Subscription fires a synthetic EOSE after
+ * `baseEoseTimeout`, and a bundle that had "reached EOSE" was exempt from the
+ * re-send a "too many REQs" NOTICE triggers. Runs the real openReq against a real
+ * nostr-tools Subscription on a fake socket.
+ */
+describe("NostrClient long-lived REQs trust only a real EOSE (audit KIMIK31 R-5)", () => {
+  function fakeRelay() {
+    const sent: string[] = [];
+    const subs: Subscription[] = [];
+    const relay: any = {
+      url: "wss://r/",
+      baseEoseTimeout: 4400,
+      connected: true,
+      openSubs: new Map(),
+      ongoingOperations: 0,
+      send: (msg: string) => sent.push(msg),
+      scheduleIdleClose: () => {},
+      subscribe(filters: any[], params: any) {
+        relay.ongoingOperations++;
+        const s = new Subscription(relay, `sub:${subs.length + 1}`, filters, params);
+        relay.openSubs.set(s.id, s);
+        subs.push(s);
+        s.fire();
+        return s;
+      },
+    };
+    return { relay, sent, subs };
+  }
+  const reqsSent = (sent: string[]) => sent.filter((m) => m.startsWith('["REQ"')).length;
+
+  it("a REQ the relay never answered is still re-sent on a late NOTICE", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const { relay, sent } = fakeRelay();
+      (client as any).pool = { ensureRelay: async () => relay, close() {} };
+      client.subscribe({ kinds: [1059] }, () => {}, ["wss://r"]);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reqsSent(sent)).toBe(1);
+      // Past nostr-tools' 4.4 s synthetic EOSE, with no answer from the relay.
+      await vi.advanceTimersByTimeAsync(10_000);
+      (client as any).handleNotice("wss://r/", "ERROR: too many concurrent REQs");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(reqsSent(sent)).toBe(2); // re-sent after the pressure back-off
+    } finally {
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a REQ the relay answered with EOSE is left alone, until a reconnect re-sends it", async () => {
+    vi.useFakeTimers();
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      const client = new NostrClient([], { reqDebounceMs: 0 });
+      const { relay, sent, subs } = fakeRelay();
+      (client as any).pool = { ensureRelay: async () => relay, close() {} };
+      client.subscribe({ kinds: [1059] }, () => {}, ["wss://r"]);
+      await vi.advanceTimersByTimeAsync(0);
+      subs[0]!.receivedEose(); // what the relay's ["EOSE", id] does
+      (client as any).handleNotice("wss://r/", "too many concurrent REQs");
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(reqsSent(sent)).toBe(1); // answered, so not the one refused
+
+      // The socket reconnects and nostr-tools re-fires the REQ (AbstractRelay onopen).
+      subs[0]!.eosed = false;
+      subs[0]!.fire();
+      expect(reqsSent(sent)).toBe(2);
+      await vi.advanceTimersByTimeAsync(10_000); // no synthetic EOSE either
+      (client as any).handleNotice("wss://r/", "too many concurrent REQs");
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(reqsSent(sent)).toBe(3);
+    } finally {
+      log.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe("NostrClient relays.exclude", () => {
   /** Records every relay set the client hands the pool (fetch, publish) or opens a
    *  long-lived REQ on (subscribe), per call. */
@@ -747,5 +862,53 @@ describe("NostrClient relays.exclude", () => {
     client.subscribe({ kinds: [1059] }, () => {}, ["wss://relay.nostr.net"]);
     await flush();
     expect(dialled).toEqual([["wss://relay.nostr.net/"]]);
+  });
+});
+
+describe("NostrClient.lookupEvent (audit KIMIK31 C-2)", () => {
+  const ID = "f".repeat(64);
+  type Params = { maxWait?: number; onevent?: (e: unknown) => void; oneose?: () => void };
+  function scriptedPool(client: NostrClient, answer: (url: string, p: Params) => void) {
+    const maxWaits: (number | undefined)[] = [];
+    (client as any).pool = {
+      subscribe(relays: string[], _f: unknown, params: Params) {
+        maxWaits.push(params.maxWait);
+        queueMicrotask(() => answer(relays[0]!, params));
+        return { close() {} };
+      },
+      close() {},
+    };
+    return maxWaits;
+  }
+
+  it("absent only when every relay really answered", async () => {
+    const client = new NostrClient([]);
+    const maxWaits = scriptedPool(client, (_u, p) => p.oneose?.());
+    await expect(client.lookupEvent(ID, ["wss://a", "wss://b"], 50)).resolves.toEqual({ found: false, unanswered: [] });
+    // nostr-tools' synthetic EOSE must not be able to fire before our own deadline.
+    expect(maxWaits.every((m) => (m ?? 0) > 50)).toBe(true);
+  });
+
+  it("a relay that never reaches EOSE is unanswered, not 'does not have it'", async () => {
+    const client = new NostrClient([]);
+    scriptedPool(client, (u, p) => {
+      if (u === "wss://a/") p.oneose?.();
+    });
+    await expect(client.lookupEvent(ID, ["wss://a", "wss://b"], 50)).resolves.toEqual({
+      found: false,
+      unanswered: ["wss://b/"],
+    });
+  });
+
+  it("no relay to ask is unanswered, not absent", async () => {
+    const client = new NostrClient([]);
+    scriptedPool(client, (_u, p) => p.oneose?.());
+    await expect(client.lookupEvent(ID, [], 50)).resolves.toEqual({ found: false, unanswered: ["(no relays)"] });
+  });
+
+  it("found as soon as a relay returns the event", async () => {
+    const client = new NostrClient([]);
+    scriptedPool(client, (_u, p) => p.onevent?.({ id: ID }));
+    await expect(client.lookupEvent(ID, ["wss://a"], 5_000)).resolves.toMatchObject({ found: true });
   });
 });

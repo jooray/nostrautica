@@ -778,6 +778,10 @@ and the event envelope are unchanged, only the address moved.
   ```
   Pairs are canonically ordered (`a < b`); the matrix carries scores only, never
   reasoning. Deleted (NIP-09) when visibility changes away from `"event"`.
+  The matrix is one event, so it is bounded by the NIP-44 plaintext ceiling
+  before the `pairs` cap: when the scored pairs do not fit, the reference
+  coordinator publishes the highest-scoring pairs that do. Readers **MUST NOT**
+  treat a pair's absence as "not scored".
 
 #### `31607`: Members-only Event Post
 
@@ -926,7 +930,7 @@ and the event envelope are unchanged, only the address moved.
     features: {
       matching: bool (default true),
       talks: bool (default false),
-      chat: string[] ≤30 (default [])     // Marmot chat-relay URLs, when offered
+      chat: string[] ≤30 (default [])     // chat capability tokens, see below
     } (default {}),
     privacy?: { [role: string ≤64]: string ≤200 } ≤32 entries, // per-role tier, e.g. "private"
     terms_url?: https-string ≤2048,
@@ -940,6 +944,15 @@ and the event envelope are unchanged, only the address moved.
   }
   ```
   See §9 for how `privacy` and `pricing` are meant to be generated.
+
+  `features.chat` lists chat capability tokens; an unknown token is ignored. The reference
+  coordinator publishes:
+  - `"marmot"`: it runs Marmot/MLS group chat for its events (§10).
+  - `"attest-intent"` (0.18): it understands the `intent` field of a 21607 `op:"add"`
+    (§10.2). A client **MUST NOT** send `intent` to a coordinator whose latest announcement
+    does not list this token, because a coordinator that predates the field rejects the
+    whole attestation at its strict parse. When the announcement is unknown or unreadable
+    the client sends a bare `add`, which every coordinator accepts.
 
 ### 6.3 Rumor kind specifications
 
@@ -1139,7 +1152,8 @@ relay-visible event on its own.
     label?: string ≤60,       // required when op:"add" ("Chrome on laptop") or op:"link"
     client_id?: string ≤120,  // stable per-device kind-30443 key-package slot id
     proof?: schnorr-sig-hex,  // required when op:"add"; forbidden on link/link_confirm
-    code?: string ≤32         // required when op:"link_confirm"; forbidden otherwise
+    code?: string ≤32,        // required when op:"link_confirm"; forbidden otherwise
+    intent?: "enrol" | "rejoin" // op:"add" only; forbidden otherwise (§10.2)
   }
   ```
   `proof` is a BIP-340 signature by the **chat device key** over
@@ -1148,6 +1162,11 @@ relay-visible event on its own.
   `link`/`link_confirm` bind an external Marmot client's key (§10.5). They were added
   after v2 froze, additively: every `add`/`revoke` rumor is unchanged, and a coordinator
   that predates them rejects such a rumor at its strict parse.
+  `intent` was added the same way (0.18, see §10.2 for its semantics): an `add` without
+  it is still valid and is handled by legacy inference, while a coordinator that
+  predates the field rejects an `add` carrying it at its strict parse. A coordinator that
+  accepts it says so with the `"attest-intent"` token in its 31611 `features.chat`, and a
+  client sends `intent` only to such a coordinator.
 
 #### `21608`: Profile Correction
 
@@ -1347,6 +1366,35 @@ are per (coordinate, account); a chat pubkey **MUST NOT** be bindable to two dif
 accounts; rebinding it to the same account (e.g. re-add after revoke) mints a fresh
 binding. On account revocation from the event, **all** of that account's device leaves are
 removed from the MLS group.
+
+**Intent (`op:"add"` only).** An `add` says *why* the device is attesting, because the
+one decision the coordinator cannot make from its own state is whether to drop a leaf it
+still holds for that device. A client includes `intent` only when the event's coordinator
+advertises `"attest-intent"` in its 31611 `features.chat` (§6.2); otherwise it sends a bare
+`add`.
+
+- `intent:"enrol"`: bind or refresh the device (first enrolment, a key-package rotation, a
+  label change, a periodic refresh). The coordinator **MUST** add the device if it holds no
+  leaf for it and **MUST NOT** remove a leaf it already holds; the binding and label are
+  updated either way.
+- `intent:"rejoin"`: the device's group state is gone (it found itself positively not a
+  member, or its user explicitly asked to rejoin). If the coordinator still holds a leaf for
+  the device it **MUST** replace it, Remove and Add in one commit where the MLS library
+  allows it, using the device's fresh key package. Every authorization check still applies.
+  A key package published well before the attestation (more than 120 s in the reference
+  coordinator) does not count as fresh, because the device's one 30443 slot is shared by
+  every event it is in and may have been rotated for another one. The coordinator does
+  **not** hold a rejoin off because the old leaf was recently active: a device that posted
+  and then lost its state is exactly the case `rejoin` exists for.
+- **Absent** (clients before 0.18): the coordinator infers, as it did before the field
+  existed. It treats the add as a re-enrolment only if the key package is fresh for this
+  request and the held leaf has shown no message or commit for a short window (5 minutes in
+  the reference coordinator), and otherwise as a refresh.
+
+A re-enrolment warrant, `rejoin` or inferred, belongs to the attestation that carried it.
+It expires a bounded time after the rumor's `created_at` (one hour in the reference
+coordinator), and a coordinator that retries a failed sync later **MUST NOT** turn an
+`enrol` into a `rejoin` or use an expired warrant to remove a leaf.
 
 ### 10.3 Device profiles (kind 0 on chat relays)
 

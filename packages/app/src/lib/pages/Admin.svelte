@@ -14,6 +14,7 @@
     chatSyncStuckPubkeys,
     summarizeBulk,
     filterPeople,
+    countMissingIntros,
     type AdminPerson,
     type BulkItem,
     type PeopleFilter,
@@ -93,6 +94,7 @@
   import AdminCommunicate from "$lib/components/AdminCommunicate.svelte";
   import AdminPeople from "$lib/components/AdminPeople.svelte";
   import AdminQueue from "$lib/components/AdminQueue.svelte";
+  import ErrorState from "$lib/components/ErrorState.svelte";
   import { t, tp, i18n } from "$lib/i18n/i18n.svelte.js";
   import { opStatus } from "$lib/stores/op-status.svelte.js";
   import { copyText } from "$lib/util/clipboard.js";
@@ -106,6 +108,13 @@
   // merged into it, never allowed to replace it, so a transient partial fetch
   // can't drop a request the organizer already saw.
   let pending = $state<PendingRequest[]>([]);
+  // Whether the queue above is KNOWN (audit KIMIK31 W-12): a scan that answered,
+  // or a cached queue from one. Until then an empty `pending` means "not loaded",
+  // and the queue must not say "no join requests".
+  let queueKnown = $state(false);
+  // The last failed queue refresh, shown with Retry; cleared by the next success.
+  let queueError = $state<unknown>(null);
+  let queueRetrying = $state(false);
   let approvedSet = $state<Set<string>>(new Set()); // approved this session
   let rosterApproved = $state<Set<string>>(new Set()); // approved per the roster
   // The full decrypted roster (UX-A1 source of truth) + directory entries, so the
@@ -247,7 +256,18 @@
     try {
       await refresh();
     } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
+      // The announced, retryable error surface, and the queue keeps what it had
+      // (audit KIMIK31 W-12).
+      queueError = e;
+    }
+  }
+
+  async function retryQueue() {
+    queueRetrying = true;
+    try {
+      await refreshGuarded();
+    } finally {
+      queueRetrying = false;
     }
   }
 
@@ -311,6 +331,8 @@
     // Merge, don't replace (UX-A2): a bounded/partial relay scan folds INTO the
     // known queue; a request already seen is never dropped by its absence here.
     pending = mergePending(pending, freshPending);
+    queueKnown = true;
+    queueError = null;
     // The roster is the durable approved source (UX-A1). A failed fetch keeps the
     // last-known roster rather than blanking the approved section.
     if (freshRoster) {
@@ -330,7 +352,8 @@
     // publish the 31610, so only fetch the queue when one is attached.
     pendingTalks =
       ctx.config.talks !== "off" && ctx.config.coordinator
-        ? await fetchPendingTalks(ctx, keys).catch(() => [])
+        ? // A failed read keeps the queue it had (W-12): an outage is not "no talks".
+          await fetchPendingTalks(ctx, keys).catch(() => pendingTalks)
         : [];
     // Invite usage rides along on the same pass (background): it derives from the
     // `pending` we just merged plus one small addressable 31601 read, and the
@@ -420,7 +443,10 @@
       // the slowest background member. network-settled (finally) still waits for
       // everything, so perf marks stay meaningful.
       const background = Promise.allSettled([refreshLiveness(), refreshKeyStatus(true)]);
-      await Promise.allSettled([refresh()]);
+      // The first refresh is the one whose failure used to vanish here, leaving a
+      // cold Admin showing an empty, healthy-looking queue (W-12).
+      const [first] = await Promise.allSettled([refresh()]);
+      if (first.status === "rejected") queueError = first.reason;
       refreshing = false;
       await background;
       // Keep the join queue fresh while the page stays open (UX-9).
@@ -440,7 +466,9 @@
     const coord = ctx.coordinate;
     // Seed the durable queue from cache, then merge so a stale cached entry never
     // clobbers a fresher in-memory one (UX-A2).
-    pending = mergePending(pending, cachedPending(coord) ?? []);
+    const cachedQueue = cachedPending(coord);
+    pending = mergePending(pending, cachedQueue ?? []);
+    if (cachedQueue) queueKnown = true; // a queue an earlier answered scan stored
     roster = cachedRoster(coord) ?? roster;
     directory = cachedDirectory(coord) ?? directory;
     reviewMap = loadReview(coord); // UX-A7 / U11: owner-scoped reject/defer state
@@ -683,7 +711,7 @@
     buildOverview({
       pendingCount: pendingRequests.length,
       approvedCount: approvedPeople.filter((p) => !p.revoked).length,
-      missingIntros: approvedPeople.filter((p) => !p.revoked && !p.hasIntro).length,
+      missingIntros: countMissingIntros(approvedPeople), // unknown intake is not "missing" (W-16)
       failedJobs: poisonStatuses.length + chatSyncStuck.length,
       talksAwaiting: visibleTalks.length,
       matchesAvailable: ctx?.config.matching === "on",
@@ -712,6 +740,7 @@
       name: p.name,
       approved: true,
       hasIntro: p.hasIntro,
+      introKnown: p.intakeAvailable,
       op: p.op,
       hasTalk: talkPubkeys.has(p.pubkey),
     })),
@@ -754,7 +783,9 @@
 
   async function refreshCoordStatus() {
     if (!ctx?.config.coordinator || !keys?.eidNsecHex) return;
-    coordStatuses = await fetchCoordinatorStatuses(ctx, keys.eidNsecHex).catch(() => []);
+    // A failed read keeps the warnings already shown (W-12): an outage must not
+    // look like the coordinator's problems were resolved.
+    coordStatuses = await fetchCoordinatorStatuses(ctx, keys.eidNsecHex).catch(() => coordStatuses);
   }
 
   function dismissStatus(s: CoordinatorStatusContent) {
@@ -1187,7 +1218,7 @@
 
 <AdminTabs {naddr} />
 
-{#if error}<div class="card warn">{error}</div>{/if}
+{#if error}<div class="card warn" role="alert">{error}</div>{/if}
 
 {#if keyStatus?.changedElsewhere}
   <div class="card warn" role="status">{t("admin.keys.changedElsewhere")}</div>
@@ -1445,8 +1476,17 @@
     </p>
   {/if}
 
+  {#if queueError}
+    <ErrorState
+      error={queueError}
+      body="admin.requests.loadFailed"
+      onRetry={() => void retryQueue()}
+      retrying={queueRetrying}
+    />
+  {/if}
   <AdminQueue
     requests={pendingRequests}
+    known={queueKnown}
     inviteOnly={ctx?.config.approval === "invite"}
     relays={ctx?.config.relays ?? []}
     filterActive={peopleFilterActive}
@@ -1500,7 +1540,14 @@
       {t("admin.invites.body")}
     </p>
     <div class="row">
-      <input type="number" min="1" max="100" bind:value={inviteCount} style="max-width:5rem" />
+      <input
+        type="number"
+        min="1"
+        max="100"
+        aria-label={t("admin.invites.countLabel")}
+        bind:value={inviteCount}
+        style="max-width:5rem"
+      />
       <button class="btn inline" onclick={makeInvites} disabled={generating}>
         {generating ? t("admin.invites.generating") : t("admin.invites.generate")}
       </button>

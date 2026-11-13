@@ -49,7 +49,7 @@ const PATCH_DIR = join(REPO_ROOT, "packages/vendor/patches");
 
 /** jooray/marmot-ts `nostrautica-vendor-<version>` = an upstream release + our open upstream PRs. */
 const DEFAULT_REPO = "https://github.com/jooray/marmot-ts.git";
-const DEFAULT_REF = "nostrautica-vendor-0.9.0";
+const DEFAULT_REF = "nostrautica-vendor-master-8040bfa";
 
 /**
  * Dependencies our patches add on top of upstream's. `@hpke/dhkem-x25519` is the

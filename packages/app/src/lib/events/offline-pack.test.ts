@@ -8,7 +8,7 @@ import { describe, it, expect } from "vitest";
 import { packComplete, type OfflinePack } from "./offline-pack.js";
 
 function pack(steps: OfflinePack["steps"]): OfflinePack {
-  return { at: 1, steps, mediaSkipped: true };
+  return { at: 1, steps, mediaSkipped: true, swControlled: true };
 }
 
 describe("packComplete", () => {
@@ -55,6 +55,21 @@ describe("packComplete", () => {
         mediaSkipped: true,
         swControlled: false,
         steps: [{ key: "roster", ok: true, count: 3 }],
+      }),
+    ).toBe(false);
+  });
+
+  // Audit KIMIK31 W-14: a pack recorded before R7 carries no swControlled and no
+  // shell/module steps; nothing verified its app code is cached.
+  it("a pre-R7 pack (no swControlled) is not complete and must be downloaded again", () => {
+    expect(
+      packComplete({
+        at: 1,
+        mediaSkipped: true,
+        steps: [
+          { key: "roster", ok: true, count: 3 },
+          { key: "directory", ok: true, count: 3 },
+        ],
       }),
     ).toBe(false);
   });

@@ -446,6 +446,42 @@ describe("every §7 payload round-trips through JSON", () => {
     ).toThrow();
   });
 
+  describe("21607 add intent (NIP §10.2, 0.18)", () => {
+    const add = {
+      v: 2,
+      a: "31923:" + hex + ":ev",
+      op: "add",
+      chat_pubkey: "b".repeat(64),
+      label: "Chrome",
+      proof: "a".repeat(128),
+    } as const;
+
+    it("accepts enrol and rejoin on add, and an add without intent (legacy)", () => {
+      roundTrips(chatKeyAttestationContentSchema, { ...add, intent: "enrol" });
+      roundTrips(chatKeyAttestationContentSchema, { ...add, intent: "rejoin" });
+      expect(chatKeyAttestationContentSchema.parse(add).intent).toBeUndefined();
+    });
+
+    it("rejects an unknown intent value", () => {
+      expect(() => chatKeyAttestationContentSchema.parse({ ...add, intent: "evict" })).toThrow();
+      expect(() => chatKeyAttestationContentSchema.parse({ ...add, intent: "" })).toThrow();
+    });
+
+    it("rejects intent on every op other than add", () => {
+      const base = { v: 2, a: add.a, chat_pubkey: add.chat_pubkey } as const;
+      expect(() => chatKeyAttestationContentSchema.parse({ ...base, op: "revoke", intent: "rejoin" })).toThrow();
+      expect(() => chatKeyAttestationContentSchema.parse({ ...base, op: "revoke", intent: "enrol" })).toThrow();
+      expect(() =>
+        chatKeyAttestationContentSchema.parse({ ...base, op: "link", label: "WN", intent: "enrol" }),
+      ).toThrow();
+      expect(() =>
+        chatKeyAttestationContentSchema.parse({ ...base, op: "link_confirm", code: "ABCDEFGH", intent: "rejoin" }),
+      ).toThrow();
+      // The same rumors without intent are fine, so the throw above is the intent.
+      expect(() => chatKeyAttestationContentSchema.parse({ ...base, op: "revoke" })).not.toThrow();
+    });
+  });
+
   describe("21607 external-client link ops (NIP §10.5)", () => {
     const base = { v: 2, a: "31923:" + hex + ":ev", chat_pubkey: "c".repeat(64) } as const;
 

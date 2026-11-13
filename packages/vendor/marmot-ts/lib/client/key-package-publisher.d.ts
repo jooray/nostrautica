@@ -60,12 +60,15 @@ export declare class KeyPackagePublisher {
     generate(options?: GenerateKeyPackageOptions): Promise<GeneratedKeyPackage>;
     /**
      * Builds, signs and publishes a kind-30443 key package event to the given
-     * relays, returning the signed event.
+     * relays, returning the signed event after at least one requested relay ACKs.
+     * @throws {KeyPackagePublishError} if no requested relay accepts the event
      */
     publish(options: PublishKeyPackageOptions): Promise<NostrEvent>;
     /**
      * Builds, signs and publishes a single NIP-09 deletion covering the given
-     * key package events to the given relays, returning the signed event.
+     * key package events to the given relays, returning the signed event after at
+     * least one requested relay ACKs. An ACK does not prove all copies were erased.
+     * @throws {KeyPackagePublishError} if no requested relay accepts the event
      */
     delete(events: NostrEvent[], relays: string[]): Promise<NostrEvent>;
 }

@@ -10,23 +10,51 @@ See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 fla
 ## Packages
 
 - **`marmot-ts/`** — `@internet-privacy/marmot-ts`, built from
-  [`jooray/marmot-ts`](https://github.com/jooray/marmot-ts) branch **`nostrautica-vendor-0.9.0`**:
-  an upstream `marmot-protocol/marmot-ts` release plus the fixes we need that upstream does
-  not have yet. The exact commit (and the bundled ts-mls commit) is recorded in
-  `marmot-ts/package.json` under `"vendoredFrom"` — that field, not this README, is the pin.
-  At the time of writing: `039016c` = upstream **v0.9.0** (`a7dd0b6`) + the same two fixes
-  as the 0.8.0 pin (cherry-picked, plus a commit moving their CHANGELOG lines under
-  "Unreleased"):
+  [`jooray/marmot-ts`](https://github.com/jooray/marmot-ts) branch
+  **`nostrautica-vendor-master-8040bfa`**: upstream `marmot-protocol/marmot-ts` plus the
+  fixes we need that upstream does not have yet. The exact commit (and the bundled ts-mls
+  commit) is recorded in `marmot-ts/package.json` under `"vendoredFrom"` — that field, not
+  this README, is the pin. At the time of writing: `d24be28` = unreleased upstream
+  **master `8040bfa`** (v0.9.0 + 7 commits; owner decision to take it before a release) +
+  the same two fixes as the 0.9.0 pin (cherry-picked without conflicts, plus a commit
+  moving their CHANGELOG lines under "Unreleased"):
 
   - `#94` check a kind-30443's tags against its KeyPackage before inviting (MDK parity).
-    0.9.0 (and master `a17913b`) still check only `mls_proposals`; the `i` KeyPackageRef,
+    0.9.0 (and master `8040bfa`) still check only `mls_proposals`; the `i` KeyPackageRef,
     `mls_extensions` and `app_components` tags are unchecked upstream.
   - `connectAll()` retries a group whose connect failed (`reconnectDelayMs`). Since 0.8.0
     the network adapter must REJECT a failed or timed-out backfill request, and then
     `connectAll()` drops a group whose every relay rejected, so a device that started
-    offline never subscribed live. Upstream PR `#121`. Unchanged in 0.9.0 and master.
+    offline never subscribed live. Upstream PR `#121`. Unchanged in master `8040bfa`.
 
-  0.9.0 itself adds only reactive UI snapshots (`MarmotGroup.snapshot`/`watch()`, a
+  What master `8040bfa` adds over v0.9.0, and how we meet it:
+
+  - `9e0def2` (upstream issue #126): a KeyPackage publish, rotation or purge now REJECTS
+    with `KeyPackagePublishError` unless a requested relay acks it, read as
+    `responses[requestedRelay].ok` (marmot asks for normalized URLs, `wss://host/`). A
+    rejected `create` keeps the private bundle with no publish record, and a rejected
+    rotate/purge keeps the old bundle. The app (`chat/client.ts` `ensurePublished`) logs
+    a rejection and carries on to the attestation (start must not fail on a relay
+    outage), republishes a stored package that has no publish record (marmot's own
+    `ensurePublished` would hand it back forever), and `rejoin` surfaces the rejection
+    as "rejoin failed". The app's network adapter keys each response by the relay string
+    asked for, not NDK's spelling. The coordinator publishes no KeyPackages of its own.
+    `ensurePublished` now picks only the explicit slot or `clientId`; both sides pass one.
+  - `8040bfa` (#124): received Welcomes survive signer and storage failures. `listen()`
+    tries each gift wrap once (an `attempted` flag), keeps one that failed for an
+    explicit `decryptGiftWraps()` (the app calls it in `joinPending`), and journals a
+    decrypted rumor before the unread write. Stored entries gain optional fields only.
+  - `bce5704`: watchers take `{ signal }`; we use none of them.
+
+  State written by the 0.9.0 pin was loaded and operated on by this build (coordinator
+  SQLite group state and a member's SQLite stores, the app's stores persisted with
+  structured clone as IndexedDB keeps them): members joined from an old unused
+  KeyPackage, an old undecrypted `received` gift wrap and an old `unread` Welcome; old
+  members followed new commits and read new messages; spent old KeyPackages rotated;
+  old history stayed readable.
+
+  The 0.9.0 pin: 0.9.0 itself added only reactive UI snapshots
+  (`MarmotGroup.snapshot`/`watch()`, a
   `changed` and a `disposed` event, `groups.watch({ includeStateChanges })`); no wire,
   MLS, event-kind or stored-state change, and the bundled ts-mls is the same `57a732c`.
   State written by the 0.8.0 pin (coordinator SQLite group state, member stores, stored
@@ -41,8 +69,9 @@ See `docs/MARMOT-GROUP-CHAT.md`, "Library: vendored marmot-ts and the 0x8009 fla
 
   When `#94` and `#121` are merged, vendor upstream directly (`--repo
   https://github.com/marmot-protocol/marmot-ts.git --ref <tag>`) and drop the fork. Earlier
-  pins are kept as branches on the fork: `nostrautica-vendor-0.8.0` (v0.8.0 + #94 + #121,
-  `e8250fc`), `nostrautica-vendor` (v0.7.0 + #83 + #94, `7c2725d`) and
+  pins are kept as branches on the fork: `nostrautica-vendor-0.9.0` (v0.9.0 + #94 + #121,
+  `039016c`), `nostrautica-vendor-0.8.0` (v0.8.0 + #94 + #121, `e8250fc`),
+  `nostrautica-vendor` (v0.7.0 + #83 + #94, `7c2725d`) and
   `nostrautica-vendor-pre-0.7.0` (`0ab8336`). The PR list is
   `gh pr list --repo marmot-protocol/marmot-ts --author jooray`.
 
@@ -79,7 +108,7 @@ Pure TypeScript (no WASM). All *other* dependencies (`@noble/*`, `@hpke/*`, `@sc
 ## Re-vendoring (one command)
 
 ```sh
-node scripts/vendor-marmot.mjs                          # jooray/marmot-ts@nostrautica-vendor-0.9.0
+node scripts/vendor-marmot.mjs                          # jooray/marmot-ts@nostrautica-vendor-master-8040bfa
 node scripts/vendor-marmot.mjs --ref <branch|tag|sha>
 node scripts/vendor-marmot.mjs --repo <url> --ref <ref>
 node scripts/vendor-marmot.mjs --src <clean local checkout>

@@ -63,6 +63,19 @@ describe("chat device attestation (21607 v2)", () => {
     expect(() => buildChatKeyAttestationContent(coordinate, { op: "add", chatPubkey, proof })).toThrow();
   });
 
+  it("carries the add intent (NIP §10.2) and leaves it out when unset", () => {
+    for (const intent of ["enrol", "rejoin"] as const) {
+      const c = buildChatKeyAttestationContent(coordinate, { op: "add", chatPubkey, label: "x", proof, intent });
+      expect(c.intent).toBe(intent);
+    }
+    const legacy = buildChatKeyAttestationContent(coordinate, { op: "add", chatPubkey, label: "x", proof });
+    expect("intent" in legacy).toBe(false);
+  });
+
+  it("refuses an intent on anything but an add", () => {
+    expect(() => buildChatKeyAttestationContent(coordinate, { op: "revoke", chatPubkey, intent: "rejoin" })).toThrow();
+  });
+
   it("builds a revoke attestation with no proof/label", () => {
     const c = buildChatKeyAttestationContent(coordinate, { op: "revoke", chatPubkey });
     expect(c).toEqual({ v: 2, a: coordinate, op: "revoke", chat_pubkey: chatPubkey });
@@ -109,5 +122,23 @@ describe("chat device attestation (21607 v2)", () => {
       kind: KIND_CHAT_KEY_ATTESTATION,
     }));
     expect(publishAccountGiftWrap).toHaveBeenCalledWith({ kind: 1059 }, coordinator, relays);
+  });
+
+  it("sendChatKeyAttestation puts the caller's intent into the sealed content", async () => {
+    const coordinator = "d".repeat(64);
+    const signer = { getPublicKey: async () => account } as AppSigner;
+    const ctx = { coordinate, config: { coordinator, relays: [] } } as unknown as EventContext;
+
+    await sendChatKeyAttestation(signer, ctx, {
+      op: "add",
+      chatPubkey,
+      label: "Browser",
+      deviceSecretKey: deviceSk,
+      intent: "rejoin",
+    });
+
+    expect(signerWrap).toHaveBeenCalledWith(signer, coordinator, expect.objectContaining({
+      content: expect.objectContaining({ op: "add", intent: "rejoin" }),
+    }));
   });
 });

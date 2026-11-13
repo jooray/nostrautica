@@ -1,4 +1,3 @@
-/** @module @category Client - Group History */
 import type { Rumor } from "applesauce-common/helpers/gift-wrap";
 import type { Filter } from "applesauce-core/helpers/filter";
 import { EventEmitter } from "eventemitter3";
@@ -42,10 +41,12 @@ export declare class GroupRumorHistory extends EventEmitter<GroupRumorHistoryEve
      * snapshot is freshly queried so removal refills limited pages. Changes
      * during loading or paused consumption are latched until the next pull.
      *
-     * The generator runs until the caller breaks out of the loop or the consuming
-     * iterator is garbage-collected (via the `finally` cleanup).
+     * Abort, return, throw, or async disposal promptly releases listeners, even
+     * while a query is pending. Explicitly close iterators when no longer needed.
      */
-    subscribe(filters?: Filter | Filter[]): AsyncGenerator<Rumor[]>;
+    subscribe(filters?: Filter | Filter[], options?: {
+        signal?: AbortSignal;
+    }): AsyncGenerator<Rumor[]>;
     /**
      * Creates an async generator for paginated loading of historical rumor events.
      *

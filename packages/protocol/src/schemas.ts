@@ -977,6 +977,30 @@ export function normalizeChatLinkCode(input: string): string {
   return input.toUpperCase().replace(/[\s.-]/g, "");
 }
 
+/**
+ * The explicit intent of a 21607 `op:"add"` (NIP §10.2), added in 0.18.
+ *
+ * - `enrol`: bind/refresh this device and add it if it holds no leaf. Never a reason
+ *   to drop a leaf the coordinator still holds for it (first enrolment, key-package
+ *   rotation, a rename riding an attestation, a refresh).
+ * - `rejoin`: the device's group state is gone (it is positively not a member, or
+ *   the user confirmed a Rejoin). The coordinator replaces any leaf it still holds
+ *   for the device with Remove+Add in one commit.
+ *
+ * Absent means a pre-0.18 client: the coordinator falls back to inferring it from
+ * the key package's freshness and the leaf's recent activity.
+ */
+export const CHAT_ATTESTATION_INTENTS = ["enrol", "rejoin"] as const;
+/**
+ * The 31611 `features.chat` token a coordinator publishes when it understands
+ * `intent` (NIP §6.2). A client sends `intent` only to a coordinator that lists it:
+ * an older one rejects the whole attestation at its strict parse.
+ */
+export const CHAT_FEATURE_ATTEST_INTENT = "attest-intent";
+/** The 31611 `features.chat` token for "runs Marmot group chat". */
+export const CHAT_FEATURE_MARMOT = "marmot";
+export type ChatAttestationIntent = (typeof CHAT_ATTESTATION_INTENTS)[number];
+
 export const chatKeyAttestationContentSchema = z
   .object({
     v: version,
@@ -988,6 +1012,9 @@ export const chatKeyAttestationContentSchema = z
     proof: z.string().regex(/^[0-9a-f]{128}$/, "expected 128-hex schnorr sig").optional(),
     // The one-time code shown inside the external client (op:"link_confirm" only).
     code: z.string().min(1).max(MAX_CHAT_LINK_CODE_INPUT).optional(),
+    // Why the device is attesting (op:"add" only, NIP §10.2). Absent = a client that
+    // predates the field; the coordinator then infers it as before.
+    intent: z.enum(CHAT_ATTESTATION_INTENTS).optional(),
   })
   .strict()
   .superRefine((val, ctx) => {
@@ -996,6 +1023,13 @@ export const chatKeyAttestationContentSchema = z
         code: z.ZodIssueCode.custom,
         path: ["code"],
         message: "code is only valid on op:'link_confirm'",
+      });
+    }
+    if (val.intent !== undefined && val.op !== "add") {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["intent"],
+        message: "intent is only valid on op:'add'",
       });
     }
     if (val.op === "link" || val.op === "link_confirm") {

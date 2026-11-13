@@ -80,8 +80,11 @@ export function autoRecoverFromDrift(revision: string): boolean {
 }
 
 export function reloadToLatestBuild(): void {
-  const online = typeof navigator === "undefined" || navigator.onLine !== false;
   refreshGuard.requestRefresh(() => {
+    // Read connectivity when the reload RUNS, not when it was asked for (audit
+    // KIMIK31 W-15): the guard can hold it for as long as unsaved work exists,
+    // and a purge after the network dropped meanwhile leaves nothing to boot.
+    const online = typeof navigator === "undefined" || navigator.onLine !== false;
     if (online) void purgeServiceWorkerAndReload();
     else window.location.reload();
   });

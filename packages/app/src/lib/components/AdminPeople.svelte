@@ -60,7 +60,7 @@
        a safe cross-locale selector, but this id is. -->
   <div class="stack" id="approved-people">
     {#each people.filter((p) => !filterActive || matchedPubkeys.has(p.pubkey)) as person (person.pubkey)}
-      <div class="card">
+      <div class="card person-card">
         <PersonId pubkey={person.pubkey} name={person.name} {relays} />
         {#if person.role === "organizer"}<span class="badge">{t("admin.people.organizer")}</span>{/if}
         {#if person.media?.length}<span class="badge">{tp("admin.requests.video", person.media.length)}</span>{/if}
@@ -128,5 +128,18 @@
   }
   .section-head {
     margin-top: 1.5rem;
+  }
+  /* The People roster's large-list mitigation, copied from Attendees (audit
+     KIMIK31 W-20; the measurements and the reasoning for each part are in
+     Attendees.svelte's `.roster-list > li` rule). Every approved person still
+     mounts, so Find and screen readers reach all of them; offscreen cards just
+     skip layout and paint. `auto` keeps the last rendered height, so the
+     placeholder follows the user's text size; 180px is only the first guess for
+     a card nobody has scrolled to. Containment lifts for the card holding focus
+     so its buttons' focus rings are not clipped. Not benchmarked at the 2,000
+     ceiling on a throttled phone yet: that is the open half of W-20. */
+  .person-card:not(:focus-within) {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 180px;
   }
 </style>

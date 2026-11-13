@@ -41,6 +41,13 @@ export const MARMOT_NAMESPACES = {
   // Ours: pending-publication records set aside because the group would not load
   // with them (audit K-8). Kept for diagnosis, never read back by marmot.
   pendingPublicationBackup: "pending-publication-bak",
+  // Ours: devices the coordinator added recently, per group, so the lost-Add
+  // repair survives a restart (audit KIMIK31 C-4). Read by MarmotAdmin.
+  recentInvites: "recent-invites",
+  // Ours: devices removed on purpose at the MLS layer only — a co-admin's Remove,
+  // or a self_remove we auto-committed — so the roster backfill and durable syncs
+  // do not invite them straight back. Per group. Read by MarmotAdmin.
+  deliberateRemovals: "deliberate-removals",
 } as const;
 
 /** The namespaces whose keys are per group, keyed by (or prefixed with) the MLS group id hex. */
@@ -52,6 +59,8 @@ const PER_GROUP_NAMESPACES = [
   MARMOT_NAMESPACES.removedMarker,
   MARMOT_NAMESPACES.leafActivity,
   MARMOT_NAMESPACES.pendingPublicationBackup,
+  MARMOT_NAMESPACES.recentInvites,
+  MARMOT_NAMESPACES.deliberateRemovals,
 ];
 
 // ── structured-clone-safe string codec ───────────────────────────────────────
@@ -258,6 +267,56 @@ export function leafActivityStore(store: Store): LeafActivityStore {
  */
 export function pendingPublicationKvKey(mlsGroupIdHex: string): string {
   return `${mlsGroupIdHex.toLowerCase()}/pending-publication/v1`;
+}
+
+/** What a retained pending-publication record says about the commit it holds. */
+export interface RetainedCommit {
+  /** The signed kind-445's event id. */
+  eventId: string;
+  /** The relays it was published to. */
+  relays: string[];
+  /** The kind-445's created_at (seconds), when present. */
+  createdAt?: number;
+  /** The serialized parent ClientState, when present (for its epoch). */
+  parentState?: Uint8Array;
+}
+
+/**
+ * Read just enough of a group's retained pending-publication record to find its
+ * commit on a relay (audit KIMIK31 C-2): the kind-445's id and the relays it went
+ * to. Deliberately looser than marmot's own `read()`, which is what refused the
+ * record in the first place, but it never guesses: undefined when there is no
+ * record, or when it does not name a 64-hex event id and at least one relay.
+ * Never throws. The record's layout is marmot-ts 0.8/0.9
+ * `client/runtime/pending-publication.js` (JSON, bytes as `{ $bytes: hex }`).
+ */
+export function retainedCommitOf(store: Store, mlsGroupIdHex: string): RetainedCommit | undefined {
+  try {
+    const text = store.marmotKvGet(MARMOT_NAMESPACES.rewind, pendingPublicationKvKey(mlsGroupIdHex));
+    if (text === undefined) return undefined;
+    const bytes = decodeValue<unknown>(text);
+    if (!(bytes instanceof Uint8Array)) return undefined;
+    const record = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as {
+      relays?: unknown;
+      work?: { envelope?: { id?: unknown; created_at?: unknown }; pending?: { parentState?: { $bytes?: unknown } } };
+    };
+    const eventId = record?.work?.envelope?.id;
+    const relays = record?.relays;
+    if (typeof eventId !== "string" || !/^[0-9a-f]{64}$/.test(eventId)) return undefined;
+    if (!Array.isArray(relays) || relays.length === 0 || !relays.every((r) => typeof r === "string")) return undefined;
+    const createdAt = record.work?.envelope?.created_at;
+    const parentHex = record.work?.pending?.parentState?.$bytes;
+    return {
+      eventId,
+      relays: relays as string[],
+      ...(typeof createdAt === "number" ? { createdAt } : {}),
+      ...(typeof parentHex === "string" && /^([0-9a-f]{2})*$/.test(parentHex)
+        ? { parentState: Uint8Array.from(parentHex.match(/../g) ?? [], (h) => parseInt(h, 16)) }
+        : {}),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /**

@@ -49,6 +49,7 @@ const { __setPersistBackend, __resetPersistForTests, setActiveCacheOwner } = awa
 const {
   fetchRoster,
   fetchDirectory,
+  fetchDirectoryAnswered,
   streamDirectory,
   cachedDirectory,
   __resetAttendeeInflightForTests,
@@ -136,7 +137,7 @@ interface FakeStream {
   kind: number;
   ds: string[];
   deliver: (events: unknown[]) => void;
-  settle: (events?: unknown[]) => void;
+  settle: (events?: unknown[], answered?: boolean) => void;
 }
 let streams: FakeStream[] = [];
 const ofKind = (k: number) => streams.filter((s) => s.kind === k);
@@ -149,6 +150,7 @@ function installRelay() {
     let resolve!: (v: unknown[]) => void;
     const ready = new Promise<unknown[]>((r) => (resolve = r));
     const seen: unknown[] = [];
+    let answered = true;
     const s: FakeStream = {
       kind: f.kinds[0],
       ds: f["#d"] ?? [],
@@ -158,13 +160,14 @@ function installRelay() {
           o.onEvent?.(e);
         }
       },
-      settle(events) {
+      settle(events, didAnswer = true) {
         if (events) s.deliver(events);
+        answered = didAnswer;
         resolve(seen);
       },
     };
     streams.push(s);
-    return { ready, stop: () => resolve(seen) };
+    return { ready, stop: () => resolve(seen), answered: () => answered, allAnswered: () => answered };
   });
 }
 
@@ -450,6 +453,25 @@ describe("in-flight sharing of the directory read", () => {
     await settleMicrotasks();
     ofKind(KIND_DIRECTORY_ENTRY)[0].settle([entryEvent(alice, "d-alice", "Alice", 200)]);
     await p;
+    expect(cachedDirectory(coordinate)?.map((e) => e.name)).toEqual(["Alice"]);
+  });
+
+  // Audit KIMIK31 W-14: an unanswered entry read came back as an empty
+  // directory, was cached as one, and let the offline pack say "Ready".
+  it("an unanswered entry read is not an empty directory, and keeps the cache", async () => {
+    const first = fetchDirectory(ctx);
+    await settleMicrotasks();
+    ofKind(KIND_ROSTER)[0].settle([rosterEvent(100)]);
+    await settleMicrotasks();
+    ofKind(KIND_DIRECTORY_ENTRY)[0].settle([entryEvent(alice, "d-alice", "Alice", 200)]);
+    await first;
+
+    const second = fetchDirectoryAnswered(ctx);
+    await settleMicrotasks();
+    ofKind(KIND_ROSTER)[1].settle([rosterEvent(100)]);
+    await settleMicrotasks();
+    ofKind(KIND_DIRECTORY_ENTRY)[1].settle([], false);
+    await expect(second).rejects.toThrow(/No relay answered/);
     expect(cachedDirectory(coordinate)?.map((e) => e.name)).toEqual(["Alice"]);
   });
 });

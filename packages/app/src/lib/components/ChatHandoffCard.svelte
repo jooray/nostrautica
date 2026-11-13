@@ -129,8 +129,10 @@
       // ensurePublished sends `loadDeviceLabel() ?? defaultDeviceLabel()`, which
       // is also what stopped renames reverting (the coordinator's
       // `label = COALESCE(excluded.label, …)` upsert prefers any incoming label).
-      // Until the protocol can say "refresh, don't evict" (audit K-1's `intent`),
-      // other members see the new name the next time this device joins.
+      // Since 0.18 the protocol can say "refresh, don't evict" (`intent:"enrol"`,
+      // NIP §10.2), and the next attestation carries the label that way. Attesting
+      // right here would show the new name sooner; it is not done yet, so other
+      // members see it the next time this device attests.
       await saveDeviceLabel(id.pubkey, label);
       pendingLabel = label;
       notice = t("chat.devices.renamedLocal");

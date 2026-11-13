@@ -28,6 +28,7 @@ import {
   getNostrGroupIdHex,
   getPubkeyLeafNodes,
   validateKeyPackageAccountIdentityProof,
+  deserializeClientState,
 } from "@internet-privacy/marmot-ts/core";
 import type { NostrNetworkInterface } from "@internet-privacy/marmot-ts/client";
 import { bytesToHex } from "@nostrautica/protocol";
@@ -39,7 +40,9 @@ import {
   expireStalePreparedWrappers,
   leafActivityStore,
   quarantinePendingPublication,
+  retainedCommitOf,
   type LeafActivityStore,
+  type RetainedCommit,
 } from "./stores.js";
 import { makeCoordinatorSigner } from "./signer.js";
 
@@ -100,7 +103,20 @@ export interface IngestedCommit {
   /** The committing leaf's pubkey; undefined when the library did not record it. */
   committer?: string;
   added: string[];
+  /**
+   * Leaves gone after this commit. For a commit that ADOPTED A FORK (`fork`) this
+   * is measured against the branch we left, so it also lists leaves that only our
+   * abandoned branch had added: it is not evidence that anyone was removed on
+   * purpose (audit KIMIK31 C-3).
+   */
   removed: string[];
+  /** Applied by fork resolution, for an epoch we had already left. */
+  fork?: true;
+  /**
+   * When the commit was SENT (ms): its 445's `created_at`, clamped to now. The
+   * committer's claim, so only as good as the committer. Absent when unknown.
+   */
+  at?: number;
 }
 
 /** What one {@link ChatMls.ingest} batch did (audit R-5, K-7). */
@@ -109,8 +125,13 @@ export interface IngestReport {
   epochAfter: number;
   /** Inbound commits applied, in order. Our own (self-echo) are not listed. */
   commits: IngestedCommit[];
-  /** self_remove commits this client was elected to make for a departing peer. */
-  autoCommits: { removed: string[]; published: boolean }[];
+  /**
+   * self_remove commits this client was elected to make for a departing peer.
+   * `epoch` is the epoch the published commit produced; `at` (ms) is when the
+   * newest proposal of the batch before it was sent, clamped to now — the
+   * departing device's own self_remove, as far as this batch can tell.
+   */
+  autoCommits: { removed: string[]; published: boolean; epoch?: number; at?: number }[];
   /**
    * Commits for an epoch we had already left that are not on our chain:
    * `adopted` when fork resolution moved us onto their branch, otherwise kept out.
@@ -126,8 +147,8 @@ export interface IngestReport {
 type IngestResultView = {
   kind: string;
   reason?: string;
-  event?: { id?: string };
-  envelope?: { id?: string };
+  event?: { id?: string; created_at?: number };
+  envelope?: { id?: string; created_at?: number };
   message?: unknown;
   result?: { kind: string; newState?: unknown; senderLeafIndex?: number };
   pending?: { parentState?: unknown; newState?: unknown };
@@ -405,6 +426,14 @@ export function createMarmotClientMls(deps: {
   network: NostrNetworkInterface;
   /** Stable 64-hex slot for the coordinator's own 30443 key packages. */
   clientId?: string;
+  /** Wall clock (ms); a seam for tests. */
+  now?: () => number;
+  /**
+   * Whether `relays` hold event `id`, and which did not answer (NostrClient
+   * `lookupEvent`). Without it a group blocked by an unrestorable retained
+   * commit stays blocked (see {@link MarmotClientMls.loadGroup}).
+   */
+  lookupEvent?: RelayEventLookup;
 }): { mls: MarmotClientMls; client: MarmotClient } {
   const stores = makeMarmotStores(deps.store);
   const client = new MarmotClient({
@@ -430,12 +459,17 @@ export function createMarmotClientMls(deps: {
       (id) => purgeGroupState(deps.store, id),
       (id) => expireStalePreparedWrappers(deps.store, id, Date.now()),
       leafActivityStore(deps.store),
-      Date.now,
+      deps.now ?? Date.now,
       (id) => quarantinePendingPublication(deps.store, id, Date.now()),
+      (id) => retainedCommitOf(deps.store, id),
+      deps.lookupEvent,
     ),
     client,
   };
 }
+
+/** See `NostrClient.lookupEvent`: `found`, or which relays gave no real answer. */
+export type RelayEventLookup = (id: string, relays: string[]) => Promise<{ found: boolean; unanswered: string[] }>;
 
 export class MarmotClientMls implements ChatMls {
   constructor(
@@ -454,23 +488,64 @@ export class MarmotClientMls implements ChatMls {
      * the backup went, or undefined when there was none (see {@link loadGroup}).
      */
     private readonly quarantinePendingPublication?: (mlsGroupIdHex: string) => string | undefined,
+    /** The event id and relays of a group's retained commit, read without marmot. */
+    private readonly findRetainedCommit?: (mlsGroupIdHex: string) => RetainedCommit | undefined,
+    /** Ask relays whether they hold an event (see {@link loadGroup}). */
+    private readonly lookupEvent?: RelayEventLookup,
   ) {}
 
   /** Per group: pubkey → when, and in which epoch, its leaf last sent or committed. */
   private readonly activity = new Map<string, Map<string, LeafActivity>>();
 
+  /** Groups whose unreadable activity record has been reported (one line per process). */
+  private readonly activityUnreadableLogged = new Set<string>();
+
+  /**
+   * The group's activity map, loaded from the store on first use. THROWS when the
+   * stored record cannot be read or parsed (audit C-1), and caches nothing then.
+   *
+   * This used to start an empty map and cache it, so one failed read (a SQLite
+   * error, a value that would not decrypt or parse) meant "no device in this group
+   * has ever sent anything" for the rest of the process, and the re-enrolment
+   * guard read that as licence to evict a healthy leaf. Not knowing is not the
+   * same as knowing there was nothing.
+   */
   private activityOf(mlsGroupIdHex: string): Map<string, LeafActivity> {
-    let map = this.activity.get(mlsGroupIdHex);
-    if (map) return map;
-    map = new Map();
-    try {
-      const raw = this.activityStore?.get(mlsGroupIdHex);
-      if (raw) for (const [k, v] of Object.entries(JSON.parse(raw) as Record<string, LeafActivity>)) map.set(k, v);
-    } catch {
-      // Unreadable: start empty. The window below simply has no evidence yet.
+    const cached = this.activity.get(mlsGroupIdHex);
+    if (cached) return cached;
+    const map = new Map<string, LeafActivity>();
+    const raw = this.activityStore?.get(mlsGroupIdHex);
+    if (raw) {
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("leaf activity record is not an object");
+      }
+      for (const [k, v] of Object.entries(parsed as Record<string, unknown>)) {
+        const entry = v as Partial<LeafActivity> | null;
+        if (!entry || typeof entry.at !== "number" || typeof entry.epoch !== "number") {
+          throw new Error(`leaf activity record has a malformed entry for ${k.slice(0, 8)}`);
+        }
+        map.set(k, { at: entry.at, epoch: entry.epoch });
+      }
     }
     this.activity.set(mlsGroupIdHex, map);
+    this.activityUnreadableLogged.delete(mlsGroupIdHex);
     return map;
+  }
+
+  /** {@link activityOf}, or undefined (logged once per group) when it will not read. */
+  private readableActivityOf(mlsGroupIdHex: string): Map<string, LeafActivity> | undefined {
+    try {
+      return this.activityOf(mlsGroupIdHex);
+    } catch (e) {
+      if (!this.activityUnreadableLogged.has(mlsGroupIdHex)) {
+        this.activityUnreadableLogged.add(mlsGroupIdHex);
+        console.warn(
+          `[chat] !!! leaf activity for group ${mlsGroupIdHex.slice(0, 12)}… is unreadable (${causeChain(e)}): not recording activity, and no re-enrolment in this group evicts a leaf until it reads again (marmot_kv namespace leaf-activity, key ${mlsGroupIdHex.toLowerCase()})`,
+        );
+      }
+      return undefined;
+    }
   }
 
   private saveActivity(mlsGroupIdHex: string): void {
@@ -485,10 +560,15 @@ export class MarmotClientMls implements ChatMls {
     }
   }
 
-  /** Record that `pubkey`'s leaf was active in `epoch`; true when worth persisting. */
-  private noteActivity(map: Map<string, LeafActivity>, pubkey: string, epoch: number): boolean {
-    const at = this.now();
+  /**
+   * Record that `pubkey`'s leaf was active in `epoch`, at `sentAt` (ms; the event's
+   * own time, see {@link ingestAndReport}); true when worth persisting. Never moves
+   * a leaf's activity back in time: a replayed old message says nothing new.
+   */
+  private noteActivity(map: Map<string, LeafActivity>, pubkey: string, epoch: number, sentAt?: number): boolean {
+    const now = this.now();
     const prev = map.get(pubkey);
+    const at = Math.max(Math.min(sentAt ?? now, now), prev?.at ?? 0);
     map.set(pubkey, { at, epoch: Math.max(epoch, prev?.epoch ?? 0) });
     // Persisting every message would be a SQLite write per message; the decision
     // this feeds works in tens of minutes, so a minute of staleness is nothing.
@@ -499,7 +579,8 @@ export class MarmotClientMls implements ChatMls {
    * When `pubkey`'s leaf last showed it is alive (audit K-1): an application
    * message it sent, or a commit it made, as seen by this coordinator's ingest.
    * Undefined when nothing is on record. A device that really lost its MLS state
-   * cannot produce either from that leaf.
+   * cannot produce either from that leaf. Rejects when the record cannot be read
+   * (audit C-1): the caller must not mistake that for "nothing on record".
    */
   async lastActivity(
     mlsGroupIdHex: string,
@@ -513,7 +594,10 @@ export class MarmotClientMls implements ChatMls {
 
   /** Drop the activity of leaves that are gone, so a re-added device starts clean. */
   private forgetActivity(mlsGroupIdHex: string, pubkeys: string[]): void {
-    const map = this.activityOf(mlsGroupIdHex);
+    // Called after a commit went out: an unreadable record must not turn that
+    // success into a throw.
+    const map = this.readableActivityOf(mlsGroupIdHex);
+    if (!map) return;
     let changed = false;
     for (const p of pubkeys) changed = map.delete(p) || changed;
     if (changed) this.saveActivity(mlsGroupIdHex);
@@ -648,13 +732,23 @@ export class MarmotClientMls implements ChatMls {
   }
 
   /**
-   * `groups.get`, with one recovery (audit K-8): marmot-ts 0.8.0 refuses to load a
-   * group whose retained pending-publication record is malformed, or whose
-   * parent no longer matches the canonical state, and on the coordinator such a
-   * group then stays `unreadable` (kept, but dead) for good. That record is only
-   * the bytes of a commit no relay acknowledged; dropping it can at worst lose a
-   * commit nobody has, which the group then simply does not have. So: back the
-   * record up, drop it, log loudly, and load once more.
+   * `groups.get`, with one guarded recovery (audit K-8, KIMIK31 C-2).
+   *
+   * marmot-ts refuses to load a group whose retained pending-publication record
+   * is malformed, or whose parent no longer matches the canonical state, and the
+   * group then stays `unreadable` (kept, but dead). Recovery means dropping the
+   * record and building on the parent epoch again. That is safe ONLY if no relay
+   * holds the retained commit. A record exists precisely because a publish was
+   * uncertain (stored, maybe, with the OK lost) or acknowledged but not yet
+   * applied, so "nobody acked it" is not "nobody has it". A member who fetched it
+   * is on that epoch already, and a new commit on the same parent forks the room
+   * (the K-7 fork). This used to drop the record unconditionally.
+   *
+   * Now the record is dropped only when its commit's event id is readable, every
+   * relay it was published to answered (a real EOSE), and none has it. Anything
+   * else (an id that cannot be read, a relay that holds it, a relay that did not
+   * answer, no lookup at all) keeps the group blocked and says why, with the
+   * event id and epoch, for an operator. Re-checked at the next load (boot).
    */
   private async loadGroup(mlsGroupIdHex: string) {
     try {
@@ -662,13 +756,44 @@ export class MarmotClientMls implements ChatMls {
     } catch (e) {
       const why = causeChain(e, 6);
       if (!PENDING_PUBLICATION_FAILURE.test(why) || !this.quarantinePendingPublication) throw e;
+      const group = mlsGroupIdHex.slice(0, 12);
+      const check = await this.retainedCommitAbsent(mlsGroupIdHex);
+      if (!check.absent) {
+        console.warn(
+          `[chat] !!! MLS group ${group}… did not load because of its retained pending-publication record (${why}) — KEPT BLOCKED, not dropped: ${check.detail}. Dropping it could fork the room; an operator has to resolve it`,
+        );
+        throw e;
+      }
       const backup = this.quarantinePendingPublication(mlsGroupIdHex);
       if (!backup) throw e;
       console.warn(
-        `[chat] !!! MLS group ${mlsGroupIdHex.slice(0, 12)}… did not load because of its retained pending-publication record (${why}) — backed it up to ${backup} and dropped it; loading again`,
+        `[chat] !!! MLS group ${group}… did not load because of its retained pending-publication record (${why}) — ${check.detail}, so it was never published: backed it up to ${backup} and dropped it; loading again`,
       );
       return await this.client.groups.get(mlsGroupIdHex);
     }
+  }
+
+  /** Whether a group's retained commit is provably on none of its relays. Never throws. */
+  private async retainedCommitAbsent(mlsGroupIdHex: string): Promise<{ absent: boolean; detail: string }> {
+    const retained = this.findRetainedCommit?.(mlsGroupIdHex);
+    if (!retained) {
+      return { absent: false, detail: "the record does not name its commit's event id and relays, so no relay can be asked for it" };
+    }
+    let epoch = "?";
+    try {
+      if (retained.parentState) epoch = String(epochOf(deserializeClientState(retained.parentState as never)));
+    } catch {
+      /* the epoch is for the log line only */
+    }
+    const what = `commit 445 ${retained.eventId} (from epoch ${epoch}${retained.createdAt ? `, created_at ${retained.createdAt}` : ""}) on ${retained.relays.join(", ")}`;
+    if (!this.lookupEvent) return { absent: false, detail: `${what}: no relay lookup available to check it` };
+    const answer = await this.lookupEvent(retained.eventId, retained.relays).catch((err: unknown) => ({
+      found: false,
+      unanswered: [`(lookup failed: ${causeChain(err)})`],
+    }));
+    if (answer.found) return { absent: false, detail: `${what}: a relay HAS it` };
+    if (answer.unanswered.length > 0) return { absent: false, detail: `${what}: no answer from ${answer.unanswered.join(", ")}` };
+    return { absent: true, detail: `${what}: every relay answered and none has it` };
   }
 
   async groupProfile(mlsGroupIdHex: string): Promise<GroupProfileStatus> {
@@ -874,8 +999,31 @@ export class MarmotClientMls implements ChatMls {
     /** Past-epoch commits, judged against the canonical chain once the batch is in. */
     const pastCommits: { epoch: number; eventId: string; digest: string }[] = [];
     let pendingAuto: IngestReport["autoCommits"][number] | undefined;
-    const activity = this.activityOf(mlsGroupIdHex);
+    // Unreadable activity (audit C-1): ingest goes on, but records nothing into a
+    // scratch map that is never saved, so the stored record is not overwritten
+    // with a partial picture.
+    const readable = this.readableActivityOf(mlsGroupIdHex);
+    const activity = readable ?? new Map<string, LeafActivity>();
     let activityDirty = false;
+    // When each event was SENT (audit C-5). Activity used to be stamped with the
+    // time of ingest, so a backfill or a relay replaying hours-old traffic made a
+    // long-silent leaf look as if it had just posted, and the re-enrolment guard
+    // then refused the re-add of a device that had really lost the room. The
+    // event's created_at is the sender's claim, so it is clamped to now: a
+    // future-dated event cannot buy a leaf more than "active right now".
+    const sentAtById = new Map<string, number>();
+    for (const e of events) if (typeof e.created_at === "number") sentAtById.set(e.id, e.created_at * 1000);
+    const sentAtOf = (r: IngestResultView): number | undefined => {
+      const s = (r.event ?? r.envelope)?.created_at;
+      return typeof s === "number" ? s * 1000 : sentAtById.get(eventIdOf(r));
+    };
+    /** {@link sentAtOf}, clamped to now: a future-dated 445 is "sent just now". */
+    const sentAtClamped = (r: IngestResultView): number | undefined => {
+      const at = sentAtOf(r);
+      return at === undefined ? undefined : Math.min(at, Date.now());
+    };
+    /** When the newest proposal seen so far was sent (for an auto-commit's `at`). */
+    let lastProposalAt: number | undefined;
 
     for await (const r of this.client.groups.ingest(mlsGroupIdHex, events as never)) {
       const result = r as unknown as IngestResultView;
@@ -887,13 +1035,19 @@ export class MarmotClientMls implements ChatMls {
             // in the tree of the epoch the message was sent in.
             const msgEpoch = privateEpochOf(result.message) ?? epoch;
             const sender = senderOfApplication(group.state, processed.senderLeafIndex, msgEpoch);
-            if (sender) activityDirty = this.noteActivity(activity, sender, msgEpoch) || activityDirty;
+            if (sender) activityDirty = this.noteActivity(activity, sender, msgEpoch, sentAtOf(result)) || activityDirty;
             break;
           }
           if (processed?.kind !== "newState") break;
           const commit = commitInfo(result.message);
           const toEpoch = epochOf(processed.newState);
-          if (commit === undefined && toEpoch === epoch) break; // a proposal
+          if (commit === undefined && toEpoch === epoch) {
+            // A proposal. A self_remove arrives as one, and an auto-commit of it
+            // follows: remember when it was sent.
+            const at = sentAtClamped(result);
+            if (at !== undefined) lastProposalAt = Math.max(lastProposalAt ?? 0, at);
+            break;
+          }
           const after = new Set(getGroupMemberPubkeys(processed.newState as never));
           const fromEpoch = commit?.epoch ?? epoch;
           if (fromEpoch < epochBefore) {
@@ -907,11 +1061,13 @@ export class MarmotClientMls implements ChatMls {
             committer: committerOf(tree, processed.newState, commit?.senderLeaf, fromEpoch),
             added: [...after].filter((p) => !members.has(p)).sort(),
             removed: [...members].filter((p) => !after.has(p)).sort(),
+            ...(fromEpoch < epochBefore ? { fork: true as const } : {}),
+            ...(sentAtClamped(result) !== undefined ? { at: sentAtClamped(result) } : {}),
           };
           report.commits.push(committed);
           for (const p of committed.removed) activityDirty = activity.delete(p) || activityDirty;
           if (committed.committer && after.has(committed.committer)) {
-            activityDirty = this.noteActivity(activity, committed.committer, toEpoch) || activityDirty;
+            activityDirty = this.noteActivity(activity, committed.committer, toEpoch, sentAtOf(result)) || activityDirty;
           }
           members = after;
           epoch = toEpoch;
@@ -932,16 +1088,23 @@ export class MarmotClientMls implements ChatMls {
         case "autoCommit": {
           const before = new Set(getGroupMemberPubkeys(result.pending?.parentState as never));
           const after = new Set(getGroupMemberPubkeys(result.pending?.newState as never));
-          pendingAuto = { removed: [...before].filter((p) => !after.has(p)).sort(), published: false };
+          pendingAuto = {
+            removed: [...before].filter((p) => !after.has(p)).sort(),
+            published: false,
+            ...(lastProposalAt !== undefined ? { at: lastProposalAt } : {}),
+          };
           report.autoCommits.push(pendingAuto);
           break;
         }
         case "appliedNotifications": {
           // Follows an autoCommit that was published and applied.
-          if (pendingAuto) pendingAuto.published = true;
-          pendingAuto = undefined;
           members = new Set(getGroupMemberPubkeys(group.state));
           epoch = epochOf(group.state);
+          if (pendingAuto) {
+            pendingAuto.published = true;
+            pendingAuto.epoch = epoch;
+          }
+          pendingAuto = undefined;
           tree = (group.state as unknown as ClientStateView).ratchetTree;
           break;
         }
@@ -959,7 +1122,7 @@ export class MarmotClientMls implements ChatMls {
       }
     }
     report.epochAfter = epochOf(group.state);
-    if (activityDirty) this.saveActivity(mlsGroupIdHex);
+    if (activityDirty && readable) this.saveActivity(mlsGroupIdHex);
 
     if (pastCommits.length) {
       // A relay re-delivering a commit we applied long ago (every resubscribe does

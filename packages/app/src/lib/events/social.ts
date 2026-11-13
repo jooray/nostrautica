@@ -192,8 +192,22 @@ export async function fetchProfiles(
   pubkeys: string[],
   opts: { force?: boolean } = {},
 ): Promise<Map<string, ProfileMeta>> {
+  return (await fetchProfilesAnswered(pubkeys, opts)).profiles;
+}
+
+/**
+ * {@link fetchProfiles}, plus whether the answer is conclusive (audit KIMIK31
+ * W-18 / W-10): `answered` is false when relays had to be asked and none of
+ * them answered, so a pubkey missing from `profiles` may simply not have been
+ * heard from. Callers that act on ABSENCE (Join's "no public profile", the chat
+ * device profile's generic-name fallback) must check it.
+ */
+export async function fetchProfilesAnswered(
+  pubkeys: string[],
+  opts: { force?: boolean } = {},
+): Promise<{ profiles: Map<string, ProfileMeta>; answered: boolean }> {
   const out = new Map<string, ProfileMeta>();
-  if (pubkeys.length === 0) return out;
+  if (pubkeys.length === 0) return { profiles: out, answered: true };
 
   const nowSec = Math.floor(Date.now() / 1000);
   const stamps = fetchStamps();
@@ -206,7 +220,7 @@ export async function fetchProfiles(
     if (profileNeedsFetch({ cached: !!hit, fetchedAt: stamps[p], nowSec, force: opts.force }))
       stale.push(p);
   }
-  if (stale.length === 0) return out;
+  if (stale.length === 0) return { profiles: out, answered: true }; // all fresh in cache
 
   // streamEvents, not fetchEvents: (a) same single-relay EOSE stall as coordinator
   // discovery — fetchEvents hangs on a 1-relay stack; (b) fetchEvents' dexie-cache/EOSE
@@ -214,10 +228,10 @@ export async function fetchProfiles(
   // fetchEventsRelayOnly), which left blank attendee names in the verification pass.
   // NOT relay-only: the dexie cache is a legitimate fast source for public profiles,
   // and streamEvents includes cache results while still terminating on the hard timeout.
-  const events = await streamEvents(
-    { kinds: [KIND_PROFILE], authors: stale },
-    { timeoutMs: 8000 },
-  ).ready;
+  const handle = streamEvents({ kinds: [KIND_PROFILE], authors: stale }, { timeoutMs: 8000 });
+  const events = await handle.ready;
+  // A double without `answered` (older tests) reads as answered, as before.
+  const answered = handle.answered?.() ?? true;
   const latest = new Map<string, (typeof events)[number]>();
   for (const e of events) {
     const prev = latest.get(e.pubkey);
@@ -235,9 +249,12 @@ export async function fetchProfiles(
   }
   // Stamp every pubkey we ASKED about, including the ones the relays had nothing
   // for: without that, a pubkey with no kind-0 anywhere is re-streamed by every
-  // caller forever (it can never produce a cache entry to age).
-  markFetched(stale, nowSec);
-  return out;
+  // caller forever (it can never produce a cache entry to age). But only when a
+  // relay ANSWERED (W-18): an outage's empty result is not "they have no
+  // profile", and stamping it suppressed the retry for the whole freshness window.
+  // Pubkeys that did come back are stamped either way.
+  markFetched(answered ? stale : [...latest.keys()], nowSec);
+  return { profiles: out, answered };
 }
 
 // The signed-in user's follow set (kind-3 p-tags) is cached per owner (`follows`)

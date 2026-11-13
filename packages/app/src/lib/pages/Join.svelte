@@ -15,7 +15,7 @@
   import { receiveGrants, isApproved } from "$lib/events/attendee.js";
   import { publishProfile, ensureRelayList, ensureDmRelayList, seedFollows } from "$lib/events/nostr-actions.js";
   import { parseCoordinate, MAX_ABOUT } from "@nostrautica/protocol";
-  import { fetchProfiles } from "$lib/events/social.js";
+  import { fetchProfilesAnswered } from "$lib/events/social.js";
   import { uploadPublicImage, prepareAvatarImage } from "$lib/media/image.js";
   import { loadLibrary, prepareReuse, loadSelfCopy, hasIntro } from "$lib/media/submit.js";
   import type { MediaDescriptor } from "@nostrautica/protocol";
@@ -31,6 +31,7 @@
   import {
     classifyProfileLoad,
     canSubmitLoggedIn,
+    IdentityFence,
     type ProfileLoadState,
   } from "$lib/events/profile-load.js";
   import {
@@ -213,9 +214,12 @@
   async function loadReuseLibrary() {
     if (!session.signer || libraryLoaded) return;
     libraryLoaded = true;
+    const fence = identityFence.capture();
     try {
       const bk = await deriveBlindingKey(session.signer);
-      library = await loadLibrary(session.signer, bk);
+      const loaded = await loadLibrary(session.signer, bk);
+      // Another account signed in meanwhile: this is the previous one's media (W-13).
+      if (identityFence.isCurrent(fence)) library = loaded;
     } catch {
       /* no library / offline — just don't offer reuse */
     }
@@ -371,9 +375,28 @@
     sent = false;
   }
 
+  // Everything below that was read for, or prefilled from, one account (audit
+  // KIMIK31 W-13). Cleared when the account changes so B never submits A's name,
+  // bio or intro.
+  const identityFence = new IdentityFence();
+  let profileAttempt = 0;
+  function resetIdentityState() {
+    profileAttempt++;
+    profileState = "idle";
+    existingName = "";
+    existingAbout = "";
+    existingPicture = "";
+    eventDisplayName = "";
+    eventAbout = "";
+    library = [];
+    libraryLoaded = false;
+    reuseChoice = "reuse";
+  }
+
   // When signed in (already, or via the sign-in options here), load the profile
   // from kind-0 — read-only. We never modify an existing user's kind-0.
   $effect(() => {
+    if (identityFence.switchTo(session.pubkey ?? null)) resetIdentityState();
     if (session.loggedIn && profileState === "idle") void loadExistingProfile();
     if (session.loggedIn && !libraryLoaded) void loadReuseLibrary();
     // The moment a signer lands (sign-in mid-join), front-run the post-login
@@ -387,16 +410,23 @@
 
   async function loadExistingProfile() {
     if (!session.signer) return;
+    const fence = identityFence.capture();
+    const attempt = ++profileAttempt;
     profileState = "loading";
     let failed = false;
     let fetched: { name?: string; about?: string; picture?: string } | undefined;
     try {
       const pubkey = await session.signer.getPublicKey();
-      const me = await fetchProfiles([pubkey]);
-      fetched = me.get(pubkey);
+      const me = await fetchProfilesAnswered([pubkey]);
+      fetched = me.profiles.get(pubkey);
+      // Nobody answered and nothing cached: unknown, not "no public profile"
+      // (audit KIMIK31 W-18), so the user gets Retry rather than an empty form.
+      if (!fetched && !me.answered) failed = true;
     } catch {
       failed = true; // a fetch error is NOT an empty profile (UX-O1)
     }
+    // A later attempt, or another account, owns the form now (W-13).
+    if (!identityFence.isCurrent(fence) || attempt !== profileAttempt) return;
     const r = classifyProfileLoad(fetched, failed);
     profileState = r.state;
     existingName = r.name;

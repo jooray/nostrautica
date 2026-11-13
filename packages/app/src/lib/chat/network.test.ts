@@ -99,6 +99,19 @@ describe("createMarmotNetwork().publish — refused vs. unanswered (audit K-7)",
     expect(res["wss://a"]).toMatchObject({ ok: false, uncertain: true });
   });
 
+  it("keys each response by the relay string asked for, not NDK's normalized URL", async () => {
+    // marmot-ts (8040bfa+) looks acks up as responses[requestedRelay]; a KeyPackage
+    // publish rejects when none is found there.
+    publishSignedOutcomes.mockResolvedValueOnce([
+      { url: "wss://a.example/", ok: true },
+      { url: "wss://b.example/", ok: false, reason: "blocked: no" },
+    ]);
+    const res = await createMarmotNetwork().publish(["wss://a.example", "wss://B.example"], event as never);
+    expect(res["wss://a.example"]).toEqual({ from: "wss://a.example", ok: true });
+    expect(res["wss://B.example"]).toMatchObject({ ok: false, message: "blocked: no" });
+    expect(Object.keys(res).sort()).toEqual(["wss://B.example", "wss://a.example"]);
+  });
+
   it("a requested relay that produced no outcome is uncertain", async () => {
     publishSignedOutcomes.mockResolvedValueOnce([{ url: "wss://a", ok: false, reason: "invalid: bad sig" }]);
     const res = await createMarmotNetwork().publish(["wss://a", "wss://silent"], event as never);

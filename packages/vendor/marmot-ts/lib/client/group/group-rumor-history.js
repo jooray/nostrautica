@@ -1,3 +1,5 @@
+/** @module @category Client - Group History */
+import { watchCurrent } from "../../utils/watch-current.js";
 import { compileFilters } from "applesauce-core/helpers/filter";
 import { EventEmitter } from "eventemitter3";
 import { deserializeApplicationData } from "../../core/group-message.js";
@@ -52,50 +54,35 @@ export class GroupRumorHistory extends EventEmitter {
      * snapshot is freshly queried so removal refills limited pages. Changes
      * during loading or paused consumption are latched until the next pull.
      *
-     * The generator runs until the caller breaks out of the loop or the consuming
-     * iterator is garbage-collected (via the `finally` cleanup).
+     * Abort, return, throw, or async disposal promptly releases listeners, even
+     * while a query is pending. Explicitly close iterators when no longer needed.
      */
-    async *subscribe(filters) {
+    subscribe(filters, options = {}) {
         const filtersArray = filters
             ? Array.isArray(filters)
                 ? filters
                 : [filters]
             : [{}];
         const matches = compileFilters(filtersArray);
-        let version = 0;
-        let observed = -1;
-        let wake;
-        const changed = () => {
-            version++;
-            wake?.();
-            wake = undefined;
-        };
-        const inserted = (rumor) => {
-            if (matches(rumor))
-                changed();
-        };
-        this.on("rumor", inserted);
-        this.on("cleared", changed);
-        this.on("removed", changed);
-        try {
-            while (true) {
-                if (observed === version)
-                    await new Promise((resolve) => {
-                        wake = resolve;
-                    });
-                const snapshotVersion = version;
-                const snapshot = await this.backend.queryRumors(filtersArray);
-                if (snapshotVersion !== version)
-                    continue;
-                observed = snapshotVersion;
-                yield [...snapshot];
-            }
-        }
-        finally {
-            this.off("rumor", inserted);
-            this.off("cleared", changed);
-            this.off("removed", changed);
-        }
+        return watchCurrent({
+            ...options,
+            discardStale: true,
+            read: async () => [...(await this.backend.queryRumors(filtersArray))],
+            subscribe: (changed) => {
+                const inserted = (rumor) => {
+                    if (matches(rumor))
+                        changed();
+                };
+                this.on("rumor", inserted);
+                this.on("cleared", changed);
+                this.on("removed", changed);
+                return () => {
+                    this.off("rumor", inserted);
+                    this.off("cleared", changed);
+                    this.off("removed", changed);
+                };
+            },
+        });
     }
     /**
      * Creates an async generator for paginated loading of historical rumor events.

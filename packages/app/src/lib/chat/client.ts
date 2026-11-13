@@ -15,12 +15,12 @@
 import { MarmotClient, Proposals } from "@internet-privacy/marmot-ts/client";
 import type { GroupRumorHistory } from "@internet-privacy/marmot-ts/client";
 import { getNostrGroupIdHex, getPubkeyLeafNodes, getGroupMembers } from "@internet-privacy/marmot-ts/core";
-import { KIND_DELETION, KIND_DM_RELAY_LIST, KIND_RELAY_LIST } from "@nostrautica/protocol";
+import { KIND_DELETION, KIND_DM_RELAY_LIST, KIND_RELAY_LIST, type ChatAttestationIntent } from "@nostrautica/protocol";
 import type { AppSigner } from "$lib/signer/types.js";
 import type { EventContext } from "$lib/events/event-context.js";
 import { publishSigned, fetchEventsRelayOnly } from "$lib/nostr/ndk.js";
 import { chatRelaysOf, unionRelays } from "$lib/nostr/relays.js";
-import { fetchProfiles, type ProfileMeta } from "$lib/events/social.js";
+import { fetchProfilesAnswered, type ProfileMeta } from "$lib/events/social.js";
 import { fetchRoster, cachedRoster } from "$lib/events/attendee.js";
 import {
   resolveChatIdentity,
@@ -52,6 +52,7 @@ import {
   type ChatMessage,
 } from "./messages.js";
 import { sendChatKeyAttestation } from "./attest.js";
+import { attestIntentFor, prefetchAttestIntentSupport } from "./attest-intent.js";
 
 /** Addressable MLS key-package event (Marmot / NIP-104). */
 const KIND_KEY_PACKAGE = 30443;
@@ -253,7 +254,33 @@ export class MarmotChat {
    * package, and — for device-key (NIP-46/NIP-07) accounts — the 21607
    * attestation binding the chat key to the account. Idempotent.
    */
-  async ensurePublished(opts?: { force?: boolean; rotate?: boolean }): Promise<void> {
+  async ensurePublished(opts?: {
+    force?: boolean;
+    rotate?: boolean;
+    /**
+     * False: republish what the coordinator needs to SEE (relay lists, the key
+     * package) but send no new attestation (audit KIMIK31 W-5). The session's
+     * setup retry uses it: the attestation it already sent waits in the durable
+     * outbox and drains on its own, while a key package that never reached a
+     * relay had nothing to republish it.
+     */
+    attest?: boolean;
+    /**
+     * The 21607 `intent` (NIP §10.2) to send, overriding the verdict-derived one.
+     * Only {@link rejoin} passes it, with "rejoin": the user asked to be put back.
+     * Otherwise a positive EVICTED verdict sends "rejoin" and everything else
+     * (first enrolment, a never-added device, a refresh) sends "enrol", which the
+     * coordinator never answers by removing a leaf it holds for this device.
+     */
+    intent?: ChatAttestationIntent;
+  }): Promise<void> {
+    // A disposed client publishes nothing (audit KIMIK31 W-2). Disposal is how
+    // logout releases the chat: a call that was already queued behind a roster
+    // read, a welcome or a backfill used to carry on afterwards, publishing a key
+    // package and an op:"add" attestation for the account just signed out of, and
+    // writing fresh MLS state after the custody lock had cleared it. Re-checked
+    // after every await below that precedes a write.
+    if (this.disposed) return;
     // Publish (or refresh) this device key's own kind-0 (NIP §10.3) so other
     // Marmot clients — and our chat UI, which resolves sender names by fetching
     // this exact pubkey's kind-0 — can show a name/picture instead of a bare
@@ -266,19 +293,25 @@ export class MarmotChat {
     // and nothing below depends on it, yet it used to sit in front of every chat
     // start, members' included. It now also publishes only when the profile
     // actually changed (see ensureChatKeyProfile).
+    // Does this event's coordinator understand the add `intent`? Read in the
+    // background now, so the answer is usually in by the time we attest; never awaited.
+    prefetchAttestIntentSupport(this.ctx.config.coordinator);
     this.profileTask ??= this.ensureChatKeyProfile()
       .catch((err) => console.warn("marmot: device profile publish failed", err))
       .finally(() => (this.profileTask = undefined));
 
     // Publish, rotate and attest ONLY on a positive "not a member" (audit K-2).
-    // Every op:"add" this sends is, to the coordinator, a re-enrolment warrant: if
-    // it still holds a leaf for this device it removes it and adds it again. So
+    // To a pre-0.18 coordinator every op:"add" is a re-enrolment warrant: if it
+    // still holds a leaf for this device it removes it and adds it again. Since
+    // 0.18 the add says which it is (`intent`), but the gate stays: an add costs
+    // the coordinator a sync, and "unknown" is not a reason to send one. So
     // "we could not confirm membership" (roster unreadable, a group that failed to
     // load, a state we could not walk) must do NOTHING, not attest. The verdict is
     // computed once per call (audit R-6): one group load, one live roster read.
     let evicted = false;
     if (!opts?.force) {
       const verdict = await this.membershipVerdict();
+      if (this.disposed) return;
       this.lastVerdict = verdict;
       if (verdict.kind === "unknown") {
         console.warn(`marmot: chat membership unknown (${verdict.reason}) — not re-enrolling this device`);
@@ -287,6 +320,11 @@ export class MarmotChat {
       if (verdict.kind === "member") return;
       evicted = verdict.evicted;
     }
+    // "rejoin" only when our own state is positively gone (we hold this event's
+    // group without our leaf) or the caller says the user asked for it. A device
+    // that was simply never added sends "enrol": the coordinator adds it if it
+    // holds no leaf, and must not evict one it does (an in-flight Welcome).
+    const wantedIntent: ChatAttestationIntent = opts?.intent ?? (evicted ? "rejoin" : "enrol");
 
     // Already a joined member OF THIS EVENT's group (APPK-3)? Publish NOTHING
     // else. Re-advertising a fresh kind-30443 key package, or (for device-key
@@ -307,6 +345,7 @@ export class MarmotChat {
     // itself on every open (prod 2026-07-30). The verdict above draws exactly
     // that line: "evicted" is a held group of this event without our leaf.
     await this.ensureRelayLists();
+    if (this.disposed) return;
     // Rotate when we are EVICTED — holding this event's group with our own leaf
     // gone — rather than merely not-yet-added. The key package we still advertise
     // is the one that was spent on the Add that created that leaf, so the
@@ -317,24 +356,60 @@ export class MarmotChat {
     // its key package may be the one an in-flight Welcome was encrypted to, and
     // rotating discards the private material needed to join with it — which is
     // also why rotateKeyPackage only ever retires a SPENT key package (K-8).
-    if (opts?.rotate || evicted) await this.rotateKeyPackage();
-    // Publish (or confirm) the kind-30443 key package on the event relays under
-    // this device's stable slot. This is what the coordinator's watcher adds.
-    await this.client.keyPackages.ensurePublished({
-      relays: this.relays,
-      identifier: this.identity.clientId,
-      client: "nostrautica-web",
-    });
+    //
+    // Since the 8040bfa vendor (upstream #126) a key-package publish, rotation or
+    // deletion that NO requested relay acked rejects with KeyPackagePublishError
+    // (rotate then keeps the old bundle). That is a relay outage, not a broken
+    // device: it must neither fail chat start (session `begin` turns a throw into
+    // the error phase) nor skip the attestation below, which waits in the durable
+    // outbox either way. So it is logged and retried: the setup recheck runs this
+    // again with `attest: false`, and an evicted device rotates again on each run.
+    let keyPackageRejected = false;
+    this.lastKeyPackageRejection = undefined;
+    try {
+      if (opts?.rotate || evicted) await this.rotateKeyPackage();
+      if (this.disposed) return;
+      // Publish (or confirm) the kind-30443 key package on the event relays under
+      // this device's stable slot. This is what the coordinator's watcher adds.
+      const current = await this.client.keyPackages.ensurePublished({
+        relays: this.relays,
+        identifier: this.identity.clientId,
+        client: "nostrautica-web",
+      });
+      // A rejected `create` stores the private bundle BEFORE publishing and records
+      // no publish, and marmot's ensurePublished then hands that never-published
+      // bundle back as the slot's "unused" package forever. No publish record means
+      // no relay ever acked it: publish a fresh one (`create` keeps old bundles).
+      // Read the record from the store: what `create` returns carries none.
+      const ref = toHex(current.keyPackageRef);
+      const record = (await this.client.keyPackages.list()).find((k) => toHex(k.keyPackageRef) === ref);
+      if (record && !record.published?.length && !this.disposed) {
+        await this.client.keyPackages.create({
+          relays: this.relays,
+          identifier: this.identity.clientId,
+          client: "nostrautica-web",
+        });
+      }
+    } catch (err) {
+      if (!isKeyPackagePublishError(err)) throw err;
+      keyPackageRejected = true;
+      this.lastKeyPackageRejection = err;
+      console.warn("marmot: no relay accepted this device's key package — will retry", err);
+    }
     // Bug 2 heal: marmot's `keyPackages.ensurePublished` early-returns whenever a
     // locally-stored key package is still "unused", WITHOUT checking the kind-30443
-    // is actually on the relays. So a publish that never reached the relay (our
-    // NDK adapter swallows a failed send, network.ts), or a relay that dropped /
-    // expired the event, leaves this client believing it advertised a key package
-    // the coordinator can never see — with no log on either side. Verify the 30443
-    // is retrievable; if not, force a fresh publish to the same `d` slot (the relay
-    // replaces in place, so this can't spawn a duplicate).
-    await this.ensureKeyPackageOnRelays();
+    // is actually on the relays. So a relay that dropped / expired the event leaves
+    // this client believing it advertised a key package the coordinator can never
+    // see — with no log on either side. Verify the 30443 is retrievable; if not,
+    // force a fresh publish to the same `d` slot (the relay replaces in place, so
+    // this can't spawn a duplicate). Skipped right after a rejection: no relay
+    // answered, so a relay read now says nothing new.
+    if (this.disposed) return;
+    if (!keyPackageRejected) await this.ensureKeyPackageOnRelays();
     await this.retireLegacyKeyPackageSlot();
+    if (opts?.attest === false) return;
+    const label = (await loadDeviceLabel(this.identity.pubkey)) ?? defaultDeviceLabel();
+    if (this.disposed) return;
     // Every account type attests its per-device chat key to the coordinator (D3),
     // sealed by the account key and carrying a proof of possession (NIP §10.2).
     //
@@ -355,8 +430,12 @@ export class MarmotChat {
       op: "add",
       chatPubkey: this.identity.pubkey,
       clientId: this.identity.clientId,
-      label: (await loadDeviceLabel(this.identity.pubkey)) ?? defaultDeviceLabel(),
+      label,
       deviceSecretKey: this.identity.secretKey,
+      // Only to a coordinator whose 31611 lists "attest-intent" (NIP §6.2). An older
+      // one rejects the whole add at its strict parse; unknown sends a bare add,
+      // which every coordinator accepts (and a 0.18 one treats as legacy).
+      intent: attestIntentFor(this.ctx.config.coordinator, wantedIntent),
     }));
     // Reaching no relay is not a throw — the wrap goes to the durable outbox — but
     // it does mean the coordinator has not heard from us and will not add us until
@@ -371,15 +450,21 @@ export class MarmotChat {
   /** Publish the device chat key's own kind-0 (name/picture borrowed from the
    *  real account's profile, marked "(chat)") — see {@link buildChatKeyProfile}. */
   private async ensureChatKeyProfile(): Promise<void> {
-    let account: Map<string, ProfileMeta>;
+    let account: { profiles: Map<string, ProfileMeta>; answered: boolean };
     try {
-      account = await fetchProfiles([this.identity.account]);
+      account = await fetchProfilesAnswered([this.identity.account]);
     } catch {
       // Offline: publishing now would replace the real name with the generic
       // fallback. Leave whatever is published alone.
       return;
     }
-    const meta = account.get(this.identity.account);
+    const meta = account.profiles.get(this.identity.account);
+    // A read that timed out with no relay answering RESOLVES (empty), it does not
+    // throw, so the guard above missed it: the device published the generic
+    // "Nostrautica user" name and recorded that as its fingerprint, so it was
+    // never retried (audit KIMIK31 W-10). Only a conclusive "no profile" may
+    // publish the fallback.
+    if (!meta && !account.answered) return;
     const ev = buildChatKeyProfile(this.identity, meta?.name, meta?.picture);
     // The chat relay set ONLY (NIP §10.3: "MUST NOT publish device kind 0
     // anywhere else", audit R-38). `this.relays` also carries the event's general
@@ -584,7 +669,14 @@ export class MarmotChat {
     };
     this.client.invites.on("decrypted", this.onInviteDecrypted);
     // Listen for gift-wrapped welcomes on our inbox relays.
-    this.inviteSub = await this.client.invites.listen(this.relays);
+    const sub = await this.client.invites.listen(this.relays);
+    if (this.disposed) {
+      // Disposed while the subscription opened (W-2): dispose() found nothing to
+      // close, so close it here rather than leave it running for a dead session.
+      sub?.unsubscribe();
+      return;
+    }
+    this.inviteSub = sub;
     // Join + bind anything already waiting (welcome delivered before we started).
     await this.joinPendingAndBind();
   }
@@ -600,6 +692,7 @@ export class MarmotChat {
     const run = prev
       .catch(() => 0)
       .then(async () => {
+        if (this.disposed) return 0; // no joins after logout (W-2)
         const before = this.boundGroups.size;
         const joined = await this.joinPending();
         await this.bindAllGroups();
@@ -632,6 +725,8 @@ export class MarmotChat {
     const unread = await this.client.invites.getUnread().catch(() => []);
     const coordinator = this.ctx.config.coordinator;
     for (const invite of unread) {
+      // Every join writes MLS state; none may land after dispose (W-2).
+      if (this.disposed) break;
       try {
         if (!coordinator || invite.pubkey !== coordinator) {
           console.warn(
@@ -850,6 +945,9 @@ export class MarmotChat {
     if (candidates.length === 0) return { kind: "not-member", evicted: false };
     return { kind: "unknown", reason: "no-group-id" };
   }
+
+  /** Set when the last {@link ensurePublished} found no relay accepting the key package. */
+  private lastKeyPackageRejection: unknown;
 
   /** The last {@link membershipVerdict} {@link ensurePublished} acted on, if any. */
   lastVerdict?: ChatMembership;
@@ -1384,7 +1482,13 @@ export class MarmotChat {
     //    possession, re-activating the same device row and driving syncMember.
     //    Forced past the membership check: when the caller forced this rejoin, our
     //    own state may still (wrongly) believe we hold a leaf.
-    await this.ensurePublished({ force: true, rotate: true });
+    // `intent:"rejoin"`: the user asked to be put back (NIP §10.2), so the
+    // coordinator replaces any leaf it still holds without the activity guard.
+    await this.ensurePublished({ force: true, rotate: true, intent: "rejoin" });
+    // The add went out (or waits in the outbox), but no relay took the rotated key
+    // package, so the coordinator has nothing new to add us with, and an evicted
+    // device has no automatic retry. Say so: the UI shows "rejoin failed".
+    if (this.lastKeyPackageRejection) throw this.lastKeyPackageRejection;
     // 4. Pick up a welcome that is already waiting; later ones arrive through the
     //    `decrypted` listener start() installed.
     await this.joinPendingAndBind();
@@ -1545,6 +1649,15 @@ function groupLeaf(group: MarmotGroupLike, pubkey: string): boolean | undefined 
   } catch {
     return undefined;
   }
+}
+
+/**
+ * marmot's KeyPackagePublishError: no requested relay acked a key-package publish
+ * or deletion. Matched by name, not `instanceof`, so a test's module mock of
+ * `@internet-privacy/marmot-ts/client` need not export the class.
+ */
+export function isKeyPackagePublishError(err: unknown): boolean {
+  return err instanceof Error && err.name === "KeyPackagePublishError";
 }
 
 /** created_at of a stored key package's newest publication (0 when never published). */

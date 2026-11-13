@@ -4,10 +4,13 @@ package today.cypherpunk.nostrautica.domain.chat
  * Whether the running MLS runtime's live subscriptions may no longer cover what it
  * holds, so a restart (close and reopen, what a force-stop did) is worth its cost.
  *
- * Two causes are recorded: a change to an account's relay lists while it already
+ * Three causes are recorded: a change to an account's relay lists while it already
  * holds groups (the known MDK bug: a relay-list change breaks the group
- * subscription until the runtime restarts), and a confirmed rejoin of a group the
- * store already held.
+ * subscription until the runtime restarts), a confirmed rejoin of a group the
+ * store already held, and a group MDK quarantined as `REWIND_RESTORE_FAILED`
+ * (MDK 0.16: only the next account open restores it; retry and rejoin cannot).
+ * A quarantine asks for one restart per group per process: if the reopen
+ * quarantines it again, restarting in a loop would not help.
  *
  * A group joined mid-run is NOT a cause. MarmotKit 0.13.0 installs the joined
  * group's kind-445 subscription itself, about a second after the Welcome; the
@@ -23,10 +26,19 @@ package today.cypherpunk.nostrautica.domain.chat
 class RuntimeFreshness {
     private val rejoinedGroups = mutableSetOf<String>()
     private var relaysChanged = false
+    private val quarantinedGroups = mutableSetOf<String>()
+    private val quarantineRestarted = mutableSetOf<String>()
 
     /** This runtime confirmed a rejoin into [groupIdHex]. */
     @Synchronized
     fun rejoined(groupIdHex: String) { rejoinedGroups += groupIdHex.lowercase() }
+
+    /** MDK quarantined [groupIdHex] until the next account open (`REWIND_RESTORE_FAILED`). */
+    @Synchronized
+    fun quarantined(groupIdHex: String) {
+        val gid = groupIdHex.lowercase()
+        if (gid !in quarantineRestarted) quarantinedGroups += gid
+    }
 
     /** An account's inbox or NIP-65 relays changed while it held at least one group. */
     @Synchronized
@@ -38,13 +50,15 @@ class RuntimeFreshness {
      * stale runtime with more holders stays stale until the next lone holder asks.
      */
     @Synchronized
-    fun shouldRestart(holders: Int): Boolean = holders == 1 && (relaysChanged || rejoinedGroups.isNotEmpty())
+    fun shouldRestart(holders: Int): Boolean =
+        holders == 1 && (relaysChanged || rejoinedGroups.isNotEmpty() || quarantinedGroups.isNotEmpty())
 
     /** Why [shouldRestart] is true, for the log. */
     @Synchronized
     fun reason(): String = listOfNotNull(
         "relay lists changed".takeIf { relaysChanged },
         "rejoined a group".takeIf { rejoinedGroups.isNotEmpty() },
+        "a group is quarantined until reopen".takeIf { quarantinedGroups.isNotEmpty() },
     ).joinToString(" and ")
 
     /** A fresh runtime registered every group it holds. */
@@ -52,5 +66,7 @@ class RuntimeFreshness {
     fun restarted() {
         rejoinedGroups.clear()
         relaysChanged = false
+        quarantineRestarted += quarantinedGroups
+        quarantinedGroups.clear()
     }
 }
