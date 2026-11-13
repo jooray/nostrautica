@@ -566,8 +566,36 @@ const PENDING_PUBLICATION_RETRY_METHODS = [
   "retryPendingPublication",
   "sweepPendingPublications",
 ] as const;
-/** Back-off before each re-send of a 21606 status a relay set refused (audit KIMIK31 R-3). */
-const STATUS_RETRY_MS = [5_000, 30_000, 120_000];
+/**
+ * Delay before the durable `deliver_status` job first re-sends a 21606 notice
+ * whose inline publish failed (audit KIMIK31 R-3). After that the job runner's
+ * own back-off applies (1 s, 10 s, 100 s, then hourly, then every 4 h).
+ */
+const STATUS_FIRST_RETRY_MS = 5_000;
+/**
+ * How long an undelivered 21606 notice is worth re-sending. Past this the job
+ * gives up with a log line: a day-old "your chat is stuck" is stale, and the
+ * organizer's Admin view reads the `job_status` row directly anyway.
+ */
+export const STATUS_DELIVERY_MAX_AGE_MS = 24 * 60 * 60_000;
+
+/** Payload of a `deliver_status` job: one recipient's copy of one 21606 notice. */
+interface StatusDelivery {
+  coordinate: string;
+  /** The attendee the notice is about; absent for an event-wide stage. Named
+   *  `pubkey` like every other per-attendee job, so a `delete_data` purge finds it. */
+  pubkey?: string;
+  stage: string;
+  state: string;
+  /** Who it is sealed to: the organizer (E_id) or the attendee. */
+  to: string;
+  /** Epoch ms the notice was issued (the outbox age bound counts from here). */
+  issuedAt: number;
+  /** Log label. */
+  what: string;
+  /** The signed gift wrap, re-sent byte for byte. */
+  wrap: NostrEvent;
+}
 
 /**
  * Whether the roster is also published at its pre-R-53 address, the bare event
@@ -1386,6 +1414,11 @@ export class Coordinator {
         }
         await this.scheduleEnrolmentRecheck(p.coordinate, p.pubkey, p.recheck, p.chain);
       });
+    });
+    // The durable outbox for 21606 poison/cleared notices (audit KIMIK31 R-3):
+    // one row per recipient copy whose inline publish may have failed.
+    this.jobs.register("deliver_status", async (p) => {
+      await this.deliverQueuedStatus(p as StatusDelivery);
     });
     // Durable retry for a config edit whose outward effects (31606 matrix publish,
     // MLS group creation/relay routing) failed on the network. See
@@ -6700,17 +6733,43 @@ export class Coordinator {
    * epoch behind its members. Tolerant by design: a MarmotClientMls without such
    * a method makes this a no-op, and a pass still running skips the next tick.
    * Returns whether a retry method was found (for tests).
+   *
+   * One group per turn of the commit queue (audit KIMIK31 R-9). The queue is
+   * there so no two groups' commits are in flight at once (K-7 point 4, relay
+   * bursts); it is not what keeps a group from committing on top of its own
+   * retained commit. That is MarmotClientMls's per-group lock, which the retry
+   * holds, and marmot-ts itself, which refuses a new commit while one is
+   * retained. Holding the queue for the whole sweep therefore bought nothing
+   * per group, and cost every live Add (C-6 put member Adds in the same queue)
+   * the full sweep: a group whose relays are dead takes up to the 15 s publish
+   * timeout, so N such groups held an attendee's Add for N × 15 s. Now each
+   * group's retry queues on its own, and an Add queued meanwhile waits for at
+   * most the one retry ahead of it.
    */
   async retryPendingPublications(): Promise<boolean> {
     const mls = this.deps.chatMls as unknown as Record<string, unknown> | undefined;
     if (!mls) return false;
+    const perGroup =
+      typeof mls.retryGroupPendingPublication === "function" && typeof mls.storedGroupIds === "function";
     const name = PENDING_PUBLICATION_RETRY_METHODS.find((m) => typeof mls[m] === "function");
-    if (!name) return false;
+    if (!perGroup && !name) return false;
     if (this.pendingPublicationSweepRunning) return true;
     this.pendingPublicationSweepRunning = true;
     try {
-      // Through the commit queue, so a re-send never overlaps another event's commit.
-      await this.withChatCommitLock(() => (mls[name] as () => Promise<unknown>).call(mls));
+      if (perGroup) {
+        const chatMls = this.deps.chatMls!;
+        const ids = await chatMls.storedGroupIds!();
+        for (const id of ids) {
+          // Each through the commit queue, so a re-send never overlaps another
+          // group's commit, and released before the next group's.
+          await this.withChatCommitLock(() => chatMls.retryGroupPendingPublication!(id)).catch((e) =>
+            this.logChatFailure("pending-publication retry", id.slice(0, 12), e),
+          );
+        }
+      } else {
+        // A port with only a whole-sweep method: one queue turn for all of it.
+        await this.withChatCommitLock(() => (mls[name!] as () => Promise<unknown>).call(mls));
+      }
     } catch (e) {
       this.logChatFailure("pending-publication retry", "*", e);
     } finally {
@@ -8105,11 +8164,11 @@ export class Coordinator {
    *
    * Best-effort by design: the recovery already happened and is recorded durably,
    * so a relay failure here must not fail the pipeline run. Each recipient is
-   * tried on its own and retried in the background ({@link deliverStatus}); the
-   * DB row is already `cleared`, so nothing re-announces after that (see the
-   * caller's `> 0` guard). A stuck banner past a relay outage longer than the
-   * retries, or across a restart, is the residual cost, and it clears on the
-   * attendee's next real failure/success cycle.
+   * tried on its own, and a copy that fails stays in the durable outbox
+   * ({@link deliverStatus}), restarts included. The DB row is already `cleared`,
+   * so nothing re-announces after that (see the caller's `> 0` guard); a stuck
+   * banner past a relay outage longer than {@link STATUS_DELIVERY_MAX_AGE_MS} is
+   * the residual cost.
    */
   private async announceCleared(state: EventState, pubkey: string, stage = "process_attendee"): Promise<void> {
     const content: import("@nostrautica/protocol").CoordinatorStatusContent = {
@@ -8130,10 +8189,16 @@ export class Coordinator {
    * used to go out one after another, so a relay refusing the organizer's copy
    * threw before the attendee's was even tried, and the poison callback
    * swallowed it: the member never learned their work had stopped, or a
-   * "poisoned" banner outlived the recovery. Every recipient gets a first attempt
-   * now; one that fails is retried in the background ({@link STATUS_RETRY_MS})
-   * with the same wrap, so the caller is not held up by a relay outage, and a
-   * final failure is logged. In memory only: a restart forgets pending retries.
+   * "poisoned" banner outlived the recovery.
+   *
+   * Every copy is first written to the job queue as a `deliver_status` row (the
+   * durable outbox), then published inline. A copy that lands is settled on the
+   * spot; one that does not stays queued and the job runner re-sends it with its
+   * usual back-off, across restarts, until it lands, is superseded by a newer
+   * notice for the same (event, stage, subject, recipient), the recipient is no
+   * longer a member, or {@link STATUS_DELIVERY_MAX_AGE_MS} passes (see
+   * {@link deliverQueuedStatus}). The row carries the signed wrap itself, so a
+   * re-send is the same event: same id (relays dedupe it), same `at`.
    * Resolves to how many recipients took the first attempt.
    */
   private async deliverStatus(
@@ -8143,36 +8208,74 @@ export class Coordinator {
     what: string,
   ): Promise<number> {
     const relays = this.accountRelays(state);
+    const issuedAt = this.now();
     const ok = await Promise.all(
       recipients.map(async (to) => {
         const wrap = buildCoordinatorStatus(this.deps.coordSk, to, content);
+        const key = `status:${wrap.id}`;
+        const payload: StatusDelivery = {
+          coordinate: state.coordinate,
+          ...(content.pubkey ? { pubkey: content.pubkey } : {}),
+          stage: content.stage ?? "",
+          state: content.state ?? "",
+          to,
+          issuedAt,
+          what,
+          wrap,
+        };
+        this.jobs.enqueue("deliver_status", key, payload, issuedAt + STATUS_FIRST_RETRY_MS);
         try {
           await this.deps.transport.publish(wrap, relays);
-          return true;
-        } catch (e) {
-          void this.retryStatus(state.coordinate, wrap, to, what, e);
-          return false;
+        } catch {
+          return false; // the queued row re-sends it
         }
+        this.deps.store.settleQueuedJob(key, this.now());
+        return true;
       }),
     );
     return ok.filter(Boolean).length;
   }
 
-  private async retryStatus(coordinate: string, wrap: NostrEvent, to: string, what: string, firstError: unknown): Promise<void> {
-    let err = firstError;
-    for (const delay of STATUS_RETRY_MS) {
-      await this.sleep(delay);
-      const state = this.events.get(coordinate);
-      if (!state) return; // detached meanwhile: nobody to tell
-      try {
-        await this.deps.transport.publish(wrap, this.accountRelays(state));
-        log(`[status] ${what} reached ${short(to)} on a retry`);
+  /**
+   * The `deliver_status` job: re-send one queued 21606 copy (see
+   * {@link deliverStatus}). Returns without sending, which settles the row, when
+   * the copy no longer should go out:
+   *   - the event is no longer installed here;
+   *   - a NEWER notice was issued for the same (event, stage, subject, recipient).
+   *     Clients keep the newest notice per (stage, subject) by `at`, but this does
+   *     not lean on that: a "poisoned" queued before a "cleared" (or the reverse)
+   *     is never sent once the later one exists, whether that one landed inline or
+   *     is itself still queued;
+   *   - the recipient is an attendee who withdrew or was revoked;
+   *   - the notice is older than {@link STATUS_DELIVERY_MAX_AGE_MS}.
+   * Otherwise it publishes, and a failure throws so the runner reschedules it.
+   */
+  private async deliverQueuedStatus(p: StatusDelivery): Promise<void> {
+    const label = `${p.what} to ${short(p.to)}`;
+    const state = this.events.get(p.coordinate);
+    if (!state) {
+      log(`[status] dropped queued ${label}: ${p.coordinate} is no longer installed`);
+      return;
+    }
+    const key = `status:${p.wrap.id}`;
+    if (this.deps.store.newerStatusDeliveryExists(key, p)) {
+      log(`[status] dropped queued ${label}: a newer ${p.stage} notice superseded it`);
+      return;
+    }
+    if (p.to !== state.eidPubkey) {
+      const status = this.deps.store.getAttendee(p.coordinate, p.to)?.status;
+      if (!status || status === "revoked") {
+        log(`[status] dropped queued ${label}: the recipient is no longer a member`);
         return;
-      } catch (e) {
-        err = e;
       }
     }
-    log(`[status] could not deliver ${what} to ${short(to)} after ${STATUS_RETRY_MS.length + 1} attempts: ${describeError(err)}`);
+    const age = this.now() - p.issuedAt;
+    if (age > STATUS_DELIVERY_MAX_AGE_MS) {
+      log(`[status] GAVE UP on ${label}: still undelivered after ${Math.round(age / 3_600_000)} h`);
+      return;
+    }
+    await this.deps.transport.publish(p.wrap, this.accountRelays(state));
+    log(`[status] ${label} delivered from the outbox`);
   }
 
   /**
@@ -8204,6 +8307,13 @@ export class Coordinator {
   }
 
   private async surfacePoison(info: import("./pipeline/jobs.js").PoisonInfo): Promise<void> {
+    // A notice that could not be delivered is not itself worth a notice: that loop
+    // has no end. It cannot poison on attempts (the outbox gives up after a day,
+    // inside the three-day tail), only on repeated hard crashes.
+    if (info.type === "deliver_status") {
+      log(`[status] outbox row poisoned (${info.error}); the notice is dropped`);
+      return;
+    }
     const coordinate = typeof info.payload?.coordinate === "string" ? info.payload.coordinate : undefined;
     if (!coordinate) return;
     const state = this.events.get(coordinate);

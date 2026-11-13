@@ -5606,7 +5606,29 @@ describe("NIP §6.3 — attendee-scoped 21606 status", () => {
     };
     return () => refused;
   }
-  const settle = () => new Promise((r) => setTimeout(r, 0));
+  /** The relay refuses every gift wrap sealed to a pubkey in `down` (mutable). */
+  function refuseWhileDown(transport: Harness["transport"], down: Set<string>) {
+    let refused = 0;
+    transport.onPublish = (e) => {
+      if (e.kind === 1059 && e.tags.some((t) => t[0] === "p" && down.has(t[1]!))) {
+        refused++;
+        throw new Error("relay outage");
+      }
+    };
+    return () => refused;
+  }
+  /** Let the outbox's first re-send come due, and run it. */
+  async function flushOutbox(h: Harness, coordinator: Coordinator = h.coordinator, stepMs = 6_000) {
+    h.clock.t += stepMs;
+    await coordinator.jobs.drain();
+  }
+  const outboxStates = (h: Harness) =>
+    ((h.store as any).db.prepare("SELECT state FROM jobs WHERE type = 'deliver_status' ORDER BY id").all() as { state: string }[])
+      .map((r) => r.state);
+  const poison = (h: Harness, pk: string, type = "process_attendee") =>
+    (h.coordinator as any).surfacePoison({ type, payload: { coordinate: h.coordinate, pubkey: pk }, attempts: 27, error: "boom" });
+  const cleared = (h: Harness, pk: string) =>
+    (h.coordinator as any).announceCleared((h.coordinator as any).events.get(h.coordinate), pk);
 
   it("a refused organizer copy of a poison notice does not stop the attendee's, and is retried (audit KIMIK31 R-3)", async () => {
     const h = await setup(0);
@@ -5614,15 +5636,11 @@ describe("NIP §6.3 — attendee-scoped 21606 status", () => {
     const pk = await join(h, attendeeSk, "crypto");
     await h.coordinator.jobs.drain();
     const refused = refuseFirstTo(h, getPublicKey(h.eidSk));
-    await (h.coordinator as any).surfacePoison({
-      type: "process_attendee",
-      payload: { coordinate: h.coordinate, pubkey: pk },
-      attempts: 27,
-      error: "boom",
-    });
-    await settle();
+    await poison(h, pk);
     expect(refused()).toBe(1);
     expect(statusesFor(h, attendeeSk).some((s) => s.state === "poison")).toBe(true);
+    expect(statusesFor(h, h.eidSk)).toEqual([]);
+    await flushOutbox(h);
     expect(statusesFor(h, h.eidSk).some((s) => s.state === "poison")).toBe(true); // the retry
   });
 
@@ -5632,11 +5650,143 @@ describe("NIP §6.3 — attendee-scoped 21606 status", () => {
     const pk = await join(h, attendeeSk, "crypto");
     await h.coordinator.jobs.drain();
     refuseFirstTo(h, getPublicKey(h.eidSk));
-    const state = (h.coordinator as any).events.get(h.coordinate);
-    await expect((h.coordinator as any).announceCleared(state, pk)).resolves.toBeUndefined();
-    await settle();
+    await expect(cleared(h, pk)).resolves.toBeUndefined();
     expect(statusesFor(h, attendeeSk).some((s) => s.state === "cleared")).toBe(true);
+    await flushOutbox(h);
     expect(statusesFor(h, h.eidSk).some((s) => s.state === "cleared")).toBe(true);
+  });
+
+  it("a notice pending at a restart is delivered by the new instance once the relay returns (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const down = new Set([getPublicKey(h.eidSk), pk]);
+    refuseWhileDown(h.transport, down);
+    await poison(h, pk);
+    await flushOutbox(h); // still down: both copies stay queued
+    expect(statusesFor(h, attendeeSk)).toEqual([]);
+    expect(statusesFor(h, h.eidSk)).toEqual([]);
+    expect(outboxStates(h)).toEqual(["pending", "pending"]);
+
+    // The daemon restarts over the same store during the outage.
+    h.coordinator.stop();
+    const restarted = new Coordinator({
+      store: h.store, transport: h.transport, coordSk: h.coordSk,
+      llm: new MockLlm(() => ({})), stt: new MockStt(), sttModel: "mock",
+      summaryModel: { provider: "mock", model: "mock-cheap" },
+      matchModel: { provider: "mock", model: "mock-strong" },
+      embedModel: { provider: "mock", model: "mock-embed" },
+      translateModel: { provider: "mock", model: "mock-cheap" },
+      defaultRelays: ["wss://test"], sleep: async () => {}, now: () => h.clock.t,
+    });
+    await restarted.start();
+
+    down.clear(); // the relay is back
+    await flushOutbox(h, restarted, 60 * 60_000);
+    expect(statusesFor(h, attendeeSk).map((s) => s.state)).toEqual(["poison"]);
+    expect(statusesFor(h, h.eidSk).map((s) => s.state)).toEqual(["poison"]);
+    expect(outboxStates(h)).toEqual(["done", "done"]);
+  });
+
+  it("poisoned then cleared during an outage delivers only the cleared notice (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const down = new Set([getPublicKey(h.eidSk), pk]);
+    refuseWhileDown(h.transport, down);
+    await poison(h, pk);
+    await flushOutbox(h);
+    await cleared(h, pk);
+    down.clear();
+    for (let i = 0; i < 3; i++) await flushOutbox(h, h.coordinator, 60 * 60_000);
+    expect(statusesFor(h, attendeeSk).map((s) => s.state)).toEqual(["cleared"]);
+    expect(statusesFor(h, h.eidSk).map((s) => s.state)).toEqual(["cleared"]);
+    expect(outboxStates(h)).toEqual(["done", "done", "done", "done"]);
+  });
+
+  it("a queued poison is never sent after a later cleared that went out inline (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const down = new Set([pk]);
+    refuseWhileDown(h.transport, down);
+    await poison(h, pk); // attendee copy queued
+    down.clear();
+    await cleared(h, pk); // lands inline, before the queued poison's re-send is due
+    await flushOutbox(h);
+    expect(statusesFor(h, attendeeSk).map((s) => s.state)).toEqual(["cleared"]);
+    // The organizer, whose relay never failed, saw both, in order.
+    expect(statusesFor(h, h.eidSk).map((s) => s.state)).toEqual(["poison", "cleared"]);
+  });
+
+  it("cleared then poisoned again during an outage delivers only the newer poison (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const down = new Set([pk]);
+    refuseWhileDown(h.transport, down);
+    await cleared(h, pk);
+    h.clock.t += 1_000;
+    await poison(h, pk);
+    await flushOutbox(h); // still down
+    down.clear();
+    await flushOutbox(h, h.coordinator, 60 * 60_000);
+    expect(statusesFor(h, attendeeSk).map((s) => s.state)).toEqual(["poison"]);
+  });
+
+  it("an organizer copy that keeps failing does not hold up the attendee's (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const down = new Set([getPublicKey(h.eidSk)]);
+    refuseWhileDown(h.transport, down);
+    await poison(h, pk);
+    expect(statusesFor(h, attendeeSk).map((s) => s.state)).toEqual(["poison"]);
+    await cleared(h, pk);
+    expect(statusesFor(h, attendeeSk).map((s) => s.state)).toEqual(["poison", "cleared"]);
+    expect(statusesFor(h, h.eidSk)).toEqual([]);
+  });
+
+  it("gives up on a notice after a day, with a log line, and stops re-sending it (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const refused = refuseWhileDown(h.transport, new Set([getPublicKey(h.eidSk)]));
+    const logs = vi.spyOn(console, "log");
+    try {
+      await poison(h, pk);
+      await flushOutbox(h);
+      for (let i = 0; i < 12; i++) await flushOutbox(h, h.coordinator, 4 * 60 * 60_000); // 48 h
+      expect(outboxStates(h)).toEqual(["done", "done"]);
+      expect(logs.mock.calls.some((c) => String(c[0]).includes("GAVE UP"))).toBe(true);
+      const after = refused();
+      for (let i = 0; i < 3; i++) await flushOutbox(h, h.coordinator, 4 * 60 * 60_000);
+      expect(refused()).toBe(after);
+      expect(statusesFor(h, h.eidSk)).toEqual([]);
+    } finally {
+      logs.mockRestore();
+    }
+  });
+
+  it("drops a queued notice to an attendee who was revoked meanwhile (audit KIMIK31 R-3)", async () => {
+    const h = await setup(0);
+    const attendeeSk = generateSecretKey();
+    const pk = await join(h, attendeeSk, "crypto");
+    await h.coordinator.jobs.drain();
+    const down = new Set([pk]);
+    refuseWhileDown(h.transport, down);
+    await poison(h, pk);
+    h.store.upsertAttendee({ coordinate: h.coordinate, pubkey: pk, status: "revoked", now: h.clock.t });
+    down.clear();
+    await flushOutbox(h);
+    expect(statusesFor(h, attendeeSk)).toEqual([]);
+    expect(outboxStates(h)).toEqual(["done", "done"]);
   });
 });
 
@@ -6033,7 +6183,9 @@ describe("audit R4 — the coordinator's own inbox is rate-gated before durable 
     });
     await h.coordinator.handleCoordinatorWrap(bystander as any);
     expect(h.store.isRumorSeen((bystander as any).id)).toBe(true);
-  });
+    // 640 real gift wraps (NIP-44 + Schnorr each) take ~10 s alone; under the full
+    // parallel `pnpm check` they crossed the 30 s default twice on 2026-11-13.
+  }, 120_000);
 
   it("strangers exhausting the shared bucket cannot starve the organizer's commands (R-12)", async () => {
     const h = await setup();
@@ -7865,6 +8017,102 @@ describe("audit K-7/S-4 — boot-time chat commits and subscriptions do not burs
     } finally {
       out.mockRestore();
     }
+  });
+
+  // Audit KIMIK31 R-9: the sweep held the commit queue across every group, so a
+  // live member Add (C-6 queues those too) waited out N dead-relay retries.
+  it("lets a live Add through between groups' retries instead of after the whole sweep", async () => {
+    const PUBLISH_TIMEOUT_MS = 15_000;
+    class HangingMls extends StubMls {
+      retried: string[] = [];
+      hanging = new Set(["g1", "g2", "g3"]);
+      failing = new Set<string>();
+      async storedGroupIds() {
+        return ["g1", "g2", "g3", "g4"];
+      }
+      async retryGroupPendingPublication(id: string) {
+        this.retried.push(id);
+        if (this.hanging.has(id)) await new Promise((r) => setTimeout(r, PUBLISH_TIMEOUT_MS));
+        if (this.failing.has(id)) throw new Error("no relay acked the re-send");
+      }
+      // The real MarmotClientMls's whole sweep: the same per-group retry, in turn.
+      async retryPendingPublications() {
+        for (const id of await this.storedGroupIds()) await this.retryGroupPendingPublication(id);
+      }
+    }
+    const mls = new HangingMls();
+    const h = await setup(0, { chat: true, chatMls: mls });
+    const c = h.coordinator as any;
+    vi.useFakeTimers();
+    try {
+      const t0 = Date.now();
+      const sweep = c.retryPendingPublications();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(mls.retried).toEqual(["g1"]); // g1's re-send is in flight
+      // An attendee's Add on a fourth group, through the admin's commit queue.
+      let addedAfter: number | undefined;
+      const add = c.marmot.withCommitLock(async () => {
+        addedAfter = Date.now() - t0;
+      });
+      await vi.advanceTimersByTimeAsync(PUBLISH_TIMEOUT_MS);
+      // Behind g1's retry only, not behind g1 + g2 + g3 (45 s).
+      expect(addedAfter).toBe(PUBLISH_TIMEOUT_MS);
+      await add;
+      await vi.advanceTimersByTimeAsync(PUBLISH_TIMEOUT_MS * 3);
+      await expect(sweep).resolves.toBe(true);
+      // And the sweep still reached every group.
+      expect(mls.retried).toEqual(["g1", "g2", "g3", "g4"]);
+
+      // One group's failing retry is logged and does not stop the others.
+      mls.retried = [];
+      mls.hanging.clear();
+      mls.failing.add("g2");
+      const out = vi.spyOn(console, "log").mockImplementation(() => {});
+      try {
+        await expect(c.retryPendingPublications()).resolves.toBe(true);
+        expect(out.mock.calls.map((x) => x.join(" ")).join("\n")).toMatch(/pending-publication retry failed for g2/);
+      } finally {
+        out.mockRestore();
+      }
+      expect(mls.retried).toEqual(["g1", "g2", "g3", "g4"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("still runs one group's retry and a commit on that same group one at a time", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const order: string[] = [];
+    class TrackingMls extends StubMls {
+      async storedGroupIds() {
+        return ["g1"];
+      }
+      async retryGroupPendingPublication(id: string) {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        order.push(`retry ${id} start`);
+        await new Promise((r) => setTimeout(r, 5));
+        order.push(`retry ${id} end`);
+        inFlight--;
+      }
+      async retryPendingPublications() {
+        await this.retryGroupPendingPublication("g1");
+      }
+    }
+    const h = await setup(0, { chat: true, chatMls: new TrackingMls() });
+    const c = h.coordinator as any;
+    const sweep = c.retryPendingPublications();
+    await new Promise((r) => setTimeout(r, 0)); // the retry has started
+    const add = c.marmot.withCommitLock(async () => {
+      inFlight++;
+      peak = Math.max(peak, inFlight);
+      order.push("add g1");
+      inFlight--;
+    });
+    await Promise.all([sweep, add]);
+    expect(peak).toBe(1);
+    expect(order).toEqual(["retry g1 start", "retry g1 end", "add g1"]);
   });
 
   it("drives that retry from a 60 s timer once the daemon is running", async () => {

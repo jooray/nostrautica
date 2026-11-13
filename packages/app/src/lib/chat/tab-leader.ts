@@ -16,10 +16,17 @@
  * builds a fresh client from the shared IndexedDB state).
  *
  * Fallbacks, in order:
- *  - No Web Locks, but `BroadcastChannel`: best-effort ping election — a tab that
- *    hears an existing leader becomes a READ-ONLY follower (send-proxy is disabled
- *    off the Web Locks path, since we can't guarantee single-writer); otherwise it
- *    leads. `usingWebLocks` is false, so the session shows the read-only notice.
+ *  - No Web Locks, but `BroadcastChannel`: ping election — a tab that hears an
+ *    existing leader becomes a follower; otherwise it leads. Two tabs that ping at
+ *    the same moment can both settle as leader, so leaders keep resolving it after
+ *    settlement (audit KIMIK31 W-7): every leader says `leader-hello` on election
+ *    and as a periodic heartbeat, carrying its tab id and start time, and a leader
+ *    that hears a higher-ranked one demotes itself (see {@link outranks}). The
+ *    session tears its client down on that demotion. Followers proxy sends as on
+ *    the Web Locks path, addressed to the leader they last heard, so a request
+ *    that reaches two leaders during the conflict window still runs only once.
+ *    A follower whose leader misses three heartbeats re-runs the election, so a
+ *    closed leader tab is replaced as the lock would replace it.
  *  - Neither: single leader (legacy single-tab behaviour).
  *
  * The Web Locks manager and channel are injected so the election/proxy logic is
@@ -72,7 +79,10 @@ export interface LeaderStatus {
 
 /** Broadcast wire protocol — {send request, ack, message list update, membership update} + election pings. */
 type Wire =
-  | { t: "leader-hello"; scope: string }
+  // `id`/`since`/`locked`: who is speaking, for post-settlement conflict resolution
+  // (W-7). Sent on election, in answer to `who-leads`, and as a heartbeat. Absent
+  // from a tab on a build before W-7, which never yields and is never yielded to.
+  | { t: "leader-hello"; scope: string; id?: string; since?: number; locked?: boolean }
   | { t: "who-leads"; scope: string }
   | { t: "sync"; scope: string }
   | { t: "state"; scope: string; coordinate: string; messages: ChatMessage[] }
@@ -80,9 +90,11 @@ type Wire =
   | { t: "status"; scope: string; coordinate: string; status: LeaderStatus }
   // `coordinate`: the event the FOLLOWER is in (audit R-31). Optional so a tab
   // still running the previous build interoperates until it reloads.
-  | { t: "send"; scope: string; reqId: string; text: string; coordinate?: string }
-  | { t: "rejoin"; scope: string; reqId: string; force?: boolean; coordinate?: string }
-  | { t: "action"; scope: string; reqId: string; action: ChatAction; coordinate?: string }
+  // `to`: the leader tab the request is for (W-7, ping path only), so that while two
+  // tabs both believe they lead, one request is not run twice. Absent: any leader.
+  | { t: "send"; scope: string; reqId: string; text: string; coordinate?: string; to?: string }
+  | { t: "rejoin"; scope: string; reqId: string; force?: boolean; coordinate?: string; to?: string }
+  | { t: "action"; scope: string; reqId: string; action: ChatAction; coordinate?: string; to?: string }
   // `code`: a machine-readable failure kind (W-4), so a follower can rebuild the
   // leader's typed error ("unroutable" → ChatUnroutableError) rather than show a
   // generic transport failure. Absent from a tab on the previous build.
@@ -117,6 +129,32 @@ export interface TabCoordinatorOptions {
   ackTimeoutMs?: number;
   /** Ack timeout (ms) for a proxied rejoin — a multi-publish handshake, not one send. */
   rejoinTimeoutMs?: number;
+  /** Leader heartbeat interval (ms), the bound on detecting a second leader (W-7). */
+  heartbeatMs?: number;
+  /** This tab's id (tests); defaults to a random one. */
+  tabId?: string;
+  /** This tab's start time in ms (tests); defaults to `Date.now()`. */
+  startedAt?: number;
+}
+
+/** A leader's identity on the wire, for ranking two leaders (W-7). */
+export interface LeaderRank {
+  id: string;
+  since: number;
+  locked: boolean;
+}
+
+/**
+ * Whether leader `a` keeps leadership over leader `b` (W-7). A Web Locks holder
+ * always wins: its leadership is guaranteed and it never demotes. Otherwise the
+ * tab that started first wins, and equal start times fall to the smaller id.
+ * Every tab computes the same answer from the same two hellos, whatever order
+ * they arrive in.
+ */
+export function outranks(a: LeaderRank, b: LeaderRank): boolean {
+  if (a.locked !== b.locked) return a.locked;
+  if (a.since !== b.since) return a.since < b.since;
+  return a.id < b.id;
 }
 
 /**
@@ -127,6 +165,24 @@ export interface TabCoordinatorOptions {
  */
 const DEFAULT_PING_WINDOW_MS = 1500;
 const PING_ROUNDS = 2;
+/**
+ * Leader heartbeat (W-7): one small `leader-hello` per leader tab per interval;
+ * followers only listen. It bounds how long two ping-path leaders that missed
+ * each other's election hello can coexist. On the Web Locks path it is inert.
+ */
+const DEFAULT_HEARTBEAT_MS = 4000;
+/**
+ * Heartbeats a ping-path follower lets its leader miss before it re-runs the
+ * election (W-7 follow-up): ~12 s at the default. One missed beat is a busy or
+ * throttled tab, not a dead one; it must not be usurped for that.
+ */
+const MISSED_BEATS_BEFORE_TAKEOVER = 3;
+
+function randomTabId(): string {
+  const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 function defaultLocks(): LockManagerLike | null {
   if (typeof navigator !== "undefined" && "locks" in navigator) {
@@ -169,6 +225,13 @@ export class ChatTabCoordinator {
   private lockRequestFailed = false;
   /** The coordinate the leader is currently serving, as seen by a follower (for read-only detection). */
   leaderCoordinate: string | undefined;
+  /** This tab's identity in the election (W-7). */
+  readonly tabId: string;
+  readonly startedAt: number;
+  /** Follower, ping path: the leader tab proxied requests are addressed to (W-7). */
+  private leaderId: string | undefined;
+  private heartbeat?: ReturnType<typeof setInterval>;
+  private readonly heartbeatMs: number;
 
   private readonly scope: string;
   private readonly locks: LockManagerLike | null;
@@ -202,6 +265,9 @@ export class ChatTabCoordinator {
     // join, i.e. several relay round-trips; the send timeout would fire mid-way and
     // report a failure over work that is still running (and will succeed).
     this.rejoinTimeoutMs = opts.rejoinTimeoutMs ?? 45_000;
+    this.heartbeatMs = opts.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
+    this.tabId = opts.tabId ?? randomTabId();
+    this.startedAt = opts.startedAt ?? Date.now();
     this.whenSettled = new Promise<void>((res) => (this.settle = res));
     this.channel?.addEventListener("message", this.onMessage);
     void this.elect();
@@ -295,8 +361,69 @@ export class ChatTabCoordinator {
     if (this.disposed || this.role === "leader") return;
     this.role = "leader";
     this.opts.onRoleChange("leader");
-    this.channel?.postMessage({ t: "leader-hello", scope: this.scope } satisfies Wire);
+    this.sayHello();
+    this.startHeartbeat();
     this.markSettled();
+  }
+
+  /** This tab's rank as a leader (W-7). */
+  private rank(): LeaderRank {
+    return { id: this.tabId, since: this.startedAt, locked: this.usingWebLocks };
+  }
+
+  private sayHello(): void {
+    const { id, since, locked } = this.rank();
+    this.channel?.postMessage({ t: "leader-hello", scope: this.scope, id, since, locked } satisfies Wire);
+  }
+
+  private startHeartbeat(): void {
+    if (!this.channel || this.heartbeat) return;
+    this.heartbeat = setInterval(() => {
+      if (this.role === "leader" && !this.disposed) this.sayHello();
+    }, this.heartbeatMs);
+  }
+
+  private stopHeartbeat(): void {
+    clearInterval(this.heartbeat);
+    this.heartbeat = undefined;
+  }
+
+  /**
+   * A settled leader heard a higher-ranked leader (W-7): step down. Ping path
+   * only, where nothing else guarantees a single writer; a Web Locks holder never
+   * gets here. The session sees `follower` and tears its client down.
+   */
+  private demote(winner: string): void {
+    if (this.disposed || this.role !== "leader") return;
+    this.stopHeartbeat();
+    this.role = "follower";
+    this.leaderId = winner;
+    this.opts.onRoleChange("follower");
+    // Re-snapshot from the winner: its messages, members and status replace ours.
+    this.channel?.postMessage({ t: "sync", scope: this.scope } satisfies Wire);
+    this.startWatchdog();
+  }
+
+  /** A leader-hello heard once settled (W-7). */
+  private onPeerLeader(msg: Extract<Wire, { t: "leader-hello" }>): void {
+    if (msg.id === undefined || msg.since === undefined || msg.id === this.tabId) return;
+    const peer: LeaderRank = { id: msg.id, since: msg.since, locked: !!msg.locked };
+    if (this.role === "follower") {
+      this.leaderAlive();
+      // Address proxied requests to the leader heard last. In a conflict the
+      // loser's hellos stop when it demotes and the winner answers it, so this
+      // settles on the winner.
+      this.leaderId = peer.id;
+      return;
+    }
+    if (this.role !== "leader" || this.usingWebLocks) return;
+    if (outranks(peer, this.rank())) {
+      this.demote(peer.id);
+    } else {
+      // We win. Say so now rather than at our next heartbeat, so the peer demotes
+      // on this message even if it never saw our election hello.
+      this.sayHello();
+    }
   }
 
   private becomeFollower(): void {
@@ -306,7 +433,68 @@ export class ChatTabCoordinator {
     // Ask the current leader for a snapshot so we render immediately, not only from
     // the next live message onward.
     this.channel?.postMessage({ t: "sync", scope: this.scope } satisfies Wire);
+    this.startWatchdog();
     this.markSettled();
+  }
+
+  /** When this follower last heard from a leader (any leader-hello or broadcast). */
+  private lastLeaderSeen = 0;
+  private watchdog?: ReturnType<typeof setInterval>;
+  private reelecting = false;
+
+  /**
+   * Ping path only: notice a leader that has gone silent and re-run the election
+   * (W-7 follow-up). On the Web Locks path the browser hands the lock to a waiting
+   * follower when the leader's tab dies; off it nothing did, so a closed or
+   * crashed leader left every other tab a follower of nobody until a reload.
+   *
+   * Only a leader known to heartbeat is watched: one that announced an id. A
+   * leader on a build before W-7 never heartbeats and never yields, so taking
+   * over from it would make a second leader that the conflict rule cannot fix.
+   */
+  private startWatchdog(): void {
+    if (this.usingWebLocks || !this.channel || this.watchdog) return;
+    this.lastLeaderSeen = Date.now();
+    this.watchdog = setInterval(() => {
+      if (this.disposed || this.role !== "follower" || this.leaderId === undefined) return;
+      if (Date.now() - this.lastLeaderSeen <= this.heartbeatMs * MISSED_BEATS_BEFORE_TAKEOVER) return;
+      void this.reelect();
+    }, this.heartbeatMs);
+  }
+
+  private stopWatchdog(): void {
+    clearInterval(this.watchdog);
+    this.watchdog = undefined;
+  }
+
+  /**
+   * The leader went silent: ask again, exactly as a new tab does, and lead only
+   * if nobody answers. Two followers that notice together can both get here and
+   * both lead; the leader-hello conflict rule (`outranks`) then demotes one of
+   * them, as for any two ping-path leaders.
+   */
+  private async reelect(): Promise<void> {
+    if (this.reelecting) return;
+    this.reelecting = true;
+    const heardAt = this.lastLeaderSeen;
+    try {
+      for (let round = 0; round < PING_ROUNDS; round++) {
+        this.channel?.postMessage({ t: "who-leads", scope: this.scope } satisfies Wire);
+        await new Promise<void>((res) => setTimeout(res, this.pingWindowMs));
+        if (this.disposed || this.role !== "follower") return;
+        // A leader spoke after all (merely slow, or another follower took over).
+        if (this.lastLeaderSeen !== heardAt) return;
+      }
+      this.stopWatchdog();
+      this.becomeLeader();
+    } finally {
+      this.reelecting = false;
+    }
+  }
+
+  /** Follower: a leader is alive (W-7 follow-up). */
+  private leaderAlive(): void {
+    this.lastLeaderSeen = Date.now();
   }
 
   private markSettled(): void {
@@ -321,13 +509,17 @@ export class ChatTabCoordinator {
     switch (msg.t) {
       case "who-leads":
         // A ping-election tab is probing — answer if we lead.
-        if (this.role === "leader") {
-          this.channel?.postMessage({ t: "leader-hello", scope: this.scope } satisfies Wire);
-        }
+        if (this.role === "leader") this.sayHello();
         return;
       case "leader-hello":
         // Someone leads. In the ping fallback (not yet settled), become a follower.
-        if (!this.usingWebLocks && !this.settled) this.becomeFollower();
+        if (!this.usingWebLocks && !this.settled) {
+          if (msg.id !== undefined) this.leaderId = msg.id;
+          this.becomeFollower();
+          return;
+        }
+        // Settled: a second leader is a conflict to resolve, not to ignore (W-7).
+        this.onPeerLeader(msg);
         return;
       case "sync":
         // A freshly-joined follower wants the current snapshot — the session
@@ -336,32 +528,35 @@ export class ChatTabCoordinator {
         return;
       case "state":
         if (this.role === "follower") {
+          this.leaderAlive();
           this.leaderCoordinate = msg.coordinate;
           this.opts.onLeaderState?.(msg.coordinate, msg.messages);
         }
         return;
       case "members":
         if (this.role === "follower") {
+          this.leaderAlive();
           this.leaderCoordinate = msg.coordinate;
           this.opts.onLeaderMembers?.(msg.coordinate, msg.members);
         }
         return;
       case "status":
         if (this.role === "follower") {
+          this.leaderAlive();
           this.leaderCoordinate = msg.coordinate;
           this.opts.onLeaderStatus?.(msg.coordinate, msg.status);
         }
         return;
       case "send":
-        if (this.role === "leader") void this.handleSendRequest(msg.reqId, msg.text, msg.coordinate);
+        if (this.isAddressedLeader(msg.to)) void this.handleSendRequest(msg.reqId, msg.text, msg.coordinate);
         return;
       case "action":
-        if (this.role === "leader") {
+        if (this.isAddressedLeader(msg.to)) {
           void this.runForFollower(msg.reqId, () => this.opts.onActionRequest?.(msg.action, msg.coordinate));
         }
         return;
       case "rejoin":
-        if (this.role === "leader") {
+        if (this.isAddressedLeader(msg.to)) {
           void this.runForFollower(msg.reqId, () => this.opts.onRejoinRequest?.(msg.force ?? false, msg.coordinate));
         }
         return;
@@ -375,6 +570,11 @@ export class ChatTabCoordinator {
         return;
       }
     }
+  }
+
+  /** Leader: is a follower request (addressed to `to`, or to any leader) ours to run? */
+  private isAddressedLeader(to: string | undefined): boolean {
+    return this.role === "leader" && (to === undefined || to === this.tabId);
   }
 
   private handleSendRequest(reqId: string, text: string, coordinate?: string): Promise<void> {
@@ -453,12 +653,13 @@ export class ChatTabCoordinator {
 
   // ── follower → leader proxy ────────────────────────────────────────────────
   /**
-   * Follower: proxy a send to the leader, resolving when it acks. Only supported on
-   * the Web Locks path (single-writer guaranteed); off it, followers are read-only.
+   * Follower: proxy a send to the leader, resolving when it acks. On the ping path
+   * it is addressed to the leader heard last (W-7), so two momentary leaders never
+   * both run it.
    */
   proxySend(text: string, coordinate?: string): Promise<void> {
     return this.proxy(
-      (reqId) => ({ t: "send", scope: this.scope, reqId, text, coordinate }),
+      (reqId) => ({ t: "send", scope: this.scope, reqId, text, coordinate, to: this.target() }),
       this.ackTimeoutMs,
       "timed out waiting for the active tab to send",
     );
@@ -467,28 +668,46 @@ export class ChatTabCoordinator {
   /** Follower: proxy a reaction/edit/delete to the leader, like {@link proxySend}. */
   proxyAction(action: ChatAction, coordinate?: string): Promise<void> {
     return this.proxy(
-      (reqId) => ({ t: "action", scope: this.scope, reqId, action, coordinate }),
+      (reqId) => ({ t: "action", scope: this.scope, reqId, action, coordinate, to: this.target() }),
       this.ackTimeoutMs,
       "timed out waiting for the active tab to send",
     );
   }
 
   /**
-   * Follower: ask the leader to re-enrol this device into the event's chat. Same
-   * single-writer constraint as {@link proxySend} — only the leader owns MLS state,
-   * so a read-only follower (no Web Locks) can't have one performed on its behalf.
+   * Follower: ask the leader to re-enrol this device into the event's chat. Only
+   * the leader owns MLS state, so it is the one that re-enrols.
    */
   proxyRejoin(force = false, coordinate?: string): Promise<void> {
     return this.proxy(
-      (reqId) => ({ t: "rejoin", scope: this.scope, reqId, force, coordinate }),
+      (reqId) => ({ t: "rejoin", scope: this.scope, reqId, force, coordinate, to: this.target() }),
       this.rejoinTimeoutMs,
       "timed out waiting for the active tab to rejoin",
     );
   }
 
+  /**
+   * The leader a request is addressed to: none on the Web Locks path (exactly one
+   * leader exists; unchanged behaviour), the last-heard leader on the ping path.
+   */
+  private target(): string | undefined {
+    return this.usingWebLocks ? undefined : this.leaderId;
+  }
+
+  /**
+   * Whether this follower can proxy to a leader. On the Web Locks path, always.
+   * On the ping path (W-7), once it knows which leader to address: an unaddressed
+   * request could run on both tabs of a conflict not yet resolved. A leader on a
+   * build before W-7 announces no id, so its followers stay read-only, as before.
+   */
+  get canProxy(): boolean {
+    if (!this.channel) return false;
+    return this.usingWebLocks || this.leaderId !== undefined;
+  }
+
   /** Post one request to the leader and resolve/reject on its ack (or timeout). */
   private proxy(build: (reqId: string) => Wire, timeoutMs: number, timeoutMessage: string): Promise<void> {
-    if (!this.usingWebLocks || !this.channel) {
+    if (!this.canProxy) {
       return Promise.reject(new Error("send proxy unavailable in this tab"));
     }
     const reqId = `${this.scope}:${Date.now()}:${this.reqSeq++}`;
@@ -505,6 +724,8 @@ export class ChatTabCoordinator {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.stopHeartbeat();
+    this.stopWatchdog();
     this.channel?.removeEventListener("message", this.onMessage);
     // Release leadership so a follower can take over immediately.
     this.stopHolding?.();

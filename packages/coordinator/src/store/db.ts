@@ -1018,6 +1018,9 @@ export const MATCH_JOB_TYPES = [
  */
 export const JOB_PRIORITY: Readonly<Record<string, number>> = {
   publish_matches: -1,
+  // A 21606 outbox re-send (audit KIMIK31 R-3): one publish, and someone's chat-
+  // stuck banner is waiting on it.
+  deliver_status: -1,
   score_reverse_batch: 1,
 };
 
@@ -2984,6 +2987,14 @@ export class Store {
       // in the queue, and a `process_attendee` queued before the withdrawal could
       // still run against a row a retried submission recreated (R-08).
       this.cancelSubjectPipelineJobs(coordinate, pubkey, { allStates: true });
+      // …and their 21606 outbox rows (audit KIMIK31 R-3), which carry the pubkey and
+      // the stage that failed for them.
+      this.db
+        .prepare(
+          `DELETE FROM jobs WHERE type = 'deliver_status' AND json_extract(payload, '$.coordinate') = ?
+             AND (json_extract(payload, '$.pubkey') = ? OR json_extract(payload, '$.to') = ?)`,
+        )
+        .run(coordinate, pubkey, pubkey);
       this.db.exec("COMMIT");
     } catch (e) {
       // Guarded, like `migrate` and `claimNextJob`: SQLite may have ALREADY rolled
@@ -3337,6 +3348,47 @@ export class Store {
     // No row despite the ignore (deleted between statements) — report it as queued;
     // the caller's next enqueue of the same key will insert normally.
     return row?.state ?? "enqueued";
+  }
+
+  /**
+   * Mark a still-`pending` row done without a worker having claimed it: the
+   * caller did the work inline (a 21606 outbox copy that its first publish
+   * delivered, audit KIMIK31 R-3). `claimed_at` is stamped so the row ages out
+   * with the other terminal rows instead of on the next prune, because a later
+   * outbox row reads it to know it was superseded. False if a worker already took
+   * the row (it re-sends the same event, which relays dedupe).
+   */
+  settleQueuedJob(dedupeKey: string, now: number): boolean {
+    const info = this.db
+      .prepare("UPDATE jobs SET state = 'done', claimed_at = ? WHERE dedupe_key = ? AND state = 'pending'")
+      .run(now, dedupeKey);
+    return Number(info.changes) > 0;
+  }
+
+  /**
+   * Whether a `deliver_status` row was queued AFTER the one keyed `dedupeKey` for
+   * the same (event, stage, subject, recipient), in any state (audit KIMIK31 R-3).
+   * Every notice copy gets a row before its first publish, so a newer notice is
+   * visible here whether it landed inline (`done`) or is still queued. Row id is
+   * the issue order: ids are AUTOINCREMENT, never reused.
+   */
+  newerStatusDeliveryExists(
+    dedupeKey: string,
+    notice: { coordinate: string; stage: string; pubkey?: string; to: string },
+  ): boolean {
+    const row = this.db
+      .prepare(
+        `SELECT 1 FROM jobs
+          WHERE type = 'deliver_status'
+            AND id > (SELECT id FROM jobs WHERE dedupe_key = ?)
+            AND json_extract(payload, '$.coordinate') = ?
+            AND json_extract(payload, '$.stage') = ?
+            AND COALESCE(json_extract(payload, '$.pubkey'), '') = ?
+            AND json_extract(payload, '$.to') = ?
+          LIMIT 1`,
+      )
+      .get(dedupeKey, notice.coordinate, notice.stage, notice.pubkey ?? "", notice.to);
+    return row !== undefined;
   }
 
   /**

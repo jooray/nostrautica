@@ -155,9 +155,10 @@ class ChatSessionStore {
   /** This tab's multi-tab role (H-7). Only the leader owns a live client. */
   tabRole = $state<TabRole>("pending");
   /**
-   * True when this tab is a follower that cannot send — either Web Locks is
-   * unavailable (no single-writer guarantee) or the leader tab is on a different
-   * event. The UI shows a read-only "chat is active in another tab" notice.
+   * True when this tab is a follower that cannot send: it does not yet know a
+   * leader it can address (or that leader is on a build that announces none), or
+   * the leader tab is on a different event. The UI shows a read-only "chat is
+   * active in another tab" notice.
    */
   readOnly = $state(false);
   /** A re-enrolment ({@link rejoin}) is in flight — the UI disables its button. */
@@ -282,8 +283,15 @@ class ChatSessionStore {
         onRoleChange: (role) => {
           if (tok !== this.token) return;
           const wasFollower = this.tabRole === "follower";
+          const wasLeader = this.tabRole === "leader";
           this.tabRole = role;
           this.recomputeReadOnly();
+          // Demotion (W-7): only the ping election (no Web Locks) ever takes
+          // leadership back, when a second leader it raced with outranks it.
+          if (role === "follower" && wasLeader) {
+            void this.stepDown(tok, signer);
+            return;
+          }
           // Promotion needs a CLIENT, not just a role. The follower branch of
           // begin() returns having constructed none, so when the leader tab closed
           // and this one inherited the lock, nothing re-ran it: the composer was
@@ -321,6 +329,7 @@ class ChatSessionStore {
         },
         onLeaderStatus: (coordinate, status) => {
           if (tok !== this.token) return;
+          this.recomputeReadOnly(); // the leader's coordinate, as for messages
           if (coordinate !== ctx.coordinate) return;
           this.adoptLeaderStatus(status);
         },
@@ -382,17 +391,7 @@ class ChatSessionStore {
       }
 
       if (coordinator.role !== "leader") {
-        // Follower: construct NO client. Resolve our own chat pubkey (a cheap
-        // IndexedDB read, no MLS client) so "my" bubbles still highlight, and render
-        // from the leader's broadcasts. The room is "ready" — it shows the leader's
-        // messages, or the active-in-another-tab notice when read-only.
-        const { resolveChatIdentity } = await import("./identity.js");
-        const id = await resolveChatIdentity(signer).catch(() => undefined);
-        if (tok !== this.token) return;
-        this.chatPubkey = id?.pubkey;
-        this.recomputeReadOnly();
-        // The leader's status, if it already arrived, outranks this default (W-4).
-        if (!this.leaderStatusSeen) this.phase = "ready";
+        await this.settleAsFollower(tok, signer);
         return;
       }
 
@@ -411,6 +410,58 @@ class ChatSessionStore {
   }
 
   /**
+   * Follower: construct NO client. Resolve our own chat pubkey (a cheap IndexedDB
+   * read, no MLS client) so "my" bubbles still highlight, and render from the
+   * leader's broadcasts. The room is "ready": it shows the leader's messages, or
+   * the active-in-another-tab notice when read-only.
+   */
+  private async settleAsFollower(tok: number, signer: AppSigner): Promise<void> {
+    if (!this.chatPubkey) {
+      const { resolveChatIdentity } = await import("./identity.js");
+      const id = await resolveChatIdentity(signer).catch(() => undefined);
+      if (tok !== this.token) return;
+      this.chatPubkey = id?.pubkey;
+    }
+    this.recomputeReadOnly();
+    // The leader's status, if it already arrived, outranks this default (W-4).
+    if (!this.leaderStatusSeen) this.phase = "ready";
+  }
+
+  /**
+   * This tab lost a leadership conflict (audit KIMIK31 W-7) and is now a
+   * follower. Only the ping election (no Web Locks) gets here: two tabs that
+   * pinged at the same moment both settled as leader and both built a live
+   * client over the one IndexedDB MLS store, and the lower-ranked one is told so
+   * by the other's hello or heartbeat.
+   *
+   * Tear the client down without touching persisted state: no logout, no wipe,
+   * just stop its subscriptions so it ingests (and so mutates) nothing more.
+   * From here new sends are proxied to the winner. An operation already running
+   * on the old client is not cut off: dispose() stops subscriptions only, so a
+   * send in flight finishes and its caller gets the real outcome. A client still
+   * being built is caught by becomeLeaderClient's liveness checks, which dispose
+   * it as soon as its current step returns.
+   */
+  private async stepDown(tok: number, signer: AppSigner): Promise<void> {
+    const chat = this.chat;
+    this.chat = undefined;
+    clearTimeout(this.recheckTimer);
+    this.recheckTimer = undefined;
+    clearTimeout(this.promoteTimer);
+    this.promoteTimer = undefined;
+    this.coordinatorForRecheck = undefined;
+    this.resyncing = 0;
+    this.damaged = false;
+    // The winner's status replaces ours; until it arrives, the follower default.
+    this.leaderStatusSeen = false;
+    if (chat) {
+      chat.onStateChange = undefined;
+      chat.dispose();
+    }
+    await this.settleAsFollower(tok, signer);
+  }
+
+  /**
    * Build and start the live client for a tab that owns the leader lock.
    *
    * Called from `begin()` when this tab wins the election outright, and from the
@@ -425,14 +476,16 @@ class ChatSessionStore {
     ctx: EventContext,
     signer: AppSigner,
   ): Promise<void> {
-    if (tok !== this.token || this.chat) return;
+    // `coordinator.role`: a ping-election leader can be demoted while its client
+    // is still being created (W-7); that client must never go live.
+    if (tok !== this.token || this.chat || coordinator.role !== "leader") return;
     // A promotion arrives while the room is already rendering "ready" off the
     // departed leader's last broadcast. Do not drop it back to "setup" — the
     // messages on screen are still the right ones, and flipping the phase for the
     // duration of a client build is exactly the flicker this path is fixing.
     const { MarmotChat } = await import("./client.js");
     const chat = await MarmotChat.create({ accountSigner: signer, ctx });
-    if (tok !== this.token || this.chat) {
+    if (tok !== this.token || this.chat || coordinator.role !== "leader") {
       chat.dispose();
       return;
     }
@@ -485,14 +538,24 @@ class ChatSessionStore {
     // lands while start() waits on the relays disposes this session, and
     // ensurePublished must not then publish and attest as the account just signed
     // out of.
-    await chat.start();
-    if (tok !== this.token) return;
-    await this.syncPhase(tok);
-    await this.syncMembers(tok, coordinator, ctx.coordinate);
-    if (tok !== this.token) return;
-    await chat.ensurePublished();
-    if (tok !== this.token) return;
-    await this.syncPhase(tok);
+    //
+    // The same checks cover a demotion (W-7): `current()` is false once
+    // stepDown() has disposed this client, so nothing below runs on it, and an
+    // error it throws because it was disposed mid-step is not this tab's to report.
+    const current = () => tok === this.token && this.chat === chat;
+    try {
+      await chat.start();
+      if (!current()) return;
+      await this.syncPhase(tok);
+      await this.syncMembers(tok, coordinator, ctx.coordinate);
+      if (!current()) return;
+      await chat.ensurePublished();
+      if (!current()) return;
+      await this.syncPhase(tok);
+    } catch (err) {
+      if (!current()) return;
+      throw err;
+    }
   }
 
   /** Retry timer for a failed follower → leader promotion (W-6). */
@@ -646,14 +709,18 @@ class ChatSessionStore {
     return true;
   }
 
-  /** A follower is read-only unless the Web Locks leader is serving THIS event. */
+  /**
+   * A follower is read-only unless it can proxy to a leader serving THIS event:
+   * the Web Locks leader, or (W-7) the ping-election leader it has heard announce
+   * itself, to which its requests are addressed.
+   */
   private recomputeReadOnly(): void {
     const c = this.coordinator;
     if (!c || c.role === "leader") {
       this.readOnly = false;
       return;
     }
-    this.readOnly = !(c.usingWebLocks && c.leaderCoordinate === this.ctx?.coordinate);
+    this.readOnly = !(c.canProxy && c.leaderCoordinate === this.ctx?.coordinate);
   }
 
   /**
@@ -734,7 +801,7 @@ class ChatSessionStore {
       }
       return;
     }
-    // Interactive follower proxies the send to the leader tab (Web Locks path only).
+    // Interactive follower proxies the send to the leader tab.
     const c = this.coordinator;
     if (c && c.role === "follower" && !this.readOnly) {
       await c.proxySend(text, this.ctx?.coordinate).catch(rethrowTyped);
@@ -949,4 +1016,12 @@ export function __setChatCoordinatorFactoryForTests(
   factory: ((opts: TabCoordinatorOptions) => ChatTabCoordinator) | null,
 ): void {
   coordinatorFactory = factory ?? undefined;
+}
+
+/**
+ * A second, independent session (tests only): each one stands for a browser tab,
+ * so a test can run two of them against one shared channel bus (audit W-7).
+ */
+export function __createChatSessionForTests(): ChatSessionStore {
+  return new ChatSessionStore();
 }

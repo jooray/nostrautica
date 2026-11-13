@@ -366,6 +366,14 @@ export interface ChatMls {
    * here. Idempotent.
    */
   retireGroup?(mlsGroupIdHex: string): Promise<void>;
+  /**
+   * Re-send ONE group's retained, unacknowledged commit (audit K-7), under that
+   * group's own lock, so no commit or ingest on the group runs while it is in
+   * flight. A no-op for a group with nothing retained; never throws. The daemon
+   * walks {@link storedGroupIds} with this one group at a time (audit KIMIK31 R-9)
+   * instead of running the whole sweep as a single step.
+   */
+  retryGroupPendingPublication?(mlsGroupIdHex: string): Promise<void>;
 }
 
 /** One leaf's last sign of life (audit K-1): wall-clock ms, and the epoch it was in. */
@@ -669,7 +677,12 @@ export class MarmotClientMls implements ChatMls {
     } catch {
       return;
     }
-    for (const id of ids) await this.serialize(id, () => this.retryPending(id));
+    for (const id of ids) await this.retryGroupPendingPublication(id);
+  }
+
+  /** See {@link ChatMls.retryGroupPendingPublication}. */
+  async retryGroupPendingPublication(mlsGroupIdHex: string): Promise<void> {
+    await this.serialize(mlsGroupIdHex, () => this.retryPending(mlsGroupIdHex));
   }
 
   private retrySweep?: ReturnType<typeof setInterval>;

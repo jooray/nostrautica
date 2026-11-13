@@ -1791,6 +1791,23 @@ describe("purgeAttendeeArtifacts removes the subject's pipeline status", () => {
     store.close();
   });
 
+  it("deletes their 21606 outbox rows, about them or sealed to them (audit KIMIK31 R-3)", () => {
+    const store = new Store();
+    const C = "31923:aa:d";
+    const keys = (): string[] =>
+      ((store as any).db.prepare("SELECT dedupe_key FROM jobs ORDER BY dedupe_key").all() as { dedupe_key: string }[]).map(
+        (r) => r.dedupe_key,
+      );
+    store.enqueueJob("deliver_status", "status:about-gone-to-org", { coordinate: C, pubkey: "gone", stage: "s", to: "org" });
+    store.enqueueJob("deliver_status", "status:to-gone", { coordinate: C, pubkey: "gone", stage: "s", to: "gone" });
+    store.enqueueJob("deliver_status", "status:event-wide", { coordinate: C, stage: "score_batch", to: "org" });
+    store.enqueueJob("deliver_status", "status:stays", { coordinate: C, pubkey: "stays", stage: "s", to: "stays" });
+    store.settleQueuedJob("status:to-gone", 1);
+    store.purgeAttendeeArtifacts(C, "gone");
+    expect(keys()).toEqual(["status:event-wide", "status:stays"]);
+    store.close();
+  });
+
   it("cancelSubjectPipelineJobs without allStates leaves running and finished rows (revoke)", () => {
     const store = new Store();
     const C = "31923:aa:d";
