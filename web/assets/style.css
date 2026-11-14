@@ -789,3 +789,17 @@ section { position: relative; padding-block: clamp(3.5rem, 8vw, 6.5rem); }
   .lang-switch { display: none; }
   .lang-select { display: block; }
 }
+
+/* ---------- Latest posts (vendored nostr-live, see nostr-live.css) ---------- */
+.news { --nl-fg: var(--text); --nl-muted: var(--text-muted); --nl-card-bg: var(--surface);
+  --nl-border: var(--border-strong); --nl-accent: var(--accent-solid); --nl-accent-fg: var(--accent-solid-text);
+  --nl-link: var(--accent); --nl-radius: var(--radius-md); --nl-media-radius: var(--radius-sm);
+  --nl-gap: 1.25rem; --nl-font: var(--sans); --nl-heading-font: var(--serif); --nl-avatar-size: 56px; }
+.news #nostr-feed { min-height: 22rem; }
+.news .nl__item { padding: 1.25rem 1.35rem; box-shadow: 0 1px 2px hsl(var(--shadow-color) / 0.08); }
+.news .nl__item, .news .nl__btn { transition: border-color 0.18s ease, transform 0.18s ease; }
+.news .nl__item:hover { border-color: var(--accent); }
+@media (prefers-reduced-motion: reduce) {
+  .news .nl__item, .news .nl__btn { transition: none; }
+}
+@media (max-width: 640px) { .news #nostr-feed { min-height: 28rem; } }

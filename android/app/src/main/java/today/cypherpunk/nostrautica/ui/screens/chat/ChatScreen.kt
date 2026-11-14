@@ -657,17 +657,35 @@ private fun Step(done: Boolean, label: String, error: Boolean = false) {
 /** The list rows: day separators between messages, sender shown on a change. */
 internal sealed interface ChatRow {
     val key: String
-    data class Day(val label: String) : ChatRow { override val key get() = "day:$label" }
+    data class Day(val label: String, val nth: Int = 1) : ChatRow { override val key get() = if (nth == 1) "day:$label" else "day:$label#$nth" }
     data class Msg(val m: ChatMessage, val showSender: Boolean) : ChatRow { override val key get() = m.id }
 }
 
+/**
+ * Rows for the LazyColumn, whose keys must be unique or Compose throws and the app
+ * crash-loops on the chat screen. MDK hands the timeline in its own order, which
+ * is not strictly by time (since 0.16 a history page can put an older message after
+ * a newer one), so a day could come round twice and repeat its `day:` key. Sort by
+ * time (stable, so equal times keep MDK's order), drop a repeated message id, and
+ * still make any repeated key unique as a last guard.
+ */
 internal fun chatRows(messages: List<ChatMessage>, locale: String): List<ChatRow> {
     val out = ArrayList<ChatRow>()
+    val keys = HashSet<String>()
+    val seenIds = HashSet<String>()
     var lastDay: String? = null
     var lastSender: String? = null
-    for (m in messages) {
+    for (m in messages.sortedBy { it.at }) {
+        if (!seenIds.add(m.id)) continue
         val day = dayLabel(m.at, locale)
-        if (day != lastDay) { out += ChatRow.Day(day); lastDay = day; lastSender = null }
+        if (day != lastDay) {
+            var n = 1
+            var row = ChatRow.Day(day)
+            while (!keys.add(row.key)) row = ChatRow.Day(day, ++n)
+            out += row
+            lastDay = day
+            lastSender = null
+        }
         out += ChatRow.Msg(m, m.sender != lastSender)
         lastSender = m.sender
     }

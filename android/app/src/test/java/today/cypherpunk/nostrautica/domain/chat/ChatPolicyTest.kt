@@ -153,12 +153,26 @@ class ChatPolicyTest {
         assertTrue(ChatPolicy.offerRejoin(setup, null, RosterSays.NOT_LISTED, refused = false))
     }
 
+    private fun change(kind: ChatEngine.ChangeKind, group: String? = "g") = ChatEngine.Change(group, kind)
+
     @Test fun messagesInARoomAlreadyOpenDoNotReconcile() {
         // R-7: no full group re-read per message once the room is bound.
-        assertFalse(ChatPolicy.needsReconcile(ChatEngine.ChangeKind.MESSAGE, ready = true))
-        assertTrue(ChatPolicy.needsReconcile(ChatEngine.ChangeKind.MESSAGE, ready = false))
-        assertTrue(ChatPolicy.needsReconcile(ChatEngine.ChangeKind.STATE, ready = true))
-        assertTrue(ChatPolicy.needsReconcile(ChatEngine.ChangeKind.HEALTH, ready = true))
+        val r = ChatPolicy.OnChange.RECONCILE
+        assertEquals(ChatPolicy.OnChange.NONE, ChatPolicy.onChange(change(ChatEngine.ChangeKind.MESSAGE), ready = true, boundGroup = "g"))
+        assertEquals(r, ChatPolicy.onChange(change(ChatEngine.ChangeKind.MESSAGE), ready = false, boundGroup = null))
+        assertEquals(r, ChatPolicy.onChange(change(ChatEngine.ChangeKind.STATE, "other"), ready = true, boundGroup = "g"))
+        assertEquals(r, ChatPolicy.onChange(change(ChatEngine.ChangeKind.HEALTH), ready = true, boundGroup = "g"))
+    }
+
+    @Test fun accountWideRecoveryStatusOnlyRereadsTheOpenRoomsHealth() {
+        // MDK 0.16 sends the account-wide RecoveryStatusChanged dozens of times a second
+        // while catching up. Each one used to re-read every group, every 300 ms.
+        val accountWide = change(ChatEngine.ChangeKind.HEALTH, group = null)
+        assertEquals(ChatPolicy.OnChange.HEALTH, ChatPolicy.onChange(accountWide, ready = true, boundGroup = "g"))
+        assertEquals(ChatPolicy.OnChange.NONE, ChatPolicy.onChange(change(ChatEngine.ChangeKind.HEALTH, "other"), ready = true, boundGroup = "g"))
+        // Before the room is bound, any health change may be the way in.
+        assertEquals(ChatPolicy.OnChange.RECONCILE, ChatPolicy.onChange(accountWide, ready = false, boundGroup = null))
+        assertTrue(ChatPolicy.RECONCILE_GAP_MS >= 1_000L)
     }
 
     @Test fun theSetupPollBacksOffAfterTwoMinutes() {

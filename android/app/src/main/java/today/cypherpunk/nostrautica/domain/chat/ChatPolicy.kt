@@ -166,16 +166,34 @@ object ChatPolicy {
         if (ready || notReadyForMs >= POLL_BACKOFF_AFTER_MS) POLL_SLOW_MS else POLL_FAST_MS
 
     /**
-     * Whether an MDK event is worth a reconcile (audit R-7: it used to run, re-reading
+     * What an MDK event is worth: a reconcile, a health re-read, or nothing (audit R-7: it used to run, re-reading
      * every group, on each incoming message). Group state and sync health always are.
      * A message is only while the room isn't bound yet (it may be the first sign of a
      * group just joined); once READY the open timeline renders messages by itself, and
      * membership changes arrive as state events (with the READY poll as a backstop).
      */
-    fun needsReconcile(kind: ChatEngine.ChangeKind, ready: Boolean): Boolean = when (kind) {
-        ChatEngine.ChangeKind.STATE, ChatEngine.ChangeKind.HEALTH -> true
-        ChatEngine.ChangeKind.MESSAGE -> !ready
+    fun onChange(change: ChatEngine.Change, ready: Boolean, boundGroup: String?): OnChange = when (change.kind) {
+        ChatEngine.ChangeKind.STATE -> OnChange.RECONCILE
+        ChatEngine.ChangeKind.MESSAGE -> if (ready) OnChange.NONE else OnChange.RECONCILE
+        // Once READY, health is only the bound group's banner. MDK 0.16 sends the
+        // account-wide RecoveryStatusChanged dozens of times a second during catch-up,
+        // and re-reading every group on each kept a Pixel reconciling every 300 ms at
+        // ~45 % CPU. Another group's trouble waits for the 60 s backstop.
+        ChatEngine.ChangeKind.HEALTH -> when {
+            !ready -> OnChange.RECONCILE
+            change.groupIdHex == null -> OnChange.HEALTH
+            change.groupIdHex == boundGroup -> OnChange.RECONCILE
+            else -> OnChange.NONE
+        }
     }
+
+    enum class OnChange { RECONCILE, HEALTH, NONE }
+
+    /** Pause after a reconcile, so an event burst becomes one re-read a second, not a busy loop. */
+    const val RECONCILE_GAP_MS = 1_000L
+
+    /** Pause after a health-only refresh of the open room. */
+    const val HEALTH_GAP_MS = 5_000L
 
     /** Whether an automatic attestation may go out now, [lastAttestMs] 0 meaning never this process. */
     fun attestAllowed(decision: Decision, lastAttestMs: Long, nowMs: Long, refusalRetry: Boolean): Boolean =

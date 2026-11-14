@@ -139,7 +139,7 @@ CERT="$(printf '%s\n' "$CERTS" | sed -n 's/.*certificate SHA-256 digest: \([0-9a
   fail "APK is signed by $CERT, not the shared publisher key $PUBLISHER_CERT_SHA256"
 echo "signer: $CERT (shared publisher key)"
 
-BADGING="$("$AAPT2" dump badging "$APK" | head -1)"
+BADGING="$("$AAPT2" dump badging "$APK" | sed -n 1p)"
 APK_PKG="$(printf '%s' "$BADGING" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
 APK_CODE="$(printf '%s' "$BADGING" | sed -n "s/.* versionCode='\([0-9]*\)'.*/\1/p")"
 APK_NAME="$(printf '%s' "$BADGING" | sed -n "s/.* versionName='\([^']*\)'.*/\1/p")"

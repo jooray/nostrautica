@@ -98,6 +98,7 @@ class ChatSession internal constructor(
     private var accountRef: String? = null
     private var device: ChatDeviceKeys.Device? = null
     private var boundGroup: String? = null
+    @Volatile private var heldGroup: GroupBinding.GroupInfo? = null
     private var timeline: ChatEngine.TimelineHandle? = null
     private var timelineJob: Job? = null
     /** The automatic-attestation spacing and refusal-retry latches. Survive [retry] on purpose. */
@@ -142,15 +143,20 @@ class ChatSession internal constructor(
 
     private suspend fun run() {
         var acquired = false
+        val t0 = System.currentTimeMillis()
+        fun step(what: String) = Log.i(TAG, "start: $what (+${System.currentTimeMillis() - t0} ms)")
         try {
+            step("acquiring the chat engine")
             engine.acquire()
             acquired = true
+            step("engine acquired")
             val chatRelays = chat.chatRelays(ctx)
             // A new device key is minted by the engine itself (no import-time
             // discovery). A stored key the engine doesn't know is imported; if that
             // import can't complete, a key never attested is safely replaced.
             var d = chat.keys.peek(account)
             if (d != null && !engine.hasAccount(d.pubkey)) {
+                step("importing the stored device key")
                 val stored = d
                 val imported = runCatching { engine.ensureAccount(stored, ChatDeviceKeys.mergeRelays(chat.keys.advertisedRelays(stored.pubkey), chatRelays), chatRelays) }
                 // Replacing the key is only safe when a FRESH roster shows it was never
@@ -170,12 +176,18 @@ class ChatSession internal constructor(
             val roster0 = chat.cachedRoster(account, ctx.coordinate)
             _state.update { it.copy(roster = roster0) }
             chat.warmProfiles(roster0, chatRelays)
+            step("opening the device account")
             var ref = engine.ensureAccount(d, advertised, chatRelays)
+            step("device account open")
             // Widening the inbox to this event's relays breaks MDK's group subscriptions
             // until a restart; do it now, before anything of ours is bound to the runtime.
-            if (engine.refreshIfStale()) ref = engine.ensureAccount(d, advertised, chatRelays)
+            if (engine.refreshIfStale()) {
+                step("runtime restarted for new relays")
+                ref = engine.ensureAccount(d, advertised, chatRelays)
+            }
             chat.keys.saveAdvertisedRelays(d.pubkey, advertised)
             accountRef = ref
+            step("ready to reconcile")
             coroutineScope {
                 launch { runCatching { chat.publishDeviceProfile(d, chatRelays) }.onFailure { Log.w(TAG, "device profile: ${it.javaClass.simpleName}") } }
                 launch {
@@ -183,10 +195,15 @@ class ChatSession internal constructor(
                     fetchRosterNow(ChatPolicy.ROSTER_REUSE_MS)?.let { r -> chat.warmProfiles(r.roster, chatRelays) }
                     reconcile()
                 }
+                fun on(change: ChatEngine.Change) =
+                    ChatPolicy.onChange(change, _state.value.phase == Phase.READY && boundGroup != null, boundGroup)
                 launch {
-                    engine.changes(ref)
-                        .filter { ChatPolicy.needsReconcile(it.kind, _state.value.phase == Phase.READY && boundGroup != null) }
-                        .conflate().collect { reconcile(); delay(300) }
+                    engine.changes(ref).filter { on(it) == ChatPolicy.OnChange.RECONCILE }
+                        .conflate().collect { reconcile(); delay(ChatPolicy.RECONCILE_GAP_MS) }
+                }
+                launch {
+                    engine.changes(ref).filter { on(it) == ChatPolicy.OnChange.HEALTH }
+                        .conflate().collect { refreshHealth(ref); delay(ChatPolicy.HEALTH_GAP_MS) }
                 }
                 launch {
                     // While not in the room, keep looking: the Welcome, a roster that now
@@ -216,6 +233,7 @@ class ChatSession internal constructor(
             timelineJob?.cancel(); timelineJob = null
             timeline?.close(); timeline = null
             boundGroup = null
+            heldGroup = null
             // A reconcile from send() after this would act on a released runtime.
             accountRef = null
             // Nothing is bound any more, so nothing is READY (the phantom READY after stop()).
@@ -230,8 +248,9 @@ class ChatSession internal constructor(
         val d = device ?: return@withLock
         val coord = coordinator
         try {
+            val t0 = System.currentTimeMillis()
             var groups = try {
-                engine.groups(ref)
+                engine.groups(ref).also { Log.d(TAG, "reconcile: ${it.size} group(s) listed in ${System.currentTimeMillis() - t0} ms") }
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -280,6 +299,14 @@ class ChatSession internal constructor(
     }
 
     /** Phase, binding and (only on positive evidence, [ChatPolicy]) an attestation. */
+    /** Re-read only the held group's sync health, for the open room's banner. */
+    private suspend fun refreshHealth(ref: String) {
+        val g = heldGroup ?: return
+        val h = runCatching { engine.syncHealth(ref, g.groupIdHex, g.unrecoverable) }
+            .onFailure { if (it is CancellationException) throw it }.getOrNull() ?: return
+        _state.update { if (heldGroup?.groupIdHex == g.groupIdHex) it.copy(resyncing = h.resyncing) else it }
+    }
+
     private suspend fun settle(ref: String, d: ChatDeviceKeys.Device, groups: List<GroupBinding.GroupInfo>, binding: GroupBinding.Result, problem: Problem?) {
         val coord = coordinator
         val now = System.currentTimeMillis()
@@ -293,6 +320,7 @@ class ChatSession internal constructor(
         val evictedFor = evictedSinceMs?.let { now - it }
         val bound = (binding as? GroupBinding.Result.Bound)?.group
         val held = bound ?: (binding as? GroupBinding.Result.Unconfirmed)?.group
+        heldGroup = held
         val health = held?.let { g ->
             runCatching { engine.syncHealth(ref, g.groupIdHex, g.unrecoverable) }.onFailure { if (it is CancellationException) throw it }.getOrNull()
         }
@@ -306,6 +334,7 @@ class ChatSession internal constructor(
         val roster = _state.value.roster
         val says = ChatPolicy.rosterSays(roster, now - rosterFreshAtMs < ChatPolicy.ROSTER_FRESH_MS, account, d.pubkey)
         val decision = ChatPolicy.decide(groups, binding, says, roster?.nostrGroupId, coord, evictedFor, refusalRetry)
+        Log.d(TAG, "settle: phase=$phase binding=${binding.javaClass.simpleName} roster=$says decision=${decision.javaClass.simpleName}")
         val refusalKey = if (phase == Phase.READY) null else ExternalLink.setupRefusalKey(statuses)
         _state.update {
             it.copy(

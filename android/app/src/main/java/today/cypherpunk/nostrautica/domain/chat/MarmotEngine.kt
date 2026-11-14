@@ -252,8 +252,12 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
             is MarmotEventFfi.WelcomeDeliveryPending -> e.accountLabel to ChatEngine.Change(e.groupIdHex, state)
             is MarmotEventFfi.EpochStallEscalated -> e.accountLabel to ChatEngine.Change(e.groupIdHex, health)
             is MarmotEventFfi.GroupChangeSuperseded -> e.accountLabel to ChatEngine.Change(e.groupIdHex, health)
-            is MarmotEventFfi.HistoryNoticesChanged -> e.accountLabel to ChatEngine.Change(null, health)
-            // 0.15: catch-up status, which feeds "history may be incomplete".
+            // MDK sends a group whose own notices changed a GroupStateUpdated as well,
+            // so the account-wide one adds nothing but another reconcile.
+            is MarmotEventFfi.HistoryNoticesChanged -> null
+            // Catch-up status, which feeds "history may be incomplete". Account-wide,
+            // and MDK 0.16 sends dozens a second while a phone catches up, so an open
+            // room only re-reads its own group's health on it (ChatPolicy.onChange).
             is MarmotEventFfi.RecoveryStatusChanged -> e.accountLabel to ChatEngine.Change(null, health)
             // 0.15: experimental device groups only. MDK never sends these to an
             // ordinary runtime like this one.

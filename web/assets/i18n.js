@@ -103,6 +103,9 @@
 
       "privacy.eyebrow": "Privacy, by tier",
       "privacy.title": "Not everything is encrypted the same way. On purpose.",
+      "news.eyebrow": "From the project",
+      "news.title": "Latest posts on Nostr",
+      "news.lead": "What we are building and shipping, read live from the relays. No account needed to look.",
       "privacy.intro": "Some of what you share is meant to be public. Some is meant for the room. Some is meant only for you. Nostrautica keeps them apart instead of pretending one setting fits all.",
       "privacy.row1_tier": "Public",
       "privacy.row1_desc": "Event page, your profile, your posts",
@@ -260,6 +263,9 @@
 
       "privacy.eyebrow": "Súkromie po vrstvách",
       "privacy.title": "Nie všetko je šifrované rovnako. Naschvál.",
+      "news.eyebrow": "Z projektu",
+      "news.title": "Najnovšie príspevky na Nostri",
+      "news.lead": "Na čom robíme a čo vydávame, čítané naživo z relayí. Na pozeranie nepotrebuješ účet.",
       "privacy.intro": "Niečo z toho, čo zdieľate, má byť verejné. Niečo patrí len miestnosti. Niečo len vám. Nostrautica to od seba drží oddelene, namiesto toho, aby predstierala, že jedno nastavenie stačí na všetko.",
       "privacy.row1_tier": "Verejné",
       "privacy.row1_desc": "Stránka podujatia, váš profil, vaše príspevky",
@@ -417,6 +423,9 @@
 
       "privacy.eyebrow": "Soukromí po vrstvách",
       "privacy.title": "Není všechno šifrované stejně. Schválně.",
+      "news.eyebrow": "Z projektu",
+      "news.title": "Nejnovější příspěvky na Nostru",
+      "news.lead": "Na čem děláme a co vydáváme, čteno živě z relayí. Na koukání nepotřebuješ účet.",
       "privacy.intro": "Něco z toho, co sdílíte, má být veřejné. Něco patří jen místnosti. Něco jen vám. Nostrautica to od sebe drží odděleně, místo aby předstírala, že jedno nastavení stačí na všechno.",
       "privacy.row1_tier": "Veřejné",
       "privacy.row1_desc": "Stránka akce, váš profil, vaše příspěvky",
@@ -573,6 +582,9 @@
 
       "privacy.eyebrow": "Datenschutz nach Ebenen",
       "privacy.title": "Nicht alles ist gleich verschlüsselt. Mit Absicht.",
+      "news.eyebrow": "Aus dem Projekt",
+      "news.title": "Neueste Beiträge auf Nostr",
+      "news.lead": "Woran wir arbeiten und was wir veröffentlichen, live von den Relays gelesen. Zum Ansehen brauchst du kein Konto.",
       "privacy.intro": "Manches von dem, was du teilst, soll öffentlich sein. Manches ist für den Raum gedacht. Manches nur für dich. Nostrautica hält das auseinander, statt so zu tun, als würde eine Einstellung für alles reichen.",
       "privacy.row1_tier": "Öffentlich",
       "privacy.row1_desc": "Event-Seite, dein Profil, deine Beiträge",
@@ -729,6 +741,9 @@
 
       "privacy.eyebrow": "Privacidad por niveles",
       "privacy.title": "No todo está cifrado de la misma manera. A propósito.",
+      "news.eyebrow": "Del proyecto",
+      "news.title": "Últimas publicaciones en Nostr",
+      "news.lead": "En qué trabajamos y qué publicamos, leído en directo desde los relays. No necesitas cuenta para verlo.",
       "privacy.intro": "Parte de lo que compartes está pensada para ser pública. Parte es para la sala. Parte es solo para ti. Nostrautica las mantiene separadas, en vez de fingir que un solo ajuste sirve para todo.",
       "privacy.row1_tier": "Público",
       "privacy.row1_desc": "Página del evento, tu perfil, tus publicaciones",
