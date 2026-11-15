@@ -716,6 +716,10 @@ section { position: relative; padding-block: clamp(3.5rem, 8vw, 6.5rem); }
    tightly it was spaced. Those two breakpoints answer different questions and
    had no business sharing a number. */
 @media (max-width: 1023px) {
+  /* The tilted secondary phone pokes past the gutter, and mobile Chrome widens the
+     layout viewport to fit it (405 px at 390), zooming the whole page out. */
+  .mock-cluster { overflow-x: clip; }
+  .mock-cluster .phone-secondary { right: 1.75rem; }
   .nav-toggle { display: inline-flex; }
   .nav-links {
     position: absolute;
