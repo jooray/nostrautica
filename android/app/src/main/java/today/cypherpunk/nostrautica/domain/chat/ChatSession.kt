@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.withLock
 import today.cypherpunk.nostrautica.domain.EventContext
 import today.cypherpunk.nostrautica.protocol.RosterContent
@@ -321,8 +322,15 @@ class ChatSession internal constructor(
         val bound = (binding as? GroupBinding.Result.Bound)?.group
         val held = bound ?: (binding as? GroupBinding.Result.Unconfirmed)?.group
         heldGroup = held
+        // Bounded: MDK answers groupRecoveryStatus from the account worker's queue, and
+        // while startup re-drives sends to an unreachable relay (mdk#3367) that queue held
+        // READY back by 20 s on a Pixel with the room already listed. Unread, the banner
+        // keeps its last value and the next recovery event refreshes it (refreshHealth).
         val health = held?.let { g ->
-            runCatching { engine.syncHealth(ref, g.groupIdHex, g.unrecoverable) }.onFailure { if (it is CancellationException) throw it }.getOrNull()
+            val t0 = System.currentTimeMillis()
+            runCatching { withTimeoutOrNull(ChatPolicy.HEALTH_READ_MS) { engine.syncHealth(ref, g.groupIdHex, g.unrecoverable) } }
+                .onFailure { if (it is CancellationException) throw it }.getOrNull()
+                .also { Log.d(TAG, "health: ${if (it == null) "not read" else "read"} in ${System.currentTimeMillis() - t0} ms") }
         }
         val unverified = bound == null && coord != null && groups.any { it.welcomer == coord }
         if (phase == Phase.READY) rejoinRequested = false

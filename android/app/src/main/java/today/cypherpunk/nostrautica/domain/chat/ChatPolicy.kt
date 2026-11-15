@@ -192,6 +192,9 @@ object ChatPolicy {
     /** Pause after a reconcile, so an event burst becomes one re-read a second, not a busy loop. */
     const val RECONCILE_GAP_MS = 1_000L
 
+    /** How long a reconcile waits for the room's sync health before deciding its phase without it. */
+    const val HEALTH_READ_MS = 1_500L
+
     /** Pause after a health-only refresh of the open room. */
     const val HEALTH_GAP_MS = 5_000L
 

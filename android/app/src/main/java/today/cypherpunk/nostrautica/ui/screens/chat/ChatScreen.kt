@@ -376,10 +376,14 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
     var unseen by remember { mutableStateOf(false) }
     var painted by remember { mutableStateOf(false) }
     val rows = remember(st.messages, s.locale) { chatRows(st.messages, s.locale) }
+    // The list's own index of the newest row: a "load older" item sits above the rows
+    // whenever there is more history, and scrolling to rows.lastIndex then stopped one
+    // short, with the newest message just below the edge.
+    val lastItem = rows.lastIndex + if (st.hasMoreBefore) 1 else 0
     LaunchedEffect(st.messages.lastOrNull()?.id) {
         if (rows.isEmpty()) return@LaunchedEffect
-        if (!painted) { listState.scrollToItem(rows.lastIndex); painted = true }
-        else if (atBottom || st.messages.lastOrNull()?.sender == me) listState.animateScrollToItem(rows.lastIndex)
+        if (!painted) { listState.scrollToItem(lastItem); painted = true }
+        else if (atBottom || st.messages.lastOrNull()?.sender == me) listState.animateScrollToItem(lastItem)
         else unseen = true
     }
     LaunchedEffect(atBottom) { if (atBottom) unseen = false }
@@ -490,7 +494,7 @@ private fun ChatBody(naddr: String, padding: PaddingValues) {
                 }
                 if (unseen) {
                     Box(Modifier.align(Alignment.BottomCenter).padding(8.dp)) {
-                        SmallButton(s.t("chat.jumpToLatest"), { scope.launch { listState.animateScrollToItem(rows.lastIndex); unseen = false } }, selected = true)
+                        SmallButton(s.t("chat.jumpToLatest"), { scope.launch { listState.animateScrollToItem(lastItem); unseen = false } }, selected = true)
                     }
                 }
             }

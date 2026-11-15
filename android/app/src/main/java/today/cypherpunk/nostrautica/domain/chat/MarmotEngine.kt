@@ -376,13 +376,18 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
         // session attests, which re-enrols the device. Unreadable instead: it waits.
         // The event can fire during start(), before the event stream is read, so the
         // one reopen ([RuntimeFreshness], via refreshIfStale) is asked for here too.
-        val held = quarantinedGroups(account).filter { it.reason == AppGroupHydrationQuarantineReasonFfi.REWIND_RESTORE_FAILED }
+        val t0 = System.currentTimeMillis()
+        fun took(what: String) = Log.d(TAG, "groups: $what after ${System.currentTimeMillis() - t0} ms")
+        val held = quarantinedGroups(account).also { took("quarantinedGroups") }.filter { it.reason == AppGroupHydrationQuarantineReasonFfi.REWIND_RESTORE_FAILED }
         if (held.isNotEmpty()) {
             held.forEach { freshness.quarantined(it.groupIdHex) }
             throw IllegalStateException("a group is quarantined until the chat runtime reopens")
         }
-        chatList(account, true).map { row ->
-            val d = groupDetails(account, row.groupIdHex)
+        chatList(account, true).also { took("chatList") }.map { row ->
+            // MDK 0.17 answers this one from the read state the worker publishes, so it
+            // no longer waits behind startup sync (groupDetails still does). Behind dead
+            // relays that wait made the first listing take 55 s on a Pixel.
+            val d = groupConversationSnapshot(account, row.groupIdHex).details.also { took("snapshot ${row.groupIdHex.take(8)}") }
             GroupBinding.GroupInfo(
                 groupIdHex = row.groupIdHex,
                 nostrGroupIdHex = d.group.nostrGroupIdHex,
@@ -491,7 +496,14 @@ class MarmotEngine(private val context: Context, private val kv: SecretKv, priva
 
     companion object {
         private const val TAG = "MarmotEngine"
-        private const val GRACE_MS = 20_000L
+        /**
+         * How long the runtime stays open after the last chat screen goes. Every open
+         * pays MDK's startup hydration, which re-drives every unacknowledged send after
+         * each batch of four groups (mdk#3367). With a group relay unreachable that held
+         * the first group read for 55 s on a Pixel, on every chat open. Five minutes
+         * makes going back to a chat, or to another event's, immediate.
+         */
+        private const val GRACE_MS = 5 * 60_000L
         /** The longest [acquire] waits for the runtime (lock, open and start together). */
         private const val ACQUIRE_TIMEOUT_MS = 60_000L
         /** How long a busy store root (a runtime still closing) is waited out. */
