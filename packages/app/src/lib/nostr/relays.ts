@@ -39,13 +39,34 @@ const ENV_BLOSSOM = (import.meta.env?.VITE_NOSTRAUTICA_BLOSSOM as string | undef
  * first failure 12:42 that day; Node probe closed 1006, Chromium 525 then 500,
  * WebKit 500). Every operation that dialled it paid its connect timeout for
  * nothing.
+ *
+ * 2026-11-15: nos.lol and nostr.mom (one IP) stopped accepting connections from
+ * everywhere we tried, and nostr.oxtr.dev from a home network. On Android each
+ * unreachable group relay held a cold chat open for about two minutes
+ * (mdk#3367). Their replacements passed the same day from a home network AND from
+ * the coordinator's host. Each one was checked for:
+ * - writes and read-backs of kinds 445 (70 KB too), 1059, 30443, 31600, 31923,
+ *   10002 and 10050;
+ * - the 1059-by-#p, 445-by-#h, 31600 and author filters, all without NIP-42 auth.
+ * Rejected in that probe:
+ * - relay.nostr.net still wants auth for 1059 #p, so Welcomes and DMs would never
+ *   arrive.
+ * - offchain.pub refuses connections from that home network.
+ * - relay.coinos.io blocks 31600 and 31923.
+ * nostr.bitcoiner.social caps events at 128 KB (in NIP-11). It also lets a key
+ * outside its web of trust write only about 12 events ("pubkey is not in our web
+ * of trust" after that; measured with a fresh key). Event and coordinator keys
+ * write far more than that, so it holds only part of an event's data. Chat 445s
+ * and 1059 wraps are signed by one-off keys, so for them it is a full relay. It is
+ * kept for that redundancy, and it is not a NIP-46 relay: one session key signs
+ * every request. relay.btcforplebs.com names no limit, so MDK sends it no commit
+ * over 64 KB. It took all 413 rebroadcast event records with no refusal.
  */
 export const DEFAULT_RELAYS = ENV_RELAYS ?? [
   "wss://nostr.cypherpunk.today",
-  "wss://nos.lol",
   "wss://relay.primal.net",
-  "wss://nostr.mom",
-  "wss://nostr.oxtr.dev",
+  "wss://nostr.bitcoiner.social",
+  "wss://relay.btcforplebs.com",
 ];
 
 /**
@@ -148,7 +169,7 @@ export function chatInteropRelays(eventRelays: string[]): string[] {
 export const NIP46_RELAYS = ENV_RELAYS ?? [
   "wss://nostr.cypherpunk.today",
   "wss://relay.primal.net",
-  "wss://nos.lol",
+  "wss://relay.btcforplebs.com",
 ];
 
 /**
@@ -166,7 +187,7 @@ export const NIP46_RELAYS = ENV_RELAYS ?? [
  *
  * This is redundancy, not resurrection: it helps when the signer is reachable on
  * any relay we also speak to (many signers subscribe on more relays than they
- * advertise, and both nos.lol and relay.primal.net are common defaults). A
+ * advertise, and relay.primal.net is a common default). A
  * signer that listens *only* on a dead relay is unreachable no matter what we
  * do — the point is that the surviving cases now work instead of all of them
  * failing together.
@@ -230,7 +251,7 @@ export const DM_RELAY_LIST: string[] =
   [
     "wss://nostr.cypherpunk.today",
     "wss://relay.primal.net",
-    "wss://nos.lol",
+    "wss://nostr.bitcoiner.social",
   ];
 
 /**
@@ -244,10 +265,9 @@ export const ONBOARDING_RELAY_LIST: { url: string; read: boolean; write: boolean
     ? ENV_RELAYS.map((url) => ({ url, read: true, write: true }))
     : [
         { url: "wss://nostr.cypherpunk.today", read: true, write: true },
-        { url: "wss://nos.lol", read: true, write: true },
         { url: "wss://relay.primal.net", read: true, write: true },
-        { url: "wss://nostr.mom", read: true, write: true },
-        { url: "wss://nostr.oxtr.dev", read: true, write: false },
+        { url: "wss://nostr.bitcoiner.social", read: true, write: true },
+        { url: "wss://relay.btcforplebs.com", read: true, write: true },
       ];
 
 /** Union of relay URL lists, de-duplicated, preserving first-seen order. */
